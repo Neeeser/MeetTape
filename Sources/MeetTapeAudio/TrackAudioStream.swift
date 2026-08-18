@@ -174,21 +174,42 @@ public final class TrackAudioReader {
 }
 
 /// Push-style access to a track, for callers that just want every buffer in order.
+///
+/// The read format is held as a plain descriptor rather than an `AVAudioFormat`,
+/// which is not `Sendable` on every SDK this builds against.
 public struct TrackAudioStream: Sendable {
     public let segments: [RecordedSegment]
     public let segmentsDirectory: URL
-    public let targetFormat: AVAudioFormat
+    public let format: AudioFormatDescriptor
 
     public init(segments: [RecordedSegment], segmentsDirectory: URL, targetFormat: AVAudioFormat) {
+        self.init(
+            segments: segments,
+            segmentsDirectory: segmentsDirectory,
+            format: AudioFormatDescriptor(
+                sampleRate: targetFormat.sampleRate, channelCount: Int(targetFormat.channelCount)
+            )
+        )
+    }
+
+    public init(segments: [RecordedSegment], segmentsDirectory: URL, format: AudioFormatDescriptor) {
         self.segments = segments
         self.segmentsDirectory = segmentsDirectory
-        self.targetFormat = targetFormat
+        self.format = format
+    }
+
+    public var targetFormat: AVAudioFormat? {
+        AVAudioFormat(
+            standardFormatWithSampleRate: format.sampleRate,
+            channels: AVAudioChannelCount(format.channelCount)
+        )
     }
 
     public var durationSeconds: Double { segments.reduce(0) { $0 + $1.seconds } }
 
-    public func makeReader() -> TrackAudioReader {
-        TrackAudioReader(
+    public func makeReader() -> TrackAudioReader? {
+        guard let targetFormat else { return nil }
+        return TrackAudioReader(
             segments: segments, segmentsDirectory: segmentsDirectory, targetFormat: targetFormat
         )
     }
@@ -200,7 +221,9 @@ public struct TrackAudioStream: Sendable {
         bufferFrames: AVAudioFrameCount = 8_192,
         body: (AVAudioPCMBuffer, Double) throws -> Bool
     ) throws {
-        let reader = makeReader()
+        guard let reader = makeReader() else {
+            throw ProcessingError.audioUnreadable(path: segmentsDirectory.lastPathComponent)
+        }
         try reader.seek(to: startOffset)
         while true {
             let position = reader.timelinePosition
@@ -214,7 +237,7 @@ public struct TrackAudioStream: Sendable {
 /// Computes an energy profile by streaming a recorded track once.
 public extension EnergyProfile {
     static func compute(stream: TrackAudioStream, windowSeconds: Double = 0.1) throws -> EnergyProfile {
-        let samplesPerWindow = Int(windowSeconds * stream.targetFormat.sampleRate)
+        let samplesPerWindow = Int(windowSeconds * stream.format.sampleRate)
         guard samplesPerWindow > 0 else { return EnergyProfile(windowSeconds: windowSeconds, values: []) }
 
         var values: [Float] = []

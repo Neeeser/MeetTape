@@ -28,11 +28,11 @@ public struct ChunkExporter: Sendable {
         self.settings = settings
     }
 
-    public var readFormat: AVAudioFormat {
-        AVAudioFormat(
-            standardFormatWithSampleRate: settings.sampleRate,
-            channels: AVAudioChannelCount(settings.channelCount)
-        )!
+    /// The format chunks are read at before encoding.
+    public var readFormat: AudioFormatDescriptor {
+        AudioFormatDescriptor(
+            sampleRate: settings.sampleRate, channelCount: settings.channelCount
+        )
     }
 
     /// Exports `[plan.start, plan.end)` of a track to `destination`.
@@ -44,7 +44,7 @@ public struct ChunkExporter: Sendable {
         to destination: URL
     ) throws -> Int64 {
         let stream = TrackAudioStream(
-            segments: segments, segmentsDirectory: segmentsDirectory, targetFormat: readFormat
+            segments: segments, segmentsDirectory: segmentsDirectory, format: readFormat
         )
         let outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,

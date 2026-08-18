@@ -196,7 +196,7 @@ public actor ProcessingPipeline {
         let stream = TrackAudioStream(
             segments: segments,
             segmentsDirectory: store.layout.segments,
-            targetFormat: exporter.readFormat
+            format: exporter.readFormat
         )
         let duration = stream.durationSeconds
         guard duration > 0.5 else { return }

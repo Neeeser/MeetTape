@@ -1,0 +1,272 @@
+import AVFoundation
+import Foundation
+import MeetTapeAudio
+import MeetTapeCore
+import TestKit
+
+/// Real audio through the real writers and readers. These use AVFoundation but no
+/// audio hardware, so they run anywhere.
+enum AudioTests {
+    static func makeTone(
+        seconds: Double, sampleRate: Double, channels: AVAudioChannelCount = 1,
+        frequency: Double = 440, amplitude: Float = 0.5
+    ) -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels)!
+        let frames = AVAudioFrameCount(seconds * sampleRate)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        let data = buffer.floatChannelData!
+        for frame in 0..<Int(frames) {
+            let value = amplitude * Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
+            for channel in 0..<Int(channels) { data[channel][frame] = value }
+        }
+        return buffer
+    }
+
+    static func makeSilence(seconds: Double, sampleRate: Double) -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        let frames = AVAudioFrameCount(seconds * sampleRate)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        let data = buffer.floatChannelData!
+        for frame in 0..<Int(frames) { data[0][frame] = 0 }
+        return buffer
+    }
+
+    static var suite: Suite {
+        Suite("Audio", [
+            test("segments rotate, close cleanly and report per-segment duration") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest, format: format, segmentSeconds: 1
+                )
+
+                for index in 0..<5 {
+                    let packet = AudioBufferPacket(
+                        buffer: makeTone(seconds: 0.5, sampleRate: 48_000), hostTime: Double(index) * 0.5
+                    )
+                    writer.enqueueSynchronously(packet)
+                }
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.equal(timeline.segments(track: .mic).count, 3, "1 s segments over 2.5 s of audio")
+                expect.close(timeline.duration(track: .mic), 2.5, tolerance: 0.01)
+                for segment in timeline.segments(track: .mic) where segment.isClosed {
+                    let url = layout.segments.appendingPathComponent(segment.file)
+                    let info = try AudioFileInspector().inspect(url: url)
+                    expect.equal(info.frameCount, segment.frameCount ?? -1, "manifest disagrees with \(segment.file)")
+                }
+            },
+
+            test("a mid-recording format change opens a new segment and is recorded") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let wideband = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+                let narrowband = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest, format: wideband, segmentSeconds: 60
+                )
+
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 2, sampleRate: 48_000), hostTime: 0
+                ))
+                // Bluetooth switches to the hands-free profile.
+                writer.changeFormat(narrowband, reason: "config_change")
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 3, sampleRate: 16_000), hostTime: 2
+                ))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.equal(timeline.segments(track: .mic).count, 2)
+                expect.equal(timeline.formatChanges.count, 1)
+                expect.equal(timeline.formatChanges[0].to.sampleRate, 16_000)
+                expect.close(timeline.duration(track: .mic), 5.0, tolerance: 0.01)
+                // The naive formula would report 2 + 3*16000/48000 = 3 s.
+                let totalFrames = timeline.segments(track: .mic).reduce(Int64(0)) { $0 + ($1.frameCount ?? 0) }
+                expect.close(Double(totalFrames) / 48_000, 3.0, tolerance: 0.01)
+            },
+
+            test("the pre-roll ring stays bounded and keeps the newest audio") { expect in
+                let ring = PreRollBuffer(capacitySeconds: 2)
+                for index in 0..<40 {
+                    ring.append(AudioBufferPacket(
+                        buffer: makeTone(seconds: 0.1, sampleRate: 48_000), hostTime: Double(index) * 0.1
+                    ))
+                }
+                expect.isTrue(ring.bufferedSeconds <= 2.05, "buffered \(ring.bufferedSeconds)s")
+                expect.isTrue(ring.bufferedSeconds >= 1.9)
+                let drained = ring.drain()
+                expect.close(drained.last?.hostTime ?? 0, 3.9, tolerance: 0.001)
+                expect.equal(ring.bufferedSeconds, 0)
+                expect.equal(ring.drain().count, 0)
+            },
+
+            test("a track reads back across a sample-rate change at the right length") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!,
+                    segmentSeconds: 60
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 2, sampleRate: 48_000), hostTime: 0
+                ))
+                writer.changeFormat(
+                    AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!, reason: "bluetooth"
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 2, sampleRate: 16_000), hostTime: 2
+                ))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                let stream = TrackAudioStream(
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                )
+                var frames: Int64 = 0
+                try stream.forEachBuffer { buffer, _ in
+                    frames += Int64(buffer.frameLength)
+                    return true
+                }
+                expect.close(Double(frames) / 16_000, 4.0, tolerance: 0.15, "read back the whole track")
+            },
+
+            test("a chunk exports to an m4a small enough for the request limit") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!,
+                    segmentSeconds: 5
+                )
+                for index in 0..<6 {
+                    writer.enqueueSynchronously(AudioBufferPacket(
+                        buffer: makeTone(seconds: 2, sampleRate: 48_000), hostTime: Double(index) * 2
+                    ))
+                }
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                let destination = root.appendingPathComponent("chunk_001.m4a")
+                let exporter = ChunkExporter()
+                let written = try exporter.export(
+                    plan: ChunkPlan(index: 1, start: 2, end: 8, overlapEnd: 0),
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    to: destination
+                )
+                expect.isTrue(written > 0, "nothing was written")
+                let info = try AudioFileInspector().inspect(url: destination)
+                expect.close(info.seconds, 6.0, tolerance: 0.35, "exported the requested span")
+
+                // 20 minutes at this bit rate has to stay well under 25 MiB.
+                let bytesPerSecond = Double(info.byteCount) / max(info.seconds, 0.001)
+                expect.isTrue(
+                    bytesPerSecond * 1_200 < 25 * 1_024 * 1_024,
+                    "a 20-minute chunk would be \(Int(bytesPerSecond * 1_200 / 1_048_576)) MiB"
+                )
+            },
+
+            test("mixing aligns the two tracks by their first-frame host times") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+
+                let remoteWriter = SegmentWriter(
+                    track: .remote, layout: layout, manifest: manifest, format: format, segmentSeconds: 60
+                )
+                remoteWriter.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 4, sampleRate: 48_000, frequency: 220), hostTime: 100.0
+                ))
+                remoteWriter.finish(reason: "test")
+
+                // The microphone starts a second later, exactly as it does in a real
+                // session where the tap comes up first.
+                let micWriter = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest, format: format, segmentSeconds: 60
+                )
+                micWriter.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 3, sampleRate: 48_000, frequency: 440), hostTime: 101.0
+                ))
+                micWriter.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                try AudioMixer().mix(
+                    timeline: timeline, segmentsDirectory: layout.segments, to: layout.mixedAudio
+                )
+                let info = try AudioFileInspector().inspect(url: layout.mixedAudio)
+                // Remote runs 0–4 s, mic is delayed to 1–4 s, so the mix is 4 s long.
+                expect.close(info.seconds, 4.0, tolerance: 0.1)
+            },
+
+            test("importing preserves the original and produces normal segments") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let sourceURL = root.appendingPathComponent("voice-memo.caf")
+                let sourceFormat = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
+                let sourceFile = try AVAudioFile(
+                    forWriting: sourceURL,
+                    settings: [
+                        AVFormatIDKey: kAudioFormatLinearPCM,
+                        AVSampleRateKey: 44_100,
+                        AVNumberOfChannelsKey: 2,
+                        AVLinearPCMBitDepthKey: 32,
+                        AVLinearPCMIsFloatKey: true,
+                        AVLinearPCMIsNonInterleaved: false,
+                    ]
+                )
+                _ = sourceFormat
+                try sourceFile.write(from: makeTone(seconds: 6, sampleRate: 44_100, channels: 2))
+                let originalBytes = try Data(contentsOf: sourceURL)
+
+                let archive = root.appendingPathComponent("archive", isDirectory: true)
+                let repository = MeetingRepository(root: archive)
+                let now = Date(timeIntervalSince1970: 1_787_070_000)
+                let created = try repository.createMeeting(
+                    source: .imported, provider: .unknown, startedAt: now, now: now
+                )
+                let result = try AudioImporter(segmentSeconds: 2).import(
+                    source: sourceURL, into: created.store, meetingID: created.metadata.id
+                )
+
+                expect.close(result.durationSeconds, 6.0, tolerance: 0.1)
+                expect.equal(result.segmentCount, 3)
+                expect.equal(result.originalFilename, "voice-memo.caf")
+
+                let preserved = created.store.layout.originals.appendingPathComponent("voice-memo.caf")
+                expect.equal(try Data(contentsOf: preserved), originalBytes, "the original was modified")
+
+                let timeline = try created.store.readTimeline()
+                expect.close(timeline.duration(track: .mic), 6.0, tolerance: 0.1)
+                expect.isTrue(timeline.isComplete)
+            },
+        ])
+    }
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "MeetTape Sensor",
+  "version": "1.0.0",
+  "description": "Reports Google Meet and Zoom meeting state to MeetTape so it records the right calls.",
+  "permissions": ["tabs", "nativeMessaging", "scripting", "*://meet.google.com/*", "*://*.zoom.us/*"],
+  "background": {
+    "scripts": ["shared/background.js"],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://meet.google.com/*", "*://*.zoom.us/*"],
+      "js": ["shared/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sensor@meettape.app",
+      "strict_min_version": "115.0"
+    }
+  }
+}

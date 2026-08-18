@@ -32,3 +32,6 @@ node_modules/
 # Local scratch
 /tmp/
 *.log
+
+# Extension build output
+extension/dist/

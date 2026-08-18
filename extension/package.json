@@ -1,0 +1,11 @@
+{
+  "name": "meettape-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MeetTape browser sensor for Google Meet and Zoom.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "./build.sh"
+  }
+}

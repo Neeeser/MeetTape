@@ -1,0 +1,351 @@
+import Foundation
+import MeetTapeCore
+import TestKit
+
+enum SessionTests {
+    static func meetEvidence(
+        confidence: MeetingConfidence, source: EvidenceSource = .browserSensor,
+        meetingID: String? = "abc-defg-hij"
+    ) -> ProviderEvidence {
+        ProviderEvidence(
+            provider: .googleMeet, confidence: confidence, source: source,
+            meetingID: meetingID, url: meetingID.map { "https://meet.google.com/\($0)" },
+            title: nil, browser: .firefox, applicationBundleID: "org.mozilla.firefox",
+            audioBundlePrefixes: ["org.mozilla.firefox"]
+        )
+    }
+
+    static var suite: Suite {
+        Suite("SessionController", [
+            test("a candidate arms capture before anything reaches disk") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let actions = controller.update(
+                    evidence: [meetEvidence(confidence: .candidate)], now: 100, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .candidate)
+                guard case .armCapture(let prefixes, let capturesRemote) = actions.first else {
+                    expect.fail("expected capture to be armed, got \(actions)")
+                    return
+                }
+                expect.equal(prefixes, ["org.mozilla.firefox"])
+                expect.isTrue(capturesRemote)
+                expect.isFalse(
+                    actions.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a candidate must not create a meeting directory"
+                )
+            },
+
+            test("confirmation commits the recording and flushes the pre-roll") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .candidate)], now: 100, wallClock: wall
+                )
+                let actions = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 101.5,
+                    wallClock: wall.addingTimeInterval(1.5)
+                )
+                expect.equal(controller.snapshot.state, .recording)
+                guard let commit = actions.compactMap({ action -> CommitRequest? in
+                    if case .commitRecording(let request) = action { return request }
+                    return nil
+                }).first else {
+                    expect.fail("expected a commit, got \(actions)")
+                    return
+                }
+                expect.equal(commit.source, .googleMeet)
+                expect.equal(commit.providerMeetingID, "abc-defg-hij")
+                expect.isFalse(commit.isProvisional)
+            },
+
+            test("an abandoned prejoin discards its buffered audio") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .candidate)], now: 100, wallClock: wall
+                )
+                var actions: [SessionAction] = []
+                var now = 100.0
+                for _ in 0..<40 {
+                    now += 30
+                    actions = controller.update(evidence: [], now: now, wallClock: wall)
+                    if !actions.isEmpty { break }
+                }
+                expect.equal(controller.snapshot.state, .idle)
+                guard case .discardCapture = actions.first else {
+                    expect.fail("expected the candidate to be discarded, got \(actions)")
+                    return
+                }
+            },
+
+            test("losing the extension mid-meeting does not end the recording") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .recording)
+
+                // The extension disconnects, and the native path keeps reporting a
+                // confirmed meeting from the window title plus microphone state.
+                var now = 100.0
+                for _ in 0..<60 {
+                    now += 0.5
+                    let actions = controller.update(
+                        evidence: [meetEvidence(confidence: .confirmed, source: .native)],
+                        now: now, wallClock: wall
+                    )
+                    expect.isFalse(
+                        actions.contains { if case .finishRecording = $0 { true } else { false } },
+                        "native fallback must keep the recording alive"
+                    )
+                }
+                expect.equal(controller.snapshot.state, .recording)
+            },
+
+            test("a disconnect and rejoin stays one meeting with two runs") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+
+                // Firefox quits. Evidence disappears entirely.
+                var now = 100.0
+                var sawReconnecting = false
+                for _ in 0..<30 {
+                    now += 0.5
+                    let actions = controller.update(evidence: [], now: now, wallClock: wall)
+                    if actions.contains(where: { $0 == .notify(.reconnecting(provider: .googleMeet)) }) {
+                        sawReconnecting = true
+                    }
+                    expect.isFalse(
+                        actions.contains { if case .finishRecording = $0 { true } else { false } },
+                        "must not finish inside the reconnect window"
+                    )
+                }
+                expect.isTrue(sawReconnecting)
+                expect.equal(controller.snapshot.state, .reconnecting)
+
+                // Firefox comes back and rejoins the same meeting.
+                now += 1
+                let resumed = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: now, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .recording)
+                expect.equal(controller.snapshot.runCount, 2)
+                expect.isTrue(
+                    resumed.contains { if case .beginRun = $0 { true } else { false } },
+                    "the rejoin should append a run, not start a meeting"
+                )
+                expect.isFalse(
+                    resumed.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a rejoin must not create a second meeting"
+                )
+            },
+
+            test("a meeting that does not come back is finished after the window") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+                var now = 100.0
+                var finished = false
+                for _ in 0..<400 {
+                    now += 0.5
+                    let actions = controller.update(evidence: [], now: now, wallClock: wall)
+                    if actions.contains(where: { if case .finishRecording = $0 { true } else { false } }) {
+                        finished = true
+                        break
+                    }
+                }
+                expect.isTrue(finished, "the meeting should end once the reconnect window expires")
+                expect.equal(controller.snapshot.state, .idle)
+                expect.isTrue(now - 100 >= 90, "ended too early: \(now - 100)s")
+            },
+
+            test("provider state never stops a manually started recording") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.startManual(
+                    source: .manual, bundlePrefixes: ["org.mozilla.firefox"],
+                    titles: TitleCandidates(human: "Ad-hoc call", timestampFallback: "f"),
+                    now: 100, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .recording)
+                expect.isTrue(controller.snapshot.isManual)
+
+                var now = 100.0
+                for _ in 0..<600 {
+                    now += 0.5
+                    let actions = controller.update(evidence: [], now: now, wallClock: wall)
+                    expect.isFalse(
+                        actions.contains { if case .finishRecording = $0 { true } else { false } },
+                        "a manual recording only ends when the user says so"
+                    )
+                }
+                expect.equal(controller.snapshot.state, .recording)
+
+                let stopped = controller.stop(reason: "user_stopped")
+                expect.isTrue(stopped.contains { if case .finishRecording = $0 { true } else { false } })
+                expect.equal(controller.snapshot.state, .idle)
+            },
+
+            test("an in-person recording captures the microphone only") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let actions = controller.startManual(
+                    source: .inPerson, bundlePrefixes: [],
+                    titles: TitleCandidates(timestampFallback: "f"), now: 100, wallClock: wall
+                )
+                guard case .armCapture(_, let capturesRemote) = actions.first else {
+                    expect.fail("expected capture to be armed, got \(actions)")
+                    return
+                }
+                expect.isFalse(capturesRemote)
+                expect.equal(controller.snapshot.source, .inPerson)
+            },
+
+            test("a provisional unknown call records first and asks after") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let actions = controller.startManual(
+                    source: .genericCall, bundlePrefixes: ["com.example.videochat"],
+                    titles: TitleCandidates(window: "Team call", timestampFallback: "f"),
+                    now: 100, wallClock: wall, isProvisional: true,
+                    applicationBundleID: "com.example.videochat"
+                )
+                let commitIndex = try expect.unwrap(actions.firstIndex {
+                    if case .commitRecording = $0 { return true } else { return false }
+                })
+                let askIndex = try expect.unwrap(actions.firstIndex {
+                    if case .askToKeepProvisional = $0 { return true } else { return false }
+                })
+                expect.isTrue(commitIndex < askIndex, "capture must already be running when we ask")
+
+                let discarded = controller.resolveProvisional(keep: false, reason: "user_discarded")
+                guard case .discardCapture = discarded.first else {
+                    expect.fail("declining should discard, got \(discarded)")
+                    return
+                }
+            },
+
+            test("keeping a provisional recording leaves it running") { expect in
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.startManual(
+                    source: .genericCall, bundlePrefixes: ["com.example.videochat"],
+                    titles: TitleCandidates(timestampFallback: "f"), now: 100, wallClock: wall,
+                    isProvisional: true, applicationBundleID: "com.example.videochat"
+                )
+                expect.equal(controller.resolveProvisional(keep: true, reason: "kept"), [])
+                expect.equal(controller.snapshot.state, .recording)
+                expect.isFalse(controller.snapshot.isProvisional)
+            },
+
+            test("paused detection ignores providers but keeps manual recording") { expect in
+                var controller = SessionController(policies: ProviderPolicies(detectionPaused: true))
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                expect.equal(
+                    controller.update(
+                        evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                    ),
+                    []
+                )
+                expect.equal(controller.snapshot.state, .idle)
+
+                let manual = controller.startManual(
+                    source: .manual, bundlePrefixes: [],
+                    titles: TitleCandidates(timestampFallback: "f"), now: 100, wallClock: wall
+                )
+                expect.isFalse(manual.isEmpty)
+            },
+
+            test("a provider set to never record is left alone") { expect in
+                var policies = ProviderPolicies()
+                policies.googleMeet = ProviderPolicy(autoStart: .never, autoStop: true)
+                var controller = SessionController(policies: policies)
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                expect.equal(
+                    controller.update(
+                        evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                    ),
+                    []
+                )
+                expect.equal(controller.snapshot.state, .idle)
+            },
+        ])
+    }
+
+    static var reconnectSuite: Suite {
+        Suite("ReconnectMatcher", [
+            test("the same meeting ID resumed quickly merges automatically") { expect in
+                let matcher = ReconnectMatcher()
+                let start = Date(timeIntervalSince1970: 1_787_070_000)
+                let earlier = ReconnectMatcher.Candidate(
+                    meetingID: "a", provider: .googleMeet, providerMeetingID: "abc-defg-hij",
+                    url: "https://meet.google.com/abc-defg-hij",
+                    startedAt: start, endedAt: start.addingTimeInterval(600)
+                )
+                let later = ReconnectMatcher.Candidate(
+                    meetingID: "b", provider: .googleMeet, providerMeetingID: "abc-defg-hij",
+                    url: "https://meet.google.com/abc-defg-hij?authuser=0",
+                    startedAt: start.addingTimeInterval(690)
+                )
+                guard case .sameMeeting = matcher.compare(earlier, later) else {
+                    expect.fail("expected an automatic merge, got \(matcher.compare(earlier, later))")
+                    return
+                }
+            },
+
+            test("a weak match is offered to the user instead of guessed") { expect in
+                let matcher = ReconnectMatcher()
+                let start = Date(timeIntervalSince1970: 1_787_070_000)
+                let earlier = ReconnectMatcher.Candidate(
+                    meetingID: "a", provider: .slack, title: "Engineering",
+                    startedAt: start, endedAt: start.addingTimeInterval(300)
+                )
+                let later = ReconnectMatcher.Candidate(
+                    meetingID: "b", provider: .slack, title: "Engineering",
+                    startedAt: start.addingTimeInterval(420)
+                )
+                guard case .possible = matcher.compare(earlier, later) else {
+                    expect.fail("expected a suggestion, got \(matcher.compare(earlier, later))")
+                    return
+                }
+            },
+
+            test("different meeting IDs are never merged") { expect in
+                let matcher = ReconnectMatcher()
+                let start = Date(timeIntervalSince1970: 1_787_070_000)
+                let earlier = ReconnectMatcher.Candidate(
+                    meetingID: "a", provider: .googleMeet, providerMeetingID: "abc-defg-hij",
+                    startedAt: start, endedAt: start.addingTimeInterval(60)
+                )
+                let later = ReconnectMatcher.Candidate(
+                    meetingID: "b", provider: .googleMeet, providerMeetingID: "zzz-zzzz-zzz",
+                    startedAt: start.addingTimeInterval(90)
+                )
+                expect.equal(matcher.compare(earlier, later), .unrelated)
+            },
+
+            test("a long gap is a new meeting whatever the evidence says") { expect in
+                let matcher = ReconnectMatcher()
+                let start = Date(timeIntervalSince1970: 1_787_070_000)
+                let earlier = ReconnectMatcher.Candidate(
+                    meetingID: "a", provider: .zoom, providerMeetingID: "81771591841",
+                    startedAt: start, endedAt: start.addingTimeInterval(600)
+                )
+                let later = ReconnectMatcher.Candidate(
+                    meetingID: "b", provider: .zoom, providerMeetingID: "81771591841",
+                    startedAt: start.addingTimeInterval(600 + 3_600)
+                )
+                expect.equal(matcher.compare(earlier, later), .unrelated)
+            },
+        ])
+    }
+
+    static var all: [Suite] { [suite, reconnectSuite] }
+}

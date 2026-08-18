@@ -1,0 +1,367 @@
+import Foundation
+import MeetTapeCore
+import TestKit
+
+enum DetectionTests {
+    static func joined(mute: Bool? = nil, title: String? = nil) -> SlackAccessibilityObservation {
+        SlackAccessibilityObservation(
+            hasLeaveHuddleControl: true, subtreeWasEmpty: false, isMuted: mute, windowTitle: title
+        )
+    }
+
+    static func previewing() -> SlackAccessibilityObservation {
+        SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: false)
+    }
+
+    static var slackSuite: Suite {
+        Suite("SlackHuddleDetector", [
+            test("holding the microphone is a candidate, not a meeting") { expect in
+                var detector = SlackHuddleDetector()
+                var now = 100.0
+
+                // Slack opened the microphone 12.2 s before the user joined.
+                let event = detector.update(
+                    observation: previewing(), helperHoldsMicrophone: true,
+                    helperProducingOutput: false, at: now
+                )
+                expect.equal(event, .candidateAppeared)
+                expect.equal(detector.state, .candidate)
+
+                for _ in 0..<30 {
+                    now += 0.4
+                    let tick = detector.update(
+                        observation: previewing(), helperHoldsMicrophone: true,
+                        helperProducingOutput: false, at: now
+                    )
+                    expect.equal(tick, .none, "a preview must not become a meeting")
+                }
+
+                now += 0.4
+                let joinedEvent = detector.update(
+                    observation: joined(), helperHoldsMicrophone: true,
+                    helperProducingOutput: true, at: now
+                )
+                expect.equal(joinedEvent, .joined)
+            },
+
+            test("a flapping accessibility subtree never ends a live huddle") { expect in
+                var detector = SlackHuddleDetector()
+                var now = 100.0
+                _ = detector.update(
+                    observation: joined(), helperHoldsMicrophone: true,
+                    helperProducingOutput: true, at: now
+                )
+                expect.equal(detector.state, .joined)
+
+                // The subtree read empty repeatedly during a confirmed active huddle.
+                for cycle in 0..<20 {
+                    now += 0.4
+                    let empty = detector.update(
+                        observation: .empty, helperHoldsMicrophone: true,
+                        helperProducingOutput: true, at: now
+                    )
+                    expect.notEqual(empty, .left(reason: "control_gone"), "ended on empty read \(cycle)")
+                    expect.notEqual(empty, .left(reason: "audio_stopped"))
+                    now += 0.4
+                    _ = detector.update(
+                        observation: joined(), helperHoldsMicrophone: true,
+                        helperProducingOutput: true, at: now
+                    )
+                    expect.equal(detector.state, .joined)
+                }
+            },
+
+            test("a real leave ends the huddle once the audio agrees") { expect in
+                var detector = SlackHuddleDetector()
+                var now = 100.0
+                _ = detector.update(
+                    observation: joined(), helperHoldsMicrophone: true,
+                    helperProducingOutput: true, at: now
+                )
+
+                var ended: SlackHuddleDetector.Event = .none
+                for _ in 0..<12 {
+                    now += 0.4
+                    ended = detector.update(
+                        observation: previewing(), helperHoldsMicrophone: false,
+                        helperProducingOutput: false, at: now
+                    )
+                    if case .left = ended { break }
+                }
+                guard case .left = ended else {
+                    expect.fail("a genuine leave must end the huddle, got \(ended)")
+                    return
+                }
+                expect.equal(detector.state, .idle)
+                expect.isTrue(now - 100.0 >= 1.2, "must not end on the first miss")
+            },
+
+            test("mute toggles are reported without touching the lifecycle") { expect in
+                var detector = SlackHuddleDetector()
+                var now = 100.0
+                _ = detector.update(
+                    observation: joined(mute: false), helperHoldsMicrophone: true,
+                    helperProducingOutput: true, at: now
+                )
+                now += 0.4
+                let muted = detector.update(
+                    observation: joined(mute: true), helperHoldsMicrophone: true,
+                    helperProducingOutput: true, at: now
+                )
+                expect.equal(muted, .muteChanged(true))
+                expect.equal(detector.state, .joined)
+            },
+
+            test("window titles yield conversation, kind and workspace") { expect in
+                let dm = try expect.unwrap(SlackWindowTitle.parse("Brian McNamara (DM) - Vectorize - Slack"))
+                expect.equal(dm.conversation, "Brian McNamara")
+                expect.equal(dm.kind, .directMessage)
+                expect.equal(dm.workspace, "Vectorize")
+
+                let channel = try expect.unwrap(
+                    SlackWindowTitle.parse("vectorize-booking (Channel) - Hindsight - Slack")
+                )
+                expect.equal(channel.conversation, "vectorize-booking")
+                expect.equal(channel.kind, .channel)
+
+                let decorated = try expect.unwrap(
+                    SlackWindowTitle.parse("andrew.neeser595 (DM) - Hindsight - Slack [Main] 🏠🔊")
+                )
+                expect.equal(decorated.conversation, "andrew.neeser595")
+                expect.equal(decorated.workspace, "Hindsight")
+
+                let preview = try expect.unwrap(SlackWindowTitle.parse("Slack - Huddle Preview"))
+                expect.isTrue(preview.isHuddlePreview)
+            },
+        ])
+    }
+
+    static var browserSuite: Suite {
+        Suite("BrowserMeetingDetector", [
+            test("Meet prejoin and joined are only distinguishable with the sensor") { expect in
+                var detector = BrowserMeetingDetector()
+                var now = 100.0
+                // Native view of the whole controlled test: the title carries the
+                // meeting code and the microphone is held, through prejoin, join
+                // and leave, with no transition at the moment of joining.
+                let native = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: false,
+                    windowTitles: ["Meet - jfp-btbt-owm"]
+                )
+                let early = detector.update(native: native, at: now)
+                expect.equal(early.provider, .googleMeet)
+                expect.equal(early.confidence, .candidate)
+                expect.equal(early.meetingID, "jfp-btbt-owm")
+
+                // Native alone eventually records anyway: recall beats precision.
+                now += 25
+                expect.equal(detector.update(native: native, at: now).confidence, .confirmed)
+
+                // With the sensor connected, prejoin is explicit.
+                var sensored = BrowserMeetingDetector()
+                sensored.sensorConnected(at: now)
+                sensored.receive(
+                    BrowserMeetingEvent(
+                        browser: .firefox, provider: .googleMeet, state: .prejoin,
+                        timestamp: now, url: "https://meet.google.com/jfp-btbt-owm",
+                        meetingID: "jfp-btbt-owm"
+                    ),
+                    at: now
+                )
+                expect.equal(sensored.update(native: native, at: now).confidence, .candidate)
+
+                now += 1.6
+                sensored.receive(
+                    BrowserMeetingEvent(
+                        browser: .firefox, provider: .googleMeet, state: .inCall,
+                        timestamp: now, url: "https://meet.google.com/jfp-btbt-owm",
+                        meetingID: "jfp-btbt-owm", muted: false
+                    ),
+                    at: now
+                )
+                let joined = sensored.update(native: native, at: now)
+                expect.equal(joined.confidence, .confirmed)
+                expect.equal(joined.source, .browserSensor)
+                expect.equal(joined.muted, false)
+            },
+
+            test("Zoom's title arrives before the microphone, and that is fine") { expect in
+                var detector = BrowserMeetingDetector()
+                var now = 100.0
+                // Measured ordering: title at 16:41:26, microphone at 16:41:31.
+                let titleOnly = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: false, browserProducesOutput: false,
+                    windowTitles: ["Andrew Neeser's Zoom Meeting"]
+                )
+                let first = detector.update(native: titleOnly, at: now)
+                expect.equal(first.provider, .zoom)
+                expect.equal(first.confidence, .none, "a title alone is not a meeting")
+
+                now += 5.3
+                let withMic = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: true,
+                    windowTitles: ["Andrew Neeser's Zoom Meeting"]
+                )
+                expect.equal(detector.update(native: withMic, at: now).confidence, .candidate)
+                now += 21
+                let confirmed = detector.update(native: withMic, at: now)
+                expect.equal(confirmed.confidence, .confirmed)
+                expect.equal(confirmed.title, "Andrew Neeser's Zoom Meeting")
+            },
+
+            test("a stale sensor falls back to native without losing the meeting") { expect in
+                var detector = BrowserMeetingDetector(freshnessWindow: 5)
+                var now = 100.0
+                detector.sensorConnected(at: now)
+                detector.receive(
+                    BrowserMeetingEvent(
+                        browser: .firefox, provider: .googleMeet, state: .inCall,
+                        timestamp: now, meetingID: "abc-defg-hij"
+                    ),
+                    at: now
+                )
+                let native = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: true,
+                    windowTitles: ["Meet - abc-defg-hij"]
+                )
+                expect.equal(detector.update(native: native, at: now).source, .browserSensor)
+
+                // The extension stops reporting. Native evidence carries the meeting.
+                now += 30
+                let fallback = detector.update(native: native, at: now)
+                expect.equal(fallback.source, .native)
+                expect.equal(fallback.confidence, .confirmed, "the meeting must not vanish")
+                expect.equal(fallback.meetingID, "abc-defg-hij")
+                expect.equal(detector.sensor.connection, .stale)
+            },
+
+            test("a refresh does not look like a leave") { expect in
+                var detector = BrowserMeetingDetector()
+                var now = 100.0
+                let live = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: true,
+                    windowTitles: ["Meet - hzc-josd-epv"]
+                )
+                _ = detector.update(native: live, at: now)
+                now += 25
+                expect.equal(detector.update(native: live, at: now).confidence, .confirmed)
+
+                // Measured refresh: microphone drops for 1.486 s and comes back with
+                // the same meeting ID.
+                now += 0.5
+                let dropped = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: false, browserProducesOutput: false,
+                    windowTitles: ["Meet"]
+                )
+                expect.equal(detector.update(native: dropped, at: now).confidence, .candidate)
+                now += 1.5
+                let back = detector.update(native: live, at: now)
+                expect.equal(back.meetingID, "hzc-josd-epv")
+            },
+
+            test("meeting identifiers come out of provider URLs") { expect in
+                expect.equal(
+                    MeetingURLParser.meetingID(forURL: "https://meet.google.com/jfp-btbt-owm"),
+                    "jfp-btbt-owm"
+                )
+                expect.equal(
+                    MeetingURLParser.meetingID(forURL: "https://app.zoom.us/wc/81771591841/join"),
+                    "81771591841"
+                )
+                expect.equal(MeetingURLParser.provider(forURL: "https://app.zoom.us/wc/1/join"), .zoom)
+                expect.isNil(MeetingURLParser.provider(forURL: "https://example.com"))
+            },
+        ])
+    }
+
+    static var genericSuite: Suite {
+        Suite("GenericCallDetector", [
+            test("system speech services never become a meeting") { expect in
+                var detector = GenericCallDetector()
+                var now = 100.0
+                // corespeechd held the microphone for the whole observed session.
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.apple.CoreSpeech", processID: 808,
+                        holdsMicrophone: true, producesOutput: false,
+                        isFrontmost: false, windowTitle: nil
+                    ),
+                ]
+                for _ in 0..<400 {
+                    now += 0.5
+                    expect.equal(detector.update(states: states, at: now), [])
+                }
+            },
+
+            test("a sustained two-way call in an unknown app is promoted") { expect in
+                var detector = GenericCallDetector()
+                var now = 100.0
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.example.videochat", processID: 4_242,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: true, windowTitle: "Team call"
+                    ),
+                ]
+                var promoted: GenericCallDetector.Candidate?
+                for _ in 0..<40 {
+                    now += 0.5
+                    for event in detector.update(states: states, at: now) {
+                        if case .callLikely(let candidate) = event { promoted = candidate }
+                    }
+                    if promoted != nil { break }
+                }
+                let candidate = try expect.unwrap(promoted)
+                expect.equal(candidate.bundleIdentifier, "com.example.videochat")
+                expect.isTrue(candidate.hasTwoWayAudio)
+                expect.isTrue(candidate.heldForSeconds >= 8)
+            },
+
+            test("an application the user always records starts immediately") { expect in
+                var detector = GenericCallDetector(
+                    configuration: .init(alwaysRecord: ["com.example.videochat"])
+                )
+                let events = detector.update(
+                    states: [
+                        ApplicationAudioState(
+                            bundleIdentifier: "com.example.videochat", processID: 1,
+                            holdsMicrophone: true, producesOutput: false,
+                            isFrontmost: true, windowTitle: nil
+                        ),
+                    ],
+                    at: 100
+                )
+                guard case .callLikely(let candidate) = events.first else {
+                    expect.fail("expected an immediate candidate, got \(events)")
+                    return
+                }
+                expect.isTrue(candidate.isPreapproved)
+            },
+
+            test("an application the user never records is ignored") { expect in
+                var detector = GenericCallDetector(
+                    configuration: .init(neverRecord: ["com.example.videochat"])
+                )
+                var now = 100.0
+                for _ in 0..<200 {
+                    now += 0.5
+                    expect.equal(
+                        detector.update(
+                            states: [
+                                ApplicationAudioState(
+                                    bundleIdentifier: "com.example.videochat", processID: 1,
+                                    holdsMicrophone: true, producesOutput: true,
+                                    isFrontmost: true, windowTitle: nil
+                                ),
+                            ],
+                            at: now
+                        ),
+                        []
+                    )
+                }
+            },
+        ])
+    }
+
+    static var all: [Suite] { [slackSuite, browserSuite, genericSuite] }
+}

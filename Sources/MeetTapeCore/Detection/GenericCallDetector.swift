@@ -1,0 +1,163 @@
+import Foundation
+
+/// Applications that hold the microphone without a meeting happening.
+///
+/// `com.apple.CoreSpeech` held microphone input for an hour and thirty-five
+/// minutes of an observed session with no user speech at any point, interrupted
+/// only by sub-second audio-object recreations. Any detector that treats "a
+/// process holds the microphone" as a candidate fires permanently without this.
+public enum MicrophoneIgnoreList {
+    public static let systemServices: Set<String> = [
+        "com.apple.CoreSpeech",
+        "com.apple.assistantd",
+        "com.apple.accessibility.heard",
+        "com.apple.cmio.ContinuityCaptureAgent",
+        "com.apple.audio.AudioComponentRegistrar",
+        "com.apple.controlcenter",
+        "com.apple.Spotlight",
+        "com.apple.VoiceMemos.RecordingWidget",
+        "com.apple.speech.speechsynthesisd",
+        "com.apple.SiriTTSService",
+        "com.apple.dictationd",
+        "com.apple.voicebankingd",
+    ]
+
+    /// MeetTape's own capture must never look like a meeting to itself.
+    public static let ownBundleIdentifiers: Set<String> = ["com.meettape.app"]
+
+    public static func isIgnored(_ bundleIdentifier: String, additional: Set<String> = []) -> Bool {
+        if bundleIdentifier.isEmpty { return true }
+        if systemServices.contains(bundleIdentifier) { return true }
+        if ownBundleIdentifiers.contains(bundleIdentifier) { return true }
+        if additional.contains(bundleIdentifier) { return true }
+        // Helper processes of an ignored service.
+        return systemServices.contains { bundleIdentifier.hasPrefix($0 + ".") }
+    }
+}
+
+/// One application's audio state, as the detector sees it.
+public struct ApplicationAudioState: Sendable, Equatable {
+    public let bundleIdentifier: String
+    public let processID: Int32
+    public let holdsMicrophone: Bool
+    public let producesOutput: Bool
+    public let isFrontmost: Bool
+    public let windowTitle: String?
+
+    public init(
+        bundleIdentifier: String, processID: Int32, holdsMicrophone: Bool,
+        producesOutput: Bool, isFrontmost: Bool, windowTitle: String?
+    ) {
+        self.bundleIdentifier = bundleIdentifier
+        self.processID = processID
+        self.holdsMicrophone = holdsMicrophone
+        self.producesOutput = producesOutput
+        self.isFrontmost = isFrontmost
+        self.windowTitle = windowTitle
+    }
+}
+
+/// Finds probable calls in applications MeetTape has no adapter for.
+///
+/// Recall is worth more than precision here: capture starts provisionally and the
+/// user is asked afterwards, so a false positive costs a prompt while a miss
+/// costs the meeting. Microphone ownership alone is never enough, and simple
+/// heuristics are used deliberately in place of a classifier.
+public struct GenericCallDetector: Sendable {
+    public struct Configuration: Sendable, Equatable {
+        /// How long an application must hold the microphone before it counts.
+        public var dwellSeconds: Double
+        /// Two-way audio is much stronger evidence than the microphone alone, so it
+        /// promotes faster.
+        public var dwellSecondsWithOutput: Double
+        /// Applications the user chose to always or never record.
+        public var alwaysRecord: Set<String>
+        public var neverRecord: Set<String>
+
+        public init(
+            dwellSeconds: Double = 25,
+            dwellSecondsWithOutput: Double = 8,
+            alwaysRecord: Set<String> = [],
+            neverRecord: Set<String> = []
+        ) {
+            self.dwellSeconds = dwellSeconds
+            self.dwellSecondsWithOutput = dwellSecondsWithOutput
+            self.alwaysRecord = alwaysRecord
+            self.neverRecord = neverRecord
+        }
+    }
+
+    public struct Candidate: Sendable, Equatable {
+        public let bundleIdentifier: String
+        public let processID: Int32
+        public let heldForSeconds: Double
+        public let hasTwoWayAudio: Bool
+        public let windowTitle: String?
+        /// The user already said always-record this application.
+        public let isPreapproved: Bool
+    }
+
+    public enum Event: Sendable, Equatable {
+        case none
+        case callLikely(Candidate)
+        case callEnded(bundleIdentifier: String)
+    }
+
+    public var configuration: Configuration
+
+    private struct Tracked {
+        var since: Double
+        var promoted = false
+        var sawOutput = false
+    }
+
+    private var tracked: [String: Tracked] = [:]
+
+    public init(configuration: Configuration = Configuration()) {
+        self.configuration = configuration
+    }
+
+    public mutating func update(states: [ApplicationAudioState], at now: Double) -> [Event] {
+        var events: [Event] = []
+        var seen: Set<String> = []
+
+        for state in states {
+            guard state.holdsMicrophone else { continue }
+            guard !MicrophoneIgnoreList.isIgnored(
+                state.bundleIdentifier, additional: configuration.neverRecord
+            ) else { continue }
+            seen.insert(state.bundleIdentifier)
+
+            var entry = tracked[state.bundleIdentifier] ?? Tracked(since: now)
+            if state.producesOutput { entry.sawOutput = true }
+            let held = now - entry.since
+            let threshold = entry.sawOutput
+                ? configuration.dwellSecondsWithOutput
+                : configuration.dwellSeconds
+            let preapproved = configuration.alwaysRecord.contains(state.bundleIdentifier)
+
+            if !entry.promoted, preapproved || held >= threshold {
+                entry.promoted = true
+                events.append(.callLikely(Candidate(
+                    bundleIdentifier: state.bundleIdentifier,
+                    processID: state.processID,
+                    heldForSeconds: held,
+                    hasTwoWayAudio: entry.sawOutput,
+                    windowTitle: state.windowTitle,
+                    isPreapproved: preapproved
+                )))
+            }
+            tracked[state.bundleIdentifier] = entry
+        }
+
+        for (bundleIdentifier, entry) in tracked where !seen.contains(bundleIdentifier) {
+            if entry.promoted { events.append(.callEnded(bundleIdentifier: bundleIdentifier)) }
+            tracked.removeValue(forKey: bundleIdentifier)
+        }
+        return events
+    }
+
+    public mutating func forget(_ bundleIdentifier: String) {
+        tracked.removeValue(forKey: bundleIdentifier)
+    }
+}

@@ -1,0 +1,157 @@
+import Foundation
+
+/// Exactly what the API returned for one chunk, stored unmodified.
+///
+/// Raw diarization is immutable. Renaming a speaker edits `speakers.map.json`, and
+/// never this file, so a name change costs nothing and loses nothing.
+public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var track: CaptureTrack
+    /// Where this chunk starts on the meeting timeline, in seconds.
+    public var timelineOffset: Double
+    public var durationSeconds: Double
+    public var model: String
+    public var responseFormat: String
+    public var segments: [RawTranscriptSegment]
+    /// The raw response body, kept so a future build can re-derive more from it.
+    public var rawResponseFile: String?
+
+    public init(
+        id: String, track: CaptureTrack, timelineOffset: Double, durationSeconds: Double,
+        model: String, responseFormat: String, segments: [RawTranscriptSegment],
+        rawResponseFile: String? = nil
+    ) {
+        self.id = id
+        self.track = track
+        self.timelineOffset = timelineOffset
+        self.durationSeconds = durationSeconds
+        self.model = model
+        self.responseFormat = responseFormat
+        self.segments = segments
+        self.rawResponseFile = rawResponseFile
+    }
+}
+
+public struct RawTranscriptSegment: Codable, Sendable, Equatable {
+    /// Chunk-relative start, in seconds, exactly as returned.
+    public var start: Double
+    public var end: Double
+    public var text: String
+    /// The API's anonymous label, such as "A". Only meaningful inside its chunk.
+    public var speaker: String?
+
+    public init(start: Double, end: Double, text: String, speaker: String?) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.speaker = speaker
+    }
+}
+
+public struct RawTranscript: Codable, Sendable, Equatable {
+    public static let currentVersion = 1
+
+    public var version: Int
+    public var chunks: [RawTranscriptChunk]
+
+    public init(version: Int = RawTranscript.currentVersion, chunks: [RawTranscriptChunk] = []) {
+        self.version = version
+        self.chunks = chunks
+    }
+
+    public func chunks(track: CaptureTrack) -> [RawTranscriptChunk] {
+        chunks.filter { $0.track == track }.sorted { $0.timelineOffset < $1.timelineOffset }
+    }
+}
+
+/// Namespacing for anonymous diarization labels.
+///
+/// OpenAI's labels are only stable inside one request, so "A" in chunk 1 and "A"
+/// in chunk 2 are not known to be the same person. Namespacing them keeps that
+/// honest and leaves speaker resolution free to map several raw clusters onto one
+/// participant.
+public enum SpeakerLabel {
+    public static let localUser = "local"
+
+    public static func namespaced(chunkID: String, rawLabel: String) -> String {
+        "\(chunkID)_speaker_\(normalise(rawLabel))"
+    }
+
+    public static func chunkID(index: Int) -> String {
+        String(format: "chunk_%03d", index)
+    }
+
+    private static func normalise(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespaces).lowercased()
+        if let numeric = Int(trimmed) { return String(format: "%02d", numeric) }
+        if trimmed.hasPrefix("speaker_") { return String(trimmed.dropFirst("speaker_".count)) }
+        if trimmed.count == 1, let scalar = trimmed.unicodeScalars.first, scalar.properties.isAlphabetic {
+            // "A" -> 00, "B" -> 01, matching the shape of numeric labels.
+            let offset = Int(scalar.value) - Int(UnicodeScalar("a").value)
+            return String(format: "%02d", offset)
+        }
+        return trimmed.replacingOccurrences(of: " ", with: "_")
+    }
+}
+
+/// One line of the canonical transcript.
+public struct Utterance: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    /// Seconds from the start of the meeting timeline.
+    public var start: Double
+    public var end: Double
+    public var track: CaptureTrack
+    /// The namespaced raw diarization label, nil for the microphone track where
+    /// the speaker is known by construction.
+    public var rawSpeakerLabel: String?
+    /// Stable identity used for display. Either `SpeakerLabel.localUser` or the raw
+    /// label, resolved through the speaker map at render time.
+    public var speakerKey: String
+    public var text: String
+    public var chunkID: String
+    public var model: String
+
+    public init(
+        id: String, start: Double, end: Double, track: CaptureTrack,
+        rawSpeakerLabel: String?, speakerKey: String, text: String,
+        chunkID: String, model: String
+    ) {
+        self.id = id
+        self.start = start
+        self.end = end
+        self.track = track
+        self.rawSpeakerLabel = rawSpeakerLabel
+        self.speakerKey = speakerKey
+        self.text = text
+        self.chunkID = chunkID
+        self.model = model
+    }
+}
+
+/// `transcript.json`. Derived from the raw responses plus the timeline, and safe
+/// to regenerate at any time.
+public struct CanonicalTranscript: Codable, Sendable, Equatable {
+    public static let currentVersion = 1
+
+    public var version: Int
+    public var generatedAt: Date
+    public var utterances: [Utterance]
+
+    public init(version: Int = CanonicalTranscript.currentVersion, generatedAt: Date, utterances: [Utterance]) {
+        self.version = version
+        self.generatedAt = generatedAt
+        self.utterances = utterances
+    }
+
+    public var durationSeconds: Double { utterances.map(\.end).max() ?? 0 }
+
+    public var speakerKeys: [String] {
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        for utterance in utterances where !seen.contains(utterance.speakerKey) {
+            seen.insert(utterance.speakerKey)
+            ordered.append(utterance.speakerKey)
+        }
+        return ordered
+    }
+}

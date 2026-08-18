@@ -71,7 +71,22 @@ public enum CaptureTrack: String, Codable, Sendable, CaseIterable {
     case mic
     case remote
 
-    public var segmentPrefix: String { rawValue }
+    /// Segment filenames use `system` for the remote track, matching the
+    /// documented archive layout. The internal name stays `remote` because the
+    /// health model for it is about a tapped application, not about the system.
+    public var segmentPrefix: String {
+        switch self {
+        case .mic: "mic"
+        case .remote: "system"
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .mic: "Microphone"
+        case .remote: "Meeting audio"
+        }
+    }
 }
 
 /// Browsers MeetTape can accept sensor events from.

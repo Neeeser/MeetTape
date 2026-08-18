@@ -110,6 +110,12 @@ public struct ManifestReadResult: Sendable {
     public let hasTruncatedTail: Bool
     /// Lines that parsed as JSON but described something this build does not know.
     public let unrecognisedLines: Int
+
+    public init(lines: [ManifestLine], hasTruncatedTail: Bool, unrecognisedLines: Int) {
+        self.lines = lines
+        self.hasTruncatedTail = hasTruncatedTail
+        self.unrecognisedLines = unrecognisedLines
+    }
 }
 
 public enum ManifestReader {

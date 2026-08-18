@@ -17,38 +17,28 @@ let hostVersion = "1.0.0"
 
 /// Reads the browser's length-prefixed messages from standard input.
 struct BrowserMessageReader {
-    func next() -> [String: Any]? {
-        var lengthBytes = [UInt8](repeating: 0, count: 4)
-        var read = 0
-        while read < 4 {
-            let count = FileHandle.standardInput.availableDataCount(into: &lengthBytes, offset: read, limit: 4)
-            if count <= 0 { return nil }
-            read += count
-        }
-        let length = Int(lengthBytes[0])
-            | Int(lengthBytes[1]) << 8
-            | Int(lengthBytes[2]) << 16
-            | Int(lengthBytes[3]) << 24
-        guard length > 0, length < 8 * 1_024 * 1_024 else { return nil }
-
-        var payload = Data()
-        while payload.count < length {
-            let chunk = FileHandle.standardInput.readData(ofLength: length - payload.count)
+    /// Reads exactly `count` bytes, or nil once the stream ends.
+    private func readExactly(_ count: Int) -> Data? {
+        var data = Data()
+        while data.count < count {
+            let chunk = FileHandle.standardInput.readData(ofLength: count - data.count)
             if chunk.isEmpty { return nil }
-            payload.append(chunk)
+            data.append(chunk)
         }
-        return (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any]
+        return data
     }
-}
 
-extension FileHandle {
-    func availableDataCount(into buffer: inout [UInt8], offset: Int, limit: Int) -> Int {
-        let data = readData(ofLength: limit - offset)
-        guard !data.isEmpty else { return 0 }
-        data.withUnsafeBytes { raw in
-            for index in 0..<data.count { buffer[offset + index] = raw[index] }
-        }
-        return data.count
+    func next() -> [String: Any]? {
+        guard let header = readExactly(4) else { return nil }
+        let length = Int(header[header.startIndex])
+            | Int(header[header.startIndex + 1]) << 8
+            | Int(header[header.startIndex + 2]) << 16
+            | Int(header[header.startIndex + 3]) << 24
+        // A hostile or confused peer must not be able to make the host allocate
+        // without bound; browsers cap messages far below this.
+        guard length > 0, length <= 1_048_576 else { return nil }
+        guard let payload = readExactly(length) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any]
     }
 }
 

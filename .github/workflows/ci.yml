@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version || true
+
+      - name: Build (debug)
+        run: ./scripts/build.sh debug
+
+      - name: Run the test suite
+        # Live OpenAI tests are skipped here: they need a key, and CI must not
+        # spend money or depend on a network service.
+        run: ./scripts/test.sh
+
+      - name: Build (release)
+        run: ./scripts/build.sh release
+
+      - name: Package the app
+        # Ad-hoc signing only. A Developer ID build happens in the release
+        # workflow, where the signing secrets live.
+        run: ./scripts/bundle-app.sh release
+
+      - name: Verify the bundle
+        run: |
+          test -x dist/MeetTape.app/Contents/MacOS/MeetTape
+          test -x dist/MeetTape.app/Contents/MacOS/meettape-nativehost
+          test -f dist/MeetTape.app/Contents/Resources/extension/firefox/manifest.json
+          codesign --verify --verbose=1 dist/MeetTape.app
+          /usr/libexec/PlistBuddy -c "Print :LSUIElement" dist/MeetTape.app/Contents/Info.plist
+
+  extension:
+    name: Browser extension
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test the sensor logic
+        working-directory: extension
+        run: npm test
+      - name: Build the extension bundles
+        run: ./extension/build.sh
+      - name: Check the manifests parse
+        run: |
+          for browser in firefox chrome; do
+            node -e "JSON.parse(require('fs').readFileSync('extension/dist/$browser/manifest.json','utf8'))"
+          done
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Investigation material stays untracked
+        run: |
+          if git ls-files --error-unmatch plans probes >/dev/null 2>&1; then
+            echo "plans/ or probes/ is tracked; they are local working material" >&2
+            exit 1
+          fi
+
+      - name: No API keys in the tree
+        run: |
+          # A committed OpenAI key is an immediate incident, so CI fails on the
+          # shape of one rather than waiting for a review to catch it.
+          if git grep -nIE 'sk-(proj-)?[A-Za-z0-9_-]{32,}' -- . ':!*.md'; then
+            echo "possible API key committed" >&2
+            exit 1
+          fi
+
+      - name: No meeting content in fixtures
+        run: |
+          if git ls-files | grep -E '\.(caf|wav|m4a|mp3)$'; then
+            echo "audio files must not be committed" >&2
+            exit 1
+          fi

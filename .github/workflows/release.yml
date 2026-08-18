@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the leading v'
+        required: true
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "$VERSION" > VERSION
+
+      - name: Test before packaging
+        run: ./scripts/test.sh
+
+      - name: Import the Developer ID certificate
+        # Absent secrets are not a failure: the build still produces an ad-hoc
+        # signed app, clearly marked as unsigned in the release notes.
+        id: signing
+        env:
+          CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE_P12" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No Developer ID certificate configured; building ad-hoc signed."
+            exit 0
+          fi
+          KEYCHAIN=build.keychain
+          security create-keychain -p actions "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          echo "$CERTIFICATE_P12" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN"
+          rm certificate.p12
+          IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the app
+        env:
+          MEETTAPE_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          MEETTAPE_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/bundle-app.sh release
+
+      - name: Notarize and staple
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: ./scripts/notarize.sh dist/MeetTape.app
+
+      - name: Package
+        run: ./scripts/package.sh ${{ steps.version.outputs.version }}
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/MeetTape-${{ steps.version.outputs.version }}.zip
+            dist/MeetTape-${{ steps.version.outputs.version }}.dmg
+            dist/MeetTape-${{ steps.version.outputs.version }}.sha256
+          draft: true
+          generate_release_notes: true
+          body: |
+            ${{ steps.signing.outputs.signed == 'true' && 'Signed with Developer ID and notarized.' || '**Unsigned build.** Gatekeeper will refuse to open it normally. Do not publish this as a public release; see docs/RELEASING.md.' }}

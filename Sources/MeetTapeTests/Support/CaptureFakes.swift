@@ -1,0 +1,189 @@
+import Foundation
+import MeetTapeCore
+import Synchronization
+
+/// Stands in for AVAudioEngine. Records every teardown and build so a rebuild
+/// storm is countable, and lets a test script the exact device readings macOS
+/// produced during Bluetooth negotiation, including the transient 0ch/0Hz one.
+final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
+    struct Build: Sendable, Equatable {
+        let format: AudioFormatDescriptor
+    }
+
+    private struct State {
+        var formatQueue: [AudioFormatDescriptor?] = []
+        var steadyFormat: AudioFormatDescriptor? = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
+        var builds: [Build] = []
+        var teardowns = 0
+        var running = false
+        var failNextBuild: CaptureError?
+        var formatReads = 0
+    }
+
+    private let state = Mutex(State())
+
+    var builds: [Build] { state.withLock { $0.builds } }
+    var buildCount: Int { state.withLock { $0.builds.count } }
+    var teardownCount: Int { state.withLock { $0.teardowns } }
+    var isRunning: Bool { state.withLock { $0.running } }
+    var formatReads: Int { state.withLock { $0.formatReads } }
+
+    /// Sets the device reading returned once capture settles.
+    func setSteadyFormat(_ format: AudioFormatDescriptor?) {
+        state.withLock { $0.steadyFormat = format }
+    }
+
+    /// Queues one-shot device readings, consumed in order before the steady value.
+    func queueFormatReadings(_ formats: [AudioFormatDescriptor?]) {
+        state.withLock { $0.formatQueue.append(contentsOf: formats) }
+    }
+
+    func failNextBuild(with error: CaptureError) {
+        state.withLock { $0.failNextBuild = error }
+    }
+
+    func currentInputFormat() -> AudioFormatDescriptor? {
+        state.withLock { state in
+            state.formatReads += 1
+            if !state.formatQueue.isEmpty { return state.formatQueue.removeFirst() }
+            return state.steadyFormat
+        }
+    }
+
+    func teardown() {
+        state.withLock { state in
+            state.teardowns += 1
+            state.running = false
+        }
+    }
+
+    func buildAndStart(format: AudioFormatDescriptor) throws {
+        let failure: CaptureError? = state.withLock { state in
+            defer { state.failNextBuild = nil }
+            return state.failNextBuild
+        }
+        if let failure { throw failure }
+        state.withLock { state in
+            state.builds.append(Build(format: format))
+            state.running = true
+        }
+    }
+}
+
+/// Stands in for the CoreAudio process tap.
+final class FakeProcessTap: ProcessTapController, Sendable {
+    private struct State {
+        var targets: [RemoteAudioTarget] = []
+        var binds: [[Int32]] = []
+        var teardowns = 0
+        var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 2)
+        var failNextBind: CaptureError?
+    }
+
+    private let state = Mutex(State())
+
+    var bindCount: Int { state.withLock { $0.binds.count } }
+    var bindHistory: [[Int32]] { state.withLock { $0.binds } }
+    var teardownCount: Int { state.withLock { $0.teardowns } }
+
+    func setTargets(_ targets: [RemoteAudioTarget]) {
+        state.withLock { $0.targets = targets }
+    }
+
+    func setFormat(_ format: AudioFormatDescriptor) {
+        state.withLock { $0.format = format }
+    }
+
+    func failNextBind(with error: CaptureError) {
+        state.withLock { $0.failNextBind = error }
+    }
+
+    func resolveTargets(bundlePrefixes: [String]) -> [RemoteAudioTarget] {
+        state.withLock { state in
+            state.targets.filter { target in
+                bundlePrefixes.contains { target.bundleIdentifier.hasPrefix($0) }
+            }
+        }
+    }
+
+    func teardown() {
+        state.withLock { $0.teardowns += 1 }
+    }
+
+    func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+        let failure: CaptureError? = state.withLock { state in
+            defer { state.failNextBind = nil }
+            return state.failNextBind
+        }
+        if let failure { throw failure }
+        return state.withLock { state in
+            state.binds.append(targets.map(\.processID).sorted())
+            return state.format
+        }
+    }
+}
+
+/// Captures coordinator callbacks so a test can assert on the manifest-visible
+/// consequences of recovery.
+final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
+    struct FormatChange: Sendable, Equatable {
+        let track: CaptureTrack
+        let from: AudioFormatDescriptor?
+        let to: AudioFormatDescriptor
+        let reason: String
+    }
+
+    struct Restart: Sendable, Equatable {
+        let track: CaptureTrack
+        let reason: String
+        let count: Int
+    }
+
+    struct HealthChange: Sendable, Equatable {
+        let track: CaptureTrack
+        let state: CaptureHealthState
+    }
+
+    private struct State {
+        var formatChanges: [FormatChange] = []
+        var restarts: [Restart] = []
+        var healthChanges: [HealthChange] = []
+        var failures: [CaptureError] = []
+    }
+
+    private let state = Mutex(State())
+
+    var formatChanges: [FormatChange] { state.withLock { $0.formatChanges } }
+    var restarts: [Restart] { state.withLock { $0.restarts } }
+    var healthChanges: [HealthChange] { state.withLock { $0.healthChanges } }
+    var failures: [CaptureError] { state.withLock { $0.failures } }
+
+    func captureWillChangeFormat(
+        track: CaptureTrack, from: AudioFormatDescriptor?, to: AudioFormatDescriptor, reason: String
+    ) {
+        state.withLock { $0.formatChanges.append(FormatChange(track: track, from: from, to: to, reason: reason)) }
+    }
+
+    func captureDidRestart(track: CaptureTrack, reason: RebuildReason, restartCount: Int) {
+        state.withLock { $0.restarts.append(Restart(track: track, reason: reason.label, count: restartCount)) }
+    }
+
+    func captureHealthChanged(track: CaptureTrack, state newState: CaptureHealthState, detail: String?) {
+        state.withLock { $0.healthChanges.append(HealthChange(track: track, state: newState)) }
+    }
+
+    func captureDidFail(track: CaptureTrack, error: CaptureError) {
+        state.withLock { $0.failures.append(error) }
+    }
+}
+
+func makeTarget(
+    pid: Int32, bundle: String = "org.mozilla.firefox", producing: Bool = false, objectID: UInt32? = nil
+) -> RemoteAudioTarget {
+    RemoteAudioTarget(
+        audioObjectID: objectID ?? UInt32(pid),
+        processID: pid,
+        bundleIdentifier: bundle,
+        isRunningOutput: producing
+    )
+}

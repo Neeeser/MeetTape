@@ -40,6 +40,19 @@ public enum MeetingSource: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// True when the microphone track is the local user by construction.
+    ///
+    /// A remote meeting has two tracks and the microphone is only ever the person
+    /// holding it, so diarizing it would be wasted effort and a source of error.
+    /// An in-person or imported recording has one track holding everyone, so its
+    /// raw diarization labels are kept.
+    public var micTrackIsLocalUser: Bool {
+        switch self {
+        case .inPerson, .imported: false
+        case .slackHuddle, .googleMeet, .zoom, .faceTime, .genericCall, .manual: true
+        }
+    }
+
     public var provider: MeetingProvider {
         switch self {
         case .slackHuddle: .slack

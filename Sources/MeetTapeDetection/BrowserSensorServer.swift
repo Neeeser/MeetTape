@@ -13,6 +13,8 @@ public final class BrowserSensorServer: @unchecked Sendable {
         public var connectionCount: Int
         public var lastMessageAt: Date?
         public var lastHello: SensorMessage.Hello?
+        /// Connections refused because the peer was not MeetTape's own relay.
+        public var rejectedConnections = 0
     }
 
     /// One connection per supported browser is plenty. A local process opening
@@ -30,7 +32,9 @@ public final class BrowserSensorServer: @unchecked Sendable {
     private var acceptSource: DispatchSourceRead?
     private var connections: [Int32: DispatchSourceRead] = [:]
     private var buffers: [Int32: Data] = [:]
-    private var status = Status(isListening: false, connectionCount: 0, lastMessageAt: nil, lastHello: nil)
+    private var status = Status(
+        isListening: false, connectionCount: 0, lastMessageAt: nil, lastHello: nil
+    )
 
     private let onMessage: @Sendable (SensorMessage) -> Void
     private let onConnectionChange: @Sendable (Int) -> Void
@@ -112,7 +116,9 @@ public final class BrowserSensorServer: @unchecked Sendable {
         let accept = acceptSource
         acceptSource = nil
         listenDescriptor = -1
-        status = Status(isListening: false, connectionCount: 0, lastMessageAt: nil, lastHello: nil)
+        status = Status(
+            isListening: false, connectionCount: 0, lastMessageAt: nil, lastHello: nil
+        )
         lock.unlock()
 
         for (_, source) in sources { source.cancel() }
@@ -130,8 +136,16 @@ public final class BrowserSensorServer: @unchecked Sendable {
         guard client >= 0 else { return }
 
         // Only MeetTape's own relay, launched by a browser, may drive detection.
-        guard let peer = verifier.peer(of: client), verifier.isTrusted(peer) else {
-            Log.detection.notice("rejected an untrusted sensor connection")
+        guard let peer = verifier.peer(of: client) else {
+            Log.detection.notice("rejected a sensor connection: the peer could not be identified")
+            lock.withLock { status.rejectedConnections += 1 }
+            close(client)
+            return
+        }
+        guard verifier.isTrusted(peer) else {
+            let reason = self.verifier.rejectionReason(peer)
+            Log.detection.notice("rejected a sensor connection: \(reason, privacy: .public)")
+            lock.withLock { status.rejectedConnections += 1 }
             close(client)
             return
         }

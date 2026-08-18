@@ -16,6 +16,17 @@ public struct SensorPeerVerifier: Sendable {
         public let processID: pid_t
         public let executablePath: String
         public let parentPath: String?
+        public let parentBundleIdentifier: String?
+
+        public init(
+            processID: pid_t, executablePath: String,
+            parentPath: String?, parentBundleIdentifier: String?
+        ) {
+            self.processID = processID
+            self.executablePath = executablePath
+            self.parentPath = parentPath
+            self.parentBundleIdentifier = parentBundleIdentifier
+        }
     }
 
     /// Absolute paths the host binary is allowed to run from.
@@ -48,10 +59,14 @@ public struct SensorPeerVerifier: Sendable {
               processID > 0
         else { return nil }
         guard let path = executablePath(of: processID) else { return nil }
+        let parent = parentProcessID(of: processID)
         return Peer(
             processID: processID,
             executablePath: path,
-            parentPath: parentProcessID(of: processID).flatMap { executablePath(of: $0) }
+            parentPath: parent.flatMap { executablePath(of: $0) },
+            parentBundleIdentifier: parent.flatMap {
+                NSRunningApplication(processIdentifier: $0)?.bundleIdentifier
+            }
         )
     }
 
@@ -62,13 +77,27 @@ public struct SensorPeerVerifier: Sendable {
     /// not stop an attacker from running it themselves.
     public func isTrusted(_ peer: Peer) -> Bool {
         guard allowedHostPaths.contains(peer.executablePath) else { return false }
+        // The bundle identifier is the direct answer; the executable path is the
+        // fallback for a browser that is running but not registered.
+        if let identifier = peer.parentBundleIdentifier,
+           allowedParentBundleIDs.contains(identifier) {
+            return true
+        }
         guard let parentPath = peer.parentPath else { return false }
         return allowedParentBundleIDs.contains { identifier in
             guard let applicationURL = NSWorkspace.shared
                 .urlForApplication(withBundleIdentifier: identifier)
             else { return false }
-            return parentPath.hasPrefix(applicationURL.path)
+            return parentPath.hasPrefix(applicationURL.deletingLastPathComponent().path)
         }
+    }
+
+    /// Why a peer was refused, for the log and the permissions pane.
+    public func rejectionReason(_ peer: Peer) -> String {
+        if !allowedHostPaths.contains(peer.executablePath) {
+            return "the connecting process is not MeetTape's relay"
+        }
+        return "the relay was not launched by a browser"
     }
 
     private func executablePath(of processID: pid_t) -> String? {

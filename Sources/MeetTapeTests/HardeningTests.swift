@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import MeetTapeAudio
 import MeetTapeCore
+import MeetTapeDetection
 import TestKit
 
 /// Regressions for defects found by adversarial review. Each one failed against
@@ -530,5 +531,45 @@ enum HardeningTests {
         ])
     }
 
-    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite] }
+    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite, sensorTrustSuite] }
+}
+
+extension HardeningTests {
+    static var sensorTrustSuite: Suite {
+        Suite("SensorTrust", [
+            test("only MeetTape's own relay, launched by a browser, is accepted") { expect in
+                let verifier = SensorPeerVerifier(
+                    allowedHostPaths: ["/Users/x/Library/Application Support/MeetTape/meettape-nativehost"],
+                    allowedParentBundleIDs: ["org.mozilla.firefox"]
+                )
+
+                let genuine = SensorPeerVerifier.Peer(
+                    processID: 100,
+                    executablePath: "/Users/x/Library/Application Support/MeetTape/meettape-nativehost",
+                    parentPath: "/Applications/Firefox.app/Contents/MacOS/firefox",
+                    parentBundleIdentifier: "org.mozilla.firefox"
+                )
+                expect.isTrue(verifier.isTrusted(genuine))
+
+                // MeetTape holds the microphone grant, so a process that can fake a
+                // meeting event records without a prompt of its own.
+                let imposter = SensorPeerVerifier.Peer(
+                    processID: 101, executablePath: "/tmp/attacker",
+                    parentPath: "/bin/zsh", parentBundleIdentifier: nil
+                )
+                expect.isFalse(verifier.isTrusted(imposter))
+                expect.isTrue(verifier.rejectionReason(imposter).contains("relay"))
+
+                // Our own relay run from a shell is still refused: it relays
+                // whatever it is fed on standard input.
+                let shellLaunched = SensorPeerVerifier.Peer(
+                    processID: 102,
+                    executablePath: "/Users/x/Library/Application Support/MeetTape/meettape-nativehost",
+                    parentPath: "/bin/zsh", parentBundleIdentifier: nil
+                )
+                expect.isFalse(verifier.isTrusted(shellLaunched))
+                expect.isTrue(verifier.rejectionReason(shellLaunched).contains("browser"))
+            },
+        ])
+    }
 }

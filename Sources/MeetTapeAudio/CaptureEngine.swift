@@ -88,17 +88,33 @@ public final class CaptureEngine: Sendable {
     private let controlQueue = DispatchQueue(label: "com.meettape.capture-control", qos: .userInitiated)
     private let timerBox = LockedBox<DispatchSourceTimer?>(nil)
 
-    private let micSource: MicrophoneSource
-    private let remoteSource: RemoteAudioSource
+    private let micSource: MicrophoneEngineController
+    private let remoteSource: ProcessTapController
     private let micCoordinator: MicrophoneRecoveryCoordinator
     private let remoteCoordinator: RemoteTapCoordinator
     private let coordinatorRelay: CoordinatorRelay
+
+    /// Builds the capture sources. The defaults are the real AVFoundation and
+    /// CoreAudio implementations; tests substitute fakes so the engine's own
+    /// behaviour can be exercised without audio hardware.
+    public typealias MicrophoneFactory = @Sendable (
+        @escaping AudioBufferSink, @escaping @Sendable () -> Void
+    ) -> MicrophoneEngineController
+    public typealias TapFactory = @Sendable (
+        @escaping AudioBufferSink, @escaping @Sendable () -> Void
+    ) -> ProcessTapController
 
     public init(
         clock: any Clock = SystemClock(),
         thresholds: CaptureThresholds = .validated,
         segmentSeconds: Double = 30,
         preRollSeconds: Double = 15,
+        makeMicrophone: MicrophoneFactory = { sink, onChange in
+            MicrophoneSource(sink: sink, onConfigurationChange: onChange)
+        },
+        makeTap: @escaping TapFactory = { sink, onFormatChanged in
+            RemoteAudioSource(sink: sink, onFormatChanged: onFormatChanged)
+        },
         delegate: any CaptureEngineDelegate
     ) {
         self.clock = clock
@@ -113,11 +129,15 @@ public final class CaptureEngine: Sendable {
 
         let micSink = SinkBox()
         let remoteSink = SinkBox()
-        self.micSource = MicrophoneSource(
-            sink: { packet in micSink.deliver(packet) },
-            onConfigurationChange: { relay.configurationChanged() }
+        let rebindOnFormatChange = RebindRequest()
+        self.micSource = makeMicrophone(
+            { packet in micSink.deliver(packet) },
+            { relay.configurationChanged() }
         )
-        self.remoteSource = RemoteAudioSource(sink: { packet in remoteSink.deliver(packet) })
+        self.remoteSource = makeTap(
+            { packet in remoteSink.deliver(packet) },
+            { rebindOnFormatChange.fire() }
+        )
 
         self.micCoordinator = MicrophoneRecoveryCoordinator(
             controller: micSource, clock: clock, thresholds: thresholds, delegate: relay
@@ -125,6 +145,11 @@ public final class CaptureEngine: Sendable {
         self.remoteCoordinator = RemoteTapCoordinator(
             controller: remoteSource, clock: clock, thresholds: thresholds, delegate: relay
         )
+        rebindOnFormatChange.connect { [remoteCoordinator, controlQueue] in
+            // The tap's format changed underneath us; rebinding is the only way to
+            // start labelling buffers correctly again.
+            controlQueue.async { remoteCoordinator.rebindAfterFormatChange() }
+        }
 
         relay.connect(engine: self)
         micSink.connect { [weak self] packet in self?.receive(packet, track: .mic) }
@@ -560,6 +585,26 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
                 .sourceHealth(.init(track: track, state: .failed, detail: error.logSafeDescription))
             )
         }
+    }
+}
+
+/// Carries the tap's format-change notification to the coordinator, which does
+/// not exist yet when the source is built.
+private final class RebindRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable () -> Void)?
+
+    func connect(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.handler = handler
+    }
+
+    func fire() {
+        lock.lock()
+        let handler = self.handler
+        lock.unlock()
+        handler?()
     }
 }
 

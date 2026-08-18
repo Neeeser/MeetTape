@@ -38,13 +38,15 @@ public enum StorageError: LogSafeError, Equatable {
     case decodeFailed(path: String, underlying: String)
     case meetingNotFound(id: String)
 
+    /// Paths are omitted: a meeting directory's name embeds the meeting title,
+    /// and the unified log is collected wholesale by sysdiagnose.
     public var logSafeDescription: String {
         switch self {
-        case .directoryCreationFailed(let path, _): "directoryCreationFailed(\(path))"
-        case .fileWriteFailed(let path, _): "fileWriteFailed(\(path))"
-        case .fileReadFailed(let path, _): "fileReadFailed(\(path))"
-        case .decodeFailed(let path, _): "decodeFailed(\(path))"
-        case .meetingNotFound(let id): "meetingNotFound(\(id))"
+        case .directoryCreationFailed: "directoryCreationFailed"
+        case .fileWriteFailed: "fileWriteFailed"
+        case .fileReadFailed: "fileReadFailed"
+        case .decodeFailed: "decodeFailed"
+        case .meetingNotFound: "meetingNotFound"
         }
     }
 }

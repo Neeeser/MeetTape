@@ -94,7 +94,7 @@ They are skipped unless explicitly enabled, so an ordinary run costs nothing:
 ./scripts/make-live-fixture.sh /tmp/meettape-fixture   # local `say`, free
 MEETTAPE_LIVE_OPENAI=1 \
 MEETTAPE_LIVE_FIXTURE=/tmp/meettape-fixture \
-OPENAI_API_KEY=sk-... \
+OPENAI_API_KEY=<your key> \
   ./scripts/test.sh --filter LiveOpenAI
 ```
 

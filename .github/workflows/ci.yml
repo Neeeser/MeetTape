@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -85,14 +88,14 @@ jobs:
         run: |
           # A committed OpenAI key is an immediate incident, so CI fails on the
           # shape of one rather than waiting for a review to catch it.
-          if git grep -nIE 'sk-(proj-)?[A-Za-z0-9_-]{32,}' -- . ':!*.md'; then
+          if git grep -nIE 'sk-(proj-)?[A-Za-z0-9_-]{32,}'; then
             echo "possible API key committed" >&2
             exit 1
           fi
 
       - name: No meeting content in fixtures
         run: |
-          if git ls-files | grep -E '\.(caf|wav|m4a|mp3)$'; then
+          if git ls-files | grep -E '\.(caf|wav|m4a|mp3|aiff|aif|mp4|mov)$'; then
             echo "audio files must not be committed" >&2
             exit 1
           fi

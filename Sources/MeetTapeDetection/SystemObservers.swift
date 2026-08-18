@@ -14,6 +14,37 @@ public struct WindowTitleReader: Sendable {
 
     public var hasTitleAccess: Bool { CGPreflightScreenCaptureAccess() }
 
+    /// Every on-screen window title, keyed by the owning application name.
+    public func allTitles() -> [String: [String]] {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return [:]
+        }
+        var result: [String: [String]] = [:]
+        for window in windows {
+            guard let owner = window[kCGWindowOwnerName as String] as? String,
+                  let name = window[kCGWindowName as String] as? String,
+                  !name.isEmpty
+            else { continue }
+            result[owner, default: []].append(name)
+        }
+        return result
+    }
+
+    /// Maps window titles to bundle identifiers, so an unknown call can carry a
+    /// name the user recognises.
+    public func titlesByBundleIdentifier(from titles: [String: [String]]) -> [String: String] {
+        var result: [String: String] = [:]
+        for application in NSWorkspace.shared.runningApplications {
+            guard let identifier = application.bundleIdentifier,
+                  let name = application.localizedName,
+                  let windows = titles[name], let first = windows.first
+            else { continue }
+            result[identifier] = first
+        }
+        return result
+    }
+
     public func titles(forOwnerNames owners: Set<String>) -> [String: [String]] {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {

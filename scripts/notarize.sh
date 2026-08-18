@@ -17,10 +17,12 @@ ARCHIVE="$(mktemp -d)/notarize.zip"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
 
 echo "==> submitting to the notary service"
+# The password is passed by reference: a command line is visible to any process
+# on the machine, and the submission holds it for the whole wait.
 xcrun notarytool submit "$ARCHIVE" \
     --apple-id "$APPLE_ID" \
     --team-id "$APPLE_TEAM_ID" \
-    --password "$APPLE_APP_PASSWORD" \
+    --password "@env:APPLE_APP_PASSWORD" \
     --wait
 
 echo "==> stapling"

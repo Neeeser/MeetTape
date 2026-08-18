@@ -40,16 +40,27 @@ public final class CalendarService: @unchecked Sendable {
     }
 
     /// Events overlapping a window around the meeting.
-    public func events(around date: Date, window: TimeInterval = 45 * 60) -> [EKEvent] {
+    ///
+    /// Asynchronous because the store can take seconds when cold, and blocking a
+    /// cooperative-pool thread on it stalls unrelated work.
+    public func events(around date: Date, window: TimeInterval = 45 * 60) async -> [EKEvent] {
         guard Self.isAuthorized else { return [] }
-        return queue.sync {
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: self.fetchEvents(around: date, window: window))
+            }
+        }
+    }
+
+    private func fetchEvents(around date: Date, window: TimeInterval) -> [EKEvent] {
+        {
             let predicate = store.predicateForEvents(
                 withStart: date.addingTimeInterval(-window),
                 end: date.addingTimeInterval(window),
                 calendars: nil
             )
             return store.events(matching: predicate)
-        }
+        }()
     }
 
     /// Picks the event most likely to be this meeting.
@@ -59,8 +70,8 @@ public final class CalendarService: @unchecked Sendable {
     /// with a low confidence so the UI can present it as a suggestion.
     public func bestMatch(
         startedAt: Date, endedAt: Date?, meetingURL: String?, providerMeetingID: String?
-    ) -> Match? {
-        let candidates = events(around: startedAt)
+    ) async -> Match? {
+        let candidates = await events(around: startedAt)
         guard !candidates.isEmpty else { return nil }
         let end = endedAt ?? startedAt.addingTimeInterval(30 * 60)
 

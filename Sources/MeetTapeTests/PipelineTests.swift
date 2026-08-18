@@ -271,7 +271,7 @@ enum PipelineTests {
                 await pipeline.process(meetingID: meeting.metadata.id)
                 let callsAfterProcessing = backend.calls.count
 
-                try pipeline.applySpeakerName(
+                try await pipeline.applySpeakerName(
                     "Tim", to: "remote_chunk_001_speaker_00", meetingID: meeting.metadata.id
                 )
                 let markdown = try String(

@@ -95,7 +95,8 @@ public struct RecoveryScanner: Sendable {
                         )
                     )
                 } catch {
-                    Log.storage.error("recovery failed for \(metadata.id, privacy: .public): \(logSafeDescription(error), privacy: .public)")
+                    // The meeting id embeds its title, so it is logged privately.
+                    Log.storage.error("recovery failed for \(metadata.id, privacy: .private): \(logSafeDescription(error), privacy: .public)")
                     report.unreadable.append(metadata.id)
                 }
                 continue

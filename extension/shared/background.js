@@ -49,6 +49,8 @@ async function countOtherAudibleTabs(senderTabId) {
 }
 
 api.runtime.onMessage.addListener(async (message, sender) => {
+  // Only this extension's own content scripts, running in a tab.
+  if (!sender || sender.id !== api.runtime.id || !sender.tab) return;
   if (!message || message.type !== 'state') return;
   const tabId = sender.tab ? sender.tab.id : null;
   const otherAudibleTabs = await countOtherAudibleTabs(tabId);
@@ -81,5 +83,6 @@ async function injectIntoOpenTabs() {
   }
 }
 
-connect();
+// The native host is connected lazily on the first meeting-shaped observation,
+// rather than spawned at browser start whether or not one ever happens.
 injectIntoOpenTabs();

@@ -137,15 +137,20 @@ public struct SessionController: Sendable {
         /// Grace after the last confirmed evidence before finishing, so a brief
         /// flap does not end a meeting.
         public var endGraceSeconds: Double
+        /// How long a candidate survives with no evidence at all before its
+        /// buffered audio is dropped.
+        public var candidateEvidenceGraceSeconds: Double
 
         public init(
             reconnectWindowSeconds: Double = 90,
             candidateTimeoutSeconds: Double = 600,
-            endGraceSeconds: Double = 6
+            endGraceSeconds: Double = 6,
+            candidateEvidenceGraceSeconds: Double = 20
         ) {
             self.reconnectWindowSeconds = reconnectWindowSeconds
             self.candidateTimeoutSeconds = candidateTimeoutSeconds
             self.endGraceSeconds = endGraceSeconds
+            self.candidateEvidenceGraceSeconds = candidateEvidenceGraceSeconds
         }
     }
 
@@ -166,6 +171,7 @@ public struct SessionController: Sendable {
     public private(set) var snapshot = Snapshot()
 
     private var candidateSince: Double?
+    private var candidateEvidenceLostAt: Double?
     private var lastConfirmedAt: Double?
     private var evidence: ProviderEvidence?
     private var pendingEnd: Double?
@@ -196,10 +202,17 @@ public struct SessionController: Sendable {
         }
 
         guard !policies.detectionPaused else {
-            if snapshot.state == .candidate {
+            switch snapshot.state {
+            case .candidate:
                 return finishCandidate(reason: "detection_paused")
+            case .recording, .reconnecting, .ending:
+                // A session already under way is finished rather than frozen:
+                // leaving it in reconnecting keeps writing segments forever and
+                // never hands the meeting to processing.
+                return finishRecording(reason: "detection_paused")
+            case .idle, .ended:
+                return []
             }
-            return []
         }
 
         let best = strongest(of: allEvidence)
@@ -226,11 +239,17 @@ public struct SessionController: Sendable {
 
         case .candidate:
             guard let best, best.confidence >= .candidate else {
-                if let since = candidateSince, now - since >= configuration.endGraceSeconds {
+                // Measured from when evidence was lost, not from when the
+                // candidate began: Slack holds the microphone for 12 s before the
+                // user joins, and one flap must not throw the pre-roll away.
+                if candidateEvidenceLostAt == nil { candidateEvidenceLostAt = now }
+                if let lostAt = candidateEvidenceLostAt,
+                   now - lostAt >= configuration.candidateEvidenceGraceSeconds {
                     return finishCandidate(reason: "candidate_evidence_gone")
                 }
                 return []
             }
+            candidateEvidenceLostAt = nil
             actions.append(contentsOf: absorbEvidence(best))
             if best.confidence == .confirmed {
                 actions.append(contentsOf: confirm(best, now: now, wallClock: wallClock))
@@ -241,8 +260,22 @@ public struct SessionController: Sendable {
             return actions
 
         case .recording:
+            if let best, best.confidence == .confirmed, !matchesCurrentMeeting(best) {
+                // A different meeting on the same provider is a new meeting, not
+                // a continuation; merging them would produce one directory with
+                // two calls in it.
+                var actions = finishRecording(reason: "meeting_changed")
+                actions.append(contentsOf: update(evidence: allEvidence, now: now, wallClock: wallClock))
+                return actions
+            }
             if let best, best.confidence == .confirmed {
                 lastConfirmedAt = now
+                pendingEnd = nil
+                return absorbEvidence(best)
+            }
+            // Weaker evidence still means the meeting is there. Only its absence
+            // starts the clock, because over-recording is the cheaper failure.
+            if let best, best.confidence == .candidate {
                 pendingEnd = nil
                 return absorbEvidence(best)
             }
@@ -269,6 +302,13 @@ public struct SessionController: Sendable {
                     resumed.append(.retargetCapture(bundlePrefixes: best.audioBundlePrefixes))
                 }
                 return resumed
+            }
+            if let best, best.confidence == .confirmed {
+                // Confirmed evidence for a different meeting: end this one now
+                // rather than losing the first 90 seconds of the next.
+                var actions = finishRecording(reason: "meeting_changed")
+                actions.append(contentsOf: update(evidence: allEvidence, now: now, wallClock: wallClock))
+                return actions
             }
             if let since = reconnectingSince, now - since >= configuration.reconnectWindowSeconds {
                 return finishRecording(reason: "provider_ended")
@@ -342,13 +382,19 @@ public struct SessionController: Sendable {
 
     // MARK: - internals
 
+    /// Picks the evidence to act on.
+    ///
+    /// Providers the user set to never record are removed first: leaving them in
+    /// would let an open Zoom tab suppress a real Meet. The ordering is total, so
+    /// the choice does not depend on the order detectors happened to report in.
     private func strongest(of evidence: [ProviderEvidence]) -> ProviderEvidence? {
         evidence
             .filter { $0.confidence > .none }
+            .filter { policies.policy(for: $0.provider).autoStart != .never }
             .max { lhs, rhs in
                 if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }
-                // A browser sensor outranks a heuristic at equal confidence.
-                return lhs.source == .native && rhs.source != .native
+                if lhs.sourceRank != rhs.sourceRank { return lhs.sourceRank < rhs.sourceRank }
+                return lhs.provider.rawValue < rhs.provider.rawValue
             }
     }
 
@@ -431,6 +477,7 @@ public struct SessionController: Sendable {
     private mutating func reset() {
         snapshot = Snapshot()
         candidateSince = nil
+        candidateEvidenceLostAt = nil
         lastConfirmedAt = nil
         pendingEnd = nil
         reconnectingSince = nil

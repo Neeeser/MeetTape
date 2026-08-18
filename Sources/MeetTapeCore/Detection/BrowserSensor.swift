@@ -65,6 +65,9 @@ public struct BrowserMeetingEvent: Codable, Sendable, Equatable {
 /// not recorded. When it goes quiet, detection falls back to native signals and
 /// an in-progress recording keeps running. A DOM regression should produce extra
 /// recording, never a missed meeting.
+///
+/// State is kept per tab. One `lastEvent` per browser would let a second tab
+/// opened during a call overwrite the live meeting with `browsing`.
 public struct BrowserSensorTracker: Sendable {
     public enum Connection: String, Sendable, Equatable {
         /// No extension has ever connected.
@@ -77,16 +80,31 @@ public struct BrowserSensorTracker: Sendable {
         case disconnected
     }
 
+    struct Entry: Sendable, Equatable {
+        var event: BrowserMeetingEvent
+        var receivedAt: Double
+    }
+
     /// How long an event is trusted as current. The extension reports on a 500 ms
     /// tick, so anything older than this means it stopped talking.
     public var freshnessWindow: Double
     public private(set) var connection: Connection = .absent
-    public private(set) var lastEvent: BrowserMeetingEvent?
-    public private(set) var lastEventAt: Double?
     public private(set) var connectedAt: Double?
+    private var entries: [Int: Entry] = [:]
+
+    /// Events with no tab identifier all share one slot.
+    private static let unknownTab = -1
 
     public init(freshnessWindow: Double = 10) {
         self.freshnessWindow = freshnessWindow
+    }
+
+    public var lastEvent: BrowserMeetingEvent? {
+        entries.values.max { lhs, rhs in lhs.receivedAt < rhs.receivedAt }?.event
+    }
+
+    public var lastEventAt: Double? {
+        entries.values.map(\.receivedAt).max()
     }
 
     public mutating func noteConnected(at now: Double) {
@@ -99,34 +117,60 @@ public struct BrowserSensorTracker: Sendable {
     }
 
     public mutating func receive(_ event: BrowserMeetingEvent, at now: Double) {
-        lastEvent = event
-        lastEventAt = now
+        let key = event.tabID ?? Self.unknownTab
+        // A late-delivered older event must not demote a live meeting.
+        if let existing = entries[key], existing.event.timestamp > event.timestamp { return }
+        entries[key] = Entry(event: event, receivedAt: now)
         connection = .fresh
     }
 
+    public mutating func closeTab(_ tabID: Int) {
+        entries.removeValue(forKey: tabID)
+    }
+
     public mutating func evaluate(at now: Double) -> Connection {
+        entries = entries.filter { now - $0.value.receivedAt <= freshnessWindow }
         switch connection {
         case .absent, .disconnected:
             return connection
         case .fresh, .stale:
-            guard let lastEventAt else {
-                // Connected but never reported: still usable, just not yet informative.
+            guard let latest = lastEventAt else {
+                // Connected but never reported: still usable, just not informative.
                 if let connectedAt, now - connectedAt > freshnessWindow { connection = .stale }
                 return connection
             }
-            connection = now - lastEventAt > freshnessWindow ? .stale : .fresh
+            connection = now - latest > freshnessWindow ? .stale : .fresh
             return connection
         }
     }
 
-    /// The event to act on, or nil when the sensor is not currently trustworthy.
+    /// The event to act on: the tab reporting the strongest state, or nil when the
+    /// sensor is not currently trustworthy.
     public func currentEvent(at now: Double) -> BrowserMeetingEvent? {
-        guard connection == .fresh, let lastEvent, let lastEventAt, now - lastEventAt <= freshnessWindow
-        else { return nil }
-        return lastEvent
+        guard connection == .fresh else { return nil }
+        let fresh = entries.values.filter { now - $0.receivedAt <= freshnessWindow }
+        guard !fresh.isEmpty else { return nil }
+        return fresh.max { lhs, rhs in
+            let left = lhs.event.state.detectionWeight
+            let right = rhs.event.state.detectionWeight
+            return left == right ? lhs.receivedAt < rhs.receivedAt : left < right
+        }?.event
     }
 
     public var isUsable: Bool { connection == .fresh }
+}
+
+extension BrowserMeetingState {
+    /// How strongly this state argues a meeting is happening, used to pick between
+    /// tabs when several report at once.
+    var detectionWeight: Int {
+        switch self {
+        case .inCall, .reconnecting: 3
+        case .waiting: 2
+        case .prejoin: 1
+        case .browsing, .ended, .unknown: 0
+        }
+    }
 }
 
 /// Parses meeting identity out of a provider URL. The extension reports these

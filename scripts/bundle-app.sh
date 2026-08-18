@@ -69,13 +69,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>MeetTape matches recordings to calendar events for titles and attendees.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>MeetTape matches recordings to calendar events for titles and attendees.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>MeetTape reads window titles to tell which meeting is on screen.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>MeetTape saves your recordings and transcripts here.</string>
 </dict>
 </plist>
 PLIST
 
-cat > "$APP_DIR/Contents/Resources/MeetTape.entitlements" <<'ENTITLEMENTS'
+cat > "$REPO_ROOT/dist/MeetTape.entitlements" <<'ENTITLEMENTS'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -87,26 +87,34 @@ cat > "$APP_DIR/Contents/Resources/MeetTape.entitlements" <<'ENTITLEMENTS'
     <true/>
     <key>com.apple.security.personal-information.calendars</key>
     <true/>
-    <key>com.apple.security.automation.apple-events</key>
-    <true/>
 </dict>
 </plist>
 ENTITLEMENTS
 
 IDENTITY="${MEETTAPE_SIGN_IDENTITY:--}"
-echo "==> signing with identity: $IDENTITY"
+# A secure timestamp is mandatory for notarization; ad-hoc signing cannot have one.
+if [ "$IDENTITY" = "-" ]; then
+    TIMESTAMP=(--timestamp=none)
+    echo "==> signing ad-hoc"
+else
+    TIMESTAMP=(--timestamp)
+    echo "==> signing with a Developer ID identity"
+fi
+# A stable identifier is what lets the app recognise its own relay when the relay
+# connects to the sensor socket.
 codesign --force --sign "$IDENTITY" \
+    --identifier "com.meettape.nativehost" \
     --options runtime \
-    --timestamp=none \
+    "${TIMESTAMP[@]}" \
     "$APP_DIR/Contents/MacOS/meettape-nativehost"
 codesign --force --sign "$IDENTITY" \
     --identifier "$BUNDLE_ID" \
     --options runtime \
-    --entitlements "$APP_DIR/Contents/Resources/MeetTape.entitlements" \
-    --timestamp=none \
+    --entitlements "$REPO_ROOT/dist/MeetTape.entitlements" \
+    "${TIMESTAMP[@]}" \
     "$APP_DIR"
 
-codesign --verify --verbose=1 "$APP_DIR" 2>&1 | sed 's/^/    /'
+codesign --verify --deep --strict --verbose=1 "$APP_DIR" 2>&1 | sed 's/^/    /'
 echo "==> built $APP_DIR"
 if [ "$IDENTITY" = "-" ]; then
     cat <<'NOTE'

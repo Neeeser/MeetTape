@@ -73,17 +73,22 @@ public struct GenericCallDetector: Sendable {
         /// Applications the user chose to always or never record.
         public var alwaysRecord: Set<String>
         public var neverRecord: Set<String>
+        /// How long an application can vanish from the audio process list before
+        /// the call is considered over.
+        public var endGraceSeconds: Double
 
         public init(
             dwellSeconds: Double = 25,
             dwellSecondsWithOutput: Double = 8,
             alwaysRecord: Set<String> = [],
-            neverRecord: Set<String> = []
+            neverRecord: Set<String> = [],
+            endGraceSeconds: Double = 6
         ) {
             self.dwellSeconds = dwellSeconds
             self.dwellSecondsWithOutput = dwellSecondsWithOutput
             self.alwaysRecord = alwaysRecord
             self.neverRecord = neverRecord
+            self.endGraceSeconds = endGraceSeconds
         }
     }
 
@@ -109,6 +114,9 @@ public struct GenericCallDetector: Sendable {
         var since: Double
         var promoted = false
         var sawOutput = false
+        var lastSeen: Double
+        var windowTitle: String?
+        var processID: Int32 = -1
     }
 
     private var tracked: [String: Tracked] = [:]
@@ -128,7 +136,10 @@ public struct GenericCallDetector: Sendable {
             ) else { continue }
             seen.insert(state.bundleIdentifier)
 
-            var entry = tracked[state.bundleIdentifier] ?? Tracked(since: now)
+            var entry = tracked[state.bundleIdentifier] ?? Tracked(since: now, lastSeen: now)
+            entry.lastSeen = now
+            entry.processID = state.processID
+            if let title = state.windowTitle { entry.windowTitle = title }
             if state.producesOutput { entry.sawOutput = true }
             let held = now - entry.since
             let threshold = entry.sawOutput
@@ -150,11 +161,33 @@ public struct GenericCallDetector: Sendable {
             tracked[state.bundleIdentifier] = entry
         }
 
+        // A single missed poll is not the end of a call: CoreAudio recreates
+        // audio objects for sub-second stretches during normal operation.
         for (bundleIdentifier, entry) in tracked where !seen.contains(bundleIdentifier) {
+            guard now - entry.lastSeen >= configuration.endGraceSeconds else { continue }
             if entry.promoted { events.append(.callEnded(bundleIdentifier: bundleIdentifier)) }
             tracked.removeValue(forKey: bundleIdentifier)
         }
         return events
+    }
+
+    /// Evidence for every promoted call still in progress.
+    ///
+    /// Detection has to keep asserting the meeting, not just announce its start:
+    /// the session lifecycle ends a recording whose evidence disappears, so a
+    /// one-shot event would cut every unsupported call short.
+    public func currentEvidence() -> [ProviderEvidence] {
+        tracked.compactMap { bundleIdentifier, entry in
+            guard entry.promoted else { return nil }
+            return ProviderEvidence(
+                provider: .unknown,
+                confidence: .confirmed,
+                source: .native,
+                title: entry.windowTitle,
+                applicationBundleID: bundleIdentifier,
+                audioBundlePrefixes: [bundleIdentifier]
+            )
+        }
     }
 
     public mutating func forget(_ bundleIdentifier: String) {

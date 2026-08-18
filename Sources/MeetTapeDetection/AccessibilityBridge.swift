@@ -62,11 +62,15 @@ public enum AccessibilityBridge {
     }
 
     /// Depth- and node-bounded walk. Returns false from `visit` to stop early.
+    ///
+    /// Returns false when the budget ran out, which the caller must treat as "no
+    /// information" rather than "not present": Slack's tree is large enough that a
+    /// truncated walk can miss the huddle window entirely.
     static func walk(
         _ element: AXUIElement, maxDepth: Int, budget: inout Int, depth: Int = 0,
         visit: (Node) -> Bool
     ) -> Bool {
-        guard budget > 0 else { return true }
+        guard budget > 0 else { return false }
         budget -= 1
         if !visit(snapshot(element)) { return false }
         guard depth < maxDepth else { return true }
@@ -93,9 +97,8 @@ public struct SlackAccessibilityReader: Sendable {
     }
 
     public func read() -> SlackAccessibilityObservation {
-        guard AccessibilityBridge.isTrusted,
-              let pid = AccessibilityBridge.processID(forBundleIdentifier: bundleIdentifier)
-        else {
+        guard AccessibilityBridge.isTrusted else { return .unavailable }
+        guard let pid = AccessibilityBridge.processID(forBundleIdentifier: bundleIdentifier) else {
             return SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: true)
         }
 
@@ -109,7 +112,10 @@ public struct SlackAccessibilityReader: Sendable {
         var muted: Bool?
         var title: String?
         var visitedNodes = 0
-        var budget = 6_000
+        var truncated = false
+        // Each window gets its own budget, so a large workspace window cannot
+        // consume the whole allowance before the huddle window is reached.
+        let budgetPerWindow = 4_000
 
         for window in windows {
             guard AccessibilityBridge.string(window, kAXRoleAttribute as String) == (kAXWindowRole as String)
@@ -117,7 +123,8 @@ public struct SlackAccessibilityReader: Sendable {
             if title == nil {
                 title = AccessibilityBridge.string(window, kAXTitleAttribute as String)
             }
-            _ = AccessibilityBridge.walk(window, maxDepth: 14, budget: &budget) { node in
+            var budget = budgetPerWindow
+            let completed = AccessibilityBridge.walk(window, maxDepth: 16, budget: &budget) { node in
                 visitedNodes += 1
                 let haystack = "\(node.description) \(node.title)".lowercased()
                 if haystack.contains("leave huddle") { hasLeave = true }
@@ -125,11 +132,13 @@ public struct SlackAccessibilityReader: Sendable {
                 else if haystack.contains("mute microphone") { muted = false }
                 return true
             }
+            if !completed { truncated = true }
         }
 
+        // A truncated walk proves nothing about the control's absence.
         return SlackAccessibilityObservation(
             hasLeaveHuddleControl: hasLeave,
-            subtreeWasEmpty: visitedNodes <= windows.count,
+            subtreeWasEmpty: visitedNodes <= windows.count || (truncated && !hasLeave),
             isMuted: muted,
             windowTitle: title
         )

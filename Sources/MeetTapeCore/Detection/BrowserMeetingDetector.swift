@@ -61,6 +61,17 @@ public struct ProviderEvidence: Sendable, Equatable {
         self.audioBundlePrefixes = audioBundlePrefixes
     }
 
+    /// Ordering between sources at equal confidence. A browser sensor knows more
+    /// than a window title, and an explicit user action outranks both.
+    public var sourceRank: Int {
+        switch source {
+        case .manual: 3
+        case .browserSensor: 2
+        case .accessibility: 1
+        case .native: 0
+        }
+    }
+
     public static func idle(provider: MeetingProvider, source: EvidenceSource) -> ProviderEvidence {
         ProviderEvidence(provider: provider, confidence: .none, source: source)
     }
@@ -131,9 +142,18 @@ public struct BrowserMeetingDetector: Sendable {
         /// the meeting over. Covers a page refresh, which took 1.5 seconds.
         public var nativeEndGraceSeconds: Double
 
-        public init(nativeConfirmDwellSeconds: Double = 20, nativeEndGraceSeconds: Double = 12) {
+        /// How long a provider window title is remembered after it stops being
+        /// visible, so a closed tab does not keep producing evidence.
+        public var titleMemorySeconds: Double
+
+        public init(
+            nativeConfirmDwellSeconds: Double = 20,
+            nativeEndGraceSeconds: Double = 12,
+            titleMemorySeconds: Double = 120
+        ) {
             self.nativeConfirmDwellSeconds = nativeConfirmDwellSeconds
             self.nativeEndGraceSeconds = nativeEndGraceSeconds
+            self.titleMemorySeconds = titleMemorySeconds
         }
     }
 
@@ -159,6 +179,7 @@ public struct BrowserMeetingDetector: Sendable {
     private var micHeldSince: Double?
     private var micReleasedSince: Double?
     private var lastNativeParse: BrowserWindowTitle.Parsed?
+    private var lastNativeParseAt: Double?
 
     public init(
         browser: BrowserKind = .firefox,
@@ -178,10 +199,10 @@ public struct BrowserMeetingDetector: Sendable {
         sensor.receive(event, at: now)
     }
 
-    public mutating func update(native: NativeSignals, at now: Double) -> ProviderEvidence {
+    public mutating func update(native signals: NativeSignals, at now: Double) -> ProviderEvidence {
         _ = sensor.evaluate(at: now)
 
-        if native.browserHoldsMicrophone {
+        if signals.browserHoldsMicrophone {
             if micHeldSince == nil { micHeldSince = now }
             micReleasedSince = nil
         } else {
@@ -189,17 +210,39 @@ public struct BrowserMeetingDetector: Sendable {
             micHeldSince = nil
         }
 
-        let parsed = native.windowTitles.compactMap(BrowserWindowTitle.parse)
+        let parsed = signals.windowTitles.compactMap(BrowserWindowTitle.parse)
             .sorted { lhs, _ in !lhs.isLanding }
             .first
-        if let parsed { lastNativeParse = parsed }
 
-        if let event = sensor.currentEvent(at: now) {
-            evidence = evidenceFromSensor(event, native: native, parsed: parsed)
-            return evidence
+        // A window title seen minutes ago is not evidence of a meeting now.
+        if let parsed {
+            lastNativeParse = parsed
+            lastNativeParseAt = now
+        } else if let seenAt = lastNativeParseAt, now - seenAt > configuration.titleMemorySeconds {
+            lastNativeParse = nil
+            lastNativeParseAt = nil
         }
 
-        evidence = nativeEvidence(native: native, parsed: parsed ?? lastNativeParse, at: now)
+        let native = nativeEvidence(native: signals, parsed: parsed ?? lastNativeParse, at: now)
+        guard let event = sensor.currentEvent(at: now) else {
+            evidence = native
+            return evidence
+        }
+        let sensed = evidenceFromSensor(event, native: signals, parsed: parsed)
+        // The two are combined rather than the sensor replacing the native path.
+        // A provider changing the label on its leave button would otherwise take
+        // a live meeting from confirmed to nothing.
+        if native.confidence > sensed.confidence {
+            var merged = native
+            merged.meetingID = sensed.meetingID ?? native.meetingID
+            merged.url = sensed.url ?? native.url
+            merged.title = sensed.title ?? native.title
+            merged.muted = sensed.muted
+            merged.otherAudibleTabs = sensed.otherAudibleTabs
+            evidence = merged
+            return evidence
+        }
+        evidence = sensed
         return evidence
     }
 

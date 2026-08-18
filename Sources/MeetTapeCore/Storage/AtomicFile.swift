@@ -15,7 +15,8 @@ public enum AtomicFile {
         }
 
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        // Meeting artefacts are private to the user, whatever the umask says.
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else {
             throw StorageError.fileWriteFailed(path: temporary.path, underlying: "open errno \(errno)")
         }

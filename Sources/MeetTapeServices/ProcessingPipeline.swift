@@ -62,7 +62,7 @@ public actor ProcessingPipeline {
         while let stage = metadata.processing.resumeStage, stage != .complete {
             do {
                 metadata.processing.recordAttempt(for: stage)
-                try store.writeMetadata(metadata)
+                try persist(metadata, to: store)
                 report(metadata, chunks: nil)
 
                 switch stage {
@@ -83,12 +83,12 @@ public actor ProcessingPipeline {
                     metadata.processing.advance(to: .enriching, at: clock.now)
                 case .enriching:
                     try await runEnrichment(store: store, metadata: &metadata, settings: settings)
-                    try finish(store: store, metadata: &metadata, settings: settings)
+                    try await finish(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .complete, at: clock.now)
                 case .complete, .failed:
                     break
                 }
-                try store.writeMetadata(metadata)
+                try persist(metadata, to: store)
                 report(metadata, chunks: nil)
             } catch {
                 let failure = (error as? ProcessingError) ?? .transport(reason: "unknown")
@@ -101,7 +101,7 @@ public actor ProcessingPipeline {
                     ),
                     at: clock.now
                 )
-                try? store.writeMetadata(metadata)
+                try? persist(metadata, to: store)
                 Log.processing.error(
                     "stage \(stage.rawValue, privacy: .public) failed: \(failure.logSafeDescription, privacy: .public)"
                 )
@@ -113,7 +113,11 @@ public actor ProcessingPipeline {
     }
 
     /// Retries a failed meeting from the stage that failed.
+    ///
+    /// A meeting already in flight is left alone: rewriting its stage from here
+    /// would be overwritten by the run that is mid-request anyway.
     public func retry(meetingID: String) async {
+        guard !running.contains(meetingID) else { return }
         guard let found = repository.findMeeting(id: meetingID) else { return }
         var metadata = found.metadata
         guard metadata.processing.state == .failed, let stage = metadata.processing.resumeStage else {
@@ -121,8 +125,31 @@ public actor ProcessingPipeline {
             return
         }
         metadata.processing.advance(to: stage, at: clock.now)
-        try? found.store.writeMetadata(metadata)
+        try? persist(metadata, to: found.store)
         await process(meetingID: meetingID)
+    }
+
+    /// Writes back only the fields this pipeline owns.
+    ///
+    /// The user can rename a meeting or edit its notes while a request is in
+    /// flight. Writing the whole copy that was read before the request would
+    /// silently discard that edit.
+    private func persist(_ metadata: MeetingMetadata, to store: MeetingStore) throws {
+        guard var current = try? store.readMetadata() else {
+            try store.writeMetadata(metadata)
+            return
+        }
+        current.processing = metadata.processing
+        current.durationSeconds = metadata.durationSeconds
+        current.titles.ai = metadata.titles.ai
+        current.titles.calendar = metadata.titles.calendar ?? current.titles.calendar
+        current.descriptionText = current.descriptionText ?? metadata.descriptionText
+        current.calendar = current.calendar ?? metadata.calendar
+        for participant in metadata.participants
+        where !current.participants.contains(where: { $0.displayName == participant.displayName }) {
+            current.participants.append(participant)
+        }
+        try store.writeMetadata(current)
     }
 
     /// Resumes everything interrupted, called at launch.
@@ -210,9 +237,15 @@ public actor ProcessingPipeline {
         let plans = planner.plan(durationSeconds: duration, energy: energy)
 
         var raw = try store.readRawTranscript()
-        let workingDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("meettape-chunks-\(metadata.id)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
+        // A unique directory, not a predictable one: a same-user process could
+        // otherwise pre-create the path and have meeting audio written through a
+        // symlink it controls.
+        let workingDirectory = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: store.layout.root,
+            create: true
+        )
         defer { try? FileManager.default.removeItem(at: workingDirectory) }
 
         for plan in plans {
@@ -357,7 +390,7 @@ public actor ProcessingPipeline {
     /// Renders the derived files and links the calendar event.
     private func finish(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
-    ) throws {
+    ) async throws {
         let timeline = try store.readTimeline()
         metadata.durationSeconds = timeline.duration
 
@@ -374,7 +407,7 @@ public actor ProcessingPipeline {
         }
 
         if metadata.calendar == nil, let calendar {
-            if let match = calendar.bestMatch(
+            if let match = await calendar.bestMatch(
                 startedAt: metadata.startedAt,
                 endedAt: metadata.endedAt,
                 meetingURL: metadata.meetingURL,
@@ -417,8 +450,9 @@ public actor ProcessingPipeline {
     /// Re-renders the transcript after a human speaker correction.
     ///
     /// Changing a name is a side-file edit: raw diarization is untouched and no
-    /// API call happens.
-    public nonisolated func applySpeakerName(
+    /// API call happens. Isolated to the actor so it cannot race the speaker map
+    /// written by a resolution stage in flight.
+    public func applySpeakerName(
         _ name: String, to key: String, meetingID: String
     ) throws {
         guard let found = repository.findMeeting(id: meetingID) else {

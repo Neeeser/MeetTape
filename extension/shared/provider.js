@@ -13,9 +13,11 @@ export function providerForURL(href) {
   } catch {
     return 'unknown';
   }
+  // Suffix checks need the dot boundary: `notmeet.google.com` is not Meet.
   const host = url.hostname.toLowerCase();
-  if (host.endsWith(MEET_HOST)) return 'meet';
-  if (host.endsWith('zoom.us') || host.includes('.zoom.')) return 'zoom';
+  const matches = (suffix) => host === suffix || host.endsWith(`.${suffix}`);
+  if (matches(MEET_HOST)) return 'meet';
+  if (matches('zoom.us') || matches('zoomgov.com')) return 'zoom';
   return 'unknown';
 }
 
@@ -79,17 +81,30 @@ export function mutedFromControls(controls) {
   return null;
 }
 
+// A meeting URL can carry a passcode in its fragment, and a page controls its own
+// title, so both are trimmed before anything is relayed or written to disk.
+function scrubURL(href) {
+  try {
+    const url = new URL(href);
+    return `${url.origin}${url.pathname}`.slice(0, 512);
+  } catch {
+    return null;
+  }
+}
+
 /// Builds the message the native host relays to MeetTape.
 export function buildState({ href, title, controls, pageText, tabId, now, participants }) {
   return {
     type: 'state',
     provider: providerForURL(href),
     state: stateFromControls(controls, pageText),
-    meetingId: meetingIdForURL(href),
-    url: href.split('?')[0],
-    title: title || null,
+    meetingId: (meetingIdForURL(href) || '').slice(0, 64) || null,
+    url: scrubURL(href),
+    title: title ? String(title).slice(0, 200) : null,
     muted: mutedFromControls(controls),
-    participants: participants && participants.length ? participants : undefined,
+    participants: participants && participants.length
+      ? participants.slice(0, 30).map((name) => String(name).slice(0, 80))
+      : undefined,
     tabId,
     sentAt: now,
   };

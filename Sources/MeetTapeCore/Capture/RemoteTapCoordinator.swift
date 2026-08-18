@@ -86,6 +86,14 @@ public final class RemoteTapCoordinator: Sendable {
         }
     }
 
+    /// The tap reported a format change. Buffers keep arriving labelled with the
+    /// old format, so nothing else can detect this.
+    public func rebindAfterFormatChange() {
+        guard state.withLock({ $0.policy.isRunning }) else { return }
+        state.withLock { $0.nextBindAllowedAt = 0 }
+        bind(reason: .targetChanged)
+    }
+
     public func noteWake() {
         state.withLock { $0.wakeRequestedAt = clock.monotonicSeconds }
     }

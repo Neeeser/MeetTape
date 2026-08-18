@@ -25,7 +25,7 @@ public final class ManifestWriter: Sendable {
         } catch {
             throw StorageError.directoryCreationFailed(path: directory.path, underlying: "\(error)")
         }
-        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else {
             throw StorageError.fileWriteFailed(path: url.path, underlying: "open errno \(errno)")
         }

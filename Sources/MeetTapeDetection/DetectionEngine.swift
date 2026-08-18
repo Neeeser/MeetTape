@@ -188,16 +188,19 @@ public final class DetectionEngine: @unchecked Sendable {
     private func poll() {
         let now = clock.monotonicSeconds
         let audioStates = audioObserver.snapshot()
-        let ownerNames: Set<String> = ["firefox", "Firefox", "Google Chrome", "Slack", "Safari", "zoom.us"]
-        let titles = windowReader.titles(forOwnerNames: ownerNames)
+        let titles = windowReader.allTitles()
+        let windowTitlesByBundle = windowReader.titlesByBundleIdentifier(from: titles)
 
         var evidence: [ProviderEvidence] = []
         var genericEvents: [GenericCallDetector.Event] = []
 
+        // Read accessibility before taking the lock: the walk crosses into
+        // another process and can block for seconds when Slack is busy.
+        let slackObservation = slackReader.read()
+
         lock.lock()
 
         // Slack
-        let slackObservation = slackReader.read()
         let slackHoldsMic = audioObserver.holdsMicrophone(
             bundlePrefixes: configuration.slackAudioPrefixes, in: audioStates
         )
@@ -248,10 +251,20 @@ public final class DetectionEngine: @unchecked Sendable {
         if configuration.genericDetection {
             let knownPrefixes = configuration.slackAudioPrefixes
                 + configuration.browsers.flatMap(\.bundleIdentifiers)
-            let unknownStates = audioStates.filter { state in
-                !knownPrefixes.contains { state.bundleIdentifier.hasPrefix($0) }
-            }
+            let unknownStates = audioStates
+                .filter { state in !knownPrefixes.contains { state.bundleIdentifier.hasPrefix($0) } }
+                .map { state in
+                    ApplicationAudioState(
+                        bundleIdentifier: state.bundleIdentifier,
+                        processID: state.processID,
+                        holdsMicrophone: state.holdsMicrophone,
+                        producesOutput: state.producesOutput,
+                        isFrontmost: state.isFrontmost,
+                        windowTitle: windowTitlesByBundle[state.bundleIdentifier]
+                    )
+                }
             genericEvents = genericDetector.update(states: unknownStates, at: now)
+            evidence.append(contentsOf: genericDetector.currentEvidence())
         }
 
         let snapshot = DetectionSnapshot(

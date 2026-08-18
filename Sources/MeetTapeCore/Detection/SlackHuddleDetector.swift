@@ -6,24 +6,35 @@ public struct SlackAccessibilityObservation: Sendable, Equatable {
     /// discriminator between previewing a Huddle and being in one: Slack opens the
     /// microphone about twelve seconds before the user joins.
     public let hasLeaveHuddleControl: Bool
-    /// The whole subtree read empty. Slack does this intermittently during a
-    /// confirmed active Huddle, so it means "no information", not "left".
+    /// The read produced no usable information: the subtree came back empty, the
+    /// walk hit its budget, or accessibility is not available at all. Slack does
+    /// this intermittently during a confirmed active Huddle, so it means "no
+    /// information", never "left".
     public let subtreeWasEmpty: Bool
+    /// Accessibility is not granted, so the join control can never be seen and the
+    /// detector has to fall back to audio evidence.
+    public let accessibilityUnavailable: Bool
     public let isMuted: Bool?
     public let windowTitle: String?
 
     public init(
         hasLeaveHuddleControl: Bool, subtreeWasEmpty: Bool,
-        isMuted: Bool? = nil, windowTitle: String? = nil
+        isMuted: Bool? = nil, windowTitle: String? = nil,
+        accessibilityUnavailable: Bool = false
     ) {
         self.hasLeaveHuddleControl = hasLeaveHuddleControl
         self.subtreeWasEmpty = subtreeWasEmpty
         self.isMuted = isMuted
         self.windowTitle = windowTitle
+        self.accessibilityUnavailable = accessibilityUnavailable
     }
 
     public static let empty = SlackAccessibilityObservation(
         hasLeaveHuddleControl: false, subtreeWasEmpty: true
+    )
+
+    public static let unavailable = SlackAccessibilityObservation(
+        hasLeaveHuddleControl: false, subtreeWasEmpty: true, accessibilityUnavailable: true
     )
 }
 
@@ -53,15 +64,21 @@ public struct SlackHuddleDetector: Sendable {
         /// How long Slack can hold the microphone with no join before the candidate
         /// is dropped.
         public var candidateTimeoutSeconds: Double
+        /// Without accessibility the join control is invisible, so a candidate is
+        /// promoted on sustained two-way audio instead. Slack opened the
+        /// microphone 12.2 s before the user joined, so this sits well past that.
+        public var audioOnlyPromotionSeconds: Double
 
         public init(
             consecutiveMissesToEnd: Int = 4,
             endGraceSeconds: Double = 3.0,
-            candidateTimeoutSeconds: Double = 180
+            candidateTimeoutSeconds: Double = 180,
+            audioOnlyPromotionSeconds: Double = 25
         ) {
             self.consecutiveMissesToEnd = consecutiveMissesToEnd
             self.endGraceSeconds = endGraceSeconds
             self.candidateTimeoutSeconds = candidateTimeoutSeconds
+            self.audioOnlyPromotionSeconds = audioOnlyPromotionSeconds
         }
     }
 
@@ -69,6 +86,8 @@ public struct SlackHuddleDetector: Sendable {
         case none
         case candidateAppeared
         case joined
+        /// Joined on audio evidence alone, because accessibility could not answer.
+        case joinedWithoutAccessibility
         case left(reason: String)
         case candidateExpired
         case muteChanged(Bool)
@@ -82,6 +101,7 @@ public struct SlackHuddleDetector: Sendable {
     private let configuration: Configuration
     private var missingSince: Double?
     private var candidateSince: Double?
+    private var joinedWithoutAccessibility = false
 
     public init(configuration: Configuration = Configuration()) {
         self.configuration = configuration
@@ -140,6 +160,20 @@ public struct SlackHuddleDetector: Sendable {
                 candidateSince = nil
                 return .candidateExpired
             }
+            // Without accessibility there is no join control to wait for, so
+            // sustained two-way audio is the best evidence available. Missing a
+            // huddle entirely is the worse outcome.
+            if observation.accessibilityUnavailable,
+               helperProducingOutput,
+               let since = candidateSince,
+               now - since >= configuration.audioOnlyPromotionSeconds {
+                state = .joined
+                consecutiveMisses = 0
+                missingSince = nil
+                candidateSince = nil
+                joinedWithoutAccessibility = true
+                return .joinedWithoutAccessibility
+            }
             if let since = candidateSince, now - since > configuration.candidateTimeoutSeconds {
                 state = .idle
                 candidateSince = nil
@@ -151,7 +185,13 @@ public struct SlackHuddleDetector: Sendable {
             if observation.hasLeaveHuddleControl {
                 consecutiveMisses = 0
                 missingSince = nil
+                joinedWithoutAccessibility = false
                 return event
+            }
+            // A huddle joined on audio evidence must end on audio evidence: there
+            // is no control whose absence could mean anything.
+            if joinedWithoutAccessibility || observation.accessibilityUnavailable {
+                guard !helperHoldsMicrophone, !helperProducingOutput else { return event }
             }
             state = .leaving
             consecutiveMisses = 1
@@ -169,25 +209,27 @@ public struct SlackHuddleDetector: Sendable {
             }
             consecutiveMisses += 1
 
-            // An empty subtree is missing information, not evidence of leaving, so
+            // A read that produced no information is not evidence of leaving, so
             // it only counts once the audio side agrees the Huddle is over.
             let audioAgrees = !helperHoldsMicrophone && !helperProducingOutput
             let missedEnough = consecutiveMisses >= configuration.consecutiveMissesToEnd
             let waitedEnough = (missingSince.map { now - $0 >= configuration.endGraceSeconds }) ?? false
 
-            if observation.subtreeWasEmpty, !audioAgrees {
+            if observation.subtreeWasEmpty || observation.accessibilityUnavailable, !audioAgrees {
                 return event
             }
-            if missedEnough, waitedEnough {
+            if missedEnough, waitedEnough, audioAgrees || !observation.subtreeWasEmpty {
                 state = .idle
                 consecutiveMisses = 0
                 missingSince = nil
+                joinedWithoutAccessibility = false
                 return .left(reason: audioAgrees ? "control_gone_and_audio_stopped" : "control_gone")
             }
             if audioAgrees, waitedEnough {
                 state = .idle
                 consecutiveMisses = 0
                 missingSince = nil
+                joinedWithoutAccessibility = false
                 return .left(reason: "audio_stopped")
             }
             return event
@@ -199,6 +241,7 @@ public struct SlackHuddleDetector: Sendable {
         consecutiveMisses = 0
         missingSince = nil
         candidateSince = nil
+        joinedWithoutAccessibility = false
         isMuted = nil
     }
 }

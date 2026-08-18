@@ -4,11 +4,10 @@
   "version": "1.0.0",
   "description": "Reports Google Meet and Zoom meeting state to MeetTape so it records the right calls.",
   "permissions": [
-    "tabs",
     "nativeMessaging",
     "scripting",
-    "*://meet.google.com/*",
-    "*://*.zoom.us/*"
+    "https://meet.google.com/*",
+    "https://*.zoom.us/*"
   ],
   "background": {
     "scripts": [
@@ -18,8 +17,8 @@
   "content_scripts": [
     {
       "matches": [
-        "*://meet.google.com/*",
-        "*://*.zoom.us/*"
+        "https://meet.google.com/*",
+        "https://*.zoom.us/*"
       ],
       "js": [
         "shared/provider.js",

@@ -100,7 +100,13 @@ public final class MeetTapeRuntime {
         detectionEngine = DetectionEngine(clock: clock, delegate: relay)
         detectionEngine.updateGenericConfiguration(loaded.genericDetectorConfiguration)
 
+        // Release builds read the key from the keychain only. A process
+        // environment is readable by any same-user process.
+        #if DEBUG
         let keyStore = LayeredAPIKeyStore(providers: [KeychainAPIKeyStore(), EnvironmentAPIKeyStore()])
+        #else
+        let keyStore: any APIKeyProviding = KeychainAPIKeyStore()
+        #endif
         pipeline = ProcessingPipeline(
             repository: repository,
             backend: OpenAIClient(keyProvider: keyStore),
@@ -165,8 +171,9 @@ public final class MeetTapeRuntime {
         )
         let report = scanner.scan()
         for recovered in report.recovered {
+            // The identifier embeds the meeting title, so it stays private.
             Log.app.notice(
-                "recovered interrupted meeting \(recovered.meetingID, privacy: .public), \(recovered.adoptedSegments) crash tails"
+                "recovered an interrupted meeting: \(recovered.adoptedSegments) crash tails, \(Int(recovered.recoveredSeconds))s"
             )
         }
         refreshRecentMeetings()
@@ -192,41 +199,14 @@ public final class MeetTapeRuntime {
         status.sensorConnection = snapshot.browserSensor
         status.slackState = snapshot.slackState
 
-        var actions: [SessionAction] = []
-        for event in snapshot.genericEvents {
-            guard case .callLikely(let candidate) = event else { continue }
-            actions.append(contentsOf: genericCandidateActions(candidate))
-        }
-        actions.append(contentsOf: sessionController.update(
+        // Unsupported calls arrive as ordinary evidence rather than a one-shot
+        // event, so the session lifecycle governs them like any other provider.
+        let actions = sessionController.update(
             evidence: snapshot.evidence, now: clock.monotonicSeconds, wallClock: clock.now
-        ))
+        )
         syncStatusFromSession()
         guard !actions.isEmpty else { return }
         enqueue { [weak self] in await self?.perform(actions) }
-    }
-
-    private func genericCandidateActions(
-        _ candidate: GenericCallDetector.Candidate
-    ) -> [SessionAction] {
-        guard sessionController.snapshot.state == .idle else { return [] }
-        guard settings.providers.unknownCalls.autoStart != .never else { return [] }
-        guard !settings.providers.detectionPaused else { return [] }
-
-        var titles = TitleCandidates(
-            timestampFallback: MeetingRepository.timestampTitle(
-                startedAt: clock.now, source: .genericCall
-            )
-        )
-        titles.window = candidate.windowTitle
-        return sessionController.startManual(
-            source: .genericCall,
-            bundlePrefixes: [candidate.bundleIdentifier],
-            titles: titles,
-            now: clock.monotonicSeconds,
-            wallClock: clock.now,
-            isProvisional: !candidate.isPreapproved,
-            applicationBundleID: candidate.bundleIdentifier
-        )
     }
 
     func captureHealthDidUpdate(_ snapshot: CaptureHealthSnapshot) {
@@ -388,7 +368,14 @@ public final class MeetTapeRuntime {
     }
 
     public func assignSpeaker(name: String, key: String, meetingID: String) {
-        try? pipeline.applySpeakerName(name, to: key, meetingID: meetingID)
+        enqueue { [weak self] in
+            guard let self else { return }
+            do {
+                try await pipeline.applySpeakerName(name, to: key, meetingID: meetingID)
+            } catch {
+                Log.app.error("speaker not saved: \(logSafeDescription(error), privacy: .public)")
+            }
+        }
     }
 
     /// A human title always wins over every other candidate.

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Observation
 import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeDetection
@@ -47,6 +48,7 @@ public struct ProvisionalPrompt: Sendable, Equatable, Identifiable {
 /// this object performs the resulting actions: arming capture, creating the
 /// meeting directory, finalising, and handing the recording to processing.
 @MainActor
+@Observable
 public final class MeetTapeRuntime {
     public private(set) var status = RuntimeStatus()
     public private(set) var recentMeetings: [MeetingSummary] = []
@@ -55,20 +57,20 @@ public final class MeetTapeRuntime {
     public private(set) var reviewMeetingID: String?
     public private(set) var settings: AppSettings
 
-    public let repository: MeetingRepository
-    public let notifications = NotificationService()
-    public let permissions = PermissionsService()
+    @ObservationIgnored public let repository: MeetingRepository
+    @ObservationIgnored public let notifications = NotificationService()
+    @ObservationIgnored public let permissions = PermissionsService()
 
-    private let settingsStore: SettingsStore
-    private let clock: any Clock
-    private var sessionController: SessionController
-    private var captureEngine: CaptureEngine!
-    private var detectionEngine: DetectionEngine!
-    private var pipeline: ProcessingPipeline!
-    private var powerObserver: PowerEventObserver?
-    private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
-    private var onStatusChange: (@MainActor @Sendable () -> Void)?
-    private let relay = RuntimeRelay()
+    @ObservationIgnored private let settingsStore: SettingsStore
+    @ObservationIgnored private let clock: any Clock
+    @ObservationIgnored private var sessionController: SessionController
+    @ObservationIgnored private var captureEngine: CaptureEngine!
+    @ObservationIgnored private var detectionEngine: DetectionEngine!
+    @ObservationIgnored private var pipeline: ProcessingPipeline!
+    @ObservationIgnored private var powerObserver: PowerEventObserver?
+    @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
+    @ObservationIgnored private var onStatusChange: (@MainActor @Sendable () -> Void)?
+    @ObservationIgnored private let relay = RuntimeRelay()
 
     public init(
         settingsDirectory: URL = SensorTransport.defaultApplicationSupport,
@@ -393,6 +395,11 @@ public final class MeetTapeRuntime {
     // MARK: - action execution
 
     private func perform(_ actions: [SessionAction]) {
+        if !actions.isEmpty {
+            Log.session.info(
+                "actions: \(actions.map(\.logLabel).joined(separator: ", "), privacy: .public)"
+            )
+        }
         for action in actions {
             switch action {
             case .armCapture(let prefixes, let capturesRemote):
@@ -623,5 +630,22 @@ final class RuntimeRelay: CaptureEngineDelegate, DetectionEngineDelegate, @unche
     func detectionEngineDidUpdate(_ snapshot: DetectionSnapshot) {
         let runtime = target
         Task { @MainActor in runtime?.detectionDidUpdate(snapshot) }
+    }
+}
+
+extension SessionAction {
+    /// A short operational label. Carries no meeting content.
+    var logLabel: String {
+        switch self {
+        case .armCapture: "arm"
+        case .retargetCapture: "retarget"
+        case .commitRecording(let request): "commit(\(request.source.rawValue))"
+        case .beginRun: "begin_run"
+        case .updateEvidence: "evidence"
+        case .discardCapture(let reason): "discard(\(reason))"
+        case .finishRecording(let reason): "finish(\(reason))"
+        case .askToKeepProvisional: "ask_keep"
+        case .notify: "notify"
+        }
     }
 }

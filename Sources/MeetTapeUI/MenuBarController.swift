@@ -1,0 +1,322 @@
+import AppKit
+import MeetTapeCore
+import MeetTapeServices
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// The menu bar item and its menu.
+///
+/// Whether capture is running has to be readable at a glance, so the icon changes
+/// while recording and the menu leads with the elapsed time and source health.
+@MainActor
+public final class MenuBarController: NSObject, NSMenuDelegate {
+    private let runtime: MeetTapeRuntime
+    private let windows: WindowManager
+    private let statusItem: NSStatusItem
+    /// Ticks the elapsed-time display. Held as a cancellable so teardown does not
+    /// need a deinit, which cannot touch main-actor state.
+    private var elapsedTimer: DispatchSourceTimer?
+
+    public init(runtime: MeetTapeRuntime, windows: WindowManager) {
+        self.runtime = runtime
+        self.windows = windows
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
+
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+        refreshButton()
+
+        runtime.observeStatus { [weak self] in
+            self?.refreshButton()
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.refreshButton() }
+        }
+        timer.resume()
+        elapsedTimer = timer
+
+        Log.ui.info(
+            "menu bar item ready: \(self.statusItem.button != nil, privacy: .public), visible: \(self.statusItem.isVisible, privacy: .public)"
+        )
+    }
+
+    /// Removes the status item and stops the timer.
+    public func teardown() {
+        elapsedTimer?.cancel()
+        elapsedTimer = nil
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
+    private func refreshButton() {
+        guard let button = statusItem.button else { return }
+        let status = runtime.status
+        let symbol: String
+        if status.isRecording {
+            symbol = status.displayHealth.isLosingAudio
+                ? "exclamationmark.circle.fill"
+                : "record.circle.fill"
+        } else if status.detectionPaused {
+            symbol = "pause.circle"
+        } else {
+            symbol = "waveform.circle"
+        }
+        button.image = NSImage(
+            systemSymbolName: symbol, accessibilityDescription: accessibilityLabel(for: status)
+        )
+        button.image?.isTemplate = !status.isRecording
+        button.contentTintColor = status.isRecording
+            ? (status.displayHealth.isLosingAudio ? .systemRed : .systemRed)
+            : nil
+        button.title = status.isRecording
+            ? " \(Format.duration(status.elapsed(now: Date())))"
+            : ""
+        button.toolTip = accessibilityLabel(for: status)
+        button.setAccessibilityLabel(accessibilityLabel(for: status))
+    }
+
+    private func accessibilityLabel(for status: RuntimeStatus) -> String {
+        guard status.isRecording else {
+            return status.detectionPaused
+                ? "MeetTape, automatic detection paused"
+                : "MeetTape, waiting for a meeting"
+        }
+        let title = status.title ?? status.provider.displayName
+        return "MeetTape recording \(title), \(Format.shortDuration(status.elapsed(now: Date())))"
+    }
+
+    // MARK: - menu
+
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let status = runtime.status
+
+        if status.isRecording {
+            addRecordingSection(to: menu, status: status)
+        } else {
+            addIdleSection(to: menu)
+        }
+
+        if !runtime.processing.isEmpty {
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: "Processing", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for progress in runtime.processing.values.sorted(by: { $0.meetingID < $1.meetingID }) {
+                let detail = progress.totalChunks > 0
+                    ? "\(progress.state.displayName) \(progress.completedChunks)/\(progress.totalChunks)"
+                    : progress.state.displayName
+                let item = NSMenuItem(title: "  \(progress.title) — \(detail)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(recentMeetingsItem())
+
+        menu.addItem(.separator())
+        let pause = NSMenuItem(
+            title: status.detectionPaused ? "Resume Automatic Detection" : "Pause Automatic Detection",
+            action: #selector(togglePause), keyEquivalent: ""
+        )
+        pause.target = self
+        pause.state = status.detectionPaused ? .on : .off
+        menu.addItem(pause)
+
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit MeetTape", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+    }
+
+    private func addRecordingSection(to menu: NSMenu, status: RuntimeStatus) {
+        let title = status.title ?? status.provider.displayName
+        let heading = NSMenuItem(title: "● Recording", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(heading)
+
+        let name = NSMenuItem(title: "  \(title)", action: nil, keyEquivalent: "")
+        name.isEnabled = false
+        menu.addItem(name)
+
+        let elapsed = NSMenuItem(
+            title: "  \(Format.duration(status.elapsed(now: Date())))", action: nil, keyEquivalent: ""
+        )
+        elapsed.isEnabled = false
+        menu.addItem(elapsed)
+
+        // Source health is only spelled out when it is not simply fine.
+        if status.displayHealth != .healthy {
+            let health = NSMenuItem(title: "  \(healthText(status))", action: nil, keyEquivalent: "")
+            health.isEnabled = false
+            menu.addItem(health)
+        }
+
+        menu.addItem(.separator())
+        let stop = NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: "")
+        stop.target = self
+        menu.addItem(stop)
+
+        let note = NSMenuItem(title: "Add Note…", action: #selector(addNote), keyEquivalent: "")
+        note.target = self
+        menu.addItem(note)
+
+        if status.isProvisional {
+            menu.addItem(.separator())
+            let keep = NSMenuItem(title: "Keep This Recording", action: #selector(keepProvisional), keyEquivalent: "")
+            keep.target = self
+            menu.addItem(keep)
+            let discard = NSMenuItem(
+                title: "Discard This Recording", action: #selector(discardProvisional), keyEquivalent: ""
+            )
+            discard.target = self
+            menu.addItem(discard)
+        }
+    }
+
+    private func healthText(_ status: RuntimeStatus) -> String {
+        switch status.displayHealth {
+        case .recovering: "Reconnecting to audio"
+        case .degraded, .failed:
+            status.health.mic.isLosingAudio
+                ? "Microphone unavailable"
+                : "Meeting audio unavailable"
+        case .idleButBound: "Meeting audio is quiet"
+        case .healthy, .idle: ""
+        }
+    }
+
+    private func addIdleSection(to menu: NSMenu) {
+        let record = NSMenuItem(title: "Start Recording", action: #selector(startManual), keyEquivalent: "r")
+        record.target = self
+        menu.addItem(record)
+
+        let inPerson = NSMenuItem(
+            title: "Start In-Person Meeting", action: #selector(startInPerson), keyEquivalent: ""
+        )
+        inPerson.target = self
+        menu.addItem(inPerson)
+
+        let importItem = NSMenuItem(title: "Import Recording…", action: #selector(importFile), keyEquivalent: "i")
+        importItem.target = self
+        menu.addItem(importItem)
+    }
+
+    private func recentMeetingsItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Recent Meetings", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let meetings = runtime.recentMeetings.prefix(12)
+        if meetings.isEmpty {
+            let empty = NSMenuItem(title: "No meetings yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            for meeting in meetings {
+                let subtitle = [
+                    Format.day(meeting.startedAt),
+                    Format.shortDuration(meeting.durationSeconds),
+                    meeting.processingState == .complete ? nil : meeting.processingState.displayName,
+                ].compactMap { $0 }.joined(separator: " · ")
+                let entry = NSMenuItem(
+                    title: meeting.title, action: #selector(openMeeting(_:)), keyEquivalent: ""
+                )
+                entry.target = self
+                entry.representedObject = meeting.id
+                entry.toolTip = subtitle
+                let attributed = NSMutableAttributedString(
+                    string: meeting.title,
+                    attributes: [.font: NSFont.menuFont(ofSize: 0)]
+                )
+                attributed.append(NSAttributedString(
+                    string: "\n\(subtitle)",
+                    attributes: [
+                        .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ]
+                ))
+                entry.attributedTitle = attributed
+                submenu.addItem(entry)
+            }
+            submenu.addItem(.separator())
+            let all = NSMenuItem(title: "Open Meetings Folder", action: #selector(openFolder), keyEquivalent: "")
+            all.target = self
+            submenu.addItem(all)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    // MARK: - actions
+
+    @objc private func startManual() { runtime.startManualRecording() }
+    @objc private func startInPerson() { runtime.startInPersonRecording() }
+    @objc private func stopRecording() { runtime.stopRecording() }
+    @objc private func keepProvisional() { runtime.resolveProvisional(keep: true) }
+    @objc private func discardProvisional() { runtime.resolveProvisional(keep: false) }
+    @objc private func openSettings() { windows.showSettings() }
+
+    @objc private func togglePause() {
+        runtime.setDetectionPaused(!runtime.status.detectionPaused)
+    }
+
+    @objc private func openMeeting(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        windows.showReview(meetingID: id)
+    }
+
+    @objc private func openFolder() {
+        NSWorkspace.shared.open(runtime.repository.archive.root)
+    }
+
+    @objc private func addNote() {
+        let alert = NSAlert()
+        alert.messageText = "Add a note to this meeting"
+        alert.informativeText = "Notes are saved with the recording and can be used as context for AI enrichment."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "Decision, action item, or context"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        runtime.addNote(text)
+    }
+
+    @objc private func importFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio, .movie, .mpeg4Movie, .mp3, .wav, .aiff]
+        panel.message = "Choose a recording to import. The original file is copied in and left unchanged."
+        panel.prompt = "Import"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task { @MainActor in
+            do {
+                let meetingID = try await runtime.importRecording(from: url)
+                windows.showReview(meetingID: meetingID)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "MeetTape could not import that file"
+                alert.informativeText = "\(url.lastPathComponent) could not be decoded."
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func quit() {
+        runtime.stop()
+        NSApp.terminate(nil)
+    }
+}

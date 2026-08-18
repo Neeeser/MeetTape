@@ -75,6 +75,7 @@ public final class DetectionEngine: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var sensorServer: BrowserSensorServer?
     private var lastSnapshot = DetectionSnapshot()
+    private var previousEvidence: [String] = []
 
     public init(
         configuration: Configuration = Configuration(),
@@ -261,9 +262,19 @@ public final class DetectionEngine: @unchecked Sendable {
             hasAccessibility: AccessibilityBridge.isTrusted,
             hasWindowTitles: !titles.isEmpty || windowReader.hasTitleAccess
         )
+        let labels = evidence.map { item in
+            "\(item.provider.rawValue):\(item.confidence.rawValue):\(item.source.rawValue)"
+        }
+        let evidenceChanged = previousEvidence != labels
+        previousEvidence = labels
         lastSnapshot = snapshot
         lock.unlock()
 
+        if evidenceChanged {
+            Log.detection.info(
+                "evidence: \(labels.isEmpty ? "none" : labels.joined(separator: ", "), privacy: .public)"
+            )
+        }
         delegate.detectionEngineDidUpdate(snapshot)
     }
 }

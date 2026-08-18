@@ -18,6 +18,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var running = false
         var failNextBuild: CaptureError?
         var formatReads = 0
+        var installedFormat: AudioFormatDescriptor?
     }
 
     private let state = Mutex(State())
@@ -57,15 +58,24 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         }
     }
 
-    func buildAndStart(format: AudioFormatDescriptor) throws {
+    /// The format the hardware settles on, which may differ from what the
+    /// coordinator asked for.
+    func setInstalledFormat(_ format: AudioFormatDescriptor?) {
+        state.withLock { $0.installedFormat = format }
+    }
+
+    @discardableResult
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
         let failure: CaptureError? = state.withLock { state in
             defer { state.failNextBuild = nil }
             return state.failNextBuild
         }
         if let failure { throw failure }
-        state.withLock { state in
-            state.builds.append(Build(format: format))
+        return state.withLock { state in
+            let installed = state.installedFormat ?? preferred
+            state.builds.append(Build(format: installed))
             state.running = true
+            return installed
         }
     }
 }

@@ -78,3 +78,44 @@ test('only meaningful changes are reported', () => {
   // A changing timestamp alone is not a change worth sending.
   assert.equal(isMeaningfulChange(base, { ...base, sentAt: 99 }), false);
 });
+
+// The built artefact is what actually loads in a browser, and a content script
+// cannot be an ES module: an import statement makes the whole script fail
+// silently and the sensor never runs.
+test('the built content scripts carry no module syntax', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const root = path.dirname(import.meta.dirname);
+  execFileSync(path.join(root, 'build.sh'), { stdio: 'pipe' });
+
+  for (const browser of ['firefox', 'chrome']) {
+    const dir = path.join(root, 'dist', browser, 'shared');
+    for (const file of ['provider.js', 'content.js', 'background.js']) {
+      const source = fs.readFileSync(path.join(dir, file), 'utf8');
+      assert.equal(/^\s*import\s/m.test(source), false, `${browser}/${file} still imports`);
+      assert.equal(/^\s*export\s/m.test(source), false, `${browser}/${file} still exports`);
+    }
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(root, 'dist', browser, 'manifest.json'), 'utf8'),
+    );
+    // provider.js has to load first: content.js calls into it.
+    assert.deepEqual(manifest.content_scripts[0].js, ['shared/provider.js', 'shared/content.js']);
+  }
+});
+
+test('the built provider still defines what the content script calls', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const root = path.dirname(import.meta.dirname);
+  const provider = fs.readFileSync(
+    path.join(root, 'dist', 'firefox', 'shared', 'provider.js'), 'utf8',
+  );
+  const content = fs.readFileSync(
+    path.join(root, 'dist', 'firefox', 'shared', 'content.js'), 'utf8',
+  );
+  for (const name of ['buildState', 'isMeaningfulChange', 'providerForURL']) {
+    assert.ok(new RegExp(`function ${name}\\b`).test(provider), `${name} missing from provider.js`);
+    assert.ok(content.includes(name), `${name} unused by content.js`);
+  }
+});

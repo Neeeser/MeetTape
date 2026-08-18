@@ -68,7 +68,8 @@ async function injectIntoOpenTabs() {
       try {
         await api.scripting.executeScript({
           target: { tabId: tab.id },
-          files: ['shared/content.js'],
+          // Order matters: provider.js defines what content.js calls.
+          files: ['shared/provider.js', 'shared/content.js'],
           injectImmediately: true,
         });
       } catch {

@@ -16,6 +16,9 @@ public struct RecordedSegment: Sendable, Equatable {
     public private(set) var byteCount: Int64?
     public private(set) var closeReason: String?
     public private(set) var wasAdoptedFromCrashTail = false
+    /// Host time of this segment's first frame. Only known once a buffer has
+    /// arrived, so the close record carries it and the open record cannot.
+    public private(set) var resolvedFirstFrameHostTime: Double?
 
     public init(
         track: CaptureTrack, index: Int, file: String, format: AudioFormatDescriptor,
@@ -27,6 +30,7 @@ public struct RecordedSegment: Sendable, Equatable {
         self.format = format
         self.startFrame = startFrame
         self.firstFrameHostTime = firstFrameHostTime
+        self.resolvedFirstFrameHostTime = firstFrameHostTime
         self.openedAt = openedAt
         self.openReason = openReason
     }
@@ -39,11 +43,15 @@ public struct RecordedSegment: Sendable, Equatable {
         return Double(frameCount) / format.sampleRate
     }
 
-    mutating func close(frameCount: Int64, byteCount: Int64, reason: String, adopted: Bool) {
+    mutating func close(
+        frameCount: Int64, byteCount: Int64, reason: String, adopted: Bool,
+        firstFrameHostTime: Double? = nil
+    ) {
         self.frameCount = frameCount
         self.byteCount = byteCount
         self.closeReason = reason
         self.wasAdoptedFromCrashTail = adopted
+        if let firstFrameHostTime { resolvedFirstFrameHostTime = firstFrameHostTime }
     }
 }
 
@@ -187,7 +195,8 @@ public enum ManifestReader {
                 let key = SegmentKey(track: payload.track, index: payload.index)
                 segmentsByKey[key]?.close(
                     frameCount: payload.frameCount, byteCount: payload.byteCount,
-                    reason: payload.reason, adopted: false
+                    reason: payload.reason, adopted: false,
+                    firstFrameHostTime: payload.firstFrameHostTime
                 )
             case .crashTailAdopted(let payload):
                 let key = SegmentKey(track: payload.track, index: payload.index)

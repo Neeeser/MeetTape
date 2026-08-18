@@ -34,6 +34,10 @@ public final class SegmentWriter: Sendable {
         var firstFrameHostTime: Double?
         var writeFailures = 0
         var isFinished = false
+        /// A failed open is retried on the next buffer rather than ending the
+        /// track: a transiently full disk should cost seconds, not the meeting.
+        var openFailedAt: Double?
+        var lastFailureLoggedAt: Double?
     }
 
     private let state: LockedBox<State>
@@ -103,22 +107,7 @@ public final class SegmentWriter: Sendable {
         queue.sync { [self] in
             let previous = state.withLock { $0.format }
             closeSegment(reason: reason)
-            if previous.sampleRate != format.sampleRate || previous.channelCount != format.channelCount {
-                manifest.append(
-                    .formatChange(.init(
-                        track: track,
-                        from: AudioFormatDescriptor(
-                            sampleRate: previous.sampleRate, channelCount: Int(previous.channelCount)
-                        ),
-                        to: AudioFormatDescriptor(
-                            sampleRate: format.sampleRate, channelCount: Int(format.channelCount)
-                        ),
-                        reason: reason
-                    )),
-                    hostTime: clock.monotonicSeconds,
-                    wallClock: clock.now
-                )
-            }
+            recordFormatChange(from: previous, to: format, reason: reason)
             state.withLock { $0.format = format }
             openSegment(reason: reason)
         }
@@ -136,7 +125,11 @@ public final class SegmentWriter: Sendable {
     private func write(_ buffer: AVAudioPCMBuffer, hostTime: Double) {
         let (file, format, finished) = state.withLock { ($0.file, $0.format, $0.isFinished) }
         guard !finished else { return }
-        guard let file else { return }
+        guard let file else {
+            retryOpenIfNeeded(at: hostTime)
+            if state.withLock({ $0.file }) != nil { write(buffer, hostTime: hostTime) }
+            return
+        }
         guard buffer.format.sampleRate == format.sampleRate,
               buffer.format.channelCount == format.channelCount
         else {
@@ -150,14 +143,24 @@ public final class SegmentWriter: Sendable {
         do {
             try file.write(from: buffer)
         } catch {
-            let failures = state.withLock { state -> Int in
+            let (failures, shouldLog) = state.withLock { state -> (Int, Bool) in
                 state.writeFailures += 1
-                return state.writeFailures
+                let now = self.clock.monotonicSeconds
+                // A failing volume produces a failure per buffer; an fsync'd
+                // manifest line each time would make the problem worse.
+                let shouldLog = state.lastFailureLoggedAt.map { now - $0 > 10 } ?? true
+                if shouldLog { state.lastFailureLoggedAt = now }
+                return (state.writeFailures, shouldLog)
             }
-            manifest.append(
-                .sourceHealth(.init(track: track, state: .failed, detail: "segment write failed")),
-                hostTime: clock.monotonicSeconds, wallClock: clock.now
-            )
+            if shouldLog {
+                manifest.append(
+                    .sourceHealth(.init(
+                        track: track, state: .failed,
+                        detail: "segment write failed (\(failures) so far)"
+                    )),
+                    hostTime: clock.monotonicSeconds, wallClock: clock.now
+                )
+            }
             if failures == 1 {
                 onFailure(.segmentWriteFailed(path: file.url.lastPathComponent, underlying: "\(error)"))
             }
@@ -177,10 +180,46 @@ public final class SegmentWriter: Sendable {
         }
     }
 
+    private func retryOpenIfNeeded(at hostTime: Double) {
+        let shouldRetry = state.withLock { state -> Bool in
+            guard state.file == nil, !state.isFinished else { return false }
+            let now = self.clock.monotonicSeconds
+            guard let failedAt = state.openFailedAt else { return true }
+            guard now - failedAt >= 1.0 else { return false }
+            state.openFailedAt = nil
+            return true
+        }
+        guard shouldRetry else { return }
+        openSegment(reason: "retry_after_open_failure")
+    }
+
     private func changeFormatOnQueue(_ format: AVAudioFormat, reason: String) {
+        let previous = state.withLock { $0.format }
         closeSegment(reason: reason)
+        recordFormatChange(from: previous, to: format, reason: reason)
         state.withLock { $0.format = format }
         openSegment(reason: reason)
+    }
+
+    /// Every format change reaches the manifest, whichever path noticed it.
+    private func recordFormatChange(from previous: AVAudioFormat, to format: AVAudioFormat, reason: String) {
+        guard previous.sampleRate != format.sampleRate
+            || previous.channelCount != format.channelCount
+        else { return }
+        manifest.append(
+            .formatChange(.init(
+                track: track,
+                from: AudioFormatDescriptor(
+                    sampleRate: previous.sampleRate, channelCount: Int(previous.channelCount)
+                ),
+                to: AudioFormatDescriptor(
+                    sampleRate: format.sampleRate, channelCount: Int(format.channelCount)
+                ),
+                reason: reason
+            )),
+            hostTime: clock.monotonicSeconds,
+            wallClock: clock.now
+        )
     }
 
     private func openSegment(reason: String) {
@@ -208,11 +247,16 @@ public final class SegmentWriter: Sendable {
             )
             state.withLock { $0.file = file }
         } catch {
-            state.withLock { state in
+            let isFirst = state.withLock { state -> Bool in
                 state.file = nil
                 state.writeFailures += 1
+                let first = state.openFailedAt == nil
+                state.openFailedAt = self.clock.monotonicSeconds
+                return first
             }
-            onFailure(.segmentWriteFailed(path: url.lastPathComponent, underlying: "\(error)"))
+            if isFirst {
+                onFailure(.segmentWriteFailed(path: url.lastPathComponent, underlying: "\(error)"))
+            }
             return
         }
 

@@ -3,11 +3,9 @@
 // It records nothing, calls no service, and owns no meeting state. If it stops
 // working the app falls back to native detection and keeps recording.
 
-import {
-  buildState,
-  isMeaningfulChange,
-  providerForURL,
-} from './provider.js';
+// provider.js is loaded as a separate content script and shares this scope, so
+// its functions are already defined here. Content scripts cannot be ES modules:
+// an `import` statement makes the whole script fail to load, silently.
 
 const api = globalThis.browser ?? globalThis.chrome;
 const POLL_MS = 500;

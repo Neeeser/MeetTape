@@ -111,7 +111,10 @@ public struct RecoveryScanner: Sendable {
     private struct AudioRecovery {
         var adopted = 0
         var reconstructed = 0
-        var seconds: Double = 0
+        /// Per track, so a two-track meeting is not reported as twice its length.
+        var secondsByTrack: [CaptureTrack: Double] = [:]
+
+        var seconds: Double { secondsByTrack.values.max() ?? 0 }
     }
 
     /// Adopts crash tails and any segment file the manifest never recorded, then
@@ -139,7 +142,7 @@ public struct RecoveryScanner: Sendable {
                 wallClock: clock.now
             )
             recovery.adopted += 1
-            recovery.seconds += info.seconds
+            recovery.secondsByTrack[segment.track, default: 0] += info.seconds
         }
 
         // A segment file with no manifest record at all: the open line was lost.
@@ -174,7 +177,7 @@ public struct RecoveryScanner: Sendable {
                 wallClock: clock.now
             )
             recovery.reconstructed += 1
-            recovery.seconds += info.seconds
+            recovery.secondsByTrack[parsed.track, default: 0] += info.seconds
         }
 
         if !timeline.isComplete {

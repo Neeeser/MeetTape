@@ -21,17 +21,26 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
         var ioProcID: AudioDeviceIOProcID?
         var format: AVAudioFormat?
         var tapUUID = UUID()
+        var formatListener: AudioObjectPropertyListenerBlock?
     }
 
     private let state = LockedBox(State())
     private let sink: AudioBufferSink
+    /// Called when the tap's own format changes underneath us, which callback
+    /// arrival cannot detect: buffers keep coming, labelled with the old format.
+    private let onFormatChanged: @Sendable () -> Void
     /// On macOS 26 the tap description can carry bundle identifiers so CoreAudio
     /// restores the tap when a provider process restarts. The poll-driven rebind
     /// stays active either way; it recovered a Firefox restart in 16 ms.
     private let usesBundleRestore: Bool
 
-    public init(sink: @escaping AudioBufferSink, usesBundleRestore: Bool = true) {
+    public init(
+        sink: @escaping AudioBufferSink,
+        onFormatChanged: @escaping @Sendable () -> Void = {},
+        usesBundleRestore: Bool = true
+    ) {
         self.sink = sink
+        self.onFormatChanged = onFormatChanged
         self.usesBundleRestore = usesBundleRestore
     }
 
@@ -44,15 +53,21 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
     }
 
     public func teardown() {
-        let removed = state.withLock { state -> (AudioObjectID, AudioObjectID, AudioDeviceIOProcID?) in
-            let values = (state.aggregateID, state.tapID, state.ioProcID)
+        let removed = state.withLock {
+            state -> (AudioObjectID, AudioObjectID, AudioDeviceIOProcID?, AudioObjectPropertyListenerBlock?) in
+            let values = (state.aggregateID, state.tapID, state.ioProcID, state.formatListener)
             state.aggregateID = 0
             state.tapID = 0
             state.ioProcID = nil
             state.format = nil
+            state.formatListener = nil
             return values
         }
-        let (aggregateID, tapID, ioProcID) = removed
+        let (aggregateID, tapID, ioProcID, formatListener) = removed
+        if let formatListener, tapID != 0 {
+            var address = CoreAudioSystem.address(kAudioTapPropertyFormat)
+            AudioObjectRemovePropertyListenerBlock(tapID, &address, nil, formatListener)
+        }
         if let ioProcID, aggregateID != 0 {
             AudioDeviceStop(aggregateID, ioProcID)
             AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
@@ -136,6 +151,9 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
             ))
         }
         guard ioStatus == noErr, let ioProcID else {
+            // The call can fail after writing an ID; destroying it first avoids
+            // leaking the block and everything it captured.
+            if let orphan = ioProcID { AudioDeviceDestroyIOProcID(aggregateID, orphan) }
             AudioHardwareDestroyAggregateDevice(aggregateID)
             AudioHardwareDestroyProcessTap(tapID)
             throw CaptureError.ioProcCreationFailed(status: ioStatus)
@@ -149,12 +167,21 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
             throw CaptureError.ioProcCreationFailed(status: startStatus)
         }
 
+        // A tap whose format changes keeps delivering buffers that would be
+        // written under the old label, at the wrong rate, with nothing in the
+        // health model able to notice.
+        let notifyFormatChanged = onFormatChanged
+        let listener: AudioObjectPropertyListenerBlock = { _, _ in notifyFormatChanged() }
+        var formatAddressForListener = CoreAudioSystem.address(kAudioTapPropertyFormat)
+        AudioObjectAddPropertyListenerBlock(tapID, &formatAddressForListener, nil, listener)
+
         state.withLock { state in
             state.tapID = tapID
             state.aggregateID = aggregateID
             state.ioProcID = ioProcID
             state.format = format
             state.tapUUID = uuid
+            state.formatListener = listener
         }
 
         return AudioFormatDescriptor(

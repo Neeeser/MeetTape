@@ -15,7 +15,15 @@ public final class BrowserSensorServer: @unchecked Sendable {
         public var lastHello: SensorMessage.Hello?
     }
 
+    /// One connection per supported browser is plenty. A local process opening
+    /// thousands would exhaust the app's file descriptors, and a recorder that
+    /// cannot open a file stops writing audio.
+    public static let maximumConnections = 4
+    /// A peer that never sends a newline must not grow memory without bound.
+    private static let maximumBufferedBytes = 256 * 1_024
+
     private let socketURL: URL
+    private let verifier: SensorPeerVerifier
     private let queue = DispatchQueue(label: "com.meettape.sensor-server")
     private let lock = NSLock()
     private var listenDescriptor: Int32 = -1
@@ -31,10 +39,12 @@ public final class BrowserSensorServer: @unchecked Sendable {
         socketURL: URL = SensorTransport.socketURL(
             applicationSupport: SensorTransport.defaultApplicationSupport
         ),
+        verifier: SensorPeerVerifier = SensorPeerVerifier(),
         onMessage: @escaping @Sendable (SensorMessage) -> Void,
         onConnectionChange: @escaping @Sendable (Int) -> Void = { _ in }
     ) {
         self.socketURL = socketURL
+        self.verifier = verifier
         self.onMessage = onMessage
         self.onConnectionChange = onConnectionChange
     }
@@ -72,6 +82,8 @@ public final class BrowserSensorServer: @unchecked Sendable {
             close(descriptor)
             throw StorageError.fileWriteFailed(path: path, underlying: "bind errno \(errno)")
         }
+        // The socket is created inside the umask window, so the mode is tightened
+        // immediately; the parent directory is the real boundary.
         chmod(path, 0o600)
         guard listen(descriptor, 4) == 0 else {
             close(descriptor)
@@ -116,6 +128,20 @@ public final class BrowserSensorServer: @unchecked Sendable {
 
         let client = accept(listener, nil, nil)
         guard client >= 0 else { return }
+
+        // Only MeetTape's own relay, launched by a browser, may drive detection.
+        guard let peer = verifier.peer(of: client), verifier.isTrusted(peer) else {
+            Log.detection.notice("rejected an untrusted sensor connection")
+            close(client)
+            return
+        }
+        let atCapacity = lock.withLock { connections.count >= Self.maximumConnections }
+        if atCapacity {
+            Log.detection.notice("sensor connection refused: already at capacity")
+            close(client)
+            return
+        }
+
         var flags = fcntl(client, F_GETFL, 0)
         flags |= O_NONBLOCK
         _ = fcntl(client, F_SETFL, flags)
@@ -154,8 +180,7 @@ public final class BrowserSensorServer: @unchecked Sendable {
             buffer.removeSubrange(buffer.startIndex...newline)
             if !line.isEmpty { completeLines.append(line) }
         }
-        // A peer that never sends a newline must not grow the buffer without bound.
-        if buffer.count > 1 << 20 { buffer.removeAll(keepingCapacity: false) }
+        if buffer.count > Self.maximumBufferedBytes { buffer.removeAll(keepingCapacity: false) }
         buffers[descriptor] = buffer
         if !completeLines.isEmpty { status.lastMessageAt = Date() }
         lock.unlock()

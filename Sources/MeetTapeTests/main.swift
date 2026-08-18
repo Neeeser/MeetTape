@@ -6,7 +6,7 @@ let suites: [Suite] = CaptureRecoveryTests.all
     + DetectionTests.all
     + SessionTests.all
     + ProcessingTests.all
-    + [PipelineTests.suite, LiveOpenAITests.suite]
+    + [PipelineTests.suite, LiveOpenAITests.suite, LiveEndToEndTests.suite]
 
 let code = await TestRunner.run(suites, arguments: Array(CommandLine.arguments.dropFirst()))
 exit(code)

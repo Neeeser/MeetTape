@@ -11,9 +11,15 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     func currentInputFormat() -> AudioFormatDescriptor?
     /// Removes the tap and stops the engine.
     func teardown()
-    /// Builds a new engine at `format`, installs the tap, and starts it.
-    func buildAndStart(format: AudioFormatDescriptor) throws
-    var isRunning: Bool { get }
+    /// Builds a new engine, installs the tap and starts it, returning the format
+    /// the tap is actually running at.
+    ///
+    /// The hardware has the last word: `preferred` is what the coordinator chose
+    /// after rejecting an unusable reading, but the device may have settled on
+    /// something else by the time the engine is built, and the returned value is
+    /// what segments must be written in.
+    @discardableResult
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor
 }
 
 public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
@@ -71,7 +77,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     }
 
     public func stop() {
-        state.withLock { $0.policy.stop() }
+        state.withLock { state in
+            state.policy.stop()
+            // Fault bookkeeping is per meeting: carrying it over makes the next
+            // recording warn about the previous one's problems.
+            state.unhealthySince = nil
+            state.restartTimestamps = []
+            state.lastRebuildFailedAt = nil
+            state.wakeRequestedAt = nil
+            state.activeFormat = nil
+        }
         controller.teardown()
         setHealth(.idle, detail: nil)
     }
@@ -211,13 +226,14 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             return
         }
 
-        if format != previous {
-            delegate.captureWillChangeFormat(track: .mic, from: previous, to: format, reason: reason.label)
-        }
-
         do {
-            try controller.buildAndStart(format: format)
-            state.withLock { $0.activeFormat = format }
+            let installed = try controller.buildAndStart(preferred: format)
+            if installed != previous {
+                delegate.captureWillChangeFormat(
+                    track: .mic, from: previous, to: installed, reason: reason.label
+                )
+            }
+            state.withLock { $0.activeFormat = installed }
         } catch {
             state.withLock { $0.lastRebuildFailedAt = now }
             setHealth(.failed, detail: "engine start failed")
@@ -239,6 +255,19 @@ public enum CaptureWarning: Sendable, Equatable {
     case segmentWriteFailed(track: CaptureTrack)
     case permissionRevoked(track: CaptureTrack)
     case storageUnavailable(path: String)
+
+    /// Identifies the condition, not the moment. Two reports of the same problem
+    /// are one warning however long it has lasted.
+    public var dedupKey: String {
+        switch self {
+        case .microphoneUnrecovered: "microphone_unrecovered"
+        case .rebuildLoop: "rebuild_loop"
+        case .remoteProducingWithoutCallbacks: "remote_without_callbacks"
+        case .segmentWriteFailed(let track): "segment_write_failed_\(track.rawValue)"
+        case .permissionRevoked(let track): "permission_revoked_\(track.rawValue)"
+        case .storageUnavailable: "storage_unavailable"
+        }
+    }
 
     public var message: String {
         switch self {

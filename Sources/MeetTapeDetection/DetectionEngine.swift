@@ -279,6 +279,14 @@ public final class DetectionEngine: @unchecked Sendable {
     }
 }
 
+extension NSLock {
+    func withLock<Result>(_ body: () throws -> Result) rethrows -> Result {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
+}
+
 extension BrowserKind {
     /// The name CoreGraphics reports as the window owner.
     var windowOwnerNames: [String] {

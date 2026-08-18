@@ -22,6 +22,10 @@ public final class RemoteTapCoordinator: Sendable {
         var wakeRequestedAt: Double?
         var bindTimestamps: [Double] = []
         var faultSince: Double?
+        /// Backs off a bind that keeps failing, so a denied permission does not
+        /// mean tearing down and recreating a tap twice a second all meeting.
+        var consecutiveBindFailures = 0
+        var nextBindAllowedAt: Double = 0
     }
 
     private let state: Mutex<State>
@@ -57,7 +61,14 @@ public final class RemoteTapCoordinator: Sendable {
     }
 
     public func stop() {
-        state.withLock { $0.policy.stop() }
+        state.withLock { state in
+            state.policy.stop()
+            state.faultSince = nil
+            state.bindTimestamps = []
+            state.wakeRequestedAt = nil
+            state.activeFormat = nil
+            state.consecutiveBindFailures = 0
+        }
         controller.teardown()
         setHealth(.idle, detail: nil)
     }
@@ -136,6 +147,8 @@ public final class RemoteTapCoordinator: Sendable {
     private func bind(reason: RebuildReason, resolved: [RemoteAudioTarget]? = nil) {
         let now = clock.monotonicSeconds
         let prefixes = state.withLock { $0.bundlePrefixes }
+        let backoffUntil = state.withLock { $0.nextBindAllowedAt }
+        if reason != .sessionStart, now < backoffUntil { return }
         let targets = resolved ?? controller.resolveTargets(bundlePrefixes: prefixes)
 
         if reason != .sessionStart {
@@ -163,10 +176,22 @@ public final class RemoteTapCoordinator: Sendable {
                 state.policy.noteBound(to: targets, at: now)
                 state.bindTimestamps.append(now)
                 state.bindTimestamps.removeAll { now - $0 > 300 }
+                state.consecutiveBindFailures = 0
+                state.nextBindAllowedAt = 0
             }
             setHealth(.recovering, detail: reason.label)
         } catch {
-            state.withLock { $0.policy.noteBindFailed() }
+            let failures: Int = state.withLock { state in
+                state.policy.noteBindFailed()
+                state.consecutiveBindFailures += 1
+                // 1 s, 2 s, 4 s … capped at 30 s.
+                let delay = min(30, pow(2, Double(min(state.consecutiveBindFailures, 5))) / 2)
+                state.nextBindAllowedAt = now + delay
+                return state.consecutiveBindFailures
+            }
+            if failures == 3 {
+                Log.capture.error("process tap has failed to bind three times running")
+            }
             setHealth(.failed, detail: "tap bind failed")
             delegate.captureDidFail(
                 track: .remote,

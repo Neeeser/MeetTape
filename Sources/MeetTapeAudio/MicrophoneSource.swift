@@ -29,9 +29,12 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     }
 
     deinit {
-        if let observer = state.withLock({ $0.observer }) {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        let (engine, observer) = state.withLock { ($0.engine, $0.observer) }
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        // The tap is removed explicitly: releasing the engine alone leaves the
+        // microphone indicator lit until the tap is torn down.
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
     }
 
     public var isRunning: Bool {
@@ -62,11 +65,25 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         engine.stop()
     }
 
-    public func buildAndStart(format: AudioFormatDescriptor) throws {
+    @discardableResult
+    public func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
+        // Microphone access is checked here rather than assumed: a denied input
+        // node starts cleanly and delivers buffers of zeroes, which would be
+        // recorded and uploaded as a meeting of silence.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .denied, .restricted, .notDetermined:
+            throw CaptureError.microphonePermissionDenied
+        @unknown default:
+            throw CaptureError.microphonePermissionDenied
+        }
+
         let engine = AVAudioEngine()
         let input = engine.inputNode
         // Install against the node's own format. Passing a format the hardware is
-        // not actually running at throws inside CoreAudio.
+        // not actually running at throws inside CoreAudio, so `preferred` informs
+        // the choice but the node decides.
         let tapFormat = input.outputFormat(forBus: 0)
         guard tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
             throw CaptureError.microphoneEngineStartFailed(status: -1)
@@ -75,7 +92,13 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         let sink = self.sink
         input.installTap(onBus: 0, bufferSize: 4_096, format: tapFormat) { buffer, when in
             guard let copy = buffer.deepCopy() else { return }
-            sink(AudioBufferPacket(buffer: copy, hostTime: HostTime.seconds(when.hostTime)))
+            // An invalid or zero host time would make every gap look like the
+            // machine's uptime and rebuild the engine on every poll. Arrival is
+            // what the watchdog measures, so substituting now is correct.
+            let hostTime = when.isHostTimeValid && when.hostTime != 0
+                ? HostTime.seconds(when.hostTime)
+                : HostTime.now
+            sink(AudioBufferPacket(buffer: copy, hostTime: hostTime))
         }
         engine.prepare()
         do {
@@ -86,6 +109,9 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             throw CaptureError.microphoneEngineStartFailed(status: Int32(truncatingIfNeeded: status))
         }
         state.withLock { $0.engine = engine }
+        return AudioFormatDescriptor(
+            sampleRate: tapFormat.sampleRate, channelCount: Int(tapFormat.channelCount)
+        )
     }
 
     /// The format the engine is actually running at, which is what segments are

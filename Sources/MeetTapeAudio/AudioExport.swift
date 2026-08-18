@@ -115,8 +115,8 @@ public struct AudioMixer: Sendable {
 
         // Whichever source started later is delayed by the difference between the
         // host times each stamped its first frame with.
-        let micStart = micSegments.first?.firstFrameHostTime
-        let remoteStart = remoteSegments.first?.firstFrameHostTime
+        let micStart = micSegments.compactMap(\.resolvedFirstFrameHostTime).first
+        let remoteStart = remoteSegments.compactMap(\.resolvedFirstFrameHostTime).first
         var micLeadIn: Double = 0
         var remoteLeadIn: Double = 0
         if let micStart, let remoteStart {

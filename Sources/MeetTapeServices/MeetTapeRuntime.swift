@@ -62,6 +62,13 @@ public final class MeetTapeRuntime {
     @ObservationIgnored public let permissions = PermissionsService()
 
     @ObservationIgnored private let settingsStore: SettingsStore
+    /// A snapshot the processing actor can read without hopping to the main
+    /// actor. `MainActor.assumeIsolated` from an actor's executor is a runtime
+    /// trap, not a shortcut.
+    @ObservationIgnored private let settingsSnapshot: LockedBox<AppSettings>
+    /// Main-actor work is chained so state updates arrive in the order they were
+    /// produced; independent tasks give no ordering guarantee.
+    @ObservationIgnored private var workChain: Task<Void, Never>?
     @ObservationIgnored private let clock: any Clock
     @ObservationIgnored private var sessionController: SessionController
     @ObservationIgnored private var captureEngine: CaptureEngine!
@@ -80,6 +87,7 @@ public final class MeetTapeRuntime {
         self.settingsStore = SettingsStore(directory: settingsDirectory)
         let loaded = settingsStore.load()
         self.settings = loaded
+        self.settingsSnapshot = LockedBox(loaded)
         self.repository = MeetingRepository(root: loaded.storageRoot)
         self.sessionController = SessionController(policies: loaded.providers)
 
@@ -98,9 +106,7 @@ public final class MeetTapeRuntime {
             backend: OpenAIClient(keyProvider: keyStore),
             calendar: CalendarService(),
             clock: clock,
-            settingsProvider: { [weak self] in
-                MainActor.assumeIsolated { self?.settings ?? AppSettings() }
-            },
+            settingsProvider: { [snapshot = settingsSnapshot] in snapshot.withLock { $0 } },
             onProgress: { [weak relay] progress in
                 Task { @MainActor in relay?.runtimeForCallbacks?.apply(progress) }
             },
@@ -122,7 +128,6 @@ public final class MeetTapeRuntime {
     public func start() {
         notifications.registerCategories()
         installNativeMessagingHost()
-        detectionEngine.start()
         powerObserver = PowerEventObserver(
             onWake: { [weak self] in
                 Task { @MainActor in self?.captureEngine.noteSystemWake() }
@@ -130,12 +135,27 @@ public final class MeetTapeRuntime {
             onSleep: {}
         )
         refreshRecentMeetings()
-        Task { await recoverAndResume() }
+        // Recovery runs before detection, so a meeting that starts during launch
+        // can never be scanned as an interrupted one and finalised underneath
+        // itself.
+        Task { @MainActor in
+            await recoverAndResume()
+            detectionEngine.start()
+        }
     }
 
     public func stop() {
         detectionEngine.stop()
         if status.isRecording { stopRecording(reason: "app_quit") }
+    }
+
+    /// Chains main-actor work so updates apply in the order they were produced.
+    private func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) {
+        let previous = workChain
+        workChain = Task { @MainActor in
+            await previous?.value
+            await body()
+        }
     }
 
     /// Startup recovery, then resumption of anything left mid-processing.
@@ -172,22 +192,25 @@ public final class MeetTapeRuntime {
         status.sensorConnection = snapshot.browserSensor
         status.slackState = snapshot.slackState
 
+        var actions: [SessionAction] = []
         for event in snapshot.genericEvents {
             guard case .callLikely(let candidate) = event else { continue }
-            handleGenericCandidate(candidate)
+            actions.append(contentsOf: genericCandidateActions(candidate))
         }
-
-        let actions = sessionController.update(
+        actions.append(contentsOf: sessionController.update(
             evidence: snapshot.evidence, now: clock.monotonicSeconds, wallClock: clock.now
-        )
-        perform(actions)
+        ))
         syncStatusFromSession()
+        guard !actions.isEmpty else { return }
+        enqueue { [weak self] in await self?.perform(actions) }
     }
 
-    private func handleGenericCandidate(_ candidate: GenericCallDetector.Candidate) {
-        guard sessionController.snapshot.state == .idle else { return }
-        guard settings.providers.unknownCalls.autoStart != .never else { return }
-        guard !settings.providers.detectionPaused else { return }
+    private func genericCandidateActions(
+        _ candidate: GenericCallDetector.Candidate
+    ) -> [SessionAction] {
+        guard sessionController.snapshot.state == .idle else { return [] }
+        guard settings.providers.unknownCalls.autoStart != .never else { return [] }
+        guard !settings.providers.detectionPaused else { return [] }
 
         var titles = TitleCandidates(
             timestampFallback: MeetingRepository.timestampTitle(
@@ -195,7 +218,7 @@ public final class MeetTapeRuntime {
             )
         )
         titles.window = candidate.windowTitle
-        let actions = sessionController.startManual(
+        return sessionController.startManual(
             source: .genericCall,
             bundlePrefixes: [candidate.bundleIdentifier],
             titles: titles,
@@ -204,11 +227,11 @@ public final class MeetTapeRuntime {
             isProvisional: !candidate.isPreapproved,
             applicationBundleID: candidate.bundleIdentifier
         )
-        perform(actions)
-        syncStatusFromSession()
     }
 
     func captureHealthDidUpdate(_ snapshot: CaptureHealthSnapshot) {
+        // A stale snapshot must not overwrite the terminal one from stop().
+        guard status.isRecording || snapshot.isWritingToDisk == false else { return }
         status.health = snapshot
         onStatusChange?()
     }
@@ -227,27 +250,30 @@ public final class MeetTapeRuntime {
             timestampFallback: MeetingRepository.timestampTitle(startedAt: clock.now, source: .manual)
         )
         titles.window = nil
-        perform(sessionController.startManual(
+        let actions = sessionController.startManual(
             source: .manual, bundlePrefixes: bundlePrefixes, titles: titles,
             now: clock.monotonicSeconds, wallClock: clock.now
-        ))
+        )
         syncStatusFromSession()
+        enqueue { [weak self] in await self?.perform(actions) }
     }
 
     public func startInPersonRecording() {
         let titles = TitleCandidates(
             timestampFallback: MeetingRepository.timestampTitle(startedAt: clock.now, source: .inPerson)
         )
-        perform(sessionController.startManual(
+        let actions = sessionController.startManual(
             source: .inPerson, bundlePrefixes: [], titles: titles,
             now: clock.monotonicSeconds, wallClock: clock.now
-        ))
+        )
         syncStatusFromSession()
+        enqueue { [weak self] in await self?.perform(actions) }
     }
 
     public func stopRecording(reason: String = "user_stopped") {
-        perform(sessionController.stop(reason: reason))
+        let actions = sessionController.stop(reason: reason)
         syncStatusFromSession()
+        enqueue { [weak self] in await self?.perform(actions) }
     }
 
     public func addNote(_ text: String) {
@@ -261,15 +287,13 @@ public final class MeetTapeRuntime {
     }
 
     public func resolveProvisional(keep: Bool) {
-        guard let prompt = provisionalPrompt else { return }
+        guard provisionalPrompt != nil else { return }
         provisionalPrompt = nil
-        if keep, !settings.alwaysRecordApplications.contains(prompt.applicationName) {
-            // Remembering the choice is offered separately; keeping is per meeting.
-        }
-        perform(sessionController.resolveProvisional(
+        let actions = sessionController.resolveProvisional(
             keep: keep, reason: keep ? "kept" : "user_discarded"
-        ))
+        )
         syncStatusFromSession()
+        enqueue { [weak self] in await self?.perform(actions) }
     }
 
     public func alwaysRecord(applicationBundleID: String) {
@@ -298,7 +322,12 @@ public final class MeetTapeRuntime {
 
     public func update(settings newSettings: AppSettings) {
         settings = newSettings
-        try? settingsStore.save(newSettings)
+        settingsSnapshot.withLock { $0 = newSettings }
+        do {
+            try settingsStore.save(newSettings)
+        } catch {
+            Log.app.error("settings not saved: \(logSafeDescription(error), privacy: .public)")
+        }
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)
         status.detectionPaused = newSettings.providers.detectionPaused
@@ -351,7 +380,8 @@ public final class MeetTapeRuntime {
     }
 
     public func retryProcessing(meetingID: String) {
-        Task {
+        enqueue { [weak self] in
+            guard let self else { return }
             await pipeline.retry(meetingID: meetingID)
             refreshRecentMeetings()
         }
@@ -394,7 +424,7 @@ public final class MeetTapeRuntime {
 
     // MARK: - action execution
 
-    private func perform(_ actions: [SessionAction]) {
+    private func perform(_ actions: [SessionAction]) async {
         if !actions.isEmpty {
             Log.session.info(
                 "actions: \(actions.map(\.logLabel).joined(separator: ", "), privacy: .public)"
@@ -403,19 +433,22 @@ public final class MeetTapeRuntime {
         for action in actions {
             switch action {
             case .armCapture(let prefixes, let capturesRemote):
-                captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
+                await captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
             case .retargetCapture(let prefixes):
-                captureEngine.retarget(bundlePrefixes: prefixes)
+                await captureEngine.retarget(bundlePrefixes: prefixes)
             case .commitRecording(let request):
-                commit(request)
+                // A commit that fails leaves nothing behind and cancels the rest
+                // of the batch, so no "recording started" notice is delivered for
+                // a meeting that does not exist.
+                guard await commit(request) else { return }
             case .beginRun(let reason):
                 beginRun(reason: reason)
             case .updateEvidence(let evidence):
                 applyEvidence(evidence)
             case .discardCapture(let reason):
-                discard(reason: reason)
+                await discard(reason: reason)
             case .finishRecording(let reason):
-                finish(reason: reason)
+                await finish(reason: reason)
             case .askToKeepProvisional(let bundleIdentifier, let title):
                 askToKeep(bundleIdentifier: bundleIdentifier, title: title)
             case .notify(let notice):
@@ -424,12 +457,15 @@ public final class MeetTapeRuntime {
         }
     }
 
-    private func commit(_ request: CommitRequest) {
+    @discardableResult
+    private func commit(_ request: CommitRequest) async -> Bool {
+        var createdDirectory: URL?
         do {
             let created = try repository.createMeeting(
                 source: request.source, provider: request.provider,
                 startedAt: request.startedAt, titles: request.titles, now: clock.now
             )
+            createdDirectory = created.store.layout.root
             var metadata = created.metadata
             metadata.providerMeetingID = request.providerMeetingID
             metadata.meetingURL = request.url
@@ -439,15 +475,22 @@ public final class MeetTapeRuntime {
             metadata.runs = [RecordingRun(id: "run-001", startedAt: request.startedAt)]
             try created.store.writeMetadata(metadata)
 
-            try captureEngine.commit(
+            try await captureEngine.commit(
                 layout: created.store.layout, meetingID: metadata.id, source: request.source
             )
             currentMeeting = (metadata, created.store)
             refreshRecentMeetings()
+            return true
         } catch {
             Log.app.error("commit failed: \(logSafeDescription(error), privacy: .public)")
-            captureEngine.discardArmed()
+            await captureEngine.discardArmed()
+            // A half-created meeting must not be left for recovery to adopt.
+            if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
+            currentMeeting = nil
             _ = sessionController.stop(reason: "commit_failed")
+            syncStatusFromSession()
+            refreshRecentMeetings()
+            return false
         }
     }
 
@@ -476,10 +519,10 @@ public final class MeetTapeRuntime {
         if let updated { currentMeeting = (updated, meeting.store) }
     }
 
-    private func discard(reason: String) {
-        captureEngine.discardArmed()
+    private func discard(reason: String) async {
+        await captureEngine.discardArmed()
         if let meeting = currentMeeting {
-            _ = captureEngine.stop(reason: reason)
+            _ = await captureEngine.stop(reason: reason)
             // A provisional recording the user declined leaves nothing behind.
             try? FileManager.default.removeItem(at: meeting.store.layout.root)
             currentMeeting = nil
@@ -488,8 +531,9 @@ public final class MeetTapeRuntime {
         provisionalPrompt = nil
     }
 
-    private func finish(reason: String) {
-        let snapshot = captureEngine.stop(reason: reason)
+    private func finish(reason: String) async {
+        let snapshot = await captureEngine.stop(reason: reason)
+        provisionalPrompt = nil
         guard let meeting = currentMeeting else { return }
         currentMeeting = nil
 

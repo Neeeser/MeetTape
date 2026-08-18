@@ -1,0 +1,34 @@
+# Local investigation material — read but never committed
+/plans/
+/probes/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+
+# Swift / Xcode build products
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserdatad/
+xcuserdata/
+
+# Packaged app output
+/dist/
+*.app/
+*.dmg
+*.zip
+
+# macOS
+.DS_Store
+
+# Node (Firefox extension tooling)
+node_modules/
+
+# Local scratch
+/tmp/
+*.log

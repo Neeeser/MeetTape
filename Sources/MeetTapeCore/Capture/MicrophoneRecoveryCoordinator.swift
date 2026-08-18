@@ -1,0 +1,261 @@
+import Foundation
+import Synchronization
+
+/// The AVAudioEngine operations the recovery coordinator needs. Implemented for
+/// real in MeetTapeAudio and by a fake in the regression tests, so the tests
+/// exercise the shipping algorithm rather than a copy of it.
+public protocol MicrophoneEngineController: AnyObject, Sendable {
+    /// Reads the current input device format from the hardware. Must be read fresh
+    /// on every rebuild: a device re-enumerated underneath a running engine keeps
+    /// the old format cached.
+    func currentInputFormat() -> AudioFormatDescriptor?
+    /// Removes the tap and stops the engine.
+    func teardown()
+    /// Builds a new engine at `format`, installs the tap, and starts it.
+    func buildAndStart(format: AudioFormatDescriptor) throws
+    var isRunning: Bool { get }
+}
+
+public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
+    func captureWillChangeFormat(
+        track: CaptureTrack, from: AudioFormatDescriptor?, to: AudioFormatDescriptor, reason: String
+    )
+    func captureDidRestart(track: CaptureTrack, reason: RebuildReason, restartCount: Int)
+    func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
+    func captureDidFail(track: CaptureTrack, error: CaptureError)
+}
+
+/// Drives `MicRecoveryPolicy` against a real engine.
+///
+/// Everything the stress test found lives here: the 400 ms configuration
+/// debounce, the 1.5 s post-rebuild grace, the 2 s frame watchdog, refusal to
+/// adopt a transient zero-channel device, and a proactive rebuild after wake.
+public final class MicrophoneRecoveryCoordinator: Sendable {
+    private struct State {
+        var policy: MicRecoveryPolicy
+        var activeFormat: AudioFormatDescriptor?
+        var health: CaptureHealthState = .idle
+        var wakeRequestedAt: Double?
+        var restartTimestamps: [Double] = []
+        var unhealthySince: Double?
+        var lastRebuildFailedAt: Double?
+    }
+
+    private let state: Mutex<State>
+    private let controller: MicrophoneEngineController
+    private let clock: any Clock
+    private let thresholds: CaptureThresholds
+    private let delegate: any CaptureCoordinatorDelegate
+
+    public init(
+        controller: MicrophoneEngineController,
+        clock: any Clock,
+        thresholds: CaptureThresholds = .validated,
+        delegate: any CaptureCoordinatorDelegate
+    ) {
+        self.controller = controller
+        self.clock = clock
+        self.thresholds = thresholds
+        self.delegate = delegate
+        self.state = Mutex(State(policy: MicRecoveryPolicy(thresholds: thresholds)))
+    }
+
+    public var health: CaptureHealthState { state.withLock { $0.health } }
+    public var activeFormat: AudioFormatDescriptor? { state.withLock { $0.activeFormat } }
+    public var restartCount: Int { state.withLock { $0.policy.restartCount } }
+    public var suppressedWatchdogTrips: Int { state.withLock { $0.policy.suppressedWatchdogTrips } }
+
+    /// Starts capture. Safe to call once; further starts are rebuilds.
+    public func start() {
+        rebuild(reason: .sessionStart, isInitial: true)
+    }
+
+    public func stop() {
+        state.withLock { $0.policy.stop() }
+        controller.teardown()
+        setHealth(.idle, detail: nil)
+    }
+
+    /// `AVAudioEngineConfigurationChange`. Deliberately does not rebuild: the
+    /// notification arrives in bursts and one of them can describe a device that
+    /// is mid-teardown.
+    public func noteConfigurationChange() {
+        let now = clock.monotonicSeconds
+        state.withLock { $0.policy.noteConfigurationChange(at: now) }
+    }
+
+    /// Called from the audio thread for every delivered buffer.
+    public func noteBufferArrived(hostTime: Double) {
+        let becameHealthy: Bool = state.withLock { state in
+            state.policy.noteBufferArrived(at: hostTime)
+            guard state.health != .healthy else { return false }
+            state.health = .healthy
+            state.unhealthySince = nil
+            return true
+        }
+        if becameHealthy {
+            delegate.captureHealthChanged(track: .mic, state: .healthy, detail: nil)
+        }
+    }
+
+    /// System wake. The rebuild is deferred by the settle delay because the audio
+    /// stack is still re-enumerating devices immediately after wake.
+    public func noteWake() {
+        let now = clock.monotonicSeconds
+        state.withLock { $0.wakeRequestedAt = now }
+    }
+
+    /// Poll. Call every `thresholds.pollInterval`.
+    public func tick() {
+        let now = clock.monotonicSeconds
+
+        let wakeDue: Bool = state.withLock { state in
+            guard let requestedAt = state.wakeRequestedAt else { return false }
+            guard now - requestedAt >= thresholds.wakeSettleDelay else { return false }
+            state.wakeRequestedAt = nil
+            return state.policy.isRunning
+        }
+        if wakeDue {
+            rebuild(reason: .wake, isInitial: false)
+            return
+        }
+
+        // A rebuild that could not find a usable device retries on the next poll.
+        let retryFailedBuild: Bool = state.withLock { state in
+            guard state.lastRebuildFailedAt != nil, state.policy.isRunning else { return false }
+            state.lastRebuildFailedAt = nil
+            return true
+        }
+        if retryFailedBuild {
+            rebuild(reason: .manual, isInitial: false)
+            return
+        }
+
+        let decision = state.withLock { $0.policy.evaluate(at: now) }
+        switch decision {
+        case .none:
+            refreshHealth(at: now)
+        case .rebuild(let reason):
+            rebuild(reason: reason, isInitial: false)
+        }
+    }
+
+    /// Warning conditions, evaluated against the validated rules: unrecovered for
+    /// more than five seconds, or more than three rebuilds inside a minute.
+    public func warnings(at now: Double? = nil) -> [CaptureWarning] {
+        let instant = now ?? clock.monotonicSeconds
+        return state.withLock { state in
+            var warnings: [CaptureWarning] = []
+            if let since = state.unhealthySince, instant - since > 5.0 {
+                warnings.append(.microphoneUnrecovered(seconds: instant - since))
+            }
+            let recent = state.restartTimestamps.filter { instant - $0 <= 60 }
+            if recent.count > 3 {
+                warnings.append(.rebuildLoop(count: recent.count, windowSeconds: 60))
+            }
+            return warnings
+        }
+    }
+
+    private func refreshHealth(at now: Double) {
+        let implied = state.withLock { $0.policy.health(at: now) }
+        guard implied != health else { return }
+        setHealth(implied, detail: nil)
+    }
+
+    private func setHealth(_ new: CaptureHealthState, detail: String?) {
+        let changed: Bool = state.withLock { state in
+            guard state.health != new else { return false }
+            state.health = new
+            if new.isNominal {
+                state.unhealthySince = nil
+            } else if new != .idle, state.unhealthySince == nil {
+                state.unhealthySince = clock.monotonicSeconds
+            }
+            return true
+        }
+        if changed { delegate.captureHealthChanged(track: .mic, state: new, detail: detail) }
+    }
+
+    private func rebuild(reason: RebuildReason, isInitial: Bool) {
+        let now = clock.monotonicSeconds
+        state.withLock { state in
+            state.policy.noteRebuildStarted(at: now, isInitial: isInitial)
+            if !isInitial { state.restartTimestamps.append(now) }
+            state.restartTimestamps.removeAll { now - $0 > 300 }
+        }
+        setHealth(.recovering, detail: reason.label)
+        if !isInitial {
+            delegate.captureDidRestart(track: .mic, reason: reason, restartCount: restartCount)
+        }
+
+        controller.teardown()
+
+        // Read the device fresh. A burst that has settled reports the real device;
+        // an unusable reading here means the hardware is still in transition.
+        let candidate = controller.currentInputFormat()
+        let previous = state.withLock { $0.activeFormat }
+        let chosen: AudioFormatDescriptor?
+        if let candidate, candidate.isUsable {
+            chosen = candidate
+        } else if let previous, previous.isUsable {
+            // Keep recording at the last good format rather than adopting 0ch/0Hz.
+            chosen = previous
+        } else {
+            chosen = nil
+        }
+
+        guard let format = chosen else {
+            state.withLock { $0.lastRebuildFailedAt = now }
+            setHealth(.degraded, detail: "no usable input device")
+            return
+        }
+
+        if format != previous {
+            delegate.captureWillChangeFormat(track: .mic, from: previous, to: format, reason: reason.label)
+        }
+
+        do {
+            try controller.buildAndStart(format: format)
+            state.withLock { $0.activeFormat = format }
+        } catch {
+            state.withLock { $0.lastRebuildFailedAt = now }
+            setHealth(.failed, detail: "engine start failed")
+            delegate.captureDidFail(
+                track: .mic,
+                error: (error as? CaptureError) ?? .microphoneEngineStartFailed(status: -1)
+            )
+        }
+    }
+}
+
+/// Conditions that justify interrupting the user. Everything not listed here —
+/// silence, mute, an idle remote application, a single successful rebuild, a
+/// device switch that recovered — is normal and stays silent.
+public enum CaptureWarning: Sendable, Equatable {
+    case microphoneUnrecovered(seconds: Double)
+    case rebuildLoop(count: Int, windowSeconds: Double)
+    case remoteProducingWithoutCallbacks(seconds: Double)
+    case segmentWriteFailed(track: CaptureTrack)
+    case permissionRevoked(track: CaptureTrack)
+    case storageUnavailable(path: String)
+
+    public var message: String {
+        switch self {
+        case .microphoneUnrecovered:
+            "MeetTape can't currently capture your microphone. Remote audio is still being recorded."
+        case .rebuildLoop:
+            "The microphone keeps disconnecting. Audio may be incomplete."
+        case .remoteProducingWithoutCallbacks:
+            "The meeting app is playing audio that MeetTape isn't receiving. Reconnecting."
+        case .segmentWriteFailed:
+            "MeetTape could not write recorded audio to disk."
+        case .permissionRevoked(let track):
+            track == .mic
+                ? "Microphone access was revoked while recording."
+                : "System audio access was revoked while recording."
+        case .storageUnavailable:
+            "MeetTape has no writable location for recordings."
+        }
+    }
+}

@@ -143,8 +143,27 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
 
         let sink = self.sink
         var ioProcID: AudioDeviceIOProcID?
+        let described = LockedBox(false)
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil) {
             _, inputData, inputTime, _, _ in
+            // The shape of the first buffer list, once per bind. An aggregate
+            // device does not have to match the tap's format, and the difference
+            // decides how many frames each callback really carries.
+            let shouldDescribe = described.withLock { seen -> Bool in
+                if seen { return false }
+                seen = true
+                return true
+            }
+            if shouldDescribe {
+                let list = UnsafeMutableAudioBufferListPointer(
+                    UnsafeMutablePointer(mutating: inputData)
+                )
+                let shape = list.map { "\($0.mNumberChannels)ch/\($0.mDataByteSize)B" }
+                    .joined(separator: " ")
+                Log.capture.info(
+                    "tap buffers: count=\(list.count, privacy: .public) [\(shape, privacy: .public)] format=\(format.sampleRate, privacy: .public)Hz x\(format.channelCount, privacy: .public)"
+                )
+            }
             guard let buffer = makeBuffer(from: inputData, format: format) else { return }
             sink(AudioBufferPacket(
                 buffer: buffer, hostTime: HostTime.seconds(inputTime.pointee.mHostTime)

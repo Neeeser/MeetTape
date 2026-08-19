@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 126 tests, all passing, no failures, in about 4 seconds.
+`./scripts/test.sh` — 130 tests, all passing, no failures, in about 4 seconds.
 Eleven further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` — 10 tests, all passing.
@@ -79,6 +79,28 @@ meeting duration matching the capture, and processing reaching `audio_safe`. Wit
 no key in the keychain, processing then fails at the first API call with a
 missing-credential error while the recording remains intact, which is the
 guarantee the `audio_safe` boundary provides.
+
+**A real Google Meet call.** A call in Firefox, with no extension loaded, was
+detected through window titles and microphone state: the log shows
+`google_meet:1:native` then `google_meet:2:native`, candidate then confirmed. The
+meeting directory carries the meeting code from the window title, and the
+manifest records 15 s of microphone and 14.9 s of meeting audio flushed from the
+pre-roll at the moment of confirmation. The microphone delivered three-channel
+buffers during that call, which is the format that used to read back as silence.
+
+**Speech through the microphone, end to end.** A recording started from the menu
+bar while speech played through the built-in speakers. The 0.5-second energy
+envelope of the recorded track shows background at -59 dBFS, both spoken
+passages at -43 dBFS, and the pause between them in the right place. The meeting
+directory, its manifest and its segments were written, finalisation reached
+`audio_safe`, and processing then stopped at the missing API key.
+
+**Aggregate device buffer shape.** With a virtual output device present, the
+process tap arrives as two streams, `[8ch/16384B, 2ch/4096B]`, the device's own
+stream first and the tap's second. Reading the first stream's byte count as
+frames recorded 334 seconds of meeting audio during 42 seconds of wall clock.
+After the fix, a 26-second recording reports 26.2 s on both tracks against a
+26.3 s host-time span.
 
 **The packaged application.** Built with `scripts/bundle-app.sh`, launched, and
 observed: `menu bar item ready: true, visible: true` and `browser sensor server

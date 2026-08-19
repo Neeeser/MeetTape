@@ -181,6 +181,66 @@ enum AudioTests {
                 expect.close(Double(frames) / 16_000, 4.0, tolerance: 0.15, "read back the whole track")
             },
 
+            test("an aggregate device's own stream is not mistaken for the tap") { expect in
+                // Measured on this machine: a stereo process tap arrives as
+                // [8ch/16384B, 2ch/4096B], the output device's stream first and
+                // the tap's second, both carrying 512 frames. Reading the first
+                // stream's bytes as frames recorded eight seconds of audio for
+                // every second of the meeting.
+                let frames = 512
+                let deviceChannels = 8
+                let tapChannels = 2
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var deviceSamples = [Float](repeating: 0.9, count: frames * deviceChannels)
+                var tapSamples = [Float](repeating: 0.25, count: frames * tapChannels)
+
+                let result: AVAudioPCMBuffer? = deviceSamples.withUnsafeMutableBufferPointer { device in
+                    tapSamples.withUnsafeMutableBufferPointer { tap in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: UInt32(deviceChannels),
+                            mDataByteSize: UInt32(frames * deviceChannels * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(device.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: UInt32(tapChannels),
+                            mDataByteSize: UInt32(frames * tapChannels * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(tap.baseAddress)
+                        )
+                        return makeBuffer(from: storage.unsafePointer, format: format)
+                    }
+                }
+                guard let buffer = result else { return expect.fail("no buffer produced") }
+                expect.equal(
+                    Int(buffer.frameLength), frames,
+                    "the frame count comes from the stream's own channels"
+                )
+                expect.close(
+                    Double(buffer.floatChannelData![0][0]), 0.25, tolerance: 0.001,
+                    "the audio comes from the tap's stream, not the device's"
+                )
+            },
+
+            test("a single interleaved stream keeps its frame count") { expect in
+                let frames = 256
+                let channels = 2
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var samples = [Float](repeating: 0.5, count: frames * channels)
+                let result: AVAudioPCMBuffer? = samples.withUnsafeMutableBufferPointer { pointer in
+                    var list = AudioBufferList(
+                        mNumberBuffers: 1,
+                        mBuffers: AudioBuffer(
+                            mNumberChannels: UInt32(channels),
+                            mDataByteSize: UInt32(frames * channels * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(pointer.baseAddress)
+                        )
+                    )
+                    return withUnsafePointer(to: &list) { makeBuffer(from: $0, format: format) }
+                }
+                expect.equal(Int(result?.frameLength ?? 0), frames)
+            },
+
             test("a three-channel microphone is still audible when it is read back") { expect in
                 // The built-in microphone on this machine reports three channels.
                 // A file with that many channels and no surround layout has no

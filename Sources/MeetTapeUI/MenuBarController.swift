@@ -84,9 +84,30 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         button.contentTintColor = status.isRecording
             ? .systemRed
             : (status.isInReconnectWindow ? .systemOrange : nil)
-        button.title = status.isRecording
-            ? " \(Format.duration(status.elapsed(now: Date())))"
-            : ""
+        if status.isRecording {
+            // With a non-template image the status item loses the menu bar's
+            // vibrant styling and a plain title draws black regardless of the
+            // menu bar's appearance. Resolving the label colour against the
+            // button's own appearance keeps the duration readable on both a
+            // dark and a light menu bar. This runs on the 1-second tick, so a
+            // mid-session appearance change is picked up.
+            var resolved = NSColor.labelColor
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                resolved = NSColor(cgColor: NSColor.labelColor.cgColor) ?? .labelColor
+            }
+            button.attributedTitle = NSAttributedString(
+                string: " \(Format.duration(status.elapsed(now: Date())))",
+                attributes: [
+                    .foregroundColor: resolved,
+                    .font: NSFont.monospacedDigitSystemFont(
+                        ofSize: NSFont.systemFontSize, weight: .regular
+                    ),
+                ]
+            )
+        } else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.title = ""
+        }
         button.toolTip = accessibilityLabel(for: status)
         button.setAccessibilityLabel(accessibilityLabel(for: status))
     }

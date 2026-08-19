@@ -20,6 +20,9 @@ public struct MeetingReviewView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 detailsCard
+                if let suggestion = model.continuationSuggestion {
+                    continuationCard(suggestion)
+                }
                 if let failure = model.metadata?.processing.lastFailure {
                     failureCard(failure)
                 }
@@ -91,6 +94,21 @@ public struct MeetingReviewView: View {
                 HStack {
                     Button("Save") { model.save() }
                     Spacer()
+                }
+            }
+        }
+    }
+
+    private func continuationCard(_ suggestion: (title: String, reason: String)) -> some View {
+        SectionCard(
+            title: "Same meeting?",
+            subtitle: "Combining links the two recordings. Neither one's audio is moved or changed."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("This may be a continuation of “\(suggestion.title)” — \(suggestion.reason).")
+                HStack {
+                    Button("Combine") { model.combineWithEarlier() }
+                    Button("Keep Separate") { model.keepSeparate() }
                 }
             }
         }

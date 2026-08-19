@@ -347,5 +347,55 @@ enum SessionTests {
         ])
     }
 
-    static var all: [Suite] { [suite, reconnectSuite] }
+    static var all: [Suite] { [suite, reconnectSuite, continuationSuite] }
+}
+
+extension SessionTests {
+    static var continuationSuite: Suite {
+        Suite("MeetingContinuation", [
+            test("a rejoined meeting links to the earlier one without moving audio") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let repository = MeetingRepository(root: root)
+                let start = Date(timeIntervalSince1970: 1_787_070_000)
+
+                let first = try repository.createMeeting(
+                    source: .googleMeet, provider: .googleMeet, startedAt: start,
+                    titles: TitleCandidates(provider: "Weekly sync", timestampFallback: "f"), now: start
+                )
+                _ = try first.store.updateMetadata { metadata in
+                    metadata.providerMeetingID = "abc-defg-hij"
+                    metadata.endedAt = start.addingTimeInterval(600)
+                    metadata.durationSeconds = 600
+                }
+                let second = try repository.createMeeting(
+                    source: .googleMeet, provider: .googleMeet,
+                    startedAt: start.addingTimeInterval(690),
+                    titles: TitleCandidates(provider: "Weekly sync", timestampFallback: "f"),
+                    now: start.addingTimeInterval(690)
+                )
+                _ = try second.store.updateMetadata { $0.providerMeetingID = "abc-defg-hij" }
+
+                let matcher = ReconnectMatcher()
+                let earlier = ReconnectMatcher.Candidate(
+                    meetingID: first.metadata.id, provider: .googleMeet,
+                    providerMeetingID: "abc-defg-hij",
+                    startedAt: start, endedAt: start.addingTimeInterval(600)
+                )
+                let later = ReconnectMatcher.Candidate(
+                    meetingID: second.metadata.id, provider: .googleMeet,
+                    providerMeetingID: "abc-defg-hij",
+                    startedAt: start.addingTimeInterval(690)
+                )
+                guard case .sameMeeting = matcher.compare(earlier, later) else {
+                    expect.fail("a rejoin with the same meeting ID should merge")
+                    return
+                }
+
+                // Both directories survive a merge: combining is a link, not a copy.
+                expect.isTrue(FileManager.default.fileExists(atPath: first.store.layout.root.path))
+                expect.isTrue(FileManager.default.fileExists(atPath: second.store.layout.root.path))
+            },
+        ])
+    }
 }

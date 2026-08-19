@@ -549,6 +549,7 @@ public final class MeetTapeRuntime {
                 metadata.processing.advance(to: .finalizing, at: self.clock.now)
                 metadata.processing.advance(to: .audioSafe, at: self.clock.now)
             }
+            linkContinuation(of: updated, store: meeting.store)
             reviewMeetingID = updated.id
             if settings.showNotifications {
                 notifications.meetingSaved(
@@ -563,6 +564,80 @@ public final class MeetTapeRuntime {
         } catch {
             Log.app.error("finalise failed: \(logSafeDescription(error), privacy: .public)")
         }
+    }
+
+    /// Associates a finished meeting with an earlier one it continues.
+    ///
+    /// Strong evidence merges on its own; anything weaker is recorded as a
+    /// suggestion for the review panel. Neither path moves or rewrites a source
+    /// segment: combining is a link, not a copy.
+    private func linkContinuation(of metadata: MeetingMetadata, store: MeetingStore) {
+        let matcher = ReconnectMatcher()
+        let later = ReconnectMatcher.Candidate(
+            meetingID: metadata.id, provider: metadata.provider,
+            providerMeetingID: metadata.providerMeetingID, url: metadata.meetingURL,
+            title: metadata.titles.provider ?? metadata.titles.window,
+            calendarEventID: metadata.calendar?.eventIdentifier,
+            applicationBundleID: metadata.applicationBundleID,
+            startedAt: metadata.startedAt, endedAt: metadata.endedAt
+        )
+
+        for summary in repository.listMeetings(limit: 6) where summary.id != metadata.id {
+            guard let found = repository.findMeeting(id: summary.id) else { continue }
+            let earlier = found.metadata
+            guard earlier.mergedIntoMeetingID == nil else { continue }
+            let candidate = ReconnectMatcher.Candidate(
+                meetingID: earlier.id, provider: earlier.provider,
+                providerMeetingID: earlier.providerMeetingID, url: earlier.meetingURL,
+                title: earlier.titles.provider ?? earlier.titles.window,
+                calendarEventID: earlier.calendar?.eventIdentifier,
+                applicationBundleID: earlier.applicationBundleID,
+                startedAt: earlier.startedAt, endedAt: earlier.endedAt
+            )
+            switch matcher.compare(candidate, later) {
+            case .unrelated:
+                continue
+            case .sameMeeting(_, let reason):
+                combine(meetingID: metadata.id, into: earlier.id, reason: reason)
+                return
+            case .possible(_, let reason):
+                _ = try? store.updateMetadata { updated in
+                    updated.possibleContinuationOf = earlier.id
+                    updated.possibleContinuationReason = reason
+                }
+                return
+            }
+        }
+    }
+
+    /// Folds one meeting into another. Both directories stay exactly as they are.
+    public func combine(meetingID: String, into earlierID: String, reason: String) {
+        guard let later = repository.findMeeting(id: meetingID),
+              let earlier = repository.findMeeting(id: earlierID)
+        else { return }
+        _ = try? later.store.updateMetadata { metadata in
+            metadata.mergedIntoMeetingID = earlierID
+            metadata.possibleContinuationOf = nil
+        }
+        _ = try? earlier.store.updateMetadata { metadata in
+            if !metadata.absorbedMeetingIDs.contains(meetingID) {
+                metadata.absorbedMeetingIDs.append(meetingID)
+            }
+            metadata.runs.append(contentsOf: later.metadata.runs)
+            metadata.durationSeconds += later.metadata.durationSeconds
+        }
+        Log.app.info("combined a meeting into an earlier one: \(reason, privacy: .public)")
+        refreshRecentMeetings()
+    }
+
+    /// Declines a suggested continuation, so it is not offered again.
+    public func keepSeparate(meetingID: String) {
+        guard let found = repository.findMeeting(id: meetingID) else { return }
+        _ = try? found.store.updateMetadata { metadata in
+            metadata.possibleContinuationOf = nil
+            metadata.possibleContinuationReason = nil
+        }
+        refreshRecentMeetings()
     }
 
     private func askToKeep(bundleIdentifier: String, title: String?) {

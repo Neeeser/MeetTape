@@ -257,6 +257,26 @@ public final class MeetingReviewModel {
     }
 
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
+
+    /// The earlier meeting this one may continue, and why.
+    public var continuationSuggestion: (title: String, reason: String)? {
+        guard let earlierID = metadata?.possibleContinuationOf,
+              let reason = metadata?.possibleContinuationReason,
+              let earlier = runtime.repository.findMeeting(id: earlierID)
+        else { return nil }
+        return (earlier.metadata.displayTitle, reason)
+    }
+
+    public func combineWithEarlier() {
+        guard let earlierID = metadata?.possibleContinuationOf else { return }
+        runtime.combine(meetingID: meetingID, into: earlierID, reason: "confirmed by the user")
+        reload()
+    }
+
+    public func keepSeparate() {
+        runtime.keepSeparate(meetingID: meetingID)
+        reload()
+    }
     public func reveal() { runtime.revealInFinder(meetingID: meetingID) }
 
     public func titleBinding() -> Binding<String> {

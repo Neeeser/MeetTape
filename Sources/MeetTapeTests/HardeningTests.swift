@@ -531,7 +531,7 @@ enum HardeningTests {
         ])
     }
 
-    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite, sensorTrustSuite, liveCaptureSuite] }
+    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite, sensorTrustSuite, liveCaptureSuite, soakSuite] }
 }
 
 extension HardeningTests {
@@ -630,6 +630,91 @@ extension HardeningTests {
                 expect.isTrue(
                     timeline.preRollFlushes.contains { $0.track == .mic && $0.seconds > 1 },
                     "the two seconds before commit should have been flushed"
+                )
+            },
+        ])
+    }
+}
+
+extension HardeningTests {
+    /// A continuous capture soak against real hardware.
+    ///
+    /// Opt-in and slow. It answers the questions a short run cannot: does memory
+    /// stay flat, do segments keep rotating, and is every file still readable and
+    /// consistent with the manifest at the end.
+    static var soakSuite: Suite {
+        Suite("Soak", [
+            test("capture stays healthy and bounded over a long run") { expect in
+                guard let minutesText = ProcessInfo.processInfo.environment["MEETTAPE_SOAK_MINUTES"],
+                      let minutes = Double(minutesText), minutes > 0
+                else {
+                    throw TestSkip("set MEETTAPE_SOAK_MINUTES=30 to run a capture soak")
+                }
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+
+                func residentMegabytes() -> Int {
+                    var usage = rusage()
+                    getrusage(RUSAGE_SELF, &usage)
+                    return Int(usage.ru_maxrss) / 1_048_576
+                }
+
+                let delegate = SilentDelegate()
+                let engine = CaptureEngine(segmentSeconds: 30, delegate: delegate)
+                await engine.arm(
+                    bundlePrefixes: ["org.mozilla.firefox", "com.tinyspeck.slackmacgap"],
+                    capturesRemote: true
+                )
+                try await engine.commit(layout: layout, meetingID: "soak", source: .manual)
+
+                let startedMemory = residentMegabytes()
+                let deadline = Date().addingTimeInterval(minutes * 60)
+                var samples: [Int] = []
+                while Date() < deadline {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                    samples.append(residentMegabytes())
+                }
+                let snapshot = await engine.stop(reason: "soak_complete")
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                let expected = minutes * 60
+                expect.isTrue(
+                    timeline.duration(track: .mic) > expected * 0.97,
+                    "captured \(Int(timeline.duration(track: .mic)))s of an expected \(Int(expected))s"
+                )
+                expect.isTrue(timeline.isComplete)
+                expect.equal(timeline.openSegments.count, 0)
+                expect.isTrue(
+                    timeline.segments(track: .mic).count >= Int(minutes * 2) - 1,
+                    "30 s rotation should produce two segments a minute"
+                )
+
+                // Every segment on disk still matches what the manifest recorded.
+                for segment in timeline.segments(track: .mic) {
+                    let info = try AudioFileInspector().inspect(
+                        url: layout.segments.appendingPathComponent(segment.file)
+                    )
+                    expect.equal(info.frameCount, segment.frameCount ?? -1, "mismatch in \(segment.file)")
+                }
+
+                let peak = samples.max() ?? startedMemory
+                expect.isTrue(
+                    peak - startedMemory < 100,
+                    "resident memory grew from \(startedMemory) MB to \(peak) MB"
+                )
+                expect.isTrue(
+                    snapshot.micSeconds > expected * 0.97,
+                    "the final snapshot should agree with the files"
+                )
+                print(
+                    "    soak: \(Int(timeline.duration(track: .mic)))s captured, "
+                        + "\(timeline.segments(track: .mic).count) segments, "
+                        + "memory \(startedMemory) → \(peak) MB, "
+                        + "\(timeline.restarts.count) restarts"
                 )
             },
         ])

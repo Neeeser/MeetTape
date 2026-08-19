@@ -151,6 +151,10 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     public var absorbedMeetingIDs: [String]
     /// Set on the meeting that was folded into another.
     public var mergedIntoMeetingID: String?
+    /// An earlier meeting this one might be a continuation of. Recorded rather
+    /// than acted on: an uncertain match is offered to the user, never guessed.
+    public var possibleContinuationOf: String?
+    public var possibleContinuationReason: String?
     /// Original filename for an imported recording, preserved verbatim.
     public var importedOriginalFilename: String?
     /// Whether the user confirmed a provisionally recorded unknown call.
@@ -196,6 +200,8 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.runs = []
         self.absorbedMeetingIDs = []
         self.mergedIntoMeetingID = nil
+        self.possibleContinuationOf = nil
+        self.possibleContinuationReason = nil
         self.importedOriginalFilename = nil
         self.provisionalDecision = nil
         self.captureWarnings = []

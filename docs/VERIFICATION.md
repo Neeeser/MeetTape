@@ -138,6 +138,13 @@ low reasoning effort on the metadata requests. All of them passed, which also
 confirms that the responses endpoint accepts that model identifier with a
 `reasoning` parameter.
 
+**Long meeting, live.** `MEETTAPE_LIVE_LONG=1` put 62 minutes of synthesised
+speech through the chunked pipeline against the real API: four diarization
+chunks, three in flight at a time, merged and de-duplicated into one
+transcript. Wall time was 13.7 minutes end to end, including local synthesis,
+the energy profile and the chunk exports. The same pipeline sending chunks one
+at a time took over ten minutes for a 25-minute file.
+
 **Live OpenAI.** `MEETTAPE_LIVE_OPENAI=1` with a locally synthesised
 three-speaker fixture. Six tests pass: credential and model access, transcription
 with segment timings, diarization separating two remote speakers, the assembled

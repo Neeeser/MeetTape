@@ -27,6 +27,22 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
     public static let diarizationCapable = ["gpt-4o-transcribe-diarize"]
     public static let metadataChoices = ["gpt-5.6-luna", "gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
 
+    /// One missing key must not reset the other two.
+    ///
+    /// The synthesized decoder throws on an absent field, and the enclosing
+    /// `AppSettings` decoder falls back to the whole default struct when this
+    /// one throws, so adding a field here would silently discard every model
+    /// identifier the user had chosen.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AIModelSettings()
+        transcription =
+            try container.decodeIfPresent(String.self, forKey: .transcription) ?? defaults.transcription
+        diarization =
+            try container.decodeIfPresent(String.self, forKey: .diarization) ?? defaults.diarization
+        metadata = try container.decodeIfPresent(String.self, forKey: .metadata) ?? defaults.metadata
+    }
+
     /// Whether the responses endpoint accepts a `reasoning` parameter for this
     /// model. GPT-4-generation models reject the field with a 400.
     public static func acceptsReasoningEffort(_ model: String) -> Bool {
@@ -61,6 +77,24 @@ public struct EnrichmentSettings: Codable, Sendable, Equatable {
 
     public var wantsAnything: Bool {
         generateTitle || generateDescription || generateNotes || generateSummary
+    }
+
+    /// As above: one absent switch must not reset the rest.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = EnrichmentSettings()
+        generateTitle =
+            try container.decodeIfPresent(Bool.self, forKey: .generateTitle) ?? defaults.generateTitle
+        generateDescription =
+            try container.decodeIfPresent(Bool.self, forKey: .generateDescription)
+            ?? defaults.generateDescription
+        generateNotes =
+            try container.decodeIfPresent(Bool.self, forKey: .generateNotes) ?? defaults.generateNotes
+        generateSummary =
+            try container.decodeIfPresent(Bool.self, forKey: .generateSummary)
+            ?? defaults.generateSummary
+        suggestSpeakers =
+            try container.decodeIfPresent(Bool.self, forKey: .suggestSpeakers) ?? defaults.suggestSpeakers
     }
 }
 
@@ -106,6 +140,23 @@ public struct SpeakerRecognitionSettings: Codable, Sendable, Equatable {
         self.learnMyVoice = learnMyVoice
         self.learnFromCorrections = learnFromCorrections
     }
+
+    /// As above.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = SpeakerRecognitionSettings()
+        recognizeKnownVoices =
+            try container.decodeIfPresent(Bool.self, forKey: .recognizeKnownVoices)
+            ?? defaults.recognizeKnownVoices
+        rememberRecurringVoices =
+            try container.decodeIfPresent(Bool.self, forKey: .rememberRecurringVoices)
+            ?? defaults.rememberRecurringVoices
+        learnMyVoice =
+            try container.decodeIfPresent(Bool.self, forKey: .learnMyVoice) ?? defaults.learnMyVoice
+        learnFromCorrections =
+            try container.decodeIfPresent(Bool.self, forKey: .learnFromCorrections)
+            ?? defaults.learnFromCorrections
+    }
 }
 
 /// Where each processing stage runs.
@@ -136,6 +187,7 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     /// True when nothing in the transcript path needs an API key.
     public var isFullyLocal: Bool { usesLocalTranscription && usesLocalDiarization }
 
+    /// As above.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = ProcessingSettings()

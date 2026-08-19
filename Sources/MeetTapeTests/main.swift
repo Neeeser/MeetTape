@@ -12,6 +12,10 @@ suites += DetectionTests.all
 suites += SessionTests.all
 suites += HardeningTests.all
 suites.append(UITests.suite)
+suites += LocalConfigurationTests.all
+suites += SpeakerIdentityTests.all
+suites += SpeakerCorrectionTests.all
+suites += BackendSelectionTests.all
 suites += ProcessingTests.all
 suites.append(PipelineTests.suite)
 suites.append(LiveOpenAITests.suite)

@@ -1,6 +1,19 @@
 import Foundation
 import MeetTapeCore
 
+/// Where the voice database lives.
+///
+/// Under Application Support and never inside a meeting folder. Embeddings are
+/// biometric identifiers that match the same person across devices, rooms and
+/// years, and a meeting folder is what a user copies, syncs and shares.
+public enum SpeakerStoreLocation {
+    public static func url(applicationSupport: URL) -> URL {
+        applicationSupport
+            .appendingPathComponent("Speakers", isDirectory: true)
+            .appendingPathComponent("voices.sqlite")
+    }
+}
+
 /// A profile as the matcher sees it: one identity and the one vector it is
 /// scored against.
 public struct SpeakerProfile: Sendable, Equatable {
@@ -42,18 +55,19 @@ public actor SpeakerStore {
 
     /// `~/Library/Application Support/MeetTape/Speakers/voices.sqlite`.
     public static func defaultURL(applicationSupport: URL) -> URL {
-        applicationSupport
-            .appendingPathComponent("Speakers", isDirectory: true)
-            .appendingPathComponent("voices.sqlite")
+        SpeakerStoreLocation.url(applicationSupport: applicationSupport)
     }
 
     public var databaseURL: URL { database.url }
 
     // MARK: - identities
 
+    /// Qualified, because `searchableProfiles` joins a table that also has
+    /// `updated_at` and SQLite rejects the ambiguity.
     private static let identityColumns = """
-        id, kind, display_name, anonymous_number, organization, is_local_user,
-        state, merged_into, created_at, updated_at, last_seen_at
+        identity.id, identity.kind, identity.display_name, identity.anonymous_number,
+        identity.organization, identity.is_local_user, identity.state, identity.merged_into,
+        identity.created_at, identity.updated_at, identity.last_seen_at
         """
 
     private func identity(from row: SpeakerDatabase.Row) -> Identity {
@@ -76,7 +90,8 @@ public actor SpeakerStore {
     private func loadIdentity(_ id: IdentityID) throws -> Identity? {
         var found: Identity?
         try database.query(
-            "SELECT \(Self.identityColumns) FROM identity WHERE id = ?", [.int64(id.rawValue)]
+            "SELECT \(Self.identityColumns) FROM identity WHERE identity.id = ?",
+            [.int64(id.rawValue)]
         ) { found = self.identity(from: $0) }
         guard var identity = found else { return nil }
         identity.aliases = try aliases(of: id)
@@ -113,11 +128,11 @@ public actor SpeakerStore {
         var sql = "SELECT \(Self.identityColumns) FROM identity WHERE 1=1"
         var bindings: [SQLValue] = []
         if let kind {
-            sql += " AND kind = ?"
+            sql += " AND identity.kind = ?"
             bindings.append(.text(kind.rawValue))
         }
-        if !includeMerged { sql += " AND merged_into IS NULL" }
-        sql += " ORDER BY COALESCE(display_name, ''), anonymous_number, id"
+        if !includeMerged { sql += " AND identity.merged_into IS NULL" }
+        sql += " ORDER BY COALESCE(identity.display_name, ''), identity.anonymous_number, identity.id"
         var out: [Identity] = []
         try database.query(sql, bindings) { out.append(self.identity(from: $0)) }
         return try out.map {
@@ -130,7 +145,10 @@ public actor SpeakerStore {
     public func localUser() throws -> Identity? {
         var found: Identity?
         try database.query(
-            "SELECT \(Self.identityColumns) FROM identity WHERE is_local_user = 1 AND merged_into IS NULL LIMIT 1"
+            """
+            SELECT \(Self.identityColumns) FROM identity
+            WHERE identity.is_local_user = 1 AND identity.merged_into IS NULL LIMIT 1
+            """
         ) { found = self.identity(from: $0) }
         return found
     }

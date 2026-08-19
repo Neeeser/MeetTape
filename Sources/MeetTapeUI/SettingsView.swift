@@ -261,6 +261,12 @@ struct OpenAISettingsTab: View {
     private var runtime: MeetTapeRuntime { model.runtime }
 
     var body: some View {
+        cloudForm
+            // Reads the keychain, which can block on an authorisation prompt.
+            .task { await model.refresh() }
+    }
+
+    private var cloudForm: some View {
         Form {
             Section("API key") {
                 SecureField("sk-…", text: model.text(\.apiKey))

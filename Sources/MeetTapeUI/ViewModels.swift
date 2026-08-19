@@ -133,7 +133,10 @@ public final class SettingsModel {
     public init(runtime: MeetTapeRuntime) {
         self.runtime = runtime
         self.localUserName = runtime.settings.localUserName
-        self.hasStoredKey = KeychainAPIKeyStore().hasKey
+        // Deliberately not read here. A keychain lookup can block on an
+        // authorisation prompt, and building a view is not the place to
+        // discover that: the panel would hang with nothing on screen.
+        self.hasStoredKey = false
     }
 
     public func refresh() async {
@@ -141,6 +144,7 @@ public final class SettingsModel {
         hostStatus = NativeMessagingInstaller().status()
         inputDescription = CoreAudioSystem.describeDefaultInput()
         sensorStatus = runtime.sensorStatus
+        hasStoredKey = KeychainAPIKeyStore().hasKey
     }
 
     public func request(_ kind: PermissionKind) async {

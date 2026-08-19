@@ -107,11 +107,13 @@ public struct RecordingAwareGate: ProcessingGate {
 /// Neural Engine, so running two meetings at once contends for one unit and
 /// wins nothing. Diarization costs 16 seconds against transcription's 249 on a
 /// 65-minute file; there is no second job worth starting.
-actor ProcessingJobLock {
+public actor ProcessingJobLock {
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
-    func acquire() async {
+    public init() {}
+
+    public func acquire() async {
         guard busy else {
             busy = true
             return
@@ -121,7 +123,7 @@ actor ProcessingJobLock {
         }
     }
 
-    func release() {
+    public func release() {
         if waiting.isEmpty {
             busy = false
         } else {

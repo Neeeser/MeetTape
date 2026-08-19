@@ -59,7 +59,7 @@ public struct FluidAudioEmbeddingExtractor: SpeakerEmbeddingExtractor {
 
 extension LocalModelManager {
     /// The configuration MeetTape ships, with the one tuned field applied.
-    static func diarizerConfiguration(speakerCount: Int?) -> OfflineDiarizerConfig {
+    public static func diarizerConfiguration(speakerCount: Int?) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig.default
         config.exposeChunkEmbeddings = true
         config.clustering.warmStartFa = LocalDiarizationTuning.warmStartFa
@@ -71,7 +71,7 @@ extension LocalModelManager {
     }
 
     /// The provenance recorded with every run, so a result can be explained.
-    static func diarizerProvenance(speakerCount: Int?) -> [String: String] {
+    public static func diarizerProvenance(speakerCount: Int?) -> [String: String] {
         var provenance = [
             "backend": LocalSpeechStack.diarizerBackendIdentifier,
             "warmStartFa": String(LocalDiarizationTuning.warmStartFa),

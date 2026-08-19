@@ -1,7 +1,8 @@
 # Releasing MeetTape
 
-A release is cut by tagging. `.github/workflows/release.yml` builds, runs the
-suite, packages a zip and a dmg with checksums, and drafts a GitHub release.
+A release is produced by pushing a version tag. `.github/workflows/release.yml`
+builds the project, runs the test suite, packages a zip and a dmg with checksums,
+and drafts a GitHub release.
 
 ```
 tag vX.Y.Z
@@ -28,26 +29,26 @@ git tag v1.2.0
 git push origin main --tags
 ```
 
-The workflow drafts the release rather than publishing it, so the artifacts can
-be checked before anyone can download them.
+The workflow drafts the release instead of publishing it, so the artifacts can be
+checked before they become downloadable.
 
 ## What is still missing
 
-Everything below is procurement, not engineering. The pipeline already has the
-steps and skips them cleanly while the credentials are absent.
+The remaining work is administrative. The pipeline already contains these steps
+and skips them while the credentials are absent.
 
 ### Apple Developer Program
 
 A paid membership ($99/year) and a **Developer ID Application** certificate.
-Without them the build is ad-hoc signed, which has two consequences:
+Without them the build is ad-hoc signed, which has three consequences:
 
-- Gatekeeper refuses to open it normally on another Mac.
+- Gatekeeper refuses to open the application normally on another Mac.
 - TCC pins its grants to the code hash, so every rebuild invalidates Microphone,
-  Accessibility and Screen Recording. A stable Developer ID signature keeps a
-  stable designated requirement and the grants survive updates.
-- Actionable notifications are refused outright under an ad-hoc signature
-  (`UNErrorDomain Code=1`), so the "Keep recording?" buttons only work on a
-  properly signed build.
+  Accessibility and Screen Recording. A Developer ID signature keeps a stable
+  designated requirement and the grants survive updates.
+- Actionable notifications are refused under an ad-hoc signature
+  (`UNErrorDomain Code=1`), so the "Keep recording?" buttons work only on a
+  signed build.
 
 ### Repository secrets to add
 
@@ -76,12 +77,12 @@ APPLE_ID=… APPLE_TEAM_ID=… APPLE_APP_PASSWORD=… \
   ./scripts/notarize.sh dist/MeetTape.app
 ```
 
-Notarization dominates the wall clock; a full pipeline usually lands in 10 to 15
-minutes.
+Notarization accounts for most of the wall-clock time; a full pipeline usually
+takes 10 to 15 minutes.
 
 ### Homebrew
 
-Not published yet, deliberately. Two current constraints:
+Not published yet. Two constraints apply:
 
 - Casks without signing and notarization are deprecated and are removed from the
   official tap, so notarization is effectively mandatory rather than optional.
@@ -108,19 +109,19 @@ cask "meettape" do
 end
 ```
 
-`zap` deliberately leaves `~/Documents/MeetTape` alone: uninstalling must not
-delete recordings.
+The `zap` stanza leaves `~/Documents/MeetTape` in place, because uninstalling the
+application must not delete recordings.
 
 ### Firefox extension distribution
 
 The extension is loaded as a temporary add-on during development. Publishing it
-on addons.mozilla.org needs a Mozilla account and a signed XPI, and the
+on addons.mozilla.org requires a Mozilla account and a signed XPI, and the
 `browser_specific_settings.gecko.id` in `extension/firefox/manifest.json`
 (`sensor@meettape.app`) has to match the listing.
 
 ## Before the first public release
 
-The specification's acceptance criteria are not all met yet. In particular:
+Several acceptance criteria from the specification are still unmet:
 
 - a genuine two-hour capture soak;
 - a 30-minute-plus Slack Huddle;
@@ -128,5 +129,4 @@ The specification's acceptance criteria are not all met yet. In particular:
 - Gatekeeper acceptance of a signed, notarized build on a clean Mac;
 - native messaging verified from the packaged app rather than the build tree.
 
-`docs/VERIFICATION.md` records what has actually been exercised, and what has
-not.
+`docs/VERIFICATION.md` records what has been exercised and what has not.

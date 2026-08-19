@@ -1,32 +1,32 @@
 # Architecture
 
-MeetTape is one process. Detection, capture, storage and processing are separate
-subsystems inside it, and the boundaries between them are load-bearing rather
-than decorative.
+MeetTape runs as a single process. Detection, capture, storage and processing are
+separate subsystems within it, and the boundaries between them are enforced in
+the module structure.
 
 ## Modules
 
 ```
-MeetTapeApp            LSUIElement executable; owns nothing but the delegate
+MeetTapeApp            LSUIElement executable; owns the application delegate
  └── MeetTapeUI        menu bar, onboarding, settings, meeting review
       └── MeetTapeServices     runtime wiring, processing pipeline
            ├── MeetTapeDetection    accessibility, window titles, sensor socket
            ├── MeetTapeIntegrations OpenAI, Keychain, EventKit, notifications
            ├── MeetTapeAudio        AVAudioEngine, process taps, files
            └── MeetTapeCore         pure logic, Foundation only
-meettape-nativehost    compiled relay between the browser and the app
+meettape-nativehost    compiled relay between the browser and the application
 ```
 
-`MeetTapeCore` has no AppKit, no AVFoundation and no network. Everything that can
-be decided without I/O is decided there, which is why the interesting failure
-modes are reproducible in a test.
+`MeetTapeCore` imports only Foundation. Every decision that can be made without
+I/O is made there, which keeps the interesting failure modes reproducible in unit
+tests.
 
-## The two-stage promotion
+## Two-stage promotion
 
-This is the central design idea, and it exists because of two measurements:
-Slack opens the microphone about twelve seconds before the user joins a Huddle,
-and a Google Meet prejoin screen is byte-identical to an active call from
-outside the browser.
+Capture is promoted through two stages because of two measurements taken during
+development: Slack opens the microphone about twelve seconds before the user
+joins a Huddle, and a Google Meet prejoin screen is indistinguishable from an
+active call when observed from outside the browser.
 
 ```
 CANDIDATE   a provider looks active
@@ -36,12 +36,13 @@ CONFIRMED   Slack: the "Leave Huddle" control exists
             fallback: the microphone held past a dwell on a provider page
             → create the meeting directory, flush the ring, write segments
 ENDED       provider end plus a grace period
-            → finalise, or discard if it was never confirmed
+            → finalise, or discard if the call was never confirmed
 ```
 
-The ring costs about 5.5 MiB and roughly a microsecond per callback, which is
-what makes "always capture, commit later" affordable. An abandoned prejoin leaves
-no directory behind; a confirmed meeting still contains its opening sentence.
+The ring buffer uses about 5.5 MiB and roughly a microsecond per callback, which
+makes it cheap enough to run for every candidate. An abandoned prejoin screen
+leaves no directory on disk, and a confirmed meeting includes its opening
+sentence.
 
 ## Capture
 
@@ -55,40 +56,41 @@ CoreAudio tap ──▶ RemoteTapCoordinator ───────────�
                  RemoteRecoveryPolicy
 ```
 
-The policies are pure state machines: they receive buffer arrivals, configuration
-changes and poll ticks, and answer one question, "rebuild or not". The
-coordinators drive them against protocols (`MicrophoneEngineController`,
+The policies are pure state machines. They receive buffer arrivals, configuration
+changes and poll ticks, and decide whether the source should be rebuilt. The
+coordinators drive them through protocols (`MicrophoneEngineController`,
 `ProcessTapController`) that AVFoundation and CoreAudio implement in production
-and fakes implement in tests. The rebuild-storm regression is therefore a unit
-test, not a hardware exercise.
+and that fakes implement in tests, so the rebuild-storm regression is covered by
+a unit test instead of a hardware exercise.
 
-Buffers are copied inside the audio callback and handed to a private serial queue.
-No file I/O happens on a render thread, and no reference to a tap buffer escapes
-its callback. Health changes are reported the same way: a manifest append does
-`write` and `fsync`, which must never happen on a render thread, so the
-coordinators' callbacks hop to the control queue first.
+Buffers are copied inside the audio callback and handed to a private serial
+queue. No file I/O happens on a render thread, and no reference to a tap buffer
+escapes its callback. Health changes follow the same rule: appending to the
+manifest performs `write` and `fsync`, so the coordinators' callbacks hop to the
+control queue before reporting.
 
-Everything that builds or tears down a device runs on that one control queue:
-arming, committing, stopping, retargeting and the 500 ms poll. That is what makes
-"a poll-driven rebuild races a user-driven stop" impossible rather than unlikely,
-and it is why a stop can never leave a live engine or tap behind.
+Every operation that builds or tears down a device runs on that one control
+queue: arming, committing, stopping, retargeting and the 500 ms poll. This makes
+a poll-driven rebuild racing a user-driven stop impossible, and it guarantees
+that stopping a recording cannot leave a live engine or tap behind.
 
-The remote writer opens on the first remote packet rather than at commit. A
-provider's audio process often does not exist yet the instant a meeting is
-confirmed, and a writer that was never created would drop every packet for the
-rest of the meeting while the tap reported healthy.
+The remote writer is opened when the first remote packet arrives rather than at
+commit time. A provider's audio process often does not exist at the moment a
+meeting is confirmed, and a writer that was never created would silently discard
+every packet for the rest of the meeting while the tap reported healthy.
 
-### Why the microphone and the remote source differ
+### Microphone and remote health models
 
-They fail differently, so they are monitored differently.
+The two sources fail in different ways, so they are monitored differently.
 
-The microphone has exactly one healthy state: buffers are arriving. Absence of
-buffers is always a fault, and the only complication is not mistaking a rebuild
-or a configuration burst for one.
+The microphone has one healthy state: buffers are arriving. Absence of buffers is
+always a fault, and the only complication is avoiding false positives during a
+rebuild or a configuration burst.
 
-A process tap has two healthy states. When the tapped application is silent it
-delivers no callbacks at all, indefinitely, and that is correct. The decidable
-signal is the application's own `kAudioProcessPropertyIsRunningOutput`:
+A process tap has two healthy states. When the tapped application produces no
+audio it delivers no callbacks at all, indefinitely, and that is correct
+behaviour. The signal that makes the state decidable is the application's own
+`kAudioProcessPropertyIsRunningOutput`:
 
 ```
 no target process              → degraded, source gone, keep polling
@@ -97,25 +99,25 @@ producing + callbacks          → healthy
 producing + no callbacks       → failed, rebind
 ```
 
-Only the last line is a fault. Reusing the microphone watchdog here would report a
-quiet meeting as broken every time nobody spoke.
+Only the last case is a fault. Applying the microphone watchdog here would report
+a quiet meeting as broken whenever nobody spoke.
 
-## The manifest is the timeline
+## The manifest as timeline
 
-Audio container headers are not trusted. Every segment open, close, format change,
-restart, health transition and marker is appended to `segments/manifest.jsonl`
-and flushed with `fsync`, so a hard kill loses at most a partial final line, which
-the reader tolerates.
+Audio container headers are not trusted. Every segment open, close, format
+change, restart, health transition and marker is appended to
+`segments/manifest.jsonl` and flushed with `fsync`, so a hard kill loses at most
+a partial final line, which the reader tolerates.
 
-Duration is the sum of each segment's own frames over that segment's own sample
-rate. This is not pedantry: a Bluetooth profile switch drops the input to 16 kHz
-mid-meeting, and dividing an accumulated frame count by the current rate
-under-reported a real 12-minute session by nearly two minutes.
+Duration is the sum of each segment's own frame count over that segment's own
+sample rate. A Bluetooth profile switch drops the input to 16 kHz mid-meeting,
+and dividing an accumulated frame count by the current sample rate under-reported
+a real twelve-minute session by nearly two minutes.
 
 Startup recovery walks every incomplete meeting, adopts any segment that has an
 open record and no close record by reading its real length from the file, and
-reconstructs segments the manifest never recorded at all. A killed recording
-becomes an interrupted meeting that still processes; it is never discarded.
+reconstructs segments that the manifest never recorded. A recording killed by a
+crash becomes an interrupted meeting that still processes.
 
 ## Session lifecycle
 
@@ -125,14 +127,14 @@ idle ──▶ candidate ──▶ recording ──▶ reconnecting ──▶ en
           discard        run 1..n      run 2 appended
 ```
 
-A meeting and a recording are different objects. A disconnect inside the
-reconnect window keeps the meeting and appends a second run; source segments are
-never rewritten to merge anything. Two separate meetings that turn out to be one
-are linked afterwards through `ReconnectMatcher`, which merges automatically only
-on strong evidence and otherwise asks.
+A meeting and a recording are separate objects. A disconnect within the reconnect
+window keeps the meeting and appends a second run, and source segments are never
+rewritten to merge anything. Two meetings that turn out to be the same call are
+linked afterwards by `ReconnectMatcher`, which merges automatically only on
+strong evidence and otherwise presents the match as a suggestion.
 
-A manually started recording ignores provider state entirely. Nothing a detector
-observes can end it.
+A manually started recording ignores provider state entirely, and no detector
+observation can end it.
 
 ## Processing
 
@@ -142,37 +144,38 @@ recording → finalizing → audio_safe → transcribing → diarizing
                                           ↘ failed (resumable at the failed stage)
 ```
 
-`audio_safe` is the boundary. Nothing reaches OpenAI before it, and after it every
-stage is retryable without risking the recording. Each transition is written to
-`metadata.json` before the next stage starts, and each completed chunk is
-appended to `transcript.raw.json` as it arrives, so a resumed run never re-sends
-work that already succeeded.
+`audio_safe` is the boundary between capture and network work. Nothing is sent to
+OpenAI before it, and every stage after it can be retried without risking the
+recording. Each transition is written to `metadata.json` before the next stage
+starts, and each completed chunk is appended to `transcript.raw.json` as it
+arrives, so a resumed run does not repeat work that already succeeded.
 
 ### Speakers
 
-The microphone track on a remote call is the local user by construction, so it is
+On a remote call the microphone track contains only the local user, so it is
 transcribed and never diarized. Only the remote track is diarized. Measured on a
 three-speaker sample, diarizing the remote track alone scored 97% against 84% for
-diarizing the mix, and the local speaker is exact by construction rather than
-merely likely.
+diarizing a mixdown of both tracks, and the local speaker is identified by
+construction.
 
 Anonymous labels are namespaced per chunk (`remote_chunk_002_speaker_01`) because
-the API's labels are only stable within one request. Mapping several raw clusters
-onto one person is the speaker-resolution stage's job, and its output is a
-suggestion stored in `speakers.map.json`. A human assignment always wins, and
-renaming re-renders the Markdown without another request.
+the API's labels are stable only within a single request. Mapping several raw
+clusters onto one person is the job of the speaker-resolution stage, whose output
+is a suggestion stored in `speakers.map.json`. An assignment made by the user
+takes precedence, and renaming re-renders the Markdown without another API
+request.
 
-An in-person or imported recording has one track holding everyone, so it is
-diarized and keeps its raw labels.
+An in-person or imported recording has a single track containing every speaker,
+so it is diarized and keeps its raw labels.
 
 ### Long meetings
 
-The diarization endpoint rejects audio longer than 1400 seconds and bodies larger
-than 25 MiB. Chunks target 19 minutes, and each boundary is nudged to the quietest
-point within a minute either side using a simple energy profile. Adjacent chunks
-overlap by eight seconds so a sentence crossing a boundary survives, and the
-overlap is de-duplicated by text similarity when the canonical transcript is
-assembled.
+The diarization endpoint rejects audio longer than 1400 seconds and request
+bodies larger than 25 MiB. Chunks target 19 minutes, and each boundary is moved
+to the quietest point within a minute either side using an energy profile.
+Adjacent chunks overlap by eight seconds so that a sentence crossing a boundary
+survives, and the overlap is de-duplicated by text similarity when the canonical
+transcript is assembled.
 
 ## Browser sensor
 
@@ -184,26 +187,28 @@ content script → background → connectNative → meettape-nativehost
                                           BrowserSensorServer (app)
 ```
 
-The extension reads semantic signals only: URL shape and accessibility labels,
-never CSS class names. The host is a compiled binary because browsers spawn hosts
-with a minimal `PATH`, and it lives in Application Support because a host under a
-TCC-protected directory never launches at all.
+The extension reads semantic signals only: URL structure and accessibility
+labels, never CSS class names. The host is a compiled binary because browsers
+spawn hosts with a minimal `PATH`, and it is installed in Application Support
+because a host placed under a TCC-protected directory never launches.
 
-The sensor is combined with native evidence rather than replacing it, and the
-stronger of the two wins. A provider renaming its leave button would otherwise
-take a live meeting from confirmed to nothing. State is kept per tab, so a second
-tab opened during a call cannot overwrite the one that is in it, and an event
-older than the one already held is ignored.
+Sensor evidence is combined with native evidence, and the stronger of the two
+determines the state. If a provider renamed its leave button, substituting sensor
+evidence for native evidence would take a live meeting from confirmed to nothing.
+State is tracked per tab, so a second tab opened during a call cannot overwrite
+the state of the tab that is in the call, and an event older than the one already
+held is ignored.
 
-Losing the extension costs precision, never the meeting: when it goes quiet the
-detector falls back to native signals and an in-flight recording keeps running.
+When the extension goes quiet, detection falls back to native signals and an
+in-flight recording continues, so losing the extension costs accuracy rather than
+the recording.
 
-The app accepts a socket connection only from its own relay binary, launched by a
-browser. MeetTape holds the microphone and system-audio grants, so a process that
-could fake a meeting event would get recording without ever triggering a
-permission prompt of its own.
+The application accepts a socket connection only from its own relay binary when
+that binary was launched by a browser. MeetTape holds the microphone and
+system-audio grants, so a process able to send a fabricated meeting event could
+obtain a recording without triggering a permission prompt of its own.
 
 Firefox routes every tab through one CoreAudio object, so meeting audio cannot be
 separated from a video playing in another tab. The extension reports how many
-other tabs are audible and the meeting is flagged; recording is never delayed or
-blocked for it.
+other tabs are audible, the meeting is flagged accordingly, and recording is
+never delayed or blocked because of it.

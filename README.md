@@ -1,34 +1,37 @@
 # MeetTape
 
-MeetTape is a macOS menu-bar application that records meetings without being
-asked. It watches for Slack Huddles and for Google Meet and Zoom in the browser,
-captures the microphone and the meeting audio as two separate streams, transcribes
-and diarizes them through OpenAI, and leaves ordinary files behind.
+MeetTape is a macOS menu-bar application that records meetings automatically. It
+detects Slack Huddles and Google Meet and Zoom calls in the browser, records the
+microphone and the meeting audio as two separate streams, transcribes and
+diarizes them through the OpenAI API, and writes the results to ordinary files on
+disk.
 
-It never joins a meeting as a participant, needs no calendar entry, records no
-video, and stores nothing in a proprietary database.
+It does not join meetings as a participant, does not require a calendar entry,
+does not record video, and does not store anything in a proprietary database.
 
-The design goal is narrow: **never miss the beginning of a meeting.** A slightly
-overlong recording is acceptable. A missing first sentence is not.
+The main design requirement is that a recording covers the start of the meeting.
+Capture begins as soon as a call looks likely and the first fifteen seconds are
+held in memory, so the opening of a meeting is included once the call is
+confirmed.
 
-## What works today
+## Supported workflows
 
-| Workflow | State |
+| Workflow | Implementation |
 |---|---|
-| Slack Huddle, automatic | Joins detected from the `Leave Huddle` accessibility control |
-| Google Meet in Firefox, automatic | Extension when installed, window title and microphone state otherwise |
-| Zoom in Firefox, automatic | Same path; the numeric meeting ID needs the extension |
-| Unsupported applications | Provisional recording, then "keep this?" |
-| Manual recording | Menu bar, unaffected by provider state |
+| Slack Huddle, automatic | Detected from the `Leave Huddle` accessibility control |
+| Google Meet in Firefox, automatic | Browser extension when installed, otherwise window titles and microphone state |
+| Zoom in Firefox, automatic | Same path; the numeric meeting ID requires the extension |
+| Unsupported applications | Records provisionally and asks whether to keep the recording |
+| Manual recording | Started from the menu bar and unaffected by provider state |
 | In-person meeting | Microphone only, diarized |
-| Import a recording | WAV, M4A, MP3, CAF, AIFF, MP4 via AVFoundation |
+| Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation |
 | Transcription and diarization | OpenAI, chunked for long meetings |
-| Speaker names | Suggested by the model, always correctable by hand |
-| Crash recovery | Interrupted recordings are adopted, not discarded |
+| Speaker names | Suggested by the model and editable by hand |
+| Crash recovery | Interrupted recordings are adopted on the next launch |
 
-FaceTime detection and Safari are not implemented. Chrome ships the same
-extension but its MV3 service worker sleeps, so the sensor is less reliable there
-than in Firefox; native detection covers it either way.
+FaceTime detection and Safari support are not implemented. Chrome uses the same
+extension, but its MV3 service worker suspends when idle, so the sensor is less
+reliable there than in Firefox. Native detection covers Chrome either way.
 
 ## How capture works
 
@@ -40,29 +43,31 @@ microphone ── AVAudioEngine ──┐
 meeting app ── CoreAudio tap ─┘
 ```
 
-Neither stream is mixed at record time and neither is resampled. Alignment
-happens later from the host timestamps stamped on every buffer.
+The streams are neither mixed nor resampled while recording. Alignment is
+computed afterwards from the host timestamps recorded with every buffer.
 
-The details below are not stylistic preferences. Each one comes from a measured
-failure:
+The following details come from measurements taken during development, and each
+one addresses a failure that was observed on real hardware:
 
-- **A configuration-change burst is debounced for 400 ms before rebuilding.**
-  macOS emits several topology events while Bluetooth negotiates, and one of them
-  described a device mid-teardown as 0 channels at 0 Hz.
-- **The frame watchdog is suppressed for 1.5 s after a rebuild starts.** Without
-  it the watchdog and the configuration observer drove each other into eight
-  rebuilds in 5.8 seconds.
-- **The microphone watchdog measures buffer arrival, not amplitude, at 2 s.**
-  An `AVAudioEngine` can report `isRunning == true` while its callbacks have been
-  dead for minutes. Silence is normal; absence of callbacks is not.
-- **The remote tap uses a different health model entirely.** A tap on an idle
-  application delivers no callbacks at all, forever, and that is correct. Only
-  "the app is producing output and we are receiving nothing" is a fault.
-- **Duration is summed per segment.** A Bluetooth profile switch drops the input
-  to 16 kHz mid-meeting; dividing accumulated frames by the current rate
-  under-reported a real session by two thirds.
-- **Segments are CAF.** Under `SIGKILL`, CAF stayed fully readable, WAV
-  under-reported its tail, and M4A became unopenable.
+- Configuration changes are debounced for 400 ms before the engine is rebuilt.
+  macOS emits several device topology events while Bluetooth negotiates, and one
+  of them described a device that was mid-teardown as 0 channels at 0 Hz.
+- The frame watchdog is suppressed for 1.5 s after a rebuild starts. Without the
+  delay, the watchdog and the configuration observer triggered each other and
+  produced eight rebuilds in 5.8 seconds.
+- The microphone watchdog measures buffer arrival at a 2-second threshold rather
+  than signal amplitude. An `AVAudioEngine` can report `isRunning == true` while
+  its callbacks have been dead for minutes, and a silent room is normal.
+- The remote tap uses a separate health model. A tap on an application that is
+  producing no audio delivers no callbacks at all, which is the expected
+  behaviour, so the fault condition is the application producing output while the
+  tap receives nothing.
+- Duration is summed per segment. A Bluetooth profile switch drops the input to
+  16 kHz mid-meeting, and dividing an accumulated frame count by the current
+  sample rate under-reported a real session by two thirds.
+- Segments are written as CAF. After `SIGKILL`, CAF files remained fully
+  readable, WAV files under-reported their tail, and M4A files could not be
+  opened.
 
 ## Architecture
 
@@ -78,16 +83,18 @@ MeetTapeServices      runtime wiring and the processing pipeline
 MeetTapeUI            menu bar, onboarding, settings, meeting review
 ```
 
-Detection produces evidence. `SessionController` decides the lifecycle.
-`CaptureEngine` captures. No provider adapter owns a recording, and the browser
-extension is a sensor that can disappear without stopping anything.
+Detection code produces evidence about what is happening on the machine.
+`SessionController` consumes that evidence and owns the recording lifecycle, and
+`CaptureEngine` performs the capture. Provider adapters have no control over
+recordings, and the browser extension is one evidence source among several, so
+losing it reduces detection accuracy without stopping a recording.
 
-Capture is a two-stage promotion: it starts the moment a call becomes a
-*candidate*, writing into a 15-second memory ring, and only becomes files when
-the call is *confirmed*. An abandoned prejoin screen therefore leaves nothing
-behind, and a confirmed meeting still has its opening sentence.
+Capture uses a two-stage promotion. It starts as soon as a call becomes a
+candidate and writes into a 15-second ring buffer in memory. Files are created
+only when the call is confirmed, so an abandoned prejoin screen leaves nothing on
+disk while a confirmed meeting still includes its opening.
 
-More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 ## Developer setup
 
@@ -103,7 +110,7 @@ cd MeetTape
 open dist/MeetTape.app
 ```
 
-Tests run as a plain executable (`meettape-test`) rather than through `swift
+Tests run as a plain executable (`meettape-test`) instead of through `swift
 test`, because XCTest and swift-testing ship with Xcode and this project is built
 to work without it.
 
@@ -112,10 +119,10 @@ to work without it.
 ./scripts/test.sh --filter SlackHuddle      # one suite
 ```
 
-Ad-hoc signing means macOS re-issues every TCC grant on each rebuild. Expect to
-re-grant Microphone, Accessibility and Screen Recording after `bundle-app.sh`.
-A Developer ID signature has a stable designated requirement and does not have
-this problem.
+Ad-hoc signing means macOS reissues every TCC grant on each rebuild, so
+Microphone, Accessibility and Screen Recording have to be granted again after
+running `bundle-app.sh`. A Developer ID signature has a stable designated
+requirement and keeps its grants across rebuilds.
 
 ## Browser extension
 
@@ -125,97 +132,107 @@ npm test          # the sensor logic
 ./build.sh        # writes dist/firefox and dist/chrome
 ```
 
-To load it in Firefox during development: `about:debugging#/runtime/this-firefox`
-→ Load Temporary Add-on → pick `extension/dist/firefox/manifest.json`. Content
-scripts do not appear in tabs that were already open, so reload any Meet or Zoom
-tab afterwards.
+To load the extension in Firefox during development, open
+`about:debugging#/runtime/this-firefox`, choose Load Temporary Add-on, and select
+`extension/dist/firefox/manifest.json`. Content scripts are not injected into
+tabs that were already open, so reload any Meet or Zoom tab afterwards.
 
-The extension talks to a compiled native messaging host, not to a script: browsers
-spawn hosts with a minimal `PATH`, so an interpreter shebang silently never
-resolves. MeetTape installs the host and its manifest on launch.
+The extension communicates with a compiled native messaging host. Browsers spawn
+hosts with a minimal `PATH`, so a script with an interpreter shebang fails to
+launch. MeetTape installs the host binary and its manifest at startup.
 
-The app only accepts a socket connection from its own relay binary, launched by a
-browser. MeetTape holds the microphone grant, so anything that could fake a
-meeting event would get recording without a prompt of its own. A refused
-connection is logged with its reason and shown in Settings → Permissions.
+The application accepts a socket connection only from its own relay binary when
+that binary was launched by a browser. MeetTape holds the microphone grant, so a
+process able to send a fabricated meeting event could record audio without
+triggering a permission prompt of its own. Refused connections are logged with a
+reason and shown in Settings under Permissions.
 
 ## Permissions
 
-| Permission | Needed for | Without it |
+| Permission | Used for | Effect when missing |
 |---|---|---|
-| Microphone | Recording your side | Nothing can be recorded |
-| System Audio & Screen Recording | Window titles for detection | Browser detection falls back to audio state |
-| Accessibility | Slack Huddle join and leave | Slack falls back to microphone heuristics |
-| Calendar | Titles and attendees | Everything still records |
-| Notifications | Start, saved and failure messages | Silent operation |
+| Microphone | Recording the local participant | No recording is possible |
+| System Audio and Screen Recording | Window titles used in detection | Browser detection falls back to audio state |
+| Accessibility | Slack Huddle join and leave detection | Slack detection falls back to microphone heuristics |
+| Calendar | Meeting titles and attendees | Recording is unaffected |
+| Notifications | Start, saved and failure messages | The application runs silently |
 
-Process taps need no prompt of their own beyond Microphone. Settings shows the
-effective state of each permission rather than trusting the System Settings
-toggle, because a stale TCC record can read as enabled while the running build
+Process taps require no prompt beyond the microphone grant. The Permissions tab
+in Settings reports the effective state of each permission by probing it, because
+a stale TCC record can appear enabled in System Settings while the running build
 has no access.
 
 ## OpenAI configuration
 
-Settings → OpenAI takes an API key, stores it in the login keychain, and offers
-Test Connection, which fetches one model description at no cost and proves both
-the key and access to that model.
+The OpenAI tab in Settings accepts an API key, stores it in the login keychain,
+and provides a Test Connection button that fetches a single model description to
+confirm both the key and access to that model.
 
-Models are configuration, not constants:
+Model identifiers are settings rather than constants:
 
-- transcription defaults to `whisper-1`, which returns the timings the timeline
-  needs; several newer models return excellent text with no segments at all;
+- transcription defaults to `whisper-1`, which returns the segment timings the
+  timeline needs, while several newer models return good text with no timings;
 - diarization defaults to `gpt-4o-transcribe-diarize`;
 - metadata defaults to `gpt-5.1`.
 
-Every enrichment is optional. With all of them off, MeetTape still records and
-still transcribes.
+Every enrichment step is optional. With all of them disabled, MeetTape still
+records and transcribes.
 
-Spend and usage are not readable from a project key, so MeetTape shows no balance
-and links to the OpenAI dashboard instead.
+Spend and usage are not readable through a project key, so MeetTape shows no
+balance and links to the OpenAI dashboard.
 
-## Where recordings live
+## Where recordings are stored
 
-`~/Documents/MeetTape/Meetings/YYYY/MM/<meeting>/`, configurable in Settings.
+Recordings are written to `~/Documents/MeetTape/Meetings/YYYY/MM/<meeting>/`,
+which can be changed in Settings.
 
 ```
 2026-08-18-1418-slack-huddle-engineering/
 ├── segments/
-│   ├── mic.0001.caf          immutable source
-│   ├── system.0001.caf       immutable source
-│   └── manifest.jsonl        append-only, the timeline authority
-├── api/                      raw API responses, exactly as received
+│   ├── mic.0001.caf          source audio for the local microphone
+│   ├── system.0001.caf       source audio for the meeting application
+│   └── manifest.jsonl        append-only record of every capture event
+├── api/                      API responses as received
 ├── metadata.json             title, participants, calendar link, processing state
-├── transcript.raw.json       raw diarization, never rewritten
-├── speakers.map.json         label to name, human-editable
-├── transcript.json           canonical timeline
-├── transcript.md             rendered for reading
-├── notes.md                  yours, never touched by AI
-├── summary.md                generated
-└── mixed.caf                 derived, safe to delete
+├── transcript.raw.json       diarization output as returned by the model
+├── speakers.map.json         mapping from raw labels to names, editable by hand
+├── transcript.json           canonical transcript on a single timeline
+├── transcript.md             rendered transcript for reading
+├── notes.md                  user notes, which no processing step modifies
+├── summary.md                generated summary
+└── mixed.caf                 mixdown of both tracks, regenerated on demand
 ```
 
-Renaming a speaker edits `speakers.map.json` and re-renders. It never
-re-transcribes and never modifies the raw diarization.
+The manifest is the authoritative timeline; audio container headers are not
+trusted. The source segments, the manifest lines, the raw API responses and any
+imported original file are never modified after they are written. The Markdown
+files, `summary.md` and `mixed.caf` are derived from those inputs and can be
+deleted safely.
+
+Renaming a speaker updates `speakers.map.json` and re-renders the transcript. It
+does not re-transcribe the audio and does not modify the raw diarization output.
 
 ## Privacy
 
-Audio goes to OpenAI, because cloud transcription is what the product does. It
-goes nowhere else. There is no MeetTape account, no telemetry, and no analytics.
+Audio is uploaded to the OpenAI API for transcription and diarization, which is
+how the transcripts are produced. It is not sent anywhere else. There is no
+MeetTape account, no telemetry and no analytics.
 
-Logs carry operational facts only: identifiers, counts, durations, health states.
-Meeting titles, transcripts, notes, participant names and meeting URLs are never
-logged, and the API key is never written to disk outside the keychain.
+Logs contain operational information only: identifiers, counts, durations and
+health states. Meeting titles, transcripts, notes, participant names and meeting
+URLs are treated as content and are never logged. The API key is stored in the
+keychain and is not written anywhere else on disk.
 
-Uninstalling MeetTape leaves every recording readable.
+Recordings remain readable after MeetTape is uninstalled.
 
-## What has been verified
+## Verification status
 
-[docs/VERIFICATION.md](docs/VERIFICATION.md) records what was actually exercised
-and what was only implemented, including a real capture run against hardware, a
-crash recovered from real files, and a full import through the live API. Several
-things are implemented but unverified, including a real Slack Huddle, a real
-browser meeting with the extension loaded, and a long soak. They are listed there
-rather than implied here.
+[docs/VERIFICATION.md](docs/VERIFICATION.md) records which behaviour has been
+exercised and which has only been implemented, including a capture run against
+real hardware, recovery from a crash on real files, and a full import through the
+live API. Several features are implemented but unverified, among them a real
+Slack Huddle, a real browser meeting with the extension loaded, and a long soak.
+They are listed in that file.
 
 ## Licence
 

@@ -245,9 +245,9 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     }
 }
 
-/// Conditions that justify interrupting the user. Everything not listed here —
-/// silence, mute, an idle remote application, a single successful rebuild, a
-/// device switch that recovered — is normal and stays silent.
+/// Conditions that justify interrupting the user. Everything else stays silent:
+/// silence, mute, an idle remote application, a single successful rebuild, and a
+/// device switch that recovered are all normal.
 public enum CaptureWarning: Sendable, Equatable {
     case microphoneUnrecovered(seconds: Double)
     case rebuildLoop(count: Int, windowSeconds: Double)
@@ -272,11 +272,11 @@ public enum CaptureWarning: Sendable, Equatable {
     public var message: String {
         switch self {
         case .microphoneUnrecovered:
-            "MeetTape can't currently capture your microphone. Remote audio is still being recorded."
+            "MeetTape cannot capture the microphone at the moment. Meeting audio is still being recorded."
         case .rebuildLoop:
             "The microphone keeps disconnecting. Audio may be incomplete."
         case .remoteProducingWithoutCallbacks:
-            "The meeting app is playing audio that MeetTape isn't receiving. Reconnecting."
+            "The meeting application is playing audio that MeetTape is not receiving. Reconnecting."
         case .segmentWriteFailed:
             "MeetTape could not write recorded audio to disk."
         case .permissionRevoked(let track):

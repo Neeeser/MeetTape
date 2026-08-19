@@ -52,7 +52,7 @@ struct GeneralSettingsTab: View {
                 )
                 if runtime.settings.providers.detectionPaused {
                     Label(
-                        "Automatic detection is paused. Meetings will not be recorded until you resume it.",
+                        "Automatic detection is paused. Meetings are not recorded until it is resumed.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .foregroundStyle(.orange)
@@ -63,8 +63,8 @@ struct GeneralSettingsTab: View {
                 TextField("Name", text: model.text(\.localUserName))
                     .onSubmit { model.saveLocalUserName() }
                 Text(
-                    "Used for your own speech on a remote call, which comes from the microphone "
-                        + "track and needs no identification."
+                    "Used to label your own speech. On a remote call it comes from the "
+                        + "microphone track, so it is attributed without diarization."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -92,9 +92,9 @@ struct ProviderSettingsTab: View {
                     Text(sensorLabel).foregroundStyle(sensorColor)
                 }
                 Text(
-                    "MeetTape records Meet and Zoom with or without the extension. Without it, "
-                        + "a prejoin screen cannot be told apart from a joined call, so recordings "
-                        + "start earlier and run a little longer."
+                    "Meet and Zoom are recorded whether or not the extension is installed. "
+                        + "Without it, a prejoin screen cannot be distinguished from a joined "
+                        + "call, so recordings start earlier and run somewhat longer."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -125,9 +125,9 @@ struct ProviderSettingsTab: View {
     private var sensorLabel: String {
         switch runtime.status.sensorConnection {
         case .fresh: "Connected"
-        case .stale: "Connected but silent — using native detection"
-        case .disconnected: "Disconnected — using native detection"
-        case .absent: "Not installed — using native detection"
+        case .stale: "Connected but silent, using native detection"
+        case .disconnected: "Disconnected, using native detection"
+        case .absent: "Not installed, using native detection"
         }
     }
 
@@ -198,8 +198,8 @@ struct AudioSettingsTab: View {
                 )
                 Text(
                     "A Bluetooth headset switches its microphone to the hands-free profile at "
-                        + "16 kHz. That is still valid audio and is recorded accurately, but it "
-                        + "transcribes less well than the built-in microphone at 48 kHz."
+                        + "16 kHz. The audio is recorded accurately at that rate, and it "
+                        + "transcribes less accurately than the built-in microphone at 48 kHz."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -219,9 +219,9 @@ struct AudioSettingsTab: View {
                     Text("\(Int(runtime.settings.preRollSeconds)) seconds")
                 }
                 Text(
-                    "Audio is written in short segments so a crash costs under a tenth of a "
-                        + "second, and capture starts before a call is confirmed so the first "
-                        + "sentence is never missed."
+                    "Audio is written in short segments, so a crash loses less than a tenth of "
+                        + "a second. Capture begins before a call is confirmed and the pre-roll "
+                        + "is kept in memory, which covers the opening of the meeting."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -255,7 +255,7 @@ struct OpenAISettingsTab: View {
                             .foregroundStyle(.red).font(.caption)
                     }
                 }
-                Text("Stored in the macOS keychain. Spend and usage are not readable from a project key; open your OpenAI dashboard for those.")
+                Text("The key is stored in the macOS keychain. Spend and usage are not readable through a project key, so use the OpenAI dashboard to review them.")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Open the OpenAI dashboard", destination: URL(string: "https://platform.openai.com/usage")!)
                     .font(.caption)
@@ -271,7 +271,7 @@ struct OpenAISettingsTab: View {
                 enrichmentToggle("Generate notes", keyPath: \.generateNotes)
                 enrichmentToggle("Generate a summary", keyPath: \.generateSummary)
                 enrichmentToggle("Suggest speaker names", keyPath: \.suggestSpeakers)
-                Text("The recording and transcript stay useful with all of these off.")
+                Text("Recording and transcription work with all of these disabled.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -338,8 +338,8 @@ struct PermissionsSettingsTab: View {
                 Button("Re-install Host") { model.installHost() }
                 if let rejected = model.sensorStatus?.rejectedConnections, rejected > 0 {
                     Label(
-                        "\(rejected) connection\(rejected == 1 ? "" : "s") refused: only MeetTape's "
-                            + "own relay, launched by a browser, may report meetings.",
+                        "\(rejected) connection\(rejected == 1 ? "" : "s") refused. Only "
+                            + "MeetTape's own relay, launched by a browser, may report meetings.",
                         systemImage: "shield.lefthalf.filled"
                     )
                     .font(.caption)
@@ -374,9 +374,10 @@ struct StorageSettingsTab: View {
                 Text(
                     """
                     Each meeting is a folder of ordinary files: the recorded audio in CAF \
-                    segments, an append-only manifest, the raw API responses, the transcript as \
-                    JSON and Markdown, your notes, and a speaker map. Nothing needs MeetTape to \
-                    be readable, and deleting the app leaves every recording intact.
+                    segments, an append-only manifest, the API responses, the transcript as \
+                    JSON and Markdown, your notes, and a speaker map. Every file can be read \
+                    without MeetTape, and uninstalling the application leaves the recordings \
+                    in place.
                     """
                 )
                 .font(.caption).foregroundStyle(.secondary)

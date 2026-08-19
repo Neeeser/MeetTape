@@ -5,7 +5,7 @@ import Synchronization
 ///
 /// Each record is flushed before the call returns, so a hard kill can lose at most
 /// the line currently being written; the reader tolerates a truncated tail. Callers
-/// must keep this off the render thread — segment writing runs on its own queue.
+/// must keep this off the render thread. Segment writing runs on its own queue.
 public final class ManifestWriter: Sendable {
     private struct State {
         var descriptor: Int32

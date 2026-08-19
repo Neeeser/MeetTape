@@ -98,7 +98,7 @@ public final class OnboardingModel {
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
-    public var inputDescription = "—"
+    public var inputDescription = "Unknown"
     public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String
     public var apiKey = ""

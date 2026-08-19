@@ -109,7 +109,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 let detail = progress.totalChunks > 0
                     ? "\(progress.state.displayName) \(progress.completedChunks)/\(progress.totalChunks)"
                     : progress.state.displayName
-                let item = NSMenuItem(title: "  \(progress.title) — \(detail)", action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: "  \(progress.title): \(detail)", action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             }
@@ -189,7 +189,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             status.health.mic.isLosingAudio
                 ? "Microphone unavailable"
                 : "Meeting audio unavailable"
-        case .idleButBound: "Meeting audio is quiet"
+        case .idleButBound: "Meeting audio is silent"
         case .healthy, .idle: ""
         }
     }
@@ -279,7 +279,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func addNote() {
         let alert = NSAlert()
         alert.messageText = "Add a note to this meeting"
-        alert.informativeText = "Notes are saved with the recording and can be used as context for AI enrichment."
+        alert.informativeText = "Notes are saved with the recording and are used as context during enrichment."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
         field.placeholderString = "Decision, action item, or context"
         alert.accessoryView = field
@@ -297,7 +297,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [.audio, .movie, .mpeg4Movie, .mp3, .wav, .aiff]
-        panel.message = "Choose a recording to import. The original file is copied in and left unchanged."
+        panel.message = "Choose a recording to import. The original file is copied and left unchanged."
         panel.prompt = "Import"
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }

@@ -225,7 +225,7 @@ public struct MeetingRepository: Sendable {
 
     public static func timestampTitle(startedAt: Date, source: MeetingSource) -> String {
         let style = Date.FormatStyle(date: .abbreviated, time: .shortened)
-        return "\(source.displayName) — \(startedAt.formatted(style))"
+        return "\(source.displayName), \(startedAt.formatted(style))"
     }
 
     /// Every meeting directory under the archive root, newest first.

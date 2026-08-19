@@ -29,7 +29,7 @@ public struct MeetingReviewView: View {
                 speakersCard
                 transcriptCard
                 if let summary = model.summary, !summary.isEmpty {
-                    SectionCard(title: "Summary", subtitle: "Generated. Your notes are kept separately.") {
+                    SectionCard(title: "Summary", subtitle: "Generated from the transcript. Your notes are stored separately.") {
                         Text(summary).font(.callout).textSelection(.enabled)
                     }
                 }
@@ -64,7 +64,7 @@ public struct MeetingReviewView: View {
             if model.metadata?.hadOtherAudibleTabs == true {
                 Label(
                     "Another browser tab was playing audio during this meeting, so the meeting "
-                        + "track may include it.",
+                        + "track may contain that audio as well.",
                     systemImage: "info.circle"
                 )
                 .font(.caption)
@@ -74,7 +74,7 @@ public struct MeetingReviewView: View {
     }
 
     private var detailsCard: some View {
-        SectionCard(title: "Title and context", subtitle: "Saved straight away, whatever processing is doing.") {
+        SectionCard(title: "Title and context", subtitle: "Saved immediately, including while processing is running.") {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Title", text: model.titleBinding())
                     .textFieldStyle(.roundedBorder)
@@ -88,7 +88,7 @@ public struct MeetingReviewView: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
                 Text(
                     "Context such as “Company X call with me, my boss Chris, John and Tim” is "
-                        + "used as evidence when suggesting who each speaker is."
+                        + "used as input when speaker names are suggested."
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -102,10 +102,10 @@ public struct MeetingReviewView: View {
     private func continuationCard(_ suggestion: (title: String, reason: String)) -> some View {
         SectionCard(
             title: "Same meeting?",
-            subtitle: "Combining links the two recordings. Neither one's audio is moved or changed."
+            subtitle: "Combining links the two recordings. Neither recording's audio is moved or modified."
         ) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("This may be a continuation of “\(suggestion.title)” — \(suggestion.reason).")
+                Text("This may be a continuation of “\(suggestion.title)”. \(suggestion.reason).")
                 HStack {
                     Button("Combine") { model.combineWithEarlier() }
                     Button("Keep Separate") { model.keepSeparate() }
@@ -124,7 +124,6 @@ public struct MeetingReviewView: View {
                     } else {
                         Button("Try Again Anyway") { model.retry() }
                     }
-                    Text("Your recording is safe.").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -133,10 +132,10 @@ public struct MeetingReviewView: View {
     private var speakersCard: some View {
         SectionCard(
             title: "Speakers",
-            subtitle: "Renaming is instant and never re-runs transcription."
+            subtitle: "Renaming applies immediately and does not re-run transcription."
         ) {
             if model.speakerKeys.isEmpty {
-                Text("No speakers yet.").foregroundStyle(.secondary).font(.callout)
+                Text("No speakers identified yet.").foregroundStyle(.secondary).font(.callout)
             } else {
                 VStack(spacing: 8) {
                     ForEach(model.speakerKeys, id: \.self) { key in
@@ -178,7 +177,7 @@ public struct MeetingReviewView: View {
     private func originLabel(_ assignment: SpeakerAssignment) -> String {
         switch assignment.origin {
         case .human: "You set this"
-        case .deterministic: "From your microphone"
+        case .deterministic: "From the microphone track"
         case .ai:
             assignment.confidence.map { String(format: "Suggested %.0f%%", $0 * 100) } ?? "Suggested"
         }
@@ -187,7 +186,7 @@ public struct MeetingReviewView: View {
     private var transcriptCard: some View {
         SectionCard(
             title: "Transcript",
-            subtitle: model.transcript == nil ? "Not ready yet." : nil
+            subtitle: model.transcript == nil ? "Not available yet." : nil
         ) {
             if let transcript = model.transcript, !transcript.utterances.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {

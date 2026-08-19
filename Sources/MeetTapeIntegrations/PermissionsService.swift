@@ -30,15 +30,15 @@ public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
     public var rationale: String {
         switch self {
         case .microphone:
-            "Records your side of every meeting. Without it MeetTape cannot record at all."
+            "Records your side of every meeting. MeetTape cannot record without it."
         case .screenRecording:
-            "Reads window titles to tell which meeting is on screen. Without it browser detection falls back to audio state alone."
+            "Reads window titles to identify which meeting is on screen. Without it, browser detection relies on audio state alone."
         case .accessibility:
-            "Detects when you join and leave a Slack Huddle. Without it Slack recording falls back to guessing from microphone use."
+            "Detects when you join and leave a Slack Huddle. Without it, Slack detection relies on microphone activity."
         case .calendar:
             "Matches recordings to calendar events for titles and attendees. Recording works without it."
         case .notifications:
-            "Tells you when recording starts, when a meeting is saved, and when something needs attention."
+            "Reports when recording starts, when a meeting is saved, and when a stage needs attention."
         }
     }
 
@@ -72,9 +72,9 @@ public enum PermissionState: String, Sendable, Equatable {
     case notDetermined
     /// System Settings shows this as enabled but the running build cannot use it.
     ///
-    /// Measured directly: after re-signing, the Accessibility toggle read as on
-    /// while `AXIsProcessTrusted()` returned false. The fix is to remove MeetTape
-    /// from the list and add it again, not to keep asking.
+    /// Observed after re-signing the application: the Accessibility toggle read as
+    /// enabled while `AXIsProcessTrusted()` returned false. Removing MeetTape from
+    /// the list in System Settings and adding it again restores access.
     case grantedButNotEffective
 }
 
@@ -94,7 +94,7 @@ public struct PermissionStatus: Sendable, Equatable, Identifiable {
         switch state {
         case .granted: nil
         case .notDetermined: "Not requested yet."
-        case .denied: "Turn it on in System Settings, then come back."
+        case .denied: "Enable it in System Settings, then return here."
         case .grantedButNotEffective:
             "\(kind.title) appears enabled but is not active for this MeetTape build. "
                 + "Remove MeetTape from the list in System Settings and add it again."
@@ -102,7 +102,8 @@ public struct PermissionStatus: Sendable, Equatable, Identifiable {
     }
 }
 
-/// Reports what MeetTape can actually do, not what a toggle claims.
+/// Reports the effective state of each permission by probing it, since a System
+/// Settings toggle can be enabled while the running build has no access.
 public struct PermissionsService: Sendable {
     public init() {}
 

@@ -40,16 +40,16 @@ public struct OnboardingView: View {
             Text("MeetTape records your meetings automatically")
                 .font(.title2.weight(.semibold))
             Text(
-                "It watches for Slack Huddles and for Google Meet and Zoom in your browser, "
-                    + "captures your microphone and the meeting audio separately, and leaves "
-                    + "ordinary files behind."
+                "MeetTape detects Slack Huddles and Google Meet and Zoom calls in your "
+                    + "browser, records your microphone and the meeting audio as separate "
+                    + "tracks, and writes the results to ordinary files on disk."
             )
             .foregroundStyle(.secondary)
         }
     }
 
     private var permissionsSection: some View {
-        SectionCard(title: "Permissions", subtitle: "Microphone is required. The rest improve detection.") {
+        SectionCard(title: "Permissions", subtitle: "The microphone is required. The others improve detection accuracy.") {
             VStack(spacing: 10) {
                 ForEach(model.statuses) { status in
                     PermissionRow(
@@ -65,7 +65,7 @@ public struct OnboardingView: View {
     private var openAISection: some View {
         SectionCard(
             title: "OpenAI",
-            subtitle: "Transcription and speaker identification run through your own API key."
+            subtitle: "Transcription and speaker identification use your own API key."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 SecureField(
@@ -87,7 +87,7 @@ public struct OnboardingView: View {
                             .foregroundStyle(.red).font(.caption)
                     }
                 }
-                Text("The key is stored in your macOS keychain and never written to a meeting file.")
+                Text("The key is stored in the macOS keychain and is not written to any meeting file.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -96,20 +96,20 @@ public struct OnboardingView: View {
     private var extensionSection: some View {
         SectionCard(
             title: "Firefox extension",
-            subtitle: "Optional. It tells MeetTape when you actually join a Meet or Zoom call."
+            subtitle: "Optional. It reports when you join and leave a Meet or Zoom call."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 if model.hostStatus?.isReadyForFirefox == true {
                     Label("Native messaging host installed", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).font(.caption)
                 } else {
-                    Label("Native messaging host not installed yet", systemImage: "exclamationmark.circle")
+                    Label("Native messaging host not installed", systemImage: "exclamationmark.circle")
                         .foregroundStyle(.orange).font(.caption)
                 }
                 Text(
-                    "Without the extension MeetTape still records Meet and Zoom, using window "
-                        + "titles and microphone state. It cannot tell a prejoin screen from a "
-                        + "joined call, so it records a little more than it needs to."
+                    "Without the extension, Meet and Zoom are still recorded using window "
+                        + "titles and microphone state. A prejoin screen cannot be distinguished "
+                        + "from a joined call, so recordings start earlier than necessary."
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 HStack {

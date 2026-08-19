@@ -100,12 +100,32 @@ public struct OnboardingView: View {
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 if model.hostStatus?.isReadyForFirefox == true {
-                    Label("Native messaging host installed", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green).font(.caption)
+                    Label(
+                        "Step 1 done: the native messaging host is installed",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .foregroundStyle(.green).font(.caption)
                 } else {
-                    Label("Native messaging host not installed", systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.orange).font(.caption)
+                    Label(
+                        "Step 1: the native messaging host is not installed",
+                        systemImage: "exclamationmark.circle"
+                    )
+                    .foregroundStyle(.orange).font(.caption)
                 }
+                Label(
+                    "Step 2: load the extension in Firefox yourself. Firefox only "
+                        + "installs add-ons through its own interface.",
+                    systemImage: "2.circle"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Open about:debugging#/runtime/this-firefox, choose Load Temporary "
+                        + "Add-on, and select manifest.json in the folder below. Firefox "
+                        + "drops a temporary add-on when it quits, so this repeats each "
+                        + "launch until the extension is signed and published."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                .textSelection(.enabled)
                 Text(
                     "Without the extension, Meet and Zoom are still recorded using window "
                         + "titles and microphone state. A prejoin screen cannot be distinguished "
@@ -115,6 +135,12 @@ public struct OnboardingView: View {
                 HStack {
                     Button("Install Host") { model.installHost() }
                     Button("Show Extension Folder") { revealExtension() }
+                    Button("Copy about:debugging") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            "about:debugging#/runtime/this-firefox", forType: .string
+                        )
+                    }
                 }
             }
         }
@@ -192,23 +218,22 @@ struct PermissionRow: View {
         case .granted:
             EmptyView()
         case .notDetermined:
-            if canRequestInApp {
-                Button("Enable") { Task { await onRequest() } }
+            Button("Enable") { Task { await onRequest() } }
+        case .denied, .grantedButNotEffective:
+            if grantedInSystemSettings {
+                // Requesting first is what adds MeetTape to the list in System
+                // Settings. Without it the pane opens on a list the app is not in
+                // and there is nothing to switch on.
+                Button("Enable in System Settings") { Task { await onRequest() } }
             } else {
                 Button("Open System Settings") { onOpenSettings() }
             }
-        case .denied, .grantedButNotEffective:
-            Button("Open System Settings") { onOpenSettings() }
         }
     }
 
-    /// Microphone, Calendar and Notifications present a dialog. Accessibility and
-    /// Screen Recording can only be granted in System Settings.
-    private var canRequestInApp: Bool {
-        switch status.kind {
-        case .microphone, .calendar, .notifications: true
-        case .accessibility, .screenRecording: false
-        }
+    /// Permissions macOS never grants from inside the app.
+    private var grantedInSystemSettings: Bool {
+        status.kind == .accessibility || status.kind == .screenRecording
     }
 
     private var symbol: String {

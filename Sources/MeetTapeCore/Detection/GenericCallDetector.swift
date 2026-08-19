@@ -7,6 +7,35 @@ import Foundation
 /// only by sub-second audio-object recreations. Any detector that treats "a
 /// process holds the microphone" as a candidate fires permanently without this.
 public enum MicrophoneIgnoreList {
+    /// Applications that hold the microphone and play audio for as long as they
+    /// run, without anyone being in a meeting: remote desktop, screen sharing and
+    /// game streaming. They match every signal the generic detector has, so they
+    /// are excluded by name.
+    public static let notMeetings: Set<String> = [
+        "com.p5sys.jump.connect",
+        "com.p5sys.jump.mac.viewer",
+        "com.p5sys.jump.mac.viewer.web",
+        "com.apple.ScreenSharing",
+        "com.apple.screensharing.agent",
+        "com.apple.screensharing.MessagesAgent",
+        "com.teamviewer.TeamViewer",
+        "com.teamviewer.TeamViewerHost",
+        "com.philandro.anydesk",
+        "com.google.chromeremotedesktop",
+        "com.edovia.screens5.mac",
+        "com.realvnc.vncviewer",
+        "com.realvnc.vncserver",
+        "com.parsecgaming.parsec",
+        "com.splashtop.streamer-mac",
+        "com.moonlight-stream.Moonlight",
+        "com.valvesoftware.steamlink",
+        "com.nvidia.gfnpc.mac",
+        "com.apple.QuickTimePlayerX",
+        "com.apple.PhotoBooth",
+        "com.apple.VoiceMemos",
+        "com.obsproject.obs-studio",
+    ]
+
     public static let systemServices: Set<String> = [
         "com.apple.CoreSpeech",
         "com.apple.assistantd",
@@ -28,10 +57,12 @@ public enum MicrophoneIgnoreList {
     public static func isIgnored(_ bundleIdentifier: String, additional: Set<String> = []) -> Bool {
         if bundleIdentifier.isEmpty { return true }
         if systemServices.contains(bundleIdentifier) { return true }
+        if notMeetings.contains(bundleIdentifier) { return true }
         if ownBundleIdentifiers.contains(bundleIdentifier) { return true }
         if additional.contains(bundleIdentifier) { return true }
-        // Helper processes of an ignored service.
-        return systemServices.contains { bundleIdentifier.hasPrefix($0 + ".") }
+        // Helper processes of an ignored application.
+        let excluded = systemServices.union(notMeetings)
+        return excluded.contains { bundleIdentifier.hasPrefix($0 + ".") }
     }
 }
 

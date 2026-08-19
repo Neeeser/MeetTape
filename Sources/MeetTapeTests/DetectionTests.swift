@@ -329,6 +329,31 @@ enum DetectionTests {
                 }
             },
 
+            test("a remote desktop session is never a meeting") { expect in
+                // Jump Desktop Connect holds the microphone and plays audio for as
+                // long as the session lasts, which is every signal the detector
+                // has. It recorded a remote-desktop session as a call.
+                var detector = GenericCallDetector()
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.p5sys.jump.connect", processID: 500,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: false, windowTitle: nil
+                    ),
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.apple.ScreenSharing", processID: 501,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: false, windowTitle: nil
+                    ),
+                ]
+                var now = 100.0
+                for _ in 0..<200 {
+                    now += 0.5
+                    expect.equal(detector.update(states: states, at: now), [])
+                }
+                expect.equal(detector.currentEvidence().count, 0, "nothing to record here")
+            },
+
             test("an unknown call is a candidate before it is confirmed") { expect in
                 // The ring has to be armed while the dwell is still running,
                 // otherwise the first eight to twenty-five seconds of the call

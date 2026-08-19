@@ -47,8 +47,17 @@ public final class OnboardingModel {
     }
 
     public func request(_ kind: PermissionKind) async {
-        _ = await runtime.permissions.request(kind)
+        let status = await runtime.permissions.request(kind)
         statuses = await runtime.permissions.allStatuses()
+        // Accessibility and Screen Recording are switched on in System Settings.
+        // The request above is what adds MeetTape to that list; opening the pane
+        // straight after it puts the switch in front of the user.
+        if !status.isUsable, kind == .accessibility || kind == .screenRecording {
+            runtime.permissions.openSettings(for: kind)
+        }
+        Log.ui.info(
+            "requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"
+        )
     }
 
     public func saveAndTestKey() async {
@@ -128,8 +137,17 @@ public final class SettingsModel {
     }
 
     public func request(_ kind: PermissionKind) async {
-        _ = await runtime.permissions.request(kind)
+        let status = await runtime.permissions.request(kind)
         statuses = await runtime.permissions.allStatuses()
+        // Accessibility and Screen Recording are switched on in System Settings.
+        // The request above is what adds MeetTape to that list; opening the pane
+        // straight after it puts the switch in front of the user.
+        if !status.isUsable, kind == .accessibility || kind == .screenRecording {
+            runtime.permissions.openSettings(for: kind)
+        }
+        Log.ui.info(
+            "requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"
+        )
     }
 
     public func saveLocalUserName() {

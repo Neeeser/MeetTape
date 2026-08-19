@@ -125,6 +125,33 @@ enum UITests {
                 expect.isFalse(raw.lowercased().contains("sk-"))
             },
 
+            test("every menu row draws in a colour that is readable on a dark menu") { expect in
+                // An attributed menu title with no foreground colour draws in
+                // black, and a disabled row draws in the system's disabled grey.
+                // Both are unreadable on a dark menu, which is where the menu bar
+                // lives most of the time.
+                await MainActor.run {
+                    let item = MenuBarController.informationItem("  Recording")
+                    guard let attributed = item.attributedTitle else {
+                        return expect.fail("an informational row needs an explicit colour")
+                    }
+                    var found = false
+                    attributed.enumerateAttribute(
+                        .foregroundColor, in: NSRange(location: 0, length: attributed.length)
+                    ) { value, _, _ in
+                        found = value is NSColor
+                    }
+                    expect.isTrue(found, "no foreground colour on \(attributed.string)")
+                    expect.isFalse(item.isEnabled, "an informational row is not clickable")
+
+                    let heading = MenuBarController.informationItem("Processing", emphasis: true)
+                    let colour = heading.attributedTitle?.attribute(
+                        .foregroundColor, at: 0, effectiveRange: nil
+                    ) as? NSColor
+                    expect.equal(colour, NSColor.labelColor, "a heading uses the primary label colour")
+                }
+            },
+
             test("permission checks never trap outside an app bundle") { expect in
                 // Reading notification permission through UserNotifications raises
                 // an uncatchable Objective-C exception when the process has no

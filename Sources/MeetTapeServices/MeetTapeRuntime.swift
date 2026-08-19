@@ -39,9 +39,19 @@ public struct RuntimeStatus: Sendable, Equatable {
 /// A meeting waiting for the user to say whether to keep it.
 public struct ProvisionalPrompt: Sendable, Equatable, Identifiable {
     public let meetingID: String
+    public let applicationBundleID: String
     public let applicationName: String
     public let title: String?
     public var id: String { meetingID }
+
+    public init(
+        meetingID: String, applicationBundleID: String, applicationName: String, title: String?
+    ) {
+        self.meetingID = meetingID
+        self.applicationBundleID = applicationBundleID
+        self.applicationName = applicationName
+        self.title = title
+    }
 }
 
 /// Owns every subsystem and turns session decisions into real work.
@@ -663,6 +673,7 @@ public final class MeetTapeRuntime {
         let name = applicationName(for: bundleIdentifier)
         provisionalPrompt = ProvisionalPrompt(
             meetingID: currentMeeting?.metadata.id ?? bundleIdentifier,
+            applicationBundleID: bundleIdentifier,
             applicationName: name,
             title: title
         )

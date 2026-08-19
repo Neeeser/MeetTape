@@ -30,6 +30,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         runtime.observeStatus { [weak self] in
             self?.refreshButton()
+            self?.syncProvisionalPrompt()
         }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)
@@ -49,6 +50,16 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         elapsedTimer?.cancel()
         elapsedTimer = nil
         NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
+    /// Shows or hides the keep-or-discard window as the runtime raises and
+    /// resolves the question.
+    private func syncProvisionalPrompt() {
+        if let prompt = runtime.provisionalPrompt {
+            windows.showProvisionalPrompt(prompt)
+        } else {
+            windows.closeProvisionalPrompt()
+        }
     }
 
     private func refreshButton() {
@@ -102,16 +113,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         if !runtime.processing.isEmpty {
             menu.addItem(.separator())
-            let header = NSMenuItem(title: "Processing", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
+            menu.addItem(Self.informationItem("Processing", emphasis: true))
             for progress in runtime.processing.values.sorted(by: { $0.meetingID < $1.meetingID }) {
                 let detail = progress.totalChunks > 0
                     ? "\(progress.state.displayName) \(progress.completedChunks)/\(progress.totalChunks)"
                     : progress.state.displayName
-                let item = NSMenuItem(title: "  \(progress.title): \(detail)", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                menu.addItem(item)
+                menu.addItem(Self.informationItem("  \(progress.title): \(detail)"))
             }
         }
 
@@ -139,25 +146,13 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func addRecordingSection(to menu: NSMenu, status: RuntimeStatus) {
         let title = status.title ?? status.provider.displayName
-        let heading = NSMenuItem(title: "● Recording", action: nil, keyEquivalent: "")
-        heading.isEnabled = false
-        menu.addItem(heading)
-
-        let name = NSMenuItem(title: "  \(title)", action: nil, keyEquivalent: "")
-        name.isEnabled = false
-        menu.addItem(name)
-
-        let elapsed = NSMenuItem(
-            title: "  \(Format.duration(status.elapsed(now: Date())))", action: nil, keyEquivalent: ""
-        )
-        elapsed.isEnabled = false
-        menu.addItem(elapsed)
+        menu.addItem(Self.informationItem("● Recording", emphasis: true))
+        menu.addItem(Self.informationItem("  \(title)"))
+        menu.addItem(Self.informationItem("  \(Format.duration(status.elapsed(now: Date())))"))
 
         // Source health is only spelled out when it is not simply fine.
         if status.displayHealth != .healthy {
-            let health = NSMenuItem(title: "  \(healthText(status))", action: nil, keyEquivalent: "")
-            health.isEnabled = false
-            menu.addItem(health)
+            menu.addItem(Self.informationItem("  \(healthText(status))"))
         }
 
         menu.addItem(.separator())
@@ -180,6 +175,29 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             discard.target = self
             menu.addItem(discard)
         }
+    }
+
+    /// A menu row that carries information rather than a command.
+    ///
+    /// A disabled item is drawn in the system's disabled colour, which on a dark
+    /// menu is barely distinguishable from the background. An attributed title
+    /// with an explicit label colour stays readable in both appearances while the
+    /// row remains unclickable.
+    public static func informationItem(_ text: String, emphasis: Bool = false) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        let size = NSFont.menuFont(ofSize: 0).pointSize
+        let font = emphasis
+            ? NSFont.systemFont(ofSize: size, weight: .semibold)
+            : NSFont.menuFont(ofSize: 0)
+        item.attributedTitle = NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: emphasis ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                .font: font,
+            ]
+        )
+        return item
     }
 
     private func healthText(_ status: RuntimeStatus) -> String {
@@ -215,9 +233,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         let submenu = NSMenu()
         let meetings = runtime.recentMeetings.prefix(12)
         if meetings.isEmpty {
-            let empty = NSMenuItem(title: "No meetings yet", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            submenu.addItem(empty)
+            submenu.addItem(Self.informationItem("No meetings yet"))
         } else {
             for meeting in meetings {
                 let subtitle = [
@@ -231,9 +247,14 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 entry.target = self
                 entry.representedObject = meeting.id
                 entry.toolTip = subtitle
+                // The label colour is explicit: an attributed title without one
+                // draws in black, which is unreadable on a dark menu.
                 let attributed = NSMutableAttributedString(
                     string: meeting.title,
-                    attributes: [.font: NSFont.menuFont(ofSize: 0)]
+                    attributes: [
+                        .font: NSFont.menuFont(ofSize: 0),
+                        .foregroundColor: NSColor.labelColor,
+                    ]
                 )
                 attributed.append(NSAttributedString(
                     string: "\n\(subtitle)",

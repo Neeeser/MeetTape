@@ -94,6 +94,11 @@ public struct PermissionStatus: Sendable, Equatable, Identifiable {
         switch state {
         case .granted: nil
         case .notDetermined: "Not requested yet."
+        case .denied where kind == .accessibility || kind == .screenRecording:
+            "Switch MeetTape on in System Settings. If it is already switched on "
+                + "there, remove it with the minus button and add it again: an "
+                + "unsigned build gets a new identity every time it is rebuilt, and "
+                + "the old entry keeps the permission."
         case .denied: "Enable it in System Settings, then return here."
         case .grantedButNotEffective:
             "\(kind.title) appears enabled but is not active for this MeetTape build. "
@@ -129,6 +134,11 @@ public struct PermissionsService: Sendable {
         for kind in PermissionKind.allCases {
             statuses.append(await status(for: kind))
         }
+        // The effective state of each permission, which is what the panel shows.
+        // Reported because a permission that reads granted in System Settings and
+        // is not usable by the running build is otherwise invisible.
+        let summary = statuses.map { "\($0.kind.rawValue)=\($0.state.rawValue)" }.joined(separator: " ")
+        Log.app.info("permissions: \(summary, privacy: .public)")
         return statuses
     }
 
@@ -177,7 +187,10 @@ public struct PermissionsService: Sendable {
         case .microphone:
             _ = await AVCaptureDevice.requestAccess(for: .audio)
         case .calendar:
-            _ = await CalendarService().requestAccess()
+            let granted = await CalendarService().requestAccess()
+            Log.app.info(
+                "calendar request returned \(granted, privacy: .public), status now \(EKEventStore.authorizationStatus(for: .event).rawValue, privacy: .public)"
+            )
         case .notifications:
             guard NotificationSupport.isAvailable else { break }
             _ = try? await UNUserNotificationCenter.current()

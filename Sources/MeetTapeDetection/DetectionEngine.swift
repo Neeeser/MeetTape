@@ -5,7 +5,6 @@ import MeetTapeCore
 
 public struct DetectionSnapshot: Sendable, Equatable {
     public var evidence: [ProviderEvidence]
-    public var genericEvents: [GenericCallDetector.Event]
     public var slackState: SlackHuddleDetector.State
     public var browserSensor: BrowserSensorTracker.Connection
     public var hasAccessibility: Bool
@@ -13,14 +12,12 @@ public struct DetectionSnapshot: Sendable, Equatable {
 
     public init(
         evidence: [ProviderEvidence] = [],
-        genericEvents: [GenericCallDetector.Event] = [],
         slackState: SlackHuddleDetector.State = .idle,
         browserSensor: BrowserSensorTracker.Connection = .absent,
         hasAccessibility: Bool = false,
         hasWindowTitles: Bool = false
     ) {
         self.evidence = evidence
-        self.genericEvents = genericEvents
         self.slackState = slackState
         self.browserSensor = browserSensor
         self.hasAccessibility = hasAccessibility
@@ -191,7 +188,6 @@ public final class DetectionEngine: @unchecked Sendable {
         let windowTitlesByBundle = windowReader.titlesByBundleIdentifier(from: titles)
 
         var evidence: [ProviderEvidence] = []
-        var genericEvents: [GenericCallDetector.Event] = []
 
         // Read accessibility before taking the lock: the walk crosses into
         // another process and can block for seconds when Slack is busy.
@@ -262,13 +258,14 @@ public final class DetectionEngine: @unchecked Sendable {
                         windowTitle: windowTitlesByBundle[state.bundleIdentifier]
                     )
                 }
-            genericEvents = genericDetector.update(states: unknownStates, at: now)
+            // The events drive the detector's own state machine; the evidence is
+            // what the session acts on.
+            _ = genericDetector.update(states: unknownStates, at: now)
             evidence.append(contentsOf: genericDetector.currentEvidence())
         }
 
         let snapshot = DetectionSnapshot(
             evidence: evidence,
-            genericEvents: genericEvents,
             slackState: slackDetector.state,
             browserSensor: browserDetectors[.firefox]?.sensor.connection ?? .absent,
             hasAccessibility: AccessibilityBridge.isTrusted,

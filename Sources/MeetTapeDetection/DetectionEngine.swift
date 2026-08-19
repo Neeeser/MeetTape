@@ -103,7 +103,9 @@ public final class DetectionEngine: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Idempotent: a second call replaces the timer rather than orphaning it.
     public func start() {
+        stop()
         startSensorServer()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.2, repeating: configuration.pollInterval)
@@ -159,18 +161,14 @@ public final class DetectionEngine: @unchecked Sendable {
         case .event(let event):
             browserDetectors[event.browser]?.receive(event, at: now)
         case .tabClosed(let tabID):
+            // Only that tab's state goes; another tab may still be in a call.
             for (browser, var detector) in browserDetectors {
-                guard detector.sensor.lastEvent?.tabID == tabID else { continue }
-                var ended = detector.sensor.lastEvent
-                ended?.state = .ended
-                if let ended { detector.receive(ended, at: now) }
+                detector.closeTab(tabID, at: now)
                 browserDetectors[browser] = detector
             }
-        case .goodbye:
-            for (browser, var detector) in browserDetectors {
-                detector.sensorDisconnected(at: now)
-                browserDetectors[browser] = detector
-            }
+        case .goodbye(let browser):
+            // One browser's host exiting says nothing about another's.
+            browserDetectors[browser]?.sensorDisconnected(at: now)
         }
     }
 
@@ -179,6 +177,7 @@ public final class DetectionEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard count == 0 else { return }
+        // No relay is connected at all, so no browser sensor is reporting.
         for (browser, var detector) in browserDetectors {
             detector.sensorDisconnected(at: now)
             browserDetectors[browser] = detector

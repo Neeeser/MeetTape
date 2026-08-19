@@ -199,6 +199,10 @@ public struct BrowserMeetingDetector: Sendable {
         sensor.receive(event, at: now)
     }
 
+    public mutating func closeTab(_ tabID: Int, at now: Double) {
+        sensor.closeTab(tabID)
+    }
+
     public mutating func update(native signals: NativeSignals, at now: Double) -> ProviderEvidence {
         _ = sensor.evaluate(at: now)
 

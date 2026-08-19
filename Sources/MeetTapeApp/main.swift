@@ -9,11 +9,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var runtime: MeetTapeRuntime!
     private var windows: WindowManager!
     private var menuBar: MenuBarController!
+    private var notificationRouter: NotificationRouter!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         runtime = MeetTapeRuntime()
         windows = WindowManager(runtime: runtime)
         menuBar = MenuBarController(runtime: runtime, windows: windows)
+        notificationRouter = NotificationRouter(runtime: runtime, windows: windows)
         runtime.start()
 
         if !runtime.settings.hasCompletedOnboarding {

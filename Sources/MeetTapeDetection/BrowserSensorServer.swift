@@ -61,7 +61,9 @@ public final class BrowserSensorServer: @unchecked Sendable {
         return status
     }
 
+    /// Idempotent: a second call replaces the listener rather than leaking it.
     public func start() throws {
+        stop()
         try FileManager.default.createDirectory(
             at: socketURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )

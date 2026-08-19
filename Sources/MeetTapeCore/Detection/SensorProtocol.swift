@@ -10,7 +10,7 @@ public enum SensorMessage: Codable, Sendable, Equatable {
     case hello(Hello)
     case event(BrowserMeetingEvent)
     case tabClosed(tabID: Int)
-    case goodbye
+    case goodbye(browser: BrowserKind)
 
     public struct Hello: Codable, Sendable, Equatable {
         public var browser: BrowserKind
@@ -29,6 +29,7 @@ public enum SensorMessage: Codable, Sendable, Equatable {
         case hello
         case event
         case tabID
+        case browser
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -43,8 +44,9 @@ public enum SensorMessage: Codable, Sendable, Equatable {
         case .tabClosed(let tabID):
             try container.encode("tab_closed", forKey: .type)
             try container.encode(tabID, forKey: .tabID)
-        case .goodbye:
+        case .goodbye(let browser):
             try container.encode("goodbye", forKey: .type)
+            try container.encode(browser, forKey: .browser)
         }
     }
 
@@ -58,7 +60,7 @@ public enum SensorMessage: Codable, Sendable, Equatable {
         case "tab_closed":
             self = .tabClosed(tabID: try container.decode(Int.self, forKey: .tabID))
         case "goodbye":
-            self = .goodbye
+            self = .goodbye(browser: try container.decodeIfPresent(BrowserKind.self, forKey: .browser) ?? .firefox)
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: container, debugDescription: "unknown sensor message \(other)"

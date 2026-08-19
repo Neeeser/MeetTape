@@ -174,5 +174,5 @@ while let raw = reader.next() {
     }
 }
 
-connection.send(.goodbye)
+connection.send(.goodbye(browser: browser))
 connection.disconnect()

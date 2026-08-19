@@ -143,6 +143,20 @@ extension LocalModelManager {
         )
     }
 
+    /// Re-analysis entry point. Uses the prepared state from the meeting's
+    /// first pass when it is still in memory, and pays the full pass when it is
+    /// not: `PreparedDiarization` holds decoded audio and cannot be persisted.
+    public func reanalyze(
+        meetingID: String, audio: URL, speakerCount: Int?
+    ) async throws -> DiarizationOutput {
+        if let cached = try await recluster(cacheKey: meetingID, speakerCount: speakerCount) {
+            return cached
+        }
+        return try await diarize(
+            audio: audio, cacheKey: meetingID, speakerCount: speakerCount, progress: { _ in }
+        )
+    }
+
     func hasPreparedDiarization(cacheKey: String) -> Bool {
         preparedDiarization(for: cacheKey) != nil
     }
@@ -199,7 +213,7 @@ extension LocalModelManager {
     ///
     /// Used on the microphone track of a remote call, where the speaker is the
     /// local user by construction, so there is nothing to cluster.
-    func embedSingleSpeaker(
+    public func embedSingleSpeaker(
         audio: URL
     ) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)? {
         let models = try await loadedDiarizerModels()

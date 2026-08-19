@@ -5,6 +5,8 @@ import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeDetection
 import MeetTapeIntegrations
+import MeetTapeLocalAI
+import MeetTapeSpeakers
 
 /// What the menu bar and panels display.
 public struct RuntimeStatus: Sendable, Equatable {
@@ -73,6 +75,9 @@ public final class MeetTapeRuntime {
     public private(set) var processing: [String: ProcessingPipeline.Progress] = [:]
     public private(set) var provisionalPrompt: ProvisionalPrompt?
     public private(set) var settings: AppSettings
+    /// Whether the on-device speech models are installed, and how far a
+    /// download has got. Recording never waits on this.
+    public internal(set) var localModelState: LocalModelState = .notInstalled
 
     /// Called when a meeting's processing state changes, so an open review
     /// window can reload its files without the user refreshing by hand.
@@ -81,12 +86,22 @@ public final class MeetTapeRuntime {
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
     @ObservationIgnored public let permissions = PermissionsService()
+    /// The on-device speech models, and the local voice memory. Both exist
+    /// whichever backends are selected: choosing the cloud diarizer costs the
+    /// vectors it would have returned, not the ability to remember a voice.
+    @ObservationIgnored public private(set) var models: LocalModelManager!
+    @ObservationIgnored public private(set) var speakers: SpeakerRecognitionService?
+    @ObservationIgnored public private(set) var speakerStore: SpeakerStore?
 
     @ObservationIgnored private let settingsStore: SettingsStore
     /// A snapshot the processing actor can read without hopping to the main
     /// actor. `MainActor.assumeIsolated` from an actor's executor is a runtime
     /// trap, not a shortcut.
     @ObservationIgnored private let settingsSnapshot: LockedBox<AppSettings>
+    /// The same trick for the recording state, which is what the processing
+    /// gate consults. Read on a timer from the processing actor, written here
+    /// on every lifecycle transition.
+    @ObservationIgnored private let recordingSnapshot: LockedBox<Bool>
     /// Main-actor work is chained so state updates arrive in the order they were
     /// produced; independent tasks give no ordering guarantee.
     @ObservationIgnored private var workChain: Task<Void, Never>?
@@ -94,7 +109,7 @@ public final class MeetTapeRuntime {
     @ObservationIgnored private var sessionController: SessionController
     @ObservationIgnored private var captureEngine: CaptureEngine!
     @ObservationIgnored private var detectionEngine: DetectionEngine!
-    @ObservationIgnored private var pipeline: ProcessingPipeline!
+    @ObservationIgnored private(set) var pipeline: ProcessingPipeline!
     @ObservationIgnored private var powerObserver: PowerEventObserver?
     @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
     @ObservationIgnored private var onStatusChange: (@MainActor @Sendable () -> Void)?
@@ -110,6 +125,8 @@ public final class MeetTapeRuntime {
         self.settings = loaded
         let snapshot = LockedBox(loaded)
         self.settingsSnapshot = snapshot
+        let recording = LockedBox(false)
+        self.recordingSnapshot = recording
         // Reads the current setting on every use, so a folder chosen in Settings
         // applies straight away.
         self.repository = MeetingRepository(rootProvider: { snapshot.withLock { $0.storageRoot } })
@@ -140,9 +157,57 @@ public final class MeetTapeRuntime {
         #else
         let keyStore: any APIKeyProviding = KeychainAPIKeyStore()
         #endif
+        let cloud = OpenAIClient(keyProvider: keyStore)
+        let modelManager = LocalModelManager(
+            applicationSupport: settingsDirectory,
+            onStateChange: { [weak relay] state in
+                Task { @MainActor in relay?.runtimeForCallbacks?.localModelState = state }
+            }
+        )
+        models = modelManager
+
+        // The identity store is deliberately not in the meeting archive. A
+        // speaker embedding is a biometric identifier, and the archive is what a
+        // user copies, syncs and shares.
+        var recognition: SpeakerRecognitionService?
+        do {
+            let store = try SpeakerStore(url: SpeakerStore.defaultURL(applicationSupport: settingsDirectory))
+            speakerStore = store
+            recognition = SpeakerRecognitionService(store: store)
+            speakers = recognition
+        } catch {
+            Log.app.error("voice memory unavailable: \(logSafeDescription(error), privacy: .public)")
+        }
+
         pipeline = ProcessingPipeline(
             repository: repository,
-            backend: OpenAIClient(keyProvider: keyStore),
+            backend: cloud,
+            backends: ProcessingBackends(
+                transcription: { settings, model in
+                    if settings.processing.usesLocalTranscription {
+                        return WhisperTranscriptionBackend(models: modelManager)
+                    }
+                    return OpenAITranscriptionBackend(backend: cloud, model: model)
+                },
+                diarization: { settings, model in
+                    if settings.processing.usesLocalDiarization {
+                        return FluidAudioDiarizationBackend(models: modelManager)
+                    }
+                    return OpenAIDiarizationBackend(backend: cloud, model: model)
+                },
+                embeddings: FluidAudioEmbeddingExtractor(models: modelManager),
+                speakers: recognition,
+                prepareLocalModels: { _ = try await modelManager.install() },
+                singleSpeakerEmbedding: { url in
+                    try await modelManager.embedSingleSpeaker(audio: url)
+                },
+                reanalyzeDiarization: { meetingID, url, count in
+                    try await modelManager.reanalyze(
+                        meetingID: meetingID, audio: url, speakerCount: count
+                    )
+                }
+            ),
+            gate: RecordingAwareGate(isRecording: { recording.withLock { $0 } }),
             calendar: CalendarService(),
             clock: clock,
             settingsProvider: { [snapshot = settingsSnapshot] in snapshot.withLock { $0 } },
@@ -174,12 +239,19 @@ public final class MeetTapeRuntime {
             onSleep: {}
         )
         refreshRecentMeetings()
-        // Recovery runs before detection, so a meeting that starts during launch
-        // can never be scanned as an interrupted one and finalised underneath
-        // itself.
+        // The recovery scan runs before detection, so a meeting that starts
+        // during launch can never be scanned as an interrupted one and finalised
+        // underneath itself. Resuming the processing of what it found runs
+        // after, because that can take minutes and detection must be watching
+        // before it does.
         Task { @MainActor in
-            await recoverAndResume()
+            await recover()
             detectionEngine.start()
+            await ensureLocalUserIdentity()
+            await refreshLocalModelState()
+            await pruneVoiceMemory()
+            await pipeline.resumeInterrupted()
+            refreshRecentMeetings()
         }
     }
 
@@ -199,7 +271,7 @@ public final class MeetTapeRuntime {
     }
 
     /// Chains main-actor work so updates apply in the order they were produced.
-    private func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) {
+    func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) {
         let previous = workChain
         workChain = Task { @MainActor in
             await previous?.value
@@ -207,8 +279,8 @@ public final class MeetTapeRuntime {
         }
     }
 
-    /// Startup recovery, then resumption of anything left mid-processing.
-    private func recoverAndResume() async {
+    /// Adopts anything a crash left behind, before detection can see it.
+    private func recover() async {
         let scanner = RecoveryScanner(
             repository: repository, inspector: AudioFileInspector(), clock: clock
         )
@@ -219,8 +291,6 @@ public final class MeetTapeRuntime {
                 "recovered an interrupted meeting: \(recovered.adoptedSegments) crash tails, \(Int(recovered.recoveredSeconds))s"
             )
         }
-        refreshRecentMeetings()
-        await pipeline.resumeInterrupted()
         refreshRecentMeetings()
     }
 
@@ -357,6 +427,15 @@ public final class MeetTapeRuntime {
         onStatusChange?()
     }
 
+    /// Applies a settings change that also has to reach the identity store,
+    /// which is where the local user's name lives once they have a profile.
+    public func updateSettingsAndIdentity(_ newSettings: AppSettings) {
+        let renamed = newSettings.localUserName != settings.localUserName
+        update(settings: newSettings)
+        guard renamed else { return }
+        enqueue { [weak self] in await self?.ensureLocalUserIdentity() }
+    }
+
     // MARK: - import
 
     /// Imports an existing recording. The original is copied in and left untouched.
@@ -432,14 +511,24 @@ public final class MeetTapeRuntime {
         }
     }
 
-    public func assignSpeaker(name: String, key: String, meetingID: String) {
+    /// Names a whole cluster.
+    ///
+    /// A confirmation, so it also enrols the cluster's own vector against that
+    /// person once the audio clears the quality gates. That and the microphone
+    /// track are the only two things that ever write a voice profile.
+    public func assignSpeaker(
+        name: String, key: String, meetingID: String, identityID: IdentityID? = nil
+    ) {
         enqueue { [weak self] in
             guard let self else { return }
             do {
-                try await pipeline.applySpeakerName(name, to: key, meetingID: meetingID)
+                _ = try await pipeline.applySpeakerName(
+                    name, to: key, meetingID: meetingID, identityID: identityID
+                )
             } catch {
                 Log.app.error("speaker not saved: \(logSafeDescription(error), privacy: .public)")
             }
+            onProcessingUpdate?(meetingID)
         }
     }
 
@@ -764,6 +853,10 @@ public final class MeetTapeRuntime {
         status.startedAt = snapshot.startedAt
         status.isProvisional = snapshot.isProvisional
         status.detectionPaused = settings.providers.detectionPaused
+        // Read by the processing gate from another executor, so a job started
+        // before a meeting parks between stages instead of competing with the
+        // capture that is running now.
+        recordingSnapshot.withLock { $0 = status.hasActiveSession }
         onStatusChange?()
     }
 }

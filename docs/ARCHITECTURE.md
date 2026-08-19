@@ -64,7 +64,19 @@ test, not a hardware exercise.
 
 Buffers are copied inside the audio callback and handed to a private serial queue.
 No file I/O happens on a render thread, and no reference to a tap buffer escapes
-its callback.
+its callback. Health changes are reported the same way: a manifest append does
+`write` and `fsync`, which must never happen on a render thread, so the
+coordinators' callbacks hop to the control queue first.
+
+Everything that builds or tears down a device runs on that one control queue:
+arming, committing, stopping, retargeting and the 500 ms poll. That is what makes
+"a poll-driven rebuild races a user-driven stop" impossible rather than unlikely,
+and it is why a stop can never leave a live engine or tap behind.
+
+The remote writer opens on the first remote packet rather than at commit. A
+provider's audio process often does not exist yet the instant a meeting is
+confirmed, and a writer that was never created would drop every packet for the
+rest of the meeting while the tap reported healthy.
 
 ### Why the microphone and the remote source differ
 
@@ -177,9 +189,19 @@ never CSS class names. The host is a compiled binary because browsers spawn host
 with a minimal `PATH`, and it lives in Application Support because a host under a
 TCC-protected directory never launches at all.
 
-The sensor is authoritative only while fresh. When it goes quiet the detector
-falls back to native signals, and an in-flight recording keeps running. Losing the
-extension costs precision, never the meeting.
+The sensor is combined with native evidence rather than replacing it, and the
+stronger of the two wins. A provider renaming its leave button would otherwise
+take a live meeting from confirmed to nothing. State is kept per tab, so a second
+tab opened during a call cannot overwrite the one that is in it, and an event
+older than the one already held is ignored.
+
+Losing the extension costs precision, never the meeting: when it goes quiet the
+detector falls back to native signals and an in-flight recording keeps running.
+
+The app accepts a socket connection only from its own relay binary, launched by a
+browser. MeetTape holds the microphone and system-audio grants, so a process that
+could fake a meeting event would get recording without ever triggering a
+permission prompt of its own.
 
 Firefox routes every tab through one CoreAudio object, so meeting audio cannot be
 separated from a video playing in another tab. The extension reports how many

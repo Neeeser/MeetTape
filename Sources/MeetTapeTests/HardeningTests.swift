@@ -136,6 +136,59 @@ enum HardeningTests {
                 expect.isTrue(timeline.duration(track: .mic) > 0.5)
             },
 
+            test("a remote writer that cannot open its file does not hang capture") { expect in
+                // Storage disappearing mid-meeting, an unmounted volume or a full
+                // disk: the writer's open fails and reports it, and that report
+                // needs the engine's own lock. Building the writer while holding
+                // that lock deadlocked the audio thread and froze the recording.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer {
+                    try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("segments").path
+                    )
+                    try? FileManager.default.removeItem(at: root)
+                }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+                let microphone = LockedBox<EmittingMicrophone?>(nil)
+                let tap = LockedBox<EmittingTap?>(nil)
+                let delegate = SilentDelegate()
+                let engine = CaptureEngine(
+                    segmentSeconds: 60,
+                    makeMicrophone: { sink, _ in
+                        let source = EmittingMicrophone(sink: sink)
+                        microphone.withLock { $0 = source }
+                        return source
+                    },
+                    makeTap: { sink, _ in
+                        let source = EmittingTap(sink: sink)
+                        tap.withLock { $0 = source }
+                        return source
+                    },
+                    delegate: delegate
+                )
+                await engine.arm(bundlePrefixes: ["com.example.app"], capturesRemote: true)
+                try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+
+                // Nothing can be created in the segments directory any more.
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o500], ofItemAtPath: layout.segments.path
+                )
+                tap.withLock { $0?.setTargets([makeTarget(pid: 42, bundle: "com.example.app")]) }
+                tap.withLock { $0?.emit(seconds: 1, hostTime: 100) }
+                microphone.withLock { $0?.emit(seconds: 1, hostTime: 101) }
+
+                // Reaching here at all is the assertion: a deadlock would never
+                // return. Stopping must still work.
+                let snapshot = await engine.stop(reason: "test")
+                expect.equal(snapshot.remoteSeconds, 0, "nothing could be written")
+                expect.isTrue(
+                    delegate.warnings.contains { $0.dedupKey.contains("segment") },
+                    "the user is told the recording could not be written: \(delegate.warnings)"
+                )
+            },
+
             test("the pre-roll reaches disk before the audio that follows it") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 121 tests, all passing, no failures, in about 4 seconds.
+`./scripts/test.sh` — 126 tests, all passing, no failures, in about 4 seconds.
 Eleven further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` — 10 tests, all passing.
@@ -51,6 +51,11 @@ Each row below covers a failure mode observed during development:
 | Starting a recording by hand during a candidate keeps the pre-roll | `SessionTests` |
 | A prejoin screen the extension can see is not committed | `DetectionTests` |
 | A call in one state still reports inside the freshness window | `extension/test` |
+| A three-channel microphone reads back audible, not silent | `AudioTests` |
+| A writer that cannot open its file does not hang capture | `HardeningTests` |
+| Recovery can append to a manifest cut off mid-line | `ManifestTests` |
+| A device that stays away is retried with a backoff | `CaptureRecoveryTests` |
+| A rename during processing is not overwritten by a stage | `PipelineTests` |
 | Every panel builds and lays out against a real view tree | `UITests` |
 | Choosing a new storage folder takes effect without a relaunch | `UITests` |
 

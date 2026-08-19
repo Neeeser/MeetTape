@@ -395,31 +395,59 @@ public final class CaptureEngine: Sendable {
         case .remote: remoteCoordinator.noteBufferArrived(hostTime: packet.hostTime)
         }
 
-        let writer = state.withLock { state -> SegmentWriter? in
+        enum Resolution {
+            case drop
+            case write(SegmentWriter)
+            /// The remote tap often binds after the meeting is committed, because
+            /// a provider's audio process may not exist yet at commit time. The
+            /// writer is created on the first packet so that audio is never
+            /// dropped for the rest of the meeting.
+            case needsRemoteWriter(layout: MeetingLayout, manifest: ManifestWriter)
+        }
+
+        let resolution = state.withLock { state -> Resolution in
             switch state.mode {
             case .idle:
-                return nil
+                return .drop
             case .armed:
                 (track == .mic ? micPreRoll : remotePreRoll).append(packet)
-                return nil
+                return .drop
             case .recording:
-                if track == .mic { return state.micWriter }
-                // The remote tap often binds after the meeting is committed: a
-                // provider's audio process may not exist yet at commit time. The
-                // writer is opened on the first packet so that audio is never
-                // dropped for the rest of the meeting.
-                if let existing = state.remoteWriter { return existing }
+                if track == .mic {
+                    return state.micWriter.map(Resolution.write) ?? .drop
+                }
+                if let existing = state.remoteWriter { return .write(existing) }
                 guard state.capturesRemote, let layout = state.layout, let manifest = state.manifest
-                else { return nil }
-                let writer = SegmentWriter(
-                    track: .remote, layout: layout, manifest: manifest,
-                    format: packet.buffer.format, segmentSeconds: self.segmentSeconds,
-                    clock: self.clock,
-                    onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
-                )
-                state.remoteWriter = writer
-                return writer
+                else { return .drop }
+                return .needsRemoteWriter(layout: layout, manifest: manifest)
             }
+        }
+
+        let writer: SegmentWriter?
+        switch resolution {
+        case .drop:
+            writer = nil
+        case .write(let existing):
+            writer = existing
+        case .needsRemoteWriter(let layout, let manifest):
+            // Built with no lock held: the writer reports an open failure through
+            // `onFailure`, which takes this same lock, and it is not recursive.
+            let created = SegmentWriter(
+                track: .remote, layout: layout, manifest: manifest,
+                format: packet.buffer.format, segmentSeconds: self.segmentSeconds,
+                clock: self.clock,
+                onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
+            )
+            // Another packet may have installed one while this was being built,
+            // and two writers on one track would interleave segment indices.
+            let winner = state.withLock { state -> SegmentWriter? in
+                guard state.mode == .recording else { return nil }
+                if let existing = state.remoteWriter { return existing }
+                state.remoteWriter = created
+                return created
+            }
+            if winner !== created { created.finish(reason: "duplicate") }
+            writer = winner
         }
         writer?.enqueue(packet)
     }

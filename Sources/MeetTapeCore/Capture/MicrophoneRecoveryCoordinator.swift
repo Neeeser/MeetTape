@@ -45,6 +45,18 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         var restartTimestamps: [Double] = []
         var unhealthySince: Double?
         var lastRebuildFailedAt: Double?
+        var consecutiveBuildFailures = 0
+        var nextRebuildAllowedAt: Double?
+
+        /// The first retry is immediate, on the next poll. Each further failure
+        /// doubles the wait, up to the ceiling.
+        mutating func noteBuildFailure(at now: Double, thresholds: CaptureThresholds) {
+            lastRebuildFailedAt = now
+            consecutiveBuildFailures += 1
+            let steps = Double(min(consecutiveBuildFailures - 1, 6))
+            let delay = min(thresholds.rebuildBackoffCeiling, thresholds.pollInterval * pow(2, steps))
+            nextRebuildAllowedAt = now + delay
+        }
     }
 
     private let state: Mutex<State>
@@ -84,6 +96,8 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.unhealthySince = nil
             state.restartTimestamps = []
             state.lastRebuildFailedAt = nil
+            state.consecutiveBuildFailures = 0
+            state.nextRebuildAllowedAt = nil
             state.wakeRequestedAt = nil
             state.activeFormat = nil
         }
@@ -91,12 +105,18 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         setHealth(.idle, detail: nil)
     }
 
-    /// `AVAudioEngineConfigurationChange`. Deliberately does not rebuild: the
-    /// notification arrives in bursts and one of them can describe a device that
-    /// is mid-teardown.
+    /// `AVAudioEngineConfigurationChange`. Does not rebuild on its own, because
+    /// the notification arrives in bursts and one of them can describe a device
+    /// that is mid-teardown.
     public func noteConfigurationChange() {
         let now = clock.monotonicSeconds
-        state.withLock { $0.policy.noteConfigurationChange(at: now) }
+        state.withLock { state in
+            state.policy.noteConfigurationChange(at: now)
+            // The hardware changed, so a device that could not be built a moment
+            // ago may exist now. The backoff starts again from nothing.
+            state.nextRebuildAllowedAt = nil
+            state.consecutiveBuildFailures = 0
+        }
     }
 
     /// Called from the audio thread for every delivered buffer.
@@ -131,13 +151,20 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             return state.policy.isRunning
         }
         if wakeDue {
+            state.withLock { state in
+                state.nextRebuildAllowedAt = nil
+                state.consecutiveBuildFailures = 0
+            }
             rebuild(reason: .wake, isInitial: false)
             return
         }
 
-        // A rebuild that could not find a usable device retries on the next poll.
+        // A rebuild that could not find a usable device is retried, with a
+        // backoff. Retrying every poll against an absent device produced eight
+        // manifest fsyncs a second for as long as the device stayed away.
         let retryFailedBuild: Bool = state.withLock { state in
             guard state.lastRebuildFailedAt != nil, state.policy.isRunning else { return false }
+            if let allowedAt = state.nextRebuildAllowedAt, now < allowedAt { return false }
             state.lastRebuildFailedAt = nil
             return true
         }
@@ -194,6 +221,15 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
 
     private func rebuild(reason: RebuildReason, isInitial: Bool) {
         let now = clock.monotonicSeconds
+        // While builds are failing, every path into a rebuild waits for the
+        // backoff, including the watchdog. Otherwise a device that has gone away
+        // is rebuilt on every poll and each attempt writes health transitions to
+        // the manifest, which is an fsync each.
+        let tooSoon: Bool = state.withLock { state in
+            guard !isInitial, let allowedAt = state.nextRebuildAllowedAt else { return false }
+            return now < allowedAt
+        }
+        if tooSoon { return }
         state.withLock { state in
             state.policy.noteRebuildStarted(at: now, isInitial: isInitial)
             if !isInitial { state.restartTimestamps.append(now) }
@@ -221,7 +257,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
 
         guard let format = chosen else {
-            state.withLock { $0.lastRebuildFailedAt = now }
+            state.withLock { $0.noteBuildFailure(at: now, thresholds: thresholds) }
             setHealth(.degraded, detail: "no usable input device")
             return
         }
@@ -233,9 +269,13 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                     track: .mic, from: previous, to: installed, reason: reason.label
                 )
             }
-            state.withLock { $0.activeFormat = installed }
+            state.withLock { state in
+                state.activeFormat = installed
+                state.consecutiveBuildFailures = 0
+                state.nextRebuildAllowedAt = nil
+            }
         } catch {
-            state.withLock { $0.lastRebuildFailedAt = now }
+            state.withLock { $0.noteBuildFailure(at: now, thresholds: thresholds) }
             setHealth(.failed, detail: "engine start failed")
             delegate.captureDidFail(
                 track: .mic,

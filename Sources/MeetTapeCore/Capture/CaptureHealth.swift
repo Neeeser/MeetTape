@@ -80,6 +80,10 @@ public struct CaptureThresholds: Sendable, Equatable {
     public var pollInterval: Double
     /// Settle delay after system wake before proactively rebuilding.
     public var wakeSettleDelay: Double
+    /// Longest wait between attempts to rebuild a source that keeps failing. The
+    /// wait doubles from one poll interval, so a device that is simply gone is
+    /// retried a few times a minute instead of twice a second.
+    public var rebuildBackoffCeiling: Double
 
     public init(
         configurationDebounce: Double = 0.4,
@@ -87,7 +91,8 @@ public struct CaptureThresholds: Sendable, Equatable {
         micCallbackTimeout: Double = 2.0,
         remoteCallbackTimeout: Double = 5.0,
         pollInterval: Double = 0.5,
-        wakeSettleDelay: Double = 1.5
+        wakeSettleDelay: Double = 1.5,
+        rebuildBackoffCeiling: Double = 30
     ) {
         self.configurationDebounce = configurationDebounce
         self.rebuildGrace = rebuildGrace
@@ -95,6 +100,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         self.remoteCallbackTimeout = remoteCallbackTimeout
         self.pollInterval = pollInterval
         self.wakeSettleDelay = wakeSettleDelay
+        self.rebuildBackoffCeiling = rebuildBackoffCeiling
     }
 
     public static let validated = CaptureThresholds()

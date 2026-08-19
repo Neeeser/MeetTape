@@ -23,6 +23,37 @@ enum AudioTests {
         return buffer
     }
 
+    /// A buffer in the shape a multi-channel built-in microphone delivers: more
+    /// than two channels, discrete, with no surround layout to mix down from.
+    static func makeDiscreteTone(
+        seconds: Double, sampleRate: Double, channels: UInt32,
+        frequency: Double = 440, amplitude: Float = 0.5
+    ) -> AVAudioPCMBuffer {
+        var description = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+                | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: channels, mBitsPerChannel: 32, mReserved: 0
+        )
+        var layout = AudioChannelLayout()
+        layout.mChannelLayoutTag = kAudioChannelLayoutTag_DiscreteInOrder | channels
+        let format = AVAudioFormat(
+            streamDescription: &description,
+            channelLayout: AVAudioChannelLayout(layout: &layout)
+        )!
+        let frames = AVAudioFrameCount(seconds * sampleRate)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        let data = buffer.floatChannelData!
+        for frame in 0..<Int(frames) {
+            let value = amplitude * Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
+            for channel in 0..<Int(channels) { data[channel][frame] = value }
+        }
+        return buffer
+    }
+
     static func makeSilence(seconds: Double, sampleRate: Double) -> AVAudioPCMBuffer {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         let frames = AVAudioFrameCount(seconds * sampleRate)
@@ -148,6 +179,46 @@ enum AudioTests {
                     return true
                 }
                 expect.close(Double(frames) / 16_000, 4.0, tolerance: 0.15, "read back the whole track")
+            },
+
+            test("a three-channel microphone is still audible when it is read back") { expect in
+                // The built-in microphone on this machine reports three channels.
+                // A file with that many channels and no surround layout has no
+                // mixdown matrix, and a converter left to itself returns silence,
+                // so the recording exists at full duration and contains nothing.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let tone = makeDiscreteTone(seconds: 2, sampleRate: 48_000, channels: 3)
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: tone.format, segmentSeconds: 60
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(buffer: tone, hostTime: 0))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.equal(timeline.segments(track: .mic).first?.format.channelCount, 3)
+
+                let stream = TrackAudioStream(
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                )
+                var peak: Float = 0
+                var frames: Int64 = 0
+                try stream.forEachBuffer { buffer, _ in
+                    frames += Int64(buffer.frameLength)
+                    if let data = buffer.floatChannelData {
+                        for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(data[0][frame])) }
+                    }
+                    return true
+                }
+                expect.close(Double(frames) / 16_000, 2.0, tolerance: 0.15, "the whole track reads back")
+                expect.isTrue(peak > 0.2, "the audio read back silent: peak \(peak)")
             },
 
             test("a chunk exports to an m4a small enough for the request limit") { expect in

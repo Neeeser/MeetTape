@@ -64,7 +64,9 @@ and that fakes implement in tests, so the rebuild-storm regression is covered by
 a unit test instead of a hardware exercise.
 
 Buffers are copied inside the audio callback and handed to a private serial
-queue. No file I/O happens on a render thread, and no reference to a tap buffer
+queue. Opening a segment file happens on that queue as well, because the first
+remote packet arrives on a render thread and creating a file there, with the
+manifest `fsync` that follows it, drops the audio being recorded. No file I/O happens on a render thread, and no reference to a tap buffer
 escapes its callback. Health changes follow the same rule: appending to the
 manifest performs `write` and `fsync`, so the coordinators' callbacks hop to the
 control queue before reporting.

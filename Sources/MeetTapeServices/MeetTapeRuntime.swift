@@ -160,6 +160,16 @@ public final class MeetTapeRuntime {
         if status.isRecording { stopRecording(reason: "app_quit") }
     }
 
+    /// Stops and waits for the recording to be finalised.
+    ///
+    /// `stop()` only enqueues the work, and at quit the main run loop stops
+    /// before it runs, which leaves the last segment open and the meeting stuck
+    /// in `recording` until the next launch recovers it. Quitting awaits this.
+    public func stopAndWait() async {
+        stop()
+        await workChain?.value
+    }
+
     /// Chains main-actor work so updates apply in the order they were produced.
     private func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) {
         let previous = workChain
@@ -333,10 +343,14 @@ public final class MeetTapeRuntime {
             source: .imported, provider: .unknown, startedAt: started,
             titles: titles, now: clock.now
         )
+        // Decoding, transcoding and copying the original are file-bound work, and
+        // this runtime is on the main actor, so it runs off it.
         let importer = AudioImporter(segmentSeconds: settings.segmentSeconds, clock: clock)
-        let result = try importer.import(
-            source: url, into: created.store, meetingID: created.metadata.id
-        )
+        let store = created.store
+        let meetingIdentifier = created.metadata.id
+        let result = try await Task.detached(priority: .userInitiated) {
+            try importer.import(source: url, into: store, meetingID: meetingIdentifier)
+        }.value
 
         var metadata = created.metadata
         metadata.durationSeconds = result.durationSeconds

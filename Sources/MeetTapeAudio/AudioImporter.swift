@@ -75,6 +75,11 @@ public struct AudioImporter: Sendable {
         else {
             throw ProcessingError.audioUnreadable(path: source.lastPathComponent)
         }
+        // More than two channels with no surround layout has no mixdown matrix,
+        // and the converter would produce silence.
+        if sourceFormat.channelCount > 2 {
+            converter.channelMap = (0..<Int(targetFormat.channelCount)).map { NSNumber(value: $0) }
+        }
 
         var producedFrames: Int64 = 0
         var hostTime = clock.monotonicSeconds

@@ -291,6 +291,38 @@ enum CaptureRecoveryTests {
                 expect.equal(coordinator.health, .healthy)
                 expect.equal(engine.buildCount, 1, "the failed attempt built nothing")
             },
+
+            test("a device that stays away is retried a few times a minute") { expect in
+                // Every attempt writes health transitions to the manifest, and each
+                // of those is an fsync. Retrying twice a second against a device
+                // that is simply gone wrote tens of thousands of lines an hour.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -10_875))
+                coordinator.start()
+                expect.equal(engine.buildCount, 1)
+
+                // Five minutes of polling twice a second.
+                for _ in 0..<600 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    engine.buildCount < 30,
+                    "\(engine.buildCount) attempts in five minutes is a retry storm"
+                )
+                expect.isTrue(engine.buildCount > 5, "it must keep trying: \(engine.buildCount)")
+
+                // The device comes back and the next attempt succeeds.
+                engine.stopFailing()
+                clock.advance(30)
+                coordinator.tick()
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                expect.equal(coordinator.health, .healthy)
+            },
         ])
     }
 

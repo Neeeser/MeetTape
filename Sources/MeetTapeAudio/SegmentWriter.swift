@@ -66,7 +66,12 @@ public final class SegmentWriter: Sendable {
         self.onFailure = onFailure
         self.state = LockedBox(State(format: format))
         self.queue = DispatchQueue(label: "com.meettape.segment-writer.\(track.rawValue)", qos: .utility)
-        queue.sync { openSegment(reason: "start") }
+        // Asynchronous because the caller can be an audio render thread: creating
+        // the file and appending an fsync'd manifest line there drops the audio
+        // being recorded. The queue is serial, so the segment is still open before
+        // the first buffer is written, and a failure reported from here runs with
+        // no caller lock held.
+        queue.async { [self] in openSegment(reason: "start") }
     }
 
     public var stats: Stats {

@@ -166,21 +166,24 @@ public actor ProcessingPipeline {
     /// flight. Writing the whole copy that was read before the request would
     /// silently discard that edit.
     private func persist(_ metadata: MeetingMetadata, to store: MeetingStore) throws {
-        guard var current = try? store.readMetadata() else {
+        guard (try? store.readMetadata()) != nil else {
             try store.writeMetadata(metadata)
             return
         }
-        current.processing = metadata.processing
-        current.durationSeconds = metadata.durationSeconds
-        current.titles.ai = metadata.titles.ai
-        current.titles.calendar = metadata.titles.calendar ?? current.titles.calendar
-        current.descriptionText = current.descriptionText ?? metadata.descriptionText
-        current.calendar = current.calendar ?? metadata.calendar
-        for participant in metadata.participants
-        where !current.participants.contains(where: { $0.displayName == participant.displayName }) {
-            current.participants.append(participant)
+        // Through updateMetadata so the read and the write are one operation: a
+        // rename landing between them would otherwise be overwritten.
+        try store.updateMetadata { current in
+            current.processing = metadata.processing
+            current.durationSeconds = metadata.durationSeconds
+            current.titles.ai = metadata.titles.ai
+            current.titles.calendar = metadata.titles.calendar ?? current.titles.calendar
+            current.descriptionText = current.descriptionText ?? metadata.descriptionText
+            current.calendar = current.calendar ?? metadata.calendar
+            for participant in metadata.participants
+            where !current.participants.contains(where: { $0.displayName == participant.displayName }) {
+                current.participants.append(participant)
+            }
         }
-        try store.writeMetadata(current)
     }
 
     /// Resumes everything interrupted, called at launch.

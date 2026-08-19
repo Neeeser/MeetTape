@@ -25,11 +25,29 @@ public final class ManifestWriter: Sendable {
         } catch {
             throw StorageError.directoryCreationFailed(path: directory.path, underlying: "\(error)")
         }
-        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
+        // Read-write, because reopening an interrupted manifest has to look at the
+        // last byte before appending to it. Writes still go through O_APPEND.
+        let descriptor = open(url.path, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else {
             throw StorageError.fileWriteFailed(path: url.path, underlying: "open errno \(errno)")
         }
+        Self.terminatePartialLine(descriptor: descriptor)
         state = Mutex(State(descriptor: descriptor))
+    }
+
+    /// Ends a partial final line before appending to it.
+    ///
+    /// A recording killed mid-write leaves a line with no newline. Appending
+    /// straight onto it glues the next record to the fragment, and the reader
+    /// tolerates a partial line only when it is last, so both the fragment and
+    /// the record that recovery just wrote are lost.
+    private static func terminatePartialLine(descriptor: Int32) {
+        let end = lseek(descriptor, 0, SEEK_END)
+        guard end > 0 else { return }
+        var last: UInt8 = 0
+        guard pread(descriptor, &last, 1, end - 1) == 1, last != 0x0A else { return }
+        var newline: UInt8 = 0x0A
+        _ = write(descriptor, &newline, 1)
     }
 
     public var writeFailures: Int { state.withLock { $0.writeFailures } }

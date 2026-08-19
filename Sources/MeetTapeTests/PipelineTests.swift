@@ -152,6 +152,41 @@ enum PipelineTests {
                 expect.equal(backend.calls.filter { $0.kind == "diarize" }.count, 1)
             },
 
+            test("a rename during processing is not overwritten by a stage") { expect in
+                // The pipeline reads metadata.json, changes its own fields and
+                // writes the whole document back, while the user renames the
+                // meeting from the review panel. Without serialisation the slower
+                // writer restores the copy it read and the rename disappears.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root)
+                let store = meeting.store
+
+                let renames = Task.detached {
+                    for index in 0..<200 {
+                        _ = try? store.updateMetadata { $0.titles.human = "Renamed \(index)" }
+                    }
+                }
+                let stages = Task.detached {
+                    for _ in 0..<200 {
+                        _ = try? store.updateMetadata { metadata in
+                            metadata.processing.advance(to: .transcribing, at: Date())
+                            metadata.durationSeconds += 1
+                        }
+                    }
+                }
+                await renames.value
+                await stages.value
+
+                let final = try store.readMetadata()
+                expect.equal(
+                    final.titles.human, "Renamed 199",
+                    "the last rename survived every stage write"
+                )
+                expect.equal(final.processing.state, .transcribing)
+                expect.isTrue(final.durationSeconds > 0)
+            },
+
             test("a rate limit is retried on its own and the meeting completes") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

@@ -122,6 +122,45 @@ enum ManifestTests {
                 expect.isFalse(timeline.isComplete)
             },
 
+            test("recovery can append to a manifest that was cut off mid-line") { expect in
+                // Startup recovery reopens the manifest of a killed recording and
+                // appends what it adopted. Writing straight onto the partial line
+                // glues the two together, and both records are then unreadable.
+                let directory = try makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let url = directory.appendingPathComponent("manifest.jsonl")
+                let writer = try ManifestWriter(url: url)
+                writer.append(.sessionStart(.init(
+                    meetingID: "m", source: .googleMeet, segmentSeconds: 30,
+                    appVersion: "1.0.0", processID: 1
+                )))
+                writer.append(.segmentOpen(.init(
+                    track: .mic, index: 1, file: "mic.0001.caf", firstFrameHostTime: nil,
+                    startFrame: 0, sampleRate: 48_000, channelCount: 1, reason: "start"
+                )))
+                writer.close()
+                var data = try Data(contentsOf: url)
+                data.append(contentsOf: Array(#"{"ev":"segment_close","host":1"#.utf8))
+                try data.write(to: url)
+
+                let recovery = try ManifestWriter(url: url)
+                recovery.append(.crashTailAdopted(.init(
+                    track: .mic, index: 1, frameCount: 480_000, byteCount: 1_920_000, seconds: 10
+                )))
+                recovery.append(.sessionEnd(.init(reason: "recovered", micSeconds: 10, remoteSeconds: 0)))
+                recovery.close()
+
+                let result = try ManifestReader.read(contentsOf: url)
+                // The fragment stays in the file and is skipped. What matters is
+                // that the records written after it are readable.
+                expect.equal(result.unrecognisedLines, 1, "only the crash fragment is dropped")
+                expect.equal(result.lines.count, 4, "both recovery records survived")
+                let timeline = ManifestReader.timeline(from: result)
+                expect.equal(timeline.openSegments.count, 0, "the tail closed the open segment")
+                expect.close(timeline.duration(track: .mic), 10, tolerance: 0.01)
+                expect.isTrue(timeline.isComplete)
+            },
+
             test("an unknown future event does not discard the recording") { expect in
                 var data = Data()
                 let writerLines = [

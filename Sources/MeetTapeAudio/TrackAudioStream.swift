@@ -151,6 +151,13 @@ public final class TrackAudioReader {
                 continue
             }
             converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
+            // A file with more than two channels and no surround layout, which is
+            // what a three-channel built-in microphone produces, has no mixdown
+            // matrix, and the converter answers with silence. Taking the leading
+            // channels keeps the recording audible.
+            if sourceFormat.channelCount > 2 {
+                converter.channelMap = (0..<Int(targetFormat.channelCount)).map { NSNumber(value: $0) }
+            }
             self.converter = converter
             currentSourceFormat = sourceFormat
             currentFile = file

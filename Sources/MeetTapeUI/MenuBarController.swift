@@ -316,7 +316,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func quit() {
-        runtime.stop()
+        // The delegate's applicationShouldTerminate stops the runtime and waits
+        // for the recording to be finalised before the process exits.
         NSApp.terminate(nil)
     }
 }

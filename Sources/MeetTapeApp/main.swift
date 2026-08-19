@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windows: WindowManager!
     private var menuBar: MenuBarController!
     private var notificationRouter: NotificationRouter!
+    private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         runtime = MeetTapeRuntime()
@@ -22,6 +23,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             windows.showOnboarding()
         }
         Log.app.info("MeetTape started")
+    }
+
+    /// Finalising a recording is asynchronous, and a terminating run loop does
+    /// not run the work that `stop()` enqueues. Termination is deferred until the
+    /// recording is closed, so the meeting is not left for crash recovery.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateNow }
+        isTerminating = true
+        Task { @MainActor in
+            await runtime.stopAndWait()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// Reads and writes one meeting's archive files.
 ///
@@ -30,14 +31,21 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(metadata), to: layout.metadata)
     }
 
-    /// Read, mutate, write. Callers serialise their own access; the atomic write
-    /// means a crash still leaves a valid file either way.
+    /// Read, mutate, write, serialised per meeting file.
+    ///
+    /// The processing pipeline writes its stage while the user renames the
+    /// meeting or edits its participants. Both sides read, change their own
+    /// fields and write the whole document, so without a lock around the trio the
+    /// slower writer restores a stale copy and the other edit disappears. Every
+    /// mutation of `metadata.json` goes through here.
     @discardableResult
     public func updateMetadata(_ body: (inout MeetingMetadata) -> Void) throws -> MeetingMetadata {
-        var metadata = try readMetadata()
-        body(&metadata)
-        try writeMetadata(metadata)
-        return metadata
+        try MetadataSerialisation.withLock(for: layout.metadata) {
+            var metadata = try readMetadata()
+            body(&metadata)
+            try writeMetadata(metadata)
+            return metadata
+        }
     }
 
     // MARK: notes
@@ -157,6 +165,28 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
         self.processingState = processingState
         self.wasInterrupted = wasInterrupted
         self.hasTranscript = hasTranscript
+    }
+}
+
+/// One lock per `metadata.json`, shared by every writer in the process.
+///
+/// The file is small and rewritten whole, so serialising the read-modify-write is
+/// cheap, and it is the only thing that stops a concurrent rename from being
+/// overwritten by a pipeline stage that read the file first.
+enum MetadataSerialisation {
+    private static let locks = Mutex<[String: NSLock]>([:])
+
+    static func withLock<T>(for url: URL, _ body: () throws -> T) rethrows -> T {
+        let path = url.standardizedFileURL.path
+        let fileLock = locks.withLock { locks -> NSLock in
+            if let existing = locks[path] { return existing }
+            let created = NSLock()
+            locks[path] = created
+            return created
+        }
+        fileLock.lock()
+        defer { fileLock.unlock() }
+        return try body()
     }
 }
 

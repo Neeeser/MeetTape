@@ -19,6 +19,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var failNextBuild: CaptureError?
         var formatReads = 0
         var installedFormat: AudioFormatDescriptor?
+        var failEveryBuild: CaptureError?
     }
 
     private let state = Mutex(State())
@@ -41,6 +42,19 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
 
     func failNextBuild(with error: CaptureError) {
         state.withLock { $0.failNextBuild = error }
+    }
+
+    /// Every build fails until `stopFailing`, which is a device that is gone
+    /// rather than one that is momentarily busy.
+    func failEveryBuild(with error: CaptureError) {
+        state.withLock { $0.failEveryBuild = error }
+    }
+
+    func stopFailing() {
+        state.withLock { state in
+            state.failEveryBuild = nil
+            state.failNextBuild = nil
+        }
     }
 
     func currentInputFormat() -> AudioFormatDescriptor? {
@@ -67,6 +81,10 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     @discardableResult
     func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
         let failure: CaptureError? = state.withLock { state in
+            if let always = state.failEveryBuild {
+                state.builds.append(Build(format: preferred))
+                return always
+            }
             defer { state.failNextBuild = nil }
             return state.failNextBuild
         }

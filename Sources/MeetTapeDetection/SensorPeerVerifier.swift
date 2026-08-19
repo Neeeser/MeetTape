@@ -101,10 +101,10 @@ public struct SensorPeerVerifier: Sendable {
     }
 
     private func executablePath(of processID: pid_t) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN) * 4)
         let length = proc_pidpath(processID, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
-        return String(cString: buffer)
+        return String(decoding: buffer[0..<Int(length)], as: UTF8.self)
     }
 
     private func parentProcessID(of processID: pid_t) -> pid_t? {

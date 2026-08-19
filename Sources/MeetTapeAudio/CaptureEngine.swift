@@ -201,19 +201,22 @@ public final class CaptureEngine: Sendable {
             )
 
             let capturesRemote = self.state.withLock { $0.capturesRemote }
+            // The writer holds this closure and the engine holds the writer, so
+            // the reference back has to be weak or the pair never deallocates.
+            let engine = WeakEngine(self)
             let micFormat = self.format(from: self.micCoordinator.activeFormat)
                 ?? AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
             let micWriter = SegmentWriter(
                 track: .mic, layout: layout, manifest: manifest, format: micFormat,
                 segmentSeconds: self.segmentSeconds, clock: self.clock,
-                onFailure: { [weak self] error in self?.handleWriteFailure(error, track: .mic) }
+                onFailure: { error in engine.value?.handleWriteFailure(error, track: .mic) }
             )
             var remoteWriter: SegmentWriter?
             if capturesRemote, let remoteFormat = self.format(from: self.remoteCoordinator.activeFormat) {
                 remoteWriter = SegmentWriter(
                     track: .remote, layout: layout, manifest: manifest, format: remoteFormat,
                     segmentSeconds: self.segmentSeconds, clock: self.clock,
-                    onFailure: { [weak self] error in self?.handleWriteFailure(error, track: .remote) }
+                    onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
                 )
             }
 
@@ -386,6 +389,7 @@ public final class CaptureEngine: Sendable {
     /// Health changes are reported through the relay, which moves the manifest
     /// write onto the control queue rather than doing it here.
     private func receive(_ packet: AudioBufferPacket, track: CaptureTrack) {
+        let engine = WeakEngine(self)
         switch track {
         case .mic: micCoordinator.noteBufferArrived(hostTime: packet.hostTime)
         case .remote: remoteCoordinator.noteBufferArrived(hostTime: packet.hostTime)
@@ -411,7 +415,7 @@ public final class CaptureEngine: Sendable {
                     track: .remote, layout: layout, manifest: manifest,
                     format: packet.buffer.format, segmentSeconds: self.segmentSeconds,
                     clock: self.clock,
-                    onFailure: { [weak self] error in self?.handleWriteFailure(error, track: .remote) }
+                    onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
                 )
                 state.remoteWriter = writer
                 return writer
@@ -586,6 +590,14 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
             )
         }
     }
+}
+
+/// A weak reference the writer's failure callback can hold without keeping the
+/// engine alive.
+private final class WeakEngine: @unchecked Sendable {
+    weak var value: CaptureEngine?
+
+    init(_ value: CaptureEngine) { self.value = value }
 }
 
 /// Carries the tap's format-change notification to the coordinator, which does

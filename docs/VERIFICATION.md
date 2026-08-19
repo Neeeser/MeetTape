@@ -158,14 +158,34 @@ monotonic across chunk boundaries, the transcript spanned the recording, and the
 overlap between chunks produced no duplicated utterances. The run costs money and
 takes tens of minutes, so it is excluded from an ordinary test run.
 
+**A real Slack Huddle through the audio-only path.** With accessibility and
+screen recording denied, a two-minute huddle against a second account was
+detected from the helper process's audio streams alone: candidate when the
+preview opened the microphone, confirmed 25 seconds after the two-way audio
+began, committed to disk, and finished with `provider_ended`. The end path was
+measured against the same huddle: the helper released its input stream the
+moment the huddle ended and its output stream 12 seconds later, evidence went
+to none 15 seconds after the leave, and the session finalised 97 seconds after
+that (6-second end grace plus the 90-second reconnect window). These runs
+predate the change that pauses capture during the reconnect window; the timing
+of the evidence decay is what they establish.
+
+**How meeting applications release audio on leave.** Measured with a CoreAudio
+process probe on macOS 26: Firefox acquires the input stream on the Meet
+prejoin screen and releases it within a second of leaving the call, keeping
+only an output stream, and Slack's helper releases input immediately and
+output within 12 seconds. Neither application holds a stream that would keep
+producing meeting evidence after a leave.
+
 ## Not verified
 
 The following behaviour is implemented but has not been exercised, and should not
 be assumed to work.
 
-- **A real Slack Huddle.** The `Leave Huddle` detection, its flap handling and
-  the helper-process tap are covered by tests written against recorded
-  observations, but no huddle has been held against this build.
+- **A real Slack Huddle with accessibility granted.** The `Leave Huddle` control
+  path is covered by tests written against recorded observations. A real huddle
+  has been recorded end to end through the audio-only fallback (below), but not
+  through the accessibility path.
 - **A real Google Meet or Zoom call in Firefox** with the extension loaded from
   `extension/dist/firefox`. The sensor path was verified with a synthetic relay
   before peer verification was added, and the browser-launched path has not been

@@ -22,8 +22,8 @@ BIN_DIR="$REPO_ROOT/.build/$CONFIG"
 
 cd "$REPO_ROOT"
 echo "==> building ($CONFIG)"
-swift build --configuration "$CONFIG" --product MeetTape
-swift build --configuration "$CONFIG" --product meettape-nativehost
+swift build --configuration "$CONFIG" "${MEETTAPE_SWIFT_FLAGS[@]+"${MEETTAPE_SWIFT_FLAGS[@]}"}" --product MeetTape
+swift build --configuration "$CONFIG" "${MEETTAPE_SWIFT_FLAGS[@]+"${MEETTAPE_SWIFT_FLAGS[@]}"}" --product meettape-nativehost
 
 echo "==> building the browser extension"
 "$REPO_ROOT/extension/build.sh" >/dev/null

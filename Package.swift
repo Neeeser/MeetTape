@@ -13,6 +13,13 @@ let package = Package(
         .executable(name: "meettape-test", targets: ["MeetTapeTests"]),
         .library(name: "MeetTapeCore", targets: ["MeetTapeCore"]),
     ],
+    // Pinned to the exact versions the local-processing and speaker-scale probes
+    // measured. A newer revision changes transcription and embedding behaviour,
+    // so it is a re-evaluation, not a bump.
+    dependencies: [
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", exact: "1.1.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.6"),
+    ],
     targets: [
         // Pure logic. Foundation only: state machines, manifest, timeline arithmetic,
         // chunk planning, transcript merging, storage layout. Everything here is
@@ -30,11 +37,32 @@ let package = Package(
         // OpenAI, Keychain, EventKit, UserNotifications.
         .target(name: "MeetTapeIntegrations", dependencies: ["MeetTapeCore"]),
 
+        // The local voice-identity store: SQLite with Float32 embedding BLOBs,
+        // plus the recognition service that scores a speaker occurrence against
+        // it. Independent of which transcription or diarization backend ran, so
+        // choosing OpenAI in Settings still keeps voice memory local.
+        .target(name: "MeetTapeSpeakers", dependencies: ["MeetTapeCore"]),
+
+        // On-device speech: WhisperKit transcription and the FluidAudio offline
+        // diarizer, behind the same protocols the OpenAI client implements.
+        .target(
+            name: "MeetTapeLocalAI",
+            dependencies: [
+                "MeetTapeCore",
+                "MeetTapeAudio",
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ]
+        ),
+
         // Wiring: session controller runtime, capture engine, processing pipeline,
         // meeting repository, app coordinator.
         .target(
             name: "MeetTapeServices",
-            dependencies: ["MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection", "MeetTapeIntegrations"]
+            dependencies: [
+                "MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection", "MeetTapeIntegrations",
+                "MeetTapeSpeakers", "MeetTapeLocalAI",
+            ]
         ),
 
         // SwiftUI/AppKit surfaces.
@@ -53,7 +81,8 @@ let package = Package(
             name: "MeetTapeTests",
             dependencies: [
                 "TestKit", "MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection",
-                "MeetTapeIntegrations", "MeetTapeServices", "MeetTapeUI",
+                "MeetTapeIntegrations", "MeetTapeSpeakers", "MeetTapeLocalAI",
+                "MeetTapeServices", "MeetTapeUI",
             ],
             resources: [.copy("Fixtures")]
         ),

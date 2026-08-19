@@ -47,10 +47,18 @@ verified against real hardware. `CaptureThresholds` holds the numbers.
 | Capture starts at candidate into a memory ring | Slack opens the mic 12.2 s before the user joins; Meet prejoin is invisible natively |
 | One missing `Leave Huddle` read never ends a huddle | Slack's accessibility subtree reads empty intermittently during a live call |
 | The browser extension can vanish without stopping a recording | Detection falls back to native signals; a DOM regression should cost precision, not the meeting |
+| Sensor evidence is combined with native evidence, never substituted for it | A provider renaming its leave button would otherwise take a live meeting from confirmed to nothing |
+| Detection keeps asserting a meeting every poll, not once at its start | The session ends a recording whose evidence disappears, so a one-shot event cuts the call short |
+| Only MeetTape's own relay, launched by a browser, may use the sensor socket | The app holds the microphone grant, so a faked meeting event is recording without a prompt |
+| Content scripts are plain scripts, never ES modules | An `import` statement makes the whole script fail to load and the sensor silently never runs |
+| No file I/O, manifest write or device work on an audio callback | An fsync on a render thread drops the audio it was recording |
+| Every device build, teardown and poll runs on the capture control queue | Otherwise a poll-driven rebuild races a user-driven stop and leaves a live engine running |
 
 Regression tests for all of these live in `Sources/MeetTapeTests/CaptureRecoveryTests.swift`,
-`DetectionTests.swift` and `ManifestTests.swift`. If one of them starts failing,
-the behaviour regressed; the test is not wrong.
+`DetectionTests.swift`, `ManifestTests.swift` and `HardeningTests.swift`. If one
+of them starts failing, the behaviour regressed; the test is not wrong.
+`docs/VERIFICATION.md` records what has been run against real hardware and what
+has not.
 
 ## Architectural boundaries
 
@@ -101,6 +109,11 @@ OPENAI_API_KEY=<your key> \
 The fixture is synthesised locally, so only the requests are live. Assertions
 count how many expected terms survive transcription rather than demanding an
 exact word, because synthetic speech transcribes with variation.
+
+Two further opt-in suites: `MEETTAPE_LIVE_CAPTURE=1` records ten seconds from the
+real microphone and process tap and checks the manifest against the files on
+disk, and `MEETTAPE_LIVE_LONG=1` puts an hour of audio through the chunked
+pipeline. The second one costs money and takes tens of minutes.
 
 ## Release
 

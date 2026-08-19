@@ -134,6 +134,11 @@ The extension talks to a compiled native messaging host, not to a script: browse
 spawn hosts with a minimal `PATH`, so an interpreter shebang silently never
 resolves. MeetTape installs the host and its manifest on launch.
 
+The app only accepts a socket connection from its own relay binary, launched by a
+browser. MeetTape holds the microphone grant, so anything that could fake a
+meeting event would get recording without a prompt of its own. A refused
+connection is logged with its reason and shown in Settings → Permissions.
+
 ## Permissions
 
 | Permission | Needed for | Without it |
@@ -202,6 +207,15 @@ Meeting titles, transcripts, notes, participant names and meeting URLs are never
 logged, and the API key is never written to disk outside the keychain.
 
 Uninstalling MeetTape leaves every recording readable.
+
+## What has been verified
+
+[docs/VERIFICATION.md](docs/VERIFICATION.md) records what was actually exercised
+and what was only implemented, including a real capture run against hardware, a
+crash recovered from real files, and a full import through the live API. Several
+things are implemented but unverified, including a real Slack Huddle, a real
+browser meeting with the extension loaded, and a long soak. They are listed there
+rather than implied here.
 
 ## Licence
 

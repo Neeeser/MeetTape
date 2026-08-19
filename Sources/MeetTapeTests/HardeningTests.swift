@@ -531,7 +531,7 @@ enum HardeningTests {
         ])
     }
 
-    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite, sensorTrustSuite] }
+    static var all: [Suite] { [captureSuite, detectionSuite, sessionSuite, sensorTrustSuite, liveCaptureSuite] }
 }
 
 extension HardeningTests {
@@ -569,6 +569,68 @@ extension HardeningTests {
                 )
                 expect.isFalse(verifier.isTrusted(shellLaunched))
                 expect.isTrue(verifier.rejectionReason(shellLaunched).contains("browser"))
+            },
+        ])
+    }
+}
+
+extension HardeningTests {
+    /// Runs the real capture chain against real hardware.
+    ///
+    /// Opt-in because it needs microphone access and a running audio device. It is
+    /// the check that the refactored engine still records: everything else in the
+    /// suite drives the algorithm through fakes.
+    static var liveCaptureSuite: Suite {
+        Suite("LiveCapture", [
+            test("the real engine records both tracks and closes a valid manifest") { expect in
+                guard ProcessInfo.processInfo.environment["MEETTAPE_LIVE_CAPTURE"] == "1" else {
+                    throw TestSkip("set MEETTAPE_LIVE_CAPTURE=1 to record from real hardware")
+                }
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+
+                let delegate = SilentDelegate()
+                let engine = CaptureEngine(segmentSeconds: 3, delegate: delegate)
+                await engine.arm(
+                    bundlePrefixes: ["org.mozilla.firefox", "com.tinyspeck.slackmacgap"],
+                    capturesRemote: true
+                )
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                try await engine.commit(layout: layout, meetingID: "live", source: .manual)
+                try await Task.sleep(nanoseconds: 8_000_000_000)
+                let snapshot = await engine.stop(reason: "test")
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.isTrue(
+                    timeline.duration(track: .mic) > 5,
+                    "expected microphone audio, got \(timeline.duration(track: .mic))s"
+                )
+                expect.isTrue(timeline.isComplete, "the manifest should close cleanly")
+                expect.equal(timeline.openSegments.count, 0)
+                expect.isTrue(
+                    timeline.segments(track: .mic).count >= 2,
+                    "3 s segments over 8 s should rotate"
+                )
+                // Every closed segment on disk matches what the manifest claims.
+                for segment in timeline.segments(track: .mic) {
+                    let info = try AudioFileInspector().inspect(
+                        url: layout.segments.appendingPathComponent(segment.file)
+                    )
+                    expect.equal(info.frameCount, segment.frameCount ?? -1, "mismatch in \(segment.file)")
+                }
+                expect.isTrue(
+                    snapshot.micSeconds > 5,
+                    "the final snapshot should report what was written"
+                )
+                // The pre-roll captured before commit is part of the recording.
+                expect.isTrue(
+                    timeline.preRollFlushes.contains { $0.track == .mic && $0.seconds > 1 },
+                    "the two seconds before commit should have been flushed"
+                )
             },
         ])
     }

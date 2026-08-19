@@ -159,9 +159,10 @@ public enum VoiceProfileStatus: Sendable, Equatable, Codable {
 
 /// What produced a voice embedding, and therefore whether it may be stored.
 ///
-/// Only the first three are ever written. A recognition result, at any
-/// confidence, is a read: letting an automatic match widen the profile it
-/// matched against is the feedback loop that makes one wrong answer permanent.
+/// A recognition result, at any confidence, is a read. Letting an automatic
+/// match widen the profile it matched against is the feedback loop that turns
+/// one wrong answer into a permanent one, so nothing here corresponds to a
+/// match.
 public enum VoiceEnrollmentSource: String, Codable, Sendable, CaseIterable {
     /// The microphone track of a remote call, where the speaker is the local
     /// user by construction.
@@ -171,6 +172,16 @@ public enum VoiceEnrollmentSource: String, Codable, Sendable, CaseIterable {
     /// A person assigned individual transcript lines, accumulated until there
     /// was enough speech to be worth enrolling.
     case humanConfirmedUtterances = "human_confirmed_utterances"
+    /// The one vector an unnamed recurring voice is created with.
+    ///
+    /// A voice nobody has named has no human to confirm it, so the profile has
+    /// to start somewhere. It starts once, from the cluster that created it, and
+    /// never grows from a later automatic match. Refused for a named person: a
+    /// profile with a name on it only ever holds human-verified material.
+    case anonymousSeed = "anonymous_seed"
 
-    public var isHumanVerified: Bool { true }
+    public var isHumanVerified: Bool { self != .anonymousSeed }
+
+    /// Whether this source may write into a named person's profile.
+    public var mayEnrolNamedPerson: Bool { self != .anonymousSeed }
 }

@@ -180,12 +180,7 @@ public struct MeetingReviewView: View {
     }
 
     private func originLabel(_ assignment: SpeakerAssignment) -> String {
-        switch assignment.origin {
-        case .human: "You set this"
-        case .deterministic: "From the microphone track"
-        case .ai:
-            assignment.confidence.map { String(format: "Suggested %.0f%%", $0 * 100) } ?? "Suggested"
-        }
+        assignment.origin.displayName
     }
 
     private var transcriptCard: some View {

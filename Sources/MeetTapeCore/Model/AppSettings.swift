@@ -64,6 +64,94 @@ public struct EnrichmentSettings: Codable, Sendable, Equatable {
     }
 }
 
+/// Which backend runs one processing stage.
+///
+/// Transcription and diarization choose independently, and neither is tied to
+/// enrichment. A user can run words locally and speakers in the cloud, or the
+/// reverse, and speaker memory stays local either way.
+public enum ProcessingBackendChoice: String, Codable, Sendable, CaseIterable {
+    case local
+    case openAI = "openai"
+
+    public var displayName: String {
+        switch self {
+        case .local: "Local"
+        case .openAI: "OpenAI"
+        }
+    }
+}
+
+/// What the local voice memory is allowed to do.
+public struct SpeakerRecognitionSettings: Codable, Sendable, Equatable {
+    /// Match speakers against the people the user has named.
+    public var recognizeKnownVoices: Bool
+    /// Keep a profile for a voice that recurs across meetings but has no name.
+    public var rememberRecurringVoices: Bool
+    /// Build the local user's own profile from microphone-track audio, where
+    /// the speaker is known by construction. That profile is what makes an
+    /// in-person or imported recording recognizable.
+    public var learnMyVoice: Bool
+    /// Turn confirmed speaker corrections into enrolment material once enough
+    /// clean speech has accumulated.
+    public var learnFromCorrections: Bool
+
+    public init(
+        recognizeKnownVoices: Bool = true,
+        rememberRecurringVoices: Bool = true,
+        learnMyVoice: Bool = true,
+        learnFromCorrections: Bool = true
+    ) {
+        self.recognizeKnownVoices = recognizeKnownVoices
+        self.rememberRecurringVoices = rememberRecurringVoices
+        self.learnMyVoice = learnMyVoice
+        self.learnFromCorrections = learnFromCorrections
+    }
+}
+
+/// Where each processing stage runs.
+///
+/// Local is the default for both, so a fresh installation records,
+/// transcribes, diarizes and recognizes speakers with no API key at all.
+public struct ProcessingSettings: Codable, Sendable, Equatable {
+    public var transcription: ProcessingBackendChoice
+    public var diarization: ProcessingBackendChoice
+    public var speakers: SpeakerRecognitionSettings
+    /// The identity that represents the person using this Mac.
+    public var localUserIdentityID: IdentityID?
+
+    public init(
+        transcription: ProcessingBackendChoice = .local,
+        diarization: ProcessingBackendChoice = .local,
+        speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
+        localUserIdentityID: IdentityID? = nil
+    ) {
+        self.transcription = transcription
+        self.diarization = diarization
+        self.speakers = speakers
+        self.localUserIdentityID = localUserIdentityID
+    }
+
+    public var usesLocalTranscription: Bool { transcription == .local }
+    public var usesLocalDiarization: Bool { diarization == .local }
+    /// True when nothing in the transcript path needs an API key.
+    public var isFullyLocal: Bool { usesLocalTranscription && usesLocalDiarization }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = ProcessingSettings()
+        transcription =
+            try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .transcription)
+            ?? defaults.transcription
+        diarization =
+            try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
+            ?? defaults.diarization
+        speakers =
+            try container.decodeIfPresent(SpeakerRecognitionSettings.self, forKey: .speakers)
+            ?? defaults.speakers
+        localUserIdentityID = try container.decodeIfPresent(IdentityID.self, forKey: .localUserIdentityID)
+    }
+}
+
 /// Everything the user can configure. Stored as JSON in Application Support so it
 /// is readable and portable, with the API key deliberately absent: that lives in
 /// the keychain and nowhere else.
@@ -75,6 +163,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var launchAtLogin: Bool
     public var showNotifications: Bool
     public var models: AIModelSettings
+    public var processing: ProcessingSettings
     public var enrichment: EnrichmentSettings
     public var providers: ProviderPolicies
     /// Name used for the local speaker, which the microphone track is by
@@ -100,6 +189,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         launchAtLogin: Bool = false,
         showNotifications: Bool = true,
         models: AIModelSettings = AIModelSettings(),
+        processing: ProcessingSettings = ProcessingSettings(),
         enrichment: EnrichmentSettings = EnrichmentSettings(),
         providers: ProviderPolicies = ProviderPolicies(),
         localUserName: String = "Me",
@@ -116,6 +206,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.launchAtLogin = launchAtLogin
         self.showNotifications = showNotifications
         self.models = models
+        self.processing = processing
         self.enrichment = enrichment
         self.providers = providers
         self.localUserName = localUserName
@@ -144,6 +235,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
         models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
+        processing =
+            try container.decodeIfPresent(ProcessingSettings.self, forKey: .processing)
+            ?? defaults.processing
         enrichment =
             try container.decodeIfPresent(EnrichmentSettings.self, forKey: .enrichment)
             ?? defaults.enrichment

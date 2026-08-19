@@ -32,6 +32,29 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// One word with its own timing.
+///
+/// Only a transcription backend that reports word timings fills these in. They
+/// are what speaker attribution aligns against, which is why the local decoder
+/// runs without prompt conditioning: prompting improves punctuation and
+/// collapses word timings, and a 60-second clip went from 198 distinct word
+/// starts to 153 with 43 words reporting zero duration.
+public struct RawTranscriptWord: Codable, Sendable, Equatable {
+    /// Chunk-relative start, in seconds.
+    public var start: Double
+    public var end: Double
+    public var text: String
+    /// The decoder's own probability for this token, kept for diagnostics.
+    public var probability: Double?
+
+    public init(start: Double, end: Double, text: String, probability: Double? = nil) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.probability = probability
+    }
+}
+
 public struct RawTranscriptSegment: Codable, Sendable, Equatable {
     /// Chunk-relative start, in seconds, exactly as returned.
     public var start: Double
@@ -39,12 +62,20 @@ public struct RawTranscriptSegment: Codable, Sendable, Equatable {
     public var text: String
     /// The API's anonymous label, such as "A". Only meaningful inside its chunk.
     public var speaker: String?
+    /// Present when the backend reported word timings. Absent for backends that
+    /// return segments only, and absent in every file written before local
+    /// transcription existed, which is why it decodes as optional.
+    public var words: [RawTranscriptWord]?
 
-    public init(start: Double, end: Double, text: String, speaker: String?) {
+    public init(
+        start: Double, end: Double, text: String, speaker: String?,
+        words: [RawTranscriptWord]? = nil
+    ) {
         self.start = start
         self.end = end
         self.text = text
         self.speaker = speaker
+        self.words = words
     }
 }
 
@@ -85,6 +116,11 @@ public enum SpeakerLabel {
         let trimmed = label.trimmingCharacters(in: .whitespaces).lowercased()
         if let numeric = Int(trimmed) { return String(format: "%02d", numeric) }
         if trimmed.hasPrefix("speaker_") { return String(trimmed.dropFirst("speaker_".count)) }
+        // "S1", "S2": the offline diarizer's own cluster names, one-based.
+        if trimmed.count >= 2, let first = trimmed.first, first.isLetter,
+           let index = Int(trimmed.dropFirst()), index >= 1 {
+            return String(format: "%02d", index - 1)
+        }
         if trimmed.count == 1, let scalar = trimmed.unicodeScalars.first, scalar.properties.isAlphabetic {
             // "A" -> 00, "B" -> 01, matching the shape of numeric labels.
             let offset = Int(scalar.value) - Int(UnicodeScalar("a").value)

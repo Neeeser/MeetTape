@@ -110,6 +110,11 @@ segments written and closed, resident memory 29 MB at the start and 29 MB at the
 end, zero engine restarts, and every segment's manifest frame count matching the
 file on disk.
 
+The live API runs below were performed before the transcript-alignment,
+de-duplication, speaker-label and retry changes that followed a review of the
+processing path, and they have not been repeated since. Those changes are covered
+by unit tests.
+
 **Live OpenAI.** `MEETTAPE_LIVE_OPENAI=1` with a locally synthesised
 three-speaker fixture. Six tests pass: credential and model access, transcription
 with segment timings, diarization separating two remote speakers, the assembled

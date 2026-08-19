@@ -19,6 +19,11 @@ public final class WindowManager {
 
     public init(runtime: MeetTapeRuntime) {
         self.runtime = runtime
+        // An open review window tracks processing on its own: when the
+        // transcript lands, the window shows it without a manual refresh.
+        runtime.onProcessingUpdate = { [weak self] meetingID in
+            self?.reviewModels[meetingID]?.reload()
+        }
     }
 
     public func showSettings() {

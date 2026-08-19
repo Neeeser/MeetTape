@@ -279,6 +279,54 @@ enum HardeningTests {
                     "recording should resume once the directory exists again"
                 )
             },
+
+            test("the reconnect window is not part of the recording") { expect in
+                // Leaving a meeting used to keep writing through the 90-second
+                // reconnect window, so every recording carried a tail of the
+                // user's desk audio. A pause closes the segments; a resume after
+                // a rejoin opens new ones and flushes the ring, so the moments
+                // before the rejoin was confirmed still land on disk.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+                let microphone = LockedBox<EmittingMicrophone?>(nil)
+                let engine = CaptureEngine(
+                    segmentSeconds: 60,
+                    makeMicrophone: { sink, _ in
+                        let source = EmittingMicrophone(sink: sink)
+                        microphone.withLock { $0 = source }
+                        return source
+                    },
+                    makeTap: { sink, _ in EmittingTap(sink: sink) },
+                    delegate: SilentDelegate()
+                )
+                await engine.arm(bundlePrefixes: [], capturesRemote: false)
+                try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+                microphone.withLock { $0?.emit(seconds: 2, hostTime: 100) }
+
+                await engine.pause(reason: "provider_evidence_gone")
+                // Audio arriving during the window goes to the ring, not to disk.
+                microphone.withLock { $0?.emit(seconds: 5, hostTime: 110) }
+
+                await engine.resume()
+                microphone.withLock { $0?.emit(seconds: 1, hostTime: 120) }
+                _ = await engine.stop(reason: "test")
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.isTrue(
+                    timeline.segments(track: .mic).count >= 2,
+                    "the pause should close one segment and the resume open another"
+                )
+                expect.isTrue(
+                    timeline.markers.contains { $0.label.hasPrefix("pause:") },
+                    "the manifest should record where the window began"
+                )
+                // 2 s before the pause, 5 s recovered from the ring, 1 s after.
+                expect.close(timeline.duration(track: .mic), 8, tolerance: 0.1)
+                expect.isTrue(timeline.isComplete)
+            },
         ])
     }
 

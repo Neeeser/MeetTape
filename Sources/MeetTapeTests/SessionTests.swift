@@ -179,11 +179,15 @@ enum SessionTests {
                 // Firefox quits. Evidence disappears entirely.
                 var now = 100.0
                 var sawReconnecting = false
+                var sawPause = false
                 for _ in 0..<30 {
                     now += 0.5
                     let actions = controller.update(evidence: [], now: now, wallClock: wall)
                     if actions.contains(where: { $0 == .notify(.reconnecting(provider: .googleMeet)) }) {
                         sawReconnecting = true
+                    }
+                    if actions.contains(where: { if case .pauseCapture = $0 { true } else { false } }) {
+                        sawPause = true
                     }
                     expect.isFalse(
                         actions.contains { if case .finishRecording = $0 { true } else { false } },
@@ -191,6 +195,10 @@ enum SessionTests {
                     )
                 }
                 expect.isTrue(sawReconnecting)
+                expect.isTrue(
+                    sawPause,
+                    "the reconnect window is waiting, not meeting, so writing must pause"
+                )
                 expect.equal(controller.snapshot.state, .reconnecting)
 
                 // Firefox comes back and rejoins the same meeting.
@@ -208,6 +216,35 @@ enum SessionTests {
                     resumed.contains { if case .commitRecording = $0 { true } else { false } },
                     "a rejoin must not create a second meeting"
                 )
+            },
+
+            test("another provider's candidate evidence cannot hold a meeting open") { expect in
+                // After leaving a Meet, Slack idling with the microphone (or any
+                // other app producing candidate-level evidence) used to reset the
+                // end clock forever, so the recording never finished.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .recording)
+
+                let slackCandidate = ProviderEvidence(
+                    provider: .slack, confidence: .candidate, source: .native,
+                    applicationBundleID: "com.tinyspeck.slackmacgap",
+                    audioBundlePrefixes: ["com.tinyspeck.slackmacgap"]
+                )
+                var now = 100.0
+                var finished = false
+                for _ in 0..<400 {
+                    now += 0.5
+                    let actions = controller.update(evidence: [slackCandidate], now: now, wallClock: wall)
+                    if actions.contains(where: { if case .finishRecording = $0 { true } else { false } }) {
+                        finished = true
+                        break
+                    }
+                }
+                expect.isTrue(finished, "the Meet recording must end despite Slack's idle microphone")
             },
 
             test("a meeting that does not come back is finished after the window") { expect in

@@ -93,9 +93,12 @@ enum UITests {
                 status.health = CaptureHealthSnapshot(mic: .failed, remote: .healthy)
                 expect.equal(status.displayHealth, .failed)
 
-                // Reconnecting still counts as recording: capture is still running.
+                // The reconnect window is not recording: segments are closed and
+                // capture waits in memory, so the menu shows a distinct state.
                 status.sessionState = .reconnecting
-                expect.isTrue(status.isRecording)
+                expect.isFalse(status.isRecording)
+                expect.isTrue(status.isInReconnectWindow)
+                expect.isTrue(status.hasActiveSession)
 
                 status.sessionState = .idle
                 expect.equal(status.displayHealth, .idle, "an idle session shows no health")

@@ -56,6 +56,7 @@ public final class SegmentWriter: Sendable {
         format: AVAudioFormat,
         segmentSeconds: Double = 30,
         clock: any Clock = SystemClock(),
+        firstSegmentIndex: Int = 1,
         onFailure: @escaping @Sendable (CaptureError) -> Void = { _ in }
     ) {
         self.track = track
@@ -64,7 +65,11 @@ public final class SegmentWriter: Sendable {
         self.clock = clock
         self.segmentSeconds = segmentSeconds
         self.onFailure = onFailure
-        self.state = LockedBox(State(format: format))
+        var initial = State(format: format)
+        // A writer opened after a reconnect continues the numbering; starting at
+        // 1 again would overwrite the first run's segments.
+        initial.index = firstSegmentIndex - 1
+        self.state = LockedBox(initial)
         self.queue = DispatchQueue(label: "com.meettape.segment-writer.\(track.rawValue)", qos: .utility)
         // Asynchronous because the caller can be an audio render thread: creating
         // the file and appending an fsync'd manifest line there drops the audio

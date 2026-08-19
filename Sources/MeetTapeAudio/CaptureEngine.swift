@@ -75,6 +75,13 @@ public final class CaptureEngine: Sendable {
         var warningsRaised: Set<String> = []
         /// Incremented on every stop so a poll already in flight is discarded.
         var generation = 0
+        /// Last segment index written on each track, carried across a pause so
+        /// the writer opened after a reconnect continues the numbering instead
+        /// of overwriting the first run's files. Held in memory because the
+        /// alternative, listing the directory, is file I/O that the lazy remote
+        /// writer path would run on an audio thread.
+        var micLastSegmentIndex = 0
+        var remoteLastSegmentIndex = 0
     }
 
     private let state = LockedBox(State())
@@ -174,6 +181,8 @@ public final class CaptureEngine: Sendable {
                 // Warnings are per meeting; a failure in the last one must not
                 // suppress the same warning in this one.
                 state.warningsRaised.removeAll()
+                state.micLastSegmentIndex = 0
+                state.remoteLastSegmentIndex = 0
             }
             self.micPreRoll.discard()
             self.remotePreRoll.discard()
@@ -200,74 +209,130 @@ public final class CaptureEngine: Sendable {
                 hostTime: self.clock.monotonicSeconds, wallClock: self.clock.now
             )
 
-            let capturesRemote = self.state.withLock { $0.capturesRemote }
-            // The writer holds this closure and the engine holds the writer, so
-            // the reference back has to be weak or the pair never deallocates.
-            let engine = WeakEngine(self)
-            let micFormat = self.format(from: self.micCoordinator.activeFormat)
-                ?? AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
-            let micWriter = SegmentWriter(
-                track: .mic, layout: layout, manifest: manifest, format: micFormat,
-                segmentSeconds: self.segmentSeconds, clock: self.clock,
-                onFailure: { error in engine.value?.handleWriteFailure(error, track: .mic) }
-            )
-            var remoteWriter: SegmentWriter?
-            if capturesRemote, let remoteFormat = self.format(from: self.remoteCoordinator.activeFormat) {
-                remoteWriter = SegmentWriter(
-                    track: .remote, layout: layout, manifest: manifest, format: remoteFormat,
-                    segmentSeconds: self.segmentSeconds, clock: self.clock,
-                    onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
-                )
+            self.beginWritingOnControlQueue(manifest: manifest, layout: layout)
+        }
+    }
+
+    /// Suspends writing while the meeting waits out its reconnect window.
+    ///
+    /// The segments close and the sources keep running into the pre-roll ring,
+    /// so the wait costs nothing on disk and a rejoin still includes the moments
+    /// before it was confirmed. The manifest stays open for the next run.
+    public func pause(reason: String) async {
+        await onControlQueue {
+            let closing = self.state.withLock { state -> (SegmentWriter?, SegmentWriter?, ManifestWriter?) in
+                guard state.mode == .recording else { return (nil, nil, nil) }
+                let values = (state.micWriter, state.remoteWriter, state.manifest)
+                state.micWriter = nil
+                state.remoteWriter = nil
+                state.mode = .armed
+                return values
             }
+            closing.0?.finish(reason: reason)
+            closing.1?.finish(reason: reason)
+            self.state.withLock { state in
+                if let mic = closing.0 { state.micLastSegmentIndex = mic.stats.segmentCount }
+                if let remote = closing.1 { state.remoteLastSegmentIndex = remote.stats.segmentCount }
+            }
+            closing.2?.append(
+                .marker(.init(label: "pause:\(reason)")),
+                hostTime: self.clock.monotonicSeconds, wallClock: self.clock.now
+            )
+        }
+    }
 
-            // The ring is drained and handed to the writer queues inside the same
-            // locked region that flips the mode, so a live buffer can never be
-            // written ahead of the pre-roll it should follow.
-            let flushed: [(CaptureTrack, Int64, Double, Double?)] = self.state.withLock { state in
-                state.manifest = manifest
-                state.layout = layout
-                state.micWriter = micWriter
-                state.remoteWriter = remoteWriter
+    /// Resumes writing after a pause: opens fresh segments and flushes the ring,
+    /// so the run includes the seconds before the rejoin was confirmed.
+    public func resume() async {
+        await onControlQueue {
+            let stored = self.state.withLock { state -> (ManifestWriter, MeetingLayout)? in
+                guard state.mode == .armed, let manifest = state.manifest, let layout = state.layout
+                else { return nil }
+                return (manifest, layout)
+            }
+            guard let (manifest, layout) = stored else { return }
+            manifest.append(
+                .marker(.init(label: "resume")),
+                hostTime: self.clock.monotonicSeconds, wallClock: self.clock.now
+            )
+            self.beginWritingOnControlQueue(manifest: manifest, layout: layout)
+        }
+    }
 
-                var summaries: [(CaptureTrack, Int64, Double, Double?)] = []
-                let micPackets = self.micPreRoll.drain()
-                if !micPackets.isEmpty {
+    /// Opens the writers, drains the pre-roll ring into them and flips the mode
+    /// to recording. Runs on the control queue, for the initial commit and for a
+    /// resume after a reconnect.
+    private func beginWritingOnControlQueue(manifest: ManifestWriter, layout: MeetingLayout) {
+        let capturesRemote = state.withLock { $0.capturesRemote }
+        // The writer holds this closure and the engine holds the writer, so
+        // the reference back has to be weak or the pair never deallocates.
+        let engine = WeakEngine(self)
+        let micFormat = format(from: micCoordinator.activeFormat)
+            ?? AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        let (micBase, remoteBase) = state.withLock { ($0.micLastSegmentIndex, $0.remoteLastSegmentIndex) }
+        let micWriter = SegmentWriter(
+            track: .mic, layout: layout, manifest: manifest, format: micFormat,
+            segmentSeconds: segmentSeconds, clock: clock,
+            firstSegmentIndex: micBase + 1,
+            onFailure: { error in engine.value?.handleWriteFailure(error, track: .mic) }
+        )
+        var remoteWriter: SegmentWriter?
+        if capturesRemote, let remoteFormat = format(from: remoteCoordinator.activeFormat) {
+            remoteWriter = SegmentWriter(
+                track: .remote, layout: layout, manifest: manifest, format: remoteFormat,
+                segmentSeconds: segmentSeconds, clock: clock,
+                firstSegmentIndex: remoteBase + 1,
+                onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
+            )
+        }
+
+        // The ring is drained and handed to the writer queues inside the same
+        // locked region that flips the mode, so a live buffer can never be
+        // written ahead of the pre-roll it should follow.
+        let flushed: [(CaptureTrack, Int64, Double, Double?)] = state.withLock { state in
+            state.manifest = manifest
+            state.layout = layout
+            state.micWriter = micWriter
+            state.remoteWriter = remoteWriter
+
+            var summaries: [(CaptureTrack, Int64, Double, Double?)] = []
+            let micPackets = self.micPreRoll.drain()
+            if !micPackets.isEmpty {
+                var frames: Int64 = 0
+                var seconds: Double = 0
+                let earliest = micPackets.first?.hostTime
+                for packet in micPackets {
+                    frames += Int64(packet.buffer.frameLength)
+                    seconds += packet.seconds
+                    micWriter.enqueue(packet)
+                }
+                summaries.append((.mic, frames, seconds, earliest))
+            }
+            if let remoteWriter {
+                let remotePackets = self.remotePreRoll.drain()
+                if !remotePackets.isEmpty {
                     var frames: Int64 = 0
                     var seconds: Double = 0
-                    let earliest = micPackets.first?.hostTime
-                    for packet in micPackets {
+                    let earliest = remotePackets.first?.hostTime
+                    for packet in remotePackets {
                         frames += Int64(packet.buffer.frameLength)
                         seconds += packet.seconds
-                        micWriter.enqueue(packet)
+                        remoteWriter.enqueue(packet)
                     }
-                    summaries.append((.mic, frames, seconds, earliest))
+                    summaries.append((.remote, frames, seconds, earliest))
                 }
-                if let remoteWriter {
-                    let remotePackets = self.remotePreRoll.drain()
-                    if !remotePackets.isEmpty {
-                        var frames: Int64 = 0
-                        var seconds: Double = 0
-                        let earliest = remotePackets.first?.hostTime
-                        for packet in remotePackets {
-                            frames += Int64(packet.buffer.frameLength)
-                            seconds += packet.seconds
-                            remoteWriter.enqueue(packet)
-                        }
-                        summaries.append((.remote, frames, seconds, earliest))
-                    }
-                }
-                state.mode = .recording
-                return summaries
             }
+            state.mode = .recording
+            return summaries
+        }
 
-            for (track, frames, seconds, earliest) in flushed {
-                manifest.append(
-                    .preRollFlushed(.init(
-                        track: track, frameCount: frames, seconds: seconds, earliestHostTime: earliest
-                    )),
-                    hostTime: self.clock.monotonicSeconds, wallClock: self.clock.now
-                )
-            }
+        for (track, frames, seconds, earliest) in flushed {
+            manifest.append(
+                .preRollFlushed(.init(
+                    track: track, frameCount: frames, seconds: seconds, earliestHostTime: earliest
+                )),
+                hostTime: clock.monotonicSeconds, wallClock: clock.now
+            )
         }
     }
 
@@ -402,7 +467,7 @@ public final class CaptureEngine: Sendable {
             /// a provider's audio process may not exist yet at commit time. The
             /// writer is created on the first packet so that audio is never
             /// dropped for the rest of the meeting.
-            case needsRemoteWriter(layout: MeetingLayout, manifest: ManifestWriter)
+            case needsRemoteWriter(layout: MeetingLayout, manifest: ManifestWriter, firstIndex: Int)
         }
 
         let resolution = state.withLock { state -> Resolution in
@@ -419,7 +484,10 @@ public final class CaptureEngine: Sendable {
                 if let existing = state.remoteWriter { return .write(existing) }
                 guard state.capturesRemote, let layout = state.layout, let manifest = state.manifest
                 else { return .drop }
-                return .needsRemoteWriter(layout: layout, manifest: manifest)
+                return .needsRemoteWriter(
+                    layout: layout, manifest: manifest,
+                    firstIndex: state.remoteLastSegmentIndex + 1
+                )
             }
         }
 
@@ -429,13 +497,13 @@ public final class CaptureEngine: Sendable {
             writer = nil
         case .write(let existing):
             writer = existing
-        case .needsRemoteWriter(let layout, let manifest):
+        case .needsRemoteWriter(let layout, let manifest, let firstIndex):
             // Built with no lock held: the writer reports an open failure through
             // `onFailure`, which takes this same lock, and it is not recursive.
             let created = SegmentWriter(
                 track: .remote, layout: layout, manifest: manifest,
                 format: packet.buffer.format, segmentSeconds: self.segmentSeconds,
-                clock: self.clock,
+                clock: self.clock, firstSegmentIndex: firstIndex,
                 onFailure: { error in engine.value?.handleWriteFailure(error, track: .remote) }
             )
             // Another packet may have installed one while this was being built,

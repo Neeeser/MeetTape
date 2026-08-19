@@ -73,6 +73,10 @@ public enum SessionAction: Sendable, Equatable {
     case retargetCapture(bundlePrefixes: [String])
     /// Create the meeting directory and start writing segments, flushing pre-roll.
     case commitRecording(CommitRequest)
+    /// The meeting's evidence is gone and the reconnect window has started.
+    /// Segments close and capture falls back to the memory ring, so the wait is
+    /// not part of the recording.
+    case pauseCapture(reason: String)
     /// A reconnect landed back in the same meeting.
     case beginRun(reason: String)
     /// Metadata learned after the recording started.
@@ -280,7 +284,9 @@ public struct SessionController: Sendable {
             }
             // Weaker evidence still means the meeting is there. Only its absence
             // starts the clock, because over-recording is the cheaper failure.
-            if let best, best.confidence == .candidate {
+            // The evidence has to come from this meeting's own provider: Slack
+            // touching the microphone must not hold a Meet recording open.
+            if let best, best.confidence == .candidate, best.provider == snapshot.provider {
                 pendingEnd = nil
                 return absorbEvidence(best)
             }
@@ -291,7 +297,12 @@ public struct SessionController: Sendable {
                 snapshot.state = .reconnecting
                 reconnectingSince = now
                 self.pendingEnd = nil
-                return [.notify(.reconnecting(provider: snapshot.provider))]
+                // The reconnect window is waiting, not meeting: writing stops
+                // now, and a rejoin starts a new run with the ring as pre-roll.
+                return [
+                    .pauseCapture(reason: "provider_evidence_gone"),
+                    .notify(.reconnecting(provider: snapshot.provider)),
+                ]
             }
             return []
 

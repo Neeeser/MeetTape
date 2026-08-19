@@ -70,6 +70,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             symbol = status.displayHealth.isLosingAudio
                 ? "exclamationmark.circle.fill"
                 : "record.circle.fill"
+        } else if status.isInReconnectWindow {
+            symbol = "arrow.triangle.2.circlepath.circle.fill"
         } else if status.detectionPaused {
             symbol = "pause.circle"
         } else {
@@ -78,10 +80,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         button.image = NSImage(
             systemSymbolName: symbol, accessibilityDescription: accessibilityLabel(for: status)
         )
-        button.image?.isTemplate = !status.isRecording
+        button.image?.isTemplate = !(status.isRecording || status.isInReconnectWindow)
         button.contentTintColor = status.isRecording
-            ? (status.displayHealth.isLosingAudio ? .systemRed : .systemRed)
-            : nil
+            ? .systemRed
+            : (status.isInReconnectWindow ? .systemOrange : nil)
         button.title = status.isRecording
             ? " \(Format.duration(status.elapsed(now: Date())))"
             : ""
@@ -90,6 +92,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func accessibilityLabel(for status: RuntimeStatus) -> String {
+        if status.isInReconnectWindow {
+            let title = status.title ?? status.provider.displayName
+            return "MeetTape, \(title) disconnected, recording paused"
+        }
         guard status.isRecording else {
             return status.detectionPaused
                 ? "MeetTape, automatic detection paused"
@@ -107,6 +113,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         if status.isRecording {
             addRecordingSection(to: menu, status: status)
+        } else if status.isInReconnectWindow {
+            addReconnectSection(to: menu, status: status)
         } else {
             addIdleSection(to: menu)
         }
@@ -175,6 +183,21 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             discard.target = self
             menu.addItem(discard)
         }
+    }
+
+    /// Shown while the meeting's evidence is gone and the reconnect window is
+    /// open. Nothing is being written; the recording resumes if the meeting
+    /// comes back and ends otherwise.
+    private func addReconnectSection(to menu: NSMenu, status: RuntimeStatus) {
+        let title = status.title ?? status.provider.displayName
+        menu.addItem(Self.informationItem("◌ Meeting disconnected", emphasis: true))
+        menu.addItem(Self.informationItem("  \(title)"))
+        menu.addItem(Self.informationItem("  Recording is paused. It resumes if the meeting comes back, and ends after 90 seconds."))
+
+        menu.addItem(.separator())
+        let stop = NSMenuItem(title: "End Meeting Now", action: #selector(stopRecording), keyEquivalent: "")
+        stop.target = self
+        menu.addItem(stop)
     }
 
     /// A menu row that carries information rather than a command.
@@ -325,8 +348,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         Task { @MainActor in
             do {
-                let meetingID = try await runtime.importRecording(from: url)
-                windows.showReview(meetingID: meetingID)
+                // The review window is not opened here. Transcription takes a
+                // while, so the import shows progress in this menu and posts a
+                // notification when the transcript is ready.
+                _ = try await runtime.importRecording(from: url)
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "MeetTape could not import that file"

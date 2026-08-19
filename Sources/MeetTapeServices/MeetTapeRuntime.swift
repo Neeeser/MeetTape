@@ -22,7 +22,13 @@ public struct RuntimeStatus: Sendable, Equatable {
 
     public init() {}
 
-    public var isRecording: Bool { sessionState == .recording || sessionState == .reconnecting }
+    /// Audio is being written to disk right now. During the reconnect window
+    /// this is false: the segments are closed and capture waits in memory.
+    public var isRecording: Bool { sessionState == .recording }
+    /// The meeting lost its evidence and is waiting out the reconnect window.
+    public var isInReconnectWindow: Bool { sessionState == .reconnecting }
+    /// A meeting is open, whether writing or waiting to reconnect.
+    public var hasActiveSession: Bool { isRecording || isInReconnectWindow }
 
     /// Never show a healthy recording while a required source is known to be
     /// failing.
@@ -66,8 +72,11 @@ public final class MeetTapeRuntime {
     public private(set) var recentMeetings: [MeetingSummary] = []
     public private(set) var processing: [String: ProcessingPipeline.Progress] = [:]
     public private(set) var provisionalPrompt: ProvisionalPrompt?
-    public private(set) var reviewMeetingID: String?
     public private(set) var settings: AppSettings
+
+    /// Called when a meeting's processing state changes, so an open review
+    /// window can reload its files without the user refreshing by hand.
+    @ObservationIgnored public var onProcessingUpdate: ((String) -> Void)?
 
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
@@ -167,7 +176,7 @@ public final class MeetTapeRuntime {
 
     public func stop() {
         detectionEngine.stop()
-        if status.isRecording { stopRecording(reason: "app_quit") }
+        if status.hasActiveSession { stopRecording(reason: "app_quit") }
     }
 
     /// Stops and waits for the recording to be finalised.
@@ -375,7 +384,6 @@ public final class MeetTapeRuntime {
         try created.store.writeMetadata(metadata)
 
         refreshRecentMeetings()
-        reviewMeetingID = metadata.id
         let meetingID = metadata.id
         Task { await pipeline.process(meetingID: meetingID) }
         return meetingID
@@ -434,16 +442,6 @@ public final class MeetTapeRuntime {
         NSWorkspace.shared.activateFileViewerSelecting([found.store.layout.root])
     }
 
-    public func closeReview() {
-        reviewMeetingID = nil
-        onStatusChange?()
-    }
-
-    public func openReview(meetingID: String) {
-        reviewMeetingID = meetingID
-        onStatusChange?()
-    }
-
     // MARK: - action execution
 
     private func perform(_ actions: [SessionAction]) async {
@@ -465,8 +463,11 @@ public final class MeetTapeRuntime {
                 // of the batch, so no "recording started" notice is delivered for
                 // a meeting that does not exist.
                 guard await commit(request) else { return }
+            case .pauseCapture(let reason):
+                await captureEngine.pause(reason: reason)
             case .beginRun(let reason):
                 beginRun(reason: reason)
+                await captureEngine.resume()
             case .updateEvidence(let evidence):
                 applyEvidence(evidence)
             case .discardCapture(let reason):
@@ -581,7 +582,6 @@ public final class MeetTapeRuntime {
                 metadata.processing.advance(to: .audioSafe, at: self.clock.now)
             }
             linkContinuation(of: updated, store: meeting.store)
-            reviewMeetingID = updated.id
             if settings.showNotifications {
                 notifications.meetingSaved(
                     title: updated.displayTitle,
@@ -714,10 +714,14 @@ public final class MeetTapeRuntime {
     func apply(_ progress: ProcessingPipeline.Progress) {
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)
+            if settings.showNotifications {
+                notifications.readyToReview(title: progress.title, meetingID: progress.meetingID)
+            }
         } else {
             processing[progress.meetingID] = progress
         }
         refreshRecentMeetings()
+        onProcessingUpdate?(progress.meetingID)
     }
 
     func handleProcessingFailure(_ meetingID: String, _ error: ProcessingError) {
@@ -726,6 +730,7 @@ public final class MeetTapeRuntime {
             notifications.processingProblem(error, meetingID: meetingID)
         }
         refreshRecentMeetings()
+        onProcessingUpdate?(meetingID)
     }
 
     private func syncStatusFromSession() {
@@ -784,6 +789,7 @@ extension SessionAction {
         case .armCapture: "arm"
         case .retargetCapture: "retarget"
         case .commitRecording(let request): "commit(\(request.source.rawValue))"
+        case .pauseCapture(let reason): "pause(\(reason))"
         case .beginRun: "begin_run"
         case .updateEvidence: "evidence"
         case .discardCapture(let reason): "discard(\(reason))"

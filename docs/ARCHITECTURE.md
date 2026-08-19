@@ -135,6 +135,20 @@ rewritten to merge anything. Two meetings that turn out to be the same call are
 linked afterwards by `ReconnectMatcher`, which merges automatically only on
 strong evidence and otherwise presents the match as a suggestion.
 
+The reconnect window itself is not recorded. When the evidence disappears the
+segments close, capture falls back to the 15-second memory ring, and the menu
+bar shows a distinct disconnected state instead of the recording indicator. A
+rejoin opens new segments, numbered after the previous run's, and flushes the
+ring so the moments before the rejoin was confirmed are on disk. Candidate
+evidence sustains a recording only when it comes from the meeting's own
+provider; another application idling with the microphone cannot hold a
+recording open.
+
+Evidence that ends is still subject to two graces before the window starts: 12
+seconds after a browser releases the microphone, because a page refresh drops
+it briefly, and a 6-second end grace against detection flaps. Those few seconds
+are the only non-meeting audio a recording can carry.
+
 A manually started recording ignores provider state entirely, and no detector
 observation can end it.
 

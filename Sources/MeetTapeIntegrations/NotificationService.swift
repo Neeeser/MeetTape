@@ -24,6 +24,7 @@ public struct NotificationService: Sendable {
         case keepRecording = "keep_recording"
         case captureProblem = "capture_problem"
         case processingProblem = "processing_problem"
+        case readyToReview = "ready_to_review"
     }
 
     public enum Action: String, Sendable {
@@ -120,6 +121,17 @@ public struct NotificationService: Sendable {
             title: "This looks like a meeting",
             body: "MeetTape started recording \(applicationName). Keep it?",
             category: .keepRecording,
+            userInfo: ["meetingID": meetingID]
+        )
+    }
+
+    /// Posted when the transcript is complete. Tapping it opens the review
+    /// window, where the user fills in speaker names and the title.
+    public func readyToReview(title: String, meetingID: String) {
+        post(
+            title: "Transcript ready",
+            body: "\(title) is transcribed. Open it to name the speakers and check the title.",
+            category: .readyToReview,
             userInfo: ["meetingID": meetingID]
         )
     }

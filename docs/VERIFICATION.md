@@ -9,8 +9,8 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 105 tests, all passing, no failures, in about 2.6 seconds.
-Eight further tests are skipped unless explicitly enabled (see below).
+`./scripts/test.sh` — 112 tests, all passing, no failures, in about 3 seconds. Ten
+further tests are skipped unless explicitly enabled (see below).
 
 `cd extension && npm test` — 9 tests, all passing.
 
@@ -42,6 +42,8 @@ Coverage worth naming, because each one encodes a measured failure:
 | Remote audio arriving after commit is still written | `HardeningTests` |
 | An unsupported call keeps recording for as long as it runs | `HardeningTests` |
 | Only MeetTape's own relay, launched by a browser, may connect | `HardeningTests` |
+| Every panel builds and lays out against a real view tree | `UITests` |
+| Choosing a new storage folder takes effect without a relaunch | `UITests` |
 
 ## Exercised against real hardware and the real API
 
@@ -73,6 +75,12 @@ logged connect and disconnect. After peer verification was added, the same test
 is refused with "the relay was not launched by a browser", which is the intended
 behaviour.
 
+**A 32-minute capture soak.** `MEETTAPE_SOAK_MINUTES=30 ./scripts/test.sh --filter Soak`
+ran the shipping `CaptureEngine` against real hardware for 1944 seconds:
+65 segments written and closed, resident memory 29 MB at the start and 29 MB at
+the end, zero engine restarts, and every segment's manifest frame count matching
+the file on disk.
+
 **Live OpenAI.** `MEETTAPE_LIVE_OPENAI=1` with a locally synthesised three-speaker
 fixture. Six tests pass: credential and model access, transcription with segment
 timings, diarization separating two remote speakers, the assembled transcript
@@ -100,8 +108,8 @@ These are implemented but have not been exercised. Do not treat them as working.
   workers sleep, and no Chrome session has been observed. The Chrome native
   messaging manifest is not installed at all, because it needs the packed
   extension's ID.
-- **A two-hour soak.** The longest continuous capture here was under a minute.
-  Memory was flat over that window, which proves nothing about two hours.
+- **A two-hour soak.** The longest continuous capture here was 32 minutes, with
+  flat memory and no restarts. Nothing longer has been run.
 - **Sleep, wake and lock during a recording.** The wake path has unit coverage
   through the coordinators' settle delay, but has not been exercised on hardware.
 - **A Bluetooth device switch mid-recording.** The rebuild-storm mitigation is
@@ -112,8 +120,10 @@ These are implemented but have not been exercised. Do not treat them as working.
   This needs a Developer ID signature.
 - **Gatekeeper, notarization and Homebrew.** No signing identity exists on this
   machine. See `docs/RELEASING.md`.
-- **The onboarding and settings windows** have been built and compile, and their
-  models are exercised indirectly, but no screenshot-level UI pass has been done.
+- **The appearance of the windows.** Onboarding, settings and review are built
+  and laid out in `UITests` through `NSHostingController`, which catches a view
+  that traps but says nothing about how any of it looks. No screenshot pass or
+  human walkthrough of the panels has been done.
 - **FaceTime.** Not implemented as a provider; a FaceTime call would be detected,
   if at all, through the generic path.
 

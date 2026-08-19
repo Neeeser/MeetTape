@@ -156,6 +156,7 @@ public struct PermissionsService: Sendable {
     }
 
     private func notificationState() async -> PermissionState {
+        guard NotificationSupport.isAvailable else { return .notDetermined }
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral: return .granted
@@ -177,6 +178,7 @@ public struct PermissionsService: Sendable {
         case .calendar:
             _ = await CalendarService().requestAccess()
         case .notifications:
+            guard NotificationSupport.isAvailable else { break }
             _ = try? await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound])
         case .accessibility:

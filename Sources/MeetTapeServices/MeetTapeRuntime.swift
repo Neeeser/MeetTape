@@ -20,6 +20,8 @@ public struct RuntimeStatus: Sendable, Equatable {
     public var slackState: SlackHuddleDetector.State = .idle
     public var lastWarning: CaptureWarning?
 
+    public init() {}
+
     public var isRecording: Bool { sessionState == .recording || sessionState == .reconnecting }
 
     /// Never show a healthy recording while a required source is known to be
@@ -87,8 +89,11 @@ public final class MeetTapeRuntime {
         self.settingsStore = SettingsStore(directory: settingsDirectory)
         let loaded = settingsStore.load()
         self.settings = loaded
-        self.settingsSnapshot = LockedBox(loaded)
-        self.repository = MeetingRepository(root: loaded.storageRoot)
+        let snapshot = LockedBox(loaded)
+        self.settingsSnapshot = snapshot
+        // Reads the current setting on every use, so a folder chosen in Settings
+        // applies straight away.
+        self.repository = MeetingRepository(rootProvider: { snapshot.withLock { $0.storageRoot } })
         self.sessionController = SessionController(policies: loaded.providers)
 
         captureEngine = CaptureEngine(

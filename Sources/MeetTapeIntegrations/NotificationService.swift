@@ -2,6 +2,16 @@ import Foundation
 import MeetTapeCore
 import UserNotifications
 
+/// Whether the User Notifications framework can be used at all.
+///
+/// `UNUserNotificationCenter.current()` raises an Objective-C exception, which
+/// Swift cannot catch, when the running process has no bundle identifier. That
+/// is every command-line invocation of this code, including the test runner.
+/// The shipping app always runs from a bundle, so this is false only outside it.
+public enum NotificationSupport {
+    public static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
+}
+
 /// User-facing notifications.
 ///
 /// Nothing here carries meeting content beyond the title the user will see
@@ -24,8 +34,10 @@ public struct NotificationService: Sendable {
     }
 
     /// `UNUserNotificationCenter.current()` is a thread-safe singleton, so it is
-    /// resolved per call rather than stored.
-    private var center: UNUserNotificationCenter { .current() }
+    /// resolved per call rather than stored. Nil outside an app bundle.
+    private var center: UNUserNotificationCenter? {
+        NotificationSupport.isAvailable ? .current() : nil
+    }
 
     public init() {}
 
@@ -64,7 +76,7 @@ public struct NotificationService: Sendable {
             ],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([keep, saved, failed])
+        center?.setNotificationCategories([keep, saved, failed])
     }
 
     public func post(
@@ -79,7 +91,7 @@ public struct NotificationService: Sendable {
         let request = UNNotificationRequest(
             identifier: "\(category.rawValue)-\(UUID().uuidString)", content: content, trigger: nil
         )
-        center.add(request) { error in
+        center?.add(request) { error in
             if let error {
                 Log.ui.notice("notification not delivered: \(logSafeDescription(error), privacy: .public)")
             }

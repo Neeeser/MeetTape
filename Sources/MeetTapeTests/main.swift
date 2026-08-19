@@ -6,6 +6,7 @@ let suites: [Suite] = CaptureRecoveryTests.all
     + DetectionTests.all
     + SessionTests.all
     + HardeningTests.all
+    + [UITests.suite]
     + ProcessingTests.all
     + [PipelineTests.suite, LiveOpenAITests.suite, LiveEndToEndTests.suite]
 

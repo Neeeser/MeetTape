@@ -161,12 +161,26 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
 }
 
 /// Creates, finds and lists meetings under the archive root.
+///
+/// The root is resolved on each use rather than captured, so choosing a new
+/// folder in Settings takes effect immediately instead of at the next launch.
 public struct MeetingRepository: Sendable {
-    public let archive: MeetingArchiveLayout
+    private let rootProvider: @Sendable () -> URL
 
-    public init(archive: MeetingArchiveLayout) { self.archive = archive }
+    public var archive: MeetingArchiveLayout { MeetingArchiveLayout(root: rootProvider()) }
 
-    public init(root: URL) { self.archive = MeetingArchiveLayout(root: root) }
+    public init(archive: MeetingArchiveLayout) {
+        let root = archive.root
+        self.rootProvider = { root }
+    }
+
+    public init(root: URL) {
+        self.rootProvider = { root }
+    }
+
+    public init(rootProvider: @escaping @Sendable () -> URL) {
+        self.rootProvider = rootProvider
+    }
 
     public func store(for metadata: MeetingMetadata) -> MeetingStore {
         MeetingStore(layout: archive.layout(forMeetingID: metadata.id, startedAt: metadata.startedAt))

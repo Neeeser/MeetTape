@@ -1,0 +1,163 @@
+import AppKit
+import Foundation
+import MeetTapeAudio
+import MeetTapeCore
+import MeetTapeIntegrations
+import MeetTapeServices
+import MeetTapeUI
+import SwiftUI
+import TestKit
+
+/// Builds each window's view tree and forces a layout pass.
+///
+/// This is not a pixel test. It catches the failures that otherwise only appear
+/// when a user opens a panel: a view that traps on a nil, a binding that reads a
+/// meeting that no longer exists, a model that crashes on an empty archive.
+enum UITests {
+    @MainActor
+    static func render(_ view: some View, size: NSSize = NSSize(width: 720, height: 560)) {
+        let controller = NSHostingController(rootView: AnyView(view))
+        controller.view.frame = NSRect(origin: .zero, size: size)
+        controller.view.layoutSubtreeIfNeeded()
+        controller.view.displayIfNeeded()
+    }
+
+    static var suite: Suite {
+        Suite("UI", [
+            test("every panel builds and lays out") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                await MainActor.run {
+                    NSApplication.shared.setActivationPolicy(.prohibited)
+
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = root.appendingPathComponent("Meetings").path
+                    runtime.update(settings: settings)
+
+                    // Onboarding on a machine with no permissions granted yet.
+                    render(OnboardingView(model: OnboardingModel(runtime: runtime), onFinish: {}))
+                    // Settings, including the tabs that read live audio state.
+                    render(SettingsView(model: SettingsModel(runtime: runtime)))
+                    expect.isTrue(true, "the panels built without trapping")
+                }
+                try? FileManager.default.removeItem(at: root)
+            },
+
+            test("the review panel handles a meeting with nothing processed yet") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let repository = MeetingRepository(root: root.appendingPathComponent("Meetings"))
+                let started = Date(timeIntervalSince1970: 1_787_070_000)
+                let created = try repository.createMeeting(
+                    source: .slackHuddle, provider: .slack, startedAt: started,
+                    titles: TitleCandidates(provider: "Engineering huddle", timestampFallback: "f"),
+                    now: started
+                )
+
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = root.appendingPathComponent("Meetings").path
+                    runtime.update(settings: settings)
+
+                    let model = MeetingReviewModel(runtime: runtime, meetingID: created.metadata.id)
+                    expect.equal(model.title, "Engineering huddle")
+                    expect.isNil(model.transcript, "nothing has been transcribed yet")
+                    expect.equal(model.speakerKeys, [])
+                    render(MeetingReviewView(model: model), size: NSSize(width: 780, height: 620))
+
+                    // Editing the title while processing has not started must stick.
+                    model.title = "Q3 planning"
+                    model.save()
+                    expect.equal(
+                        repository.findMeeting(id: created.metadata.id)?.metadata.displayTitle,
+                        "Q3 planning"
+                    )
+                }
+            },
+
+            test("menu-bar state reads correctly in each phase") { expect in
+                var status = RuntimeStatus()
+                expect.isFalse(status.isRecording)
+                expect.equal(status.displayHealth, .idle)
+
+                status.sessionState = .recording
+                status.startedAt = Date().addingTimeInterval(-125)
+                status.health = CaptureHealthSnapshot(mic: .healthy, remote: .idleButBound)
+                expect.isTrue(status.isRecording)
+                expect.equal(status.displayHealth, .healthy)
+                expect.close(status.elapsed(now: Date()), 125, tolerance: 2)
+                expect.equal(Format.duration(125), "02:05")
+
+                // A failing required source is never displayed as healthy.
+                status.health = CaptureHealthSnapshot(mic: .failed, remote: .healthy)
+                expect.equal(status.displayHealth, .failed)
+
+                // Reconnecting still counts as recording: capture is still running.
+                status.sessionState = .reconnecting
+                expect.isTrue(status.isRecording)
+
+                status.sessionState = .idle
+                expect.equal(status.displayHealth, .idle, "an idle session shows no health")
+            },
+
+            test("settings survive a round trip through disk") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let store = SettingsStore(directory: root)
+                expect.equal(store.load().localUserName, "Me", "defaults apply to a fresh install")
+
+                var settings = AppSettings()
+                settings.localUserName = "Andrew"
+                settings.providers.zoom = ProviderPolicy(autoStart: .never, autoStop: false)
+                settings.enrichment.generateSummary = false
+                settings.alwaysRecordApplications = ["com.example.videochat"]
+                try store.save(settings)
+
+                let reloaded = SettingsStore(directory: root).load()
+                expect.equal(reloaded.localUserName, "Andrew")
+                expect.equal(reloaded.providers.zoom.autoStart, .never)
+                expect.isFalse(reloaded.enrichment.generateSummary)
+                expect.equal(reloaded.alwaysRecordApplications, ["com.example.videochat"])
+                // The API key is never in settings; it lives in the keychain.
+                let raw = try String(contentsOf: store.url, encoding: .utf8)
+                expect.isFalse(raw.contains("apiKey"))
+                expect.isFalse(raw.lowercased().contains("sk-"))
+            },
+
+            test("permission checks never trap outside an app bundle") { expect in
+                // Reading notification permission through UserNotifications raises
+                // an uncatchable Objective-C exception when the process has no
+                // bundle identifier, which killed the whole test run when an
+                // onboarding view refreshed itself in the background.
+                expect.isFalse(
+                    NotificationSupport.isAvailable, "the test runner is not an app bundle"
+                )
+                let statuses = await PermissionsService().allStatuses()
+                expect.equal(statuses.count, PermissionKind.allCases.count)
+                expect.equal(
+                    statuses.first { $0.kind == .notifications }?.state, .notDetermined
+                )
+                NotificationService().registerCategories()
+                NotificationService().recordingStarted(provider: .slack, title: "Standup")
+            },
+
+            test("processing state maps to something a person can read") { expect in
+                expect.equal(ProcessingState.transcribing.displayName, "Transcribing")
+                expect.equal(ProcessingState.failed.displayName, "Needs attention")
+                expect.equal(ProcessingState.complete.displayName, "Complete")
+                // Every failure message reassures about the recording.
+                for error: ProcessingError in [
+                    .missingAPIKey, .authenticationFailed, .rateLimited(retryAfter: nil),
+                    .serverError(status: 500), .transport(reason: "offline"),
+                ] {
+                    expect.isTrue(
+                        error.userMessage.contains("recording is safe")
+                            || error.userMessage.contains("Your recording"),
+                        "\(error.logSafeDescription) does not reassure: \(error.userMessage)"
+                    )
+                }
+            },
+        ])
+    }
+}

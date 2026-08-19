@@ -20,7 +20,9 @@ public final class NotificationRouter: NSObject, UNUserNotificationCenterDelegat
         self.runtime = runtime
         self.windows = windows
         super.init()
-        UNUserNotificationCenter.current().delegate = self
+        if NotificationSupport.isAvailable {
+            UNUserNotificationCenter.current().delegate = self
+        }
     }
 
     public nonisolated func userNotificationCenter(

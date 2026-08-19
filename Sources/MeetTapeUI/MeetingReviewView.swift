@@ -26,6 +26,7 @@ public struct MeetingReviewView: View {
                 if let failure = model.metadata?.processing.lastFailure {
                     failureCard(failure)
                 }
+                participantsCard
                 speakersCard
                 transcriptCard
                 if let summary = model.summary, !summary.isEmpty {
@@ -134,85 +135,230 @@ public struct MeetingReviewView: View {
         }
     }
 
+    private var participantsCard: some View {
+        SectionCard(
+            title: "Participants",
+            subtitle: "Optional. Helps recognition without ever forcing a name onto a speaker who did not match."
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !model.expectedParticipants.isEmpty {
+                    ForEach(model.expectedParticipants, id: \.self) { name in
+                        HStack {
+                            Text(name).font(.callout)
+                            Spacer()
+                            Button("Remove") { model.removeParticipant(name) }
+                                .buttonStyle(.link).font(.caption)
+                        }
+                    }
+                }
+                HStack {
+                    TextField("Add a name", text: model.text(\.participantDraft))
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { model.addParticipant() }
+                    Button("Add") { model.addParticipant() }
+                        .disabled(model.participantDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Text(
+                    "Changing this re-runs speaker matching only. Nothing is transcribed again."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var speakersCard: some View {
         SectionCard(
             title: "Speakers",
-            subtitle: "Renaming applies immediately and does not re-run transcription."
+            subtitle: "Naming a speaker applies immediately and does not re-run transcription."
         ) {
-            if model.speakerKeys.isEmpty {
-                Text("No speakers identified yet.").foregroundStyle(.secondary).font(.callout)
-            } else {
-                VStack(spacing: 8) {
-                    ForEach(model.speakerKeys, id: \.self) { key in
-                        speakerRow(key)
+            VStack(alignment: .leading, spacing: 10) {
+                if model.speakerRows.isEmpty {
+                    Text("No speakers identified yet.").foregroundStyle(.secondary).font(.callout)
+                } else {
+                    ForEach(model.speakerRows) { row in speakerRow(row) }
+                }
+                if model.namingCluster != nil { namingField }
+                reanalyzeRow
+            }
+        }
+        .task { await model.reloadSpeakers() }
+    }
+
+    private func speakerRow(_ row: MeetingSpeakerRow) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.displayName).font(.callout)
+                Text(speakerDetail(row)).font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(minWidth: 190, alignment: .leading)
+
+            ConfidenceBadge(band: row.band, origin: row.origin)
+
+            Spacer()
+
+            Menu("Change") {
+                ForEach(model.knownPeople) { person in
+                    Button(person.identity.resolvedName) {
+                        model.assignCluster(row.clusterID, to: person)
                     }
                 }
+                if !model.knownPeople.isEmpty { Divider() }
+                Button("New person…") { model.beginNamingCluster(row.clusterID) }
+                Button("Leave unknown") { model.clearCluster(row.clusterID) }
             }
+            .fixedSize()
         }
     }
 
-    private func speakerRow(_ key: String) -> some View {
-        let assignment = model.speakers.entries[key]
-        return HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(SpeakerMap.fallbackName(for: key)).font(.callout)
-                if let evidence = assignment?.evidence, assignment?.origin == .ai {
-                    Text(evidence).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            .frame(width: 150, alignment: .leading)
+    /// What the automatic decision was, in words rather than a number.
+    ///
+    /// A cosine similarity of 0.92 is not a 92% probability: genuine matches sit
+    /// between 0.72 and 0.96 and so do the hardest wrong ones, so the score is
+    /// kept for diagnostics and never shown as a percentage.
+    private func speakerDetail(_ row: MeetingSpeakerRow) -> String {
+        var parts: [String] = [Format.shortDuration(row.speechSeconds)]
+        switch row.origin {
+        case .human: parts.append("you set this")
+        case .deterministic: parts.append("your microphone track")
+        case .voiceProfile: parts.append("matched a saved voice")
+        case .anonymousVoice:
+            parts.append(
+                row.meetingCount > 1
+                    ? "heard in \(row.meetingCount) meetings"
+                    : "heard before"
+            )
+        case .ai:
+            if row.identity == nil { parts.append("not recognized") }
+        }
+        return parts.joined(separator: " · ")
+    }
 
-            TextField("Name", text: model.nameBinding(for: key))
+    private var namingField: some View {
+        HStack {
+            TextField("Name", text: model.text(\.newPersonDraft))
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { model.commitName(for: key) }
-                .accessibilityLabel("Name for \(SpeakerMap.fallbackName(for: key))")
-
-            if let assignment {
-                Text(originLabel(assignment))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 96, alignment: .leading)
-            }
-
-            Button("Set") { model.commitName(for: key) }
-                .disabled((model.draftNames[key] ?? "").isEmpty)
+                .onSubmit { model.commitNaming() }
+            Button("Save") { model.commitNaming() }
+                .disabled(model.newPersonDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel") { model.cancelNaming() }
         }
     }
 
-    private func originLabel(_ assignment: SpeakerAssignment) -> String {
-        assignment.origin.displayName
+    private var reanalyzeRow: some View {
+        HStack(spacing: 8) {
+            Text("Re-analyze speakers").font(.caption).foregroundStyle(.secondary)
+            TextField("Count", text: model.text(\.reanalyzeCount))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 64)
+            Button("Run") { model.reanalyzeSpeakers() }
+                .disabled(model.isReanalyzing)
+            if model.isReanalyzing { ProgressView().controlSize(.small) }
+            Text("Leave the count empty to let MeetTape decide. The words are not re-transcribed.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     private var transcriptCard: some View {
         SectionCard(
             title: "Transcript",
-            subtitle: model.transcript == nil ? "Not available yet." : nil
+            subtitle: model.transcript == nil
+                ? "Not available yet."
+                : "Click a name to correct that line alone."
         ) {
             if let transcript = model.transcript, !transcript.utterances.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
+                // Lazy because a long meeting is thousands of lines and each one
+                // carries a menu.
+                LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(transcript.utterances) { utterance in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(model.speakers.resolvedName(for: utterance))
-                                    .font(.callout.weight(.semibold))
-                                Text(TranscriptRenderer().timecode(utterance.start))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(utterance.text).font(.callout).textSelection(.enabled)
-                        }
+                        utteranceRow(utterance)
                     }
                 }
+                if model.namingUtterance != nil { namingField }
             } else {
                 HStack(spacing: 8) {
                     if model.metadata?.processing.state != .failed {
                         ProgressView().controlSize(.small)
                     }
-                    Text(model.metadata?.processing.state.displayName ?? "Waiting")
+                    Text(processingLabel)
                         .foregroundStyle(.secondary)
                     Button("Refresh") { model.reload() }.buttonStyle(.link)
                 }
             }
+        }
+    }
+
+    private func utteranceRow(_ utterance: Utterance) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Menu(model.speakers.resolvedName(for: utterance)) {
+                    ForEach(model.knownPeople) { person in
+                        Button(person.identity.resolvedName) {
+                            model.assignUtterance(utterance, to: person)
+                        }
+                    }
+                    if !model.knownPeople.isEmpty { Divider() }
+                    Button("New person…") { model.beginNamingUtterance(utterance) }
+                    Button("Use this speaker's name") { model.clearUtterance(utterance) }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .font(.callout.weight(.semibold))
+                Text(TranscriptRenderer().timecode(utterance.start))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if model.speakers.override(for: utterance) != nil {
+                    Image(systemName: "pencil.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("You set the speaker on this line")
+                }
+            }
+            Text(utterance.text).font(.callout).textSelection(.enabled)
+        }
+    }
+
+    /// What the panel says while it waits.
+    private var processingLabel: String {
+        guard let state = model.metadata?.processing.state else { return "Waiting" }
+        if let progress = model.progress, let detail = progress.detail { return detail }
+        if let progress = model.progress, let fraction = progress.fraction, fraction > 0, fraction < 1 {
+            return "\(state.displayName) — \(Int(fraction * 100))%"
+        }
+        return state.displayName
+    }
+}
+
+/// High, Likely or Unknown. Never a percentage: the score behind it is a cosine
+/// similarity, and the genuine and impostor distributions overlap at the top.
+struct ConfidenceBadge: View {
+    let band: SpeakerConfidenceBand
+    let origin: SpeakerAssignmentOrigin
+
+    var body: some View {
+        Text(label)
+            .font(.caption2)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(colour.opacity(0.15), in: Capsule())
+            .foregroundStyle(colour)
+    }
+
+    private var label: String {
+        switch origin {
+        case .human: "Confirmed"
+        case .deterministic: "You"
+        case .voiceProfile: band.displayName
+        case .anonymousVoice: "Seen before"
+        case .ai: band == .unknown ? "Unknown" : band.displayName
+        }
+    }
+
+    private var colour: Color {
+        switch origin {
+        case .human, .deterministic: .green
+        case .voiceProfile: band == .high ? .green : .orange
+        case .anonymousVoice: .blue
+        case .ai: .secondary
         }
     }
 }

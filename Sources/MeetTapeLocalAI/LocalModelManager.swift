@@ -9,7 +9,9 @@ import WhisperKit
 /// Recording never waits on this. A meeting that finishes while the models are
 /// still downloading queues, and processing starts when they arrive.
 public actor LocalModelManager {
-    public let locations: LocalModelLocations
+    /// Immutable and Sendable, so the settings panel can show the path
+    /// without hopping to this actor.
+    public nonisolated let locations: LocalModelLocations
     private let receipts: LocalModelReceiptStore
     private var state: LocalModelState
     private var whisper: WhisperKit?
@@ -74,7 +76,9 @@ public actor LocalModelManager {
         if case .installed(let receipt) = state { return receipt }
         if let installTask { return try await installTask.value }
 
-        let task = Task<LocalModelReceipt, Error> { [locations] in
+        // `self` is captured strongly on purpose: the install must finish and
+        // write its receipt even if nothing else is holding the manager.
+        let task = Task<LocalModelReceipt, Error> { [locations, self] in
             publish(.downloading(fraction: 0, detail: "Preparing"))
             try FileManager.default.createDirectory(at: locations.whisperBase, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: locations.diarizerDirectory, withIntermediateDirectories: true)
@@ -84,10 +88,13 @@ public actor LocalModelManager {
             let whisperFolder = try await WhisperKit.download(
                 variant: LocalSpeechStack.whisperModel,
                 downloadBase: locations.whisperBase,
-                progressCallback: { [weak self] progress in
-                    guard let self else { return }
+                progressCallback: { progress in
                     let fraction = min(max(progress.fractionCompleted, 0), 1) * 0.9
-                    Task { await self.publish(.downloading(fraction: fraction, detail: "Downloading speech model")) }
+                    Task {
+                        await self.publish(
+                            .downloading(fraction: fraction, detail: "Downloading speech model")
+                        )
+                    }
                 }
             )
 

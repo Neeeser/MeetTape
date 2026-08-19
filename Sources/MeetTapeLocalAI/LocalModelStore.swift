@@ -121,7 +121,8 @@ enum DirectorySize {
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
         if !isDirectory.boolValue {
-            return (try? manager.attributesOfItem(atPath: url.path)[.size] as? Int64) as? Int64 ?? 0
+            let attributes = try? manager.attributesOfItem(atPath: url.path)
+            return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
         }
         guard let enumerator = manager.enumerator(
             at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]

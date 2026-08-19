@@ -18,19 +18,25 @@ public struct SettingsView: View {
         TabView {
             GeneralSettingsTab(model: model)
                 .tabItem { Label("General", systemImage: "gearshape") }
+            ProcessingSettingsTab(model: model)
+                .tabItem { Label("Processing", systemImage: "waveform.badge.magnifyingglass") }
+            LocalModelsSettingsTab(model: model)
+                .tabItem { Label("Local models", systemImage: "cpu") }
+            PeopleSettingsTab(model: model)
+                .tabItem { Label("People", systemImage: "person.crop.circle") }
             ProviderSettingsTab(model: model)
                 .tabItem { Label("Providers", systemImage: "person.2.wave.2") }
             AudioSettingsTab(model: model)
                 .tabItem { Label("Audio", systemImage: "waveform") }
             OpenAISettingsTab(model: model)
-                .tabItem { Label("OpenAI", systemImage: "sparkles") }
+                .tabItem { Label("Cloud", systemImage: "sparkles") }
             PermissionsSettingsTab(model: model)
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
             StorageSettingsTab(model: model)
                 .tabItem { Label("Storage", systemImage: "folder") }
         }
         .padding(16)
-        .frame(minWidth: 660, minHeight: 480)
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 

@@ -5,6 +5,7 @@ import MeetTapeCore
 import MeetTapeDetection
 import MeetTapeIntegrations
 import MeetTapeServices
+import MeetTapeSpeakers
 import Observation
 import SwiftUI
 
@@ -113,6 +114,12 @@ public final class SettingsModel {
     public var apiKey = ""
     public var hasStoredKey: Bool
     public var testState = TestState.idle
+    public var people: [SpeakerDirectoryEntry] = []
+    public var recurringVoices: [SpeakerDirectoryEntry] = []
+    public var voiceStatistics: SpeakerStore.Statistics?
+    public var renaming: SpeakerDirectoryEntry?
+    public var renameDraft = ""
+    public var renameOrganization = ""
 
     public enum TestState: Equatable {
         case idle
@@ -153,7 +160,7 @@ public final class SettingsModel {
     public func saveLocalUserName() {
         var settings = runtime.settings
         settings.localUserName = localUserName.isEmpty ? "Me" : localUserName
-        runtime.update(settings: settings)
+        runtime.updateSettingsAndIdentity(settings)
     }
 
     public func saveKey() {
@@ -194,6 +201,54 @@ public final class SettingsModel {
         runtime.update(settings: settings)
     }
 
+    public func refreshPeople() async {
+        people = await runtime.speakerDirectory(kind: .person)
+        recurringVoices = await runtime.speakerDirectory(kind: .anonymous)
+        voiceStatistics = await runtime.voiceMemoryStatistics()
+    }
+
+    public func beginRename(_ entry: SpeakerDirectoryEntry) {
+        renaming = entry
+        renameDraft = entry.identity.kind == .person ? entry.identity.resolvedName : ""
+        renameOrganization = entry.identity.organization ?? ""
+    }
+
+    public func cancelRename() {
+        renaming = nil
+        renameDraft = ""
+        renameOrganization = ""
+    }
+
+    /// Names a person, or gives a recurring unnamed voice a name for the first
+    /// time. Every meeting that voice appeared in reads the new name; nothing is
+    /// transcribed or diarized again.
+    public func commitRename() async {
+        guard let entry = renaming else { return }
+        let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return cancelRename() }
+        let organization = renameOrganization.trimmingCharacters(in: .whitespacesAndNewlines)
+        await runtime.renamePerson(
+            entry.id, to: name, organization: organization.isEmpty ? nil : organization
+        )
+        cancelRename()
+        await refreshPeople()
+    }
+
+    /// Deletes the biometric material and keeps the name on past transcripts.
+    public func forgetVoice(_ entry: SpeakerDirectoryEntry) async {
+        await runtime.forgetVoice(of: entry.id)
+        await refreshPeople()
+    }
+
+    public func deletePerson(_ entry: SpeakerDirectoryEntry) async {
+        await runtime.deletePerson(entry.id)
+        await refreshPeople()
+    }
+
+    public func installLocalModels() async {
+        await runtime.installLocalModels()
+    }
+
     /// Reads and writes one settings value in place.
     public func binding<Value>(_ keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {
         Binding(
@@ -223,8 +278,21 @@ public final class MeetingReviewModel {
     public var summary: String?
     public var errorMessage: String?
     public var draftNames: [String: String] = [:]
+    /// Detected speakers with how each was decided, refreshed alongside the
+    /// transcript.
+    public var speakerRows: [MeetingSpeakerRow] = []
+    /// Everyone MeetTape could put on a line, for the pickers.
+    public var knownPeople: [SpeakerDirectoryEntry] = []
+    public var expectedParticipants: [String] = []
+    public var participantDraft = ""
+    /// The line waiting for a name that is not in the list yet.
+    public var namingUtterance: Utterance?
+    public var namingCluster: String?
+    public var newPersonDraft = ""
+    public var reanalyzeCount = ""
+    public var isReanalyzing = false
 
-    @ObservationIgnored private let runtime: MeetTapeRuntime
+    @ObservationIgnored let runtime: MeetTapeRuntime
     @ObservationIgnored public let meetingID: String
 
     public init(runtime: MeetTapeRuntime, meetingID: String) {
@@ -250,6 +318,132 @@ public final class MeetingReviewModel {
         summary = found.store.readSummary()
         speakers = (try? found.store.readSpeakerMap()) ?? SpeakerMap()
         transcript = try? found.store.readCanonicalTranscript()
+        expectedParticipants = found.metadata.participants
+            .filter { $0.origin == .human }
+            .map(\.displayName)
+    }
+
+    /// The parts that need the identity store, which the file read does not.
+    public func reloadSpeakers() async {
+        speakerRows = await runtime.speakers(inMeeting: meetingID)
+        knownPeople = await runtime.speakerDirectory(kind: .person)
+    }
+
+    /// Names one speaker's whole cluster. Applies immediately, re-renders the
+    /// transcript, and does not re-run transcription or diarization.
+    public func assignCluster(_ clusterID: String, to entry: SpeakerDirectoryEntry) {
+        runtime.assignSpeaker(
+            name: entry.identity.resolvedName, key: clusterID, meetingID: meetingID,
+            identityID: entry.id
+        )
+    }
+
+    public func assignCluster(_ clusterID: String, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runtime.assignSpeaker(name: trimmed, key: clusterID, meetingID: meetingID)
+    }
+
+    public func clearCluster(_ clusterID: String) {
+        runtime.assignSpeaker(name: "", key: clusterID, meetingID: meetingID)
+    }
+
+    /// Changes the speaker on one line only. Every other line in the same
+    /// cluster keeps its name.
+    public func assignUtterance(_ utterance: Utterance, to entry: SpeakerDirectoryEntry) {
+        runtime.assignUtteranceSpeaker(
+            name: entry.identity.resolvedName, utteranceID: utterance.id,
+            meetingID: meetingID, identityID: entry.id
+        )
+        applyLocalOverride(utterance, name: entry.identity.resolvedName, identityID: entry.id)
+    }
+
+    public func assignUtterance(_ utterance: Utterance, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runtime.assignUtteranceSpeaker(
+            name: trimmed, utteranceID: utterance.id, meetingID: meetingID
+        )
+        applyLocalOverride(utterance, name: trimmed, identityID: nil)
+    }
+
+    public func clearUtterance(_ utterance: Utterance) {
+        runtime.assignUtteranceSpeaker(name: "", utteranceID: utterance.id, meetingID: meetingID)
+        speakers.clearOverride(for: utterance)
+    }
+
+    /// Shows the correction straight away.
+    ///
+    /// The write goes through the pipeline actor so it cannot race a resolution
+    /// stage, and re-reading every file for one line would make editing a long
+    /// transcript unusable.
+    private func applyLocalOverride(_ utterance: Utterance, name: String, identityID: IdentityID?) {
+        speakers.overrideUtterance(
+            utterance,
+            with: SpeakerAssignment(
+                displayName: name, origin: .human, identityID: identityID,
+                provenance: .human()
+            ),
+            at: Date()
+        )
+    }
+
+    public func beginNamingUtterance(_ utterance: Utterance) {
+        namingUtterance = utterance
+        namingCluster = nil
+        newPersonDraft = ""
+    }
+
+    public func beginNamingCluster(_ clusterID: String) {
+        namingCluster = clusterID
+        namingUtterance = nil
+        newPersonDraft = ""
+    }
+
+    public func cancelNaming() {
+        namingUtterance = nil
+        namingCluster = nil
+        newPersonDraft = ""
+    }
+
+    public func commitNaming() {
+        if let utterance = namingUtterance {
+            assignUtterance(utterance, toNewPerson: newPersonDraft)
+        } else if let cluster = namingCluster {
+            assignCluster(cluster, toNewPerson: newPersonDraft)
+        }
+        cancelNaming()
+    }
+
+    public func addParticipant() {
+        let trimmed = participantDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        expectedParticipants.append(trimmed)
+        participantDraft = ""
+        saveParticipants()
+    }
+
+    public func removeParticipant(_ name: String) {
+        expectedParticipants.removeAll { $0 == name }
+        saveParticipants()
+    }
+
+    /// Records who the user says was present and re-runs identity resolution
+    /// alone. No audio is read and nothing is transcribed again.
+    public func saveParticipants() {
+        let names = expectedParticipants
+        Task { [runtime, meetingID] in
+            await runtime.setExpectedParticipants(names, meetingID: meetingID)
+        }
+    }
+
+    /// Re-runs clustering, optionally at a speaker count the user chose. The
+    /// words are untouched.
+    public func reanalyzeSpeakers() {
+        isReanalyzing = true
+        runtime.reanalyzeSpeakers(
+            meetingID: meetingID, speakerCount: Int(reanalyzeCount.trimmingCharacters(in: .whitespaces))
+        )
     }
 
     /// Saved straight away, even while transcription is still running.
@@ -275,6 +469,15 @@ public final class MeetingReviewModel {
     }
 
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
+
+    /// How far the current stage has got, when the backend reports it. A local
+    /// transcription has no chunks to count, and a stage showing nothing for
+    /// four minutes reads as hung.
+    public var progress: ProcessingPipeline.Progress? { runtime.processing[meetingID] }
+
+    public func text(_ keyPath: ReferenceWritableKeyPath<MeetingReviewModel, String>) -> Binding<String> {
+        Binding(get: { self[keyPath: keyPath] }, set: { self[keyPath: keyPath] = $0 })
+    }
 
     /// Re-assembles the transcript from the raw chunks on disk. No API call.
     public func rebuildTranscript() {

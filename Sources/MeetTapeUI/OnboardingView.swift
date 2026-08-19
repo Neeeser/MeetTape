@@ -24,6 +24,7 @@ public struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 permissionsSection
+                localModelsSection
                 openAISection
                 extensionSection
                 storageSection
@@ -62,10 +63,41 @@ public struct OnboardingView: View {
         }
     }
 
+    private var localModelsSection: some View {
+        SectionCard(
+            title: "Speech models",
+            subtitle: "Downloaded once. After that, transcription and speaker recognition run on this Mac."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                switch model.runtime.localModelState {
+                case .installed, .outdated:
+                    Label("Installed", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green).font(.callout)
+                case .downloading(let fraction, let detail):
+                    ProgressView(value: fraction)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                case .failed(let message):
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange).font(.caption)
+                    Button("Try Again") { Task { await model.runtime.installLocalModels() } }
+                case .notInstalled:
+                    Button("Download about 650 MB") {
+                        Task { await model.runtime.installLocalModels() }
+                    }
+                }
+                Text(
+                    "You can start recording straight away. Meetings that finish while the "
+                        + "download is running are processed when it completes."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var openAISection: some View {
         SectionCard(
             title: "OpenAI",
-            subtitle: "Transcription and speaker identification use your own API key."
+            subtitle: "Optional. Titles, summaries and notes are written by a cloud model; everything else runs here."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 SecureField(
@@ -87,8 +119,12 @@ public struct OnboardingView: View {
                             .foregroundStyle(.red).font(.caption)
                     }
                 }
-                Text("The key is stored in the macOS keychain and is not written to any meeting file.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "The key is stored in the macOS keychain and is not written to any meeting "
+                        + "file. Recording, transcription, speakers and voice recognition all "
+                        + "work without one."
+                )
+                .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

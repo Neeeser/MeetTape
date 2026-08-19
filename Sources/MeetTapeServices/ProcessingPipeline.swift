@@ -523,6 +523,33 @@ public actor ProcessingPipeline {
         ))
     }
 
+    /// Re-assembles the canonical transcript from the raw chunks on disk and
+    /// re-renders the Markdown. Makes no API call. Used after an assembly
+    /// improvement, so a meeting processed under the old rules picks them up.
+    public func rebuildTranscript(meetingID: String) throws {
+        guard let found = repository.findMeeting(id: meetingID) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        let raw = try found.store.readRawTranscript()
+        guard !raw.chunks.isEmpty else { return }
+        let assembler = TranscriptAssembler()
+        let transcript = assembler.assemble(
+            raw: raw,
+            micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
+            generatedAt: clock.now
+        )
+        try found.store.writeCanonicalTranscript(transcript)
+        let speakers = try found.store.readSpeakerMap()
+        let renderer = TranscriptRenderer()
+        try found.store.writeTranscriptMarkdown(renderer.markdown(
+            transcript: transcript,
+            speakers: speakers,
+            title: found.metadata.displayTitle,
+            startedAt: found.metadata.startedAt,
+            durationSeconds: found.metadata.durationSeconds
+        ))
+    }
+
     /// Re-renders the transcript after a human speaker correction.
     ///
     /// Changing a name is a side-file edit: raw diarization is untouched and no

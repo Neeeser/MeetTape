@@ -185,6 +185,18 @@ three-speaker sample, diarizing the remote track alone scored 97% against 84% fo
 diarizing a mixdown of both tracks, and the local speaker is identified by
 construction.
 
+A user without headphones plays the remote side through speakers, and the
+microphone records it: the transcription model then writes the remote speakers'
+words onto the local track under the local user's name. The remote track is
+authoritative for those words, so during assembly a local-track segment whose
+text matches a diarized utterance nearby in time is dropped as echo. The match
+window is generous because timestamps drift by whole sentences on audio with
+speaker bleed, and a segment in which the model merged both voices cannot be
+split, so headphones still produce the cleaner transcript. Turns are also
+capped at 30 seconds: bleed keeps the microphone from ever going silent, and
+the pause rule alone chained a real recording into one 219-second utterance
+that pushed every reply after the whole block.
+
 Anonymous labels are namespaced per chunk (`remote_chunk_002_speaker_01`) because
 the API's labels are stable only within a single request, and an unnamed label
 renders with its chunk ("Speaker 1 (part 2)") so two clusters are never displayed

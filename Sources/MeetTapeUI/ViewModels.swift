@@ -276,6 +276,13 @@ public final class MeetingReviewModel {
 
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
 
+    /// Re-assembles the transcript from the raw chunks on disk. No API call.
+    public func rebuildTranscript() {
+        runtime.rebuildTranscript(meetingID: meetingID) { [weak self] in
+            self?.reload()
+        }
+    }
+
     /// The earlier meeting this one may continue, and why.
     public var continuationSuggestion: (title: String, reason: String)? {
         guard let earlierID = metadata?.possibleContinuationOf,

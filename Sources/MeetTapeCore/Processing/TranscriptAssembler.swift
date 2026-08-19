@@ -52,15 +52,22 @@ public struct TranscriptAssembler: Sendable {
         public var duplicateSimilarity: Double
         /// How far either side of an overlapping utterance to look for its twin.
         public var duplicateSearchSeconds: Double
+        /// Longest turn one utterance is allowed to span. Without headphones the
+        /// microphone hears the remote side too, the audio never goes silent, and
+        /// the gap rule alone chained a real recording into one 219-second
+        /// utterance that pushed every reply after the whole block.
+        public var maxUtteranceSeconds: Double
 
         public init(
             utteranceGapSeconds: Double = 1.2,
             duplicateSimilarity: Double = 0.62,
-            duplicateSearchSeconds: Double = 12
+            duplicateSearchSeconds: Double = 12,
+            maxUtteranceSeconds: Double = 30
         ) {
             self.utteranceGapSeconds = utteranceGapSeconds
             self.duplicateSimilarity = duplicateSimilarity
             self.duplicateSearchSeconds = duplicateSearchSeconds
+            self.maxUtteranceSeconds = maxUtteranceSeconds
         }
     }
 
@@ -81,12 +88,30 @@ public struct TranscriptAssembler: Sendable {
         micTrackIsLocalUser: Bool,
         generatedAt: Date
     ) -> CanonicalTranscript {
+        // The diarized tracks are assembled first so that the local track can be
+        // checked against them. A user without headphones plays the remote side
+        // through speakers, the microphone records it, and the transcription
+        // model writes the remote speakers' words onto the local track. The
+        // remote track is authoritative for those words, so a local segment that
+        // repeats them nearby in time is echo and is dropped.
         var utterances: [Utterance] = []
-        for track in CaptureTrack.allCases {
+        var echoReference: [Utterance] = []
+        let orderedTracks = CaptureTrack.allCases.sorted { lhs, _ in
+            !(lhs == .mic && micTrackIsLocalUser)
+        }
+        for track in orderedTracks {
             let chunks = raw.chunks(track: track)
             guard !chunks.isEmpty else { continue }
             let treatAsLocalUser = track == .mic && micTrackIsLocalUser
-            utterances.append(contentsOf: assembleTrack(chunks, treatAsLocalUser: treatAsLocalUser))
+            // Sorted so the echo scan can stop at the first utterance past its
+            // window instead of walking the whole meeting per segment.
+            let assembled = assembleTrack(
+                chunks,
+                treatAsLocalUser: treatAsLocalUser,
+                echoReference: treatAsLocalUser ? echoReference.sorted { $0.start < $1.start } : []
+            )
+            if !treatAsLocalUser { echoReference.append(contentsOf: assembled) }
+            utterances.append(contentsOf: assembled)
         }
         utterances.sort { lhs, rhs in
             lhs.start == rhs.start ? lhs.track.rawValue < rhs.track.rawValue : lhs.start < rhs.start
@@ -95,11 +120,13 @@ public struct TranscriptAssembler: Sendable {
     }
 
     private func assembleTrack(
-        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool
+        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance]
     ) -> [Utterance] {
         var accepted: [Utterance] = []
         for chunk in chunks {
-            let candidates = utterances(from: chunk, treatAsLocalUser: treatAsLocalUser)
+            let candidates = utterances(
+                from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference
+            )
             for candidate in candidates {
                 if isDuplicate(candidate, of: accepted) { continue }
                 accepted.append(candidate)
@@ -111,7 +138,7 @@ public struct TranscriptAssembler: Sendable {
     /// Groups consecutive same-speaker segments into readable turns and moves
     /// them onto the meeting timeline.
     private func utterances(
-        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool
+        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, echoReference: [Utterance]
     ) -> [Utterance] {
         var result: [Utterance] = []
         var current: (start: Double, end: Double, speaker: String?, text: String)?
@@ -144,9 +171,14 @@ public struct TranscriptAssembler: Sendable {
         for segment in chunk.segments.sorted(by: { $0.start < $1.start }) {
             let text = segment.text.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
+            if isEcho(text, start: chunk.timelineOffset + segment.start,
+                      end: chunk.timelineOffset + segment.end, reference: echoReference) {
+                continue
+            }
             if var group = current,
                group.speaker == segment.speaker,
-               segment.start - group.end <= configuration.utteranceGapSeconds {
+               segment.start - group.end <= configuration.utteranceGapSeconds,
+               segment.end - group.start <= configuration.maxUtteranceSeconds {
                 group.end = max(group.end, segment.end)
                 group.text += group.text.isEmpty ? text : " \(text)"
                 current = group
@@ -157,6 +189,27 @@ public struct TranscriptAssembler: Sendable {
         }
         flush()
         return result
+    }
+
+    /// A local-track segment that repeats what a diarized track already says
+    /// nearby in time. The window is generous because a transcription model's
+    /// timestamps drift by whole sentences on audio that carries speaker bleed.
+    private func isEcho(
+        _ text: String, start: Double, end: Double, reference: [Utterance]
+    ) -> Bool {
+        guard !reference.isEmpty else { return false }
+        let window = configuration.duplicateSearchSeconds
+        for utterance in reference {
+            if utterance.start > end + window { break }
+            guard utterance.end > start - window else { continue }
+            if TextSimilarity.score(utterance.text, text) >= configuration.duplicateSimilarity {
+                return true
+            }
+            if text.count >= 12, utterance.text.lowercased().contains(text.lowercased()) {
+                return true
+            }
+        }
+        return false
     }
 
     /// An utterance in the overlap region that repeats something already accepted.

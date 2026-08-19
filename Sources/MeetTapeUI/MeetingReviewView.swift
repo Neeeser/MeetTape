@@ -59,6 +59,11 @@ public struct MeetingReviewView: View {
                 HStack {
                     Text(directory.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Button("Reveal in Finder") { model.reveal() }.buttonStyle(.link)
+                    if model.transcript != nil {
+                        Button("Rebuild Transcript") { model.rebuildTranscript() }
+                            .buttonStyle(.link)
+                            .help("Re-assembles the transcript from the stored API responses. Makes no API request.")
+                    }
                 }
             }
             if model.metadata?.hadOtherAudibleTabs == true {

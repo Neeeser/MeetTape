@@ -410,6 +410,19 @@ public final class MeetTapeRuntime {
         }
     }
 
+    /// Re-assembles the transcript from the raw chunks already on disk.
+    public func rebuildTranscript(meetingID: String, completion: @escaping @Sendable @MainActor () -> Void = {}) {
+        enqueue { [weak self] in
+            guard let self else { return }
+            do {
+                try await pipeline.rebuildTranscript(meetingID: meetingID)
+            } catch {
+                Log.app.error("transcript rebuild failed: \(logSafeDescription(error), privacy: .public)")
+            }
+            completion()
+        }
+    }
+
     public func assignSpeaker(name: String, key: String, meetingID: String) {
         enqueue { [weak self] in
             guard let self else { return }

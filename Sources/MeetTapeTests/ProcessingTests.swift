@@ -192,6 +192,80 @@ enum ProcessingTests {
                 expect.isTrue(texts.contains("Agreed, let's cache it."))
             },
 
+            test("a remote speaker heard through the local microphone is not the local user") { expect in
+                // Recorded on a real call without headphones: the remote side
+                // plays through the speakers, the microphone records it, and the
+                // transcription model writes the remote speaker's sentence onto
+                // the local track. The remote track already owns those words.
+                let remote = chunk(id: "remote_chunk_001", track: .remote, offset: 0, segments: [
+                    RawTranscriptSegment(
+                        start: 279.07, end: 282.37,
+                        text: "Yeah, you can go watch the Blue Jays if you're still into baseball at all.",
+                        speaker: "00"
+                    ),
+                ])
+                let mic = chunk(id: "mic_chunk_001", track: .mic, offset: 0, segments: [
+                    RawTranscriptSegment(start: 269, end: 270, text: "Have you been?", speaker: nil),
+                    RawTranscriptSegment(
+                        start: 278, end: 282,
+                        text: "Yeah, you can go watch the Blue Jays if you're still into baseball at all.",
+                        speaker: nil
+                    ),
+                    RawTranscriptSegment(start: 284, end: 287, text: "The Red Sox, mostly out of habit.", speaker: nil),
+                ])
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [mic, remote]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let local = transcript.utterances.filter { $0.speakerKey == SpeakerLabel.localUser }
+                expect.isTrue(
+                    !local.contains { $0.text.contains("Blue Jays") },
+                    "the remote speaker's sentence stayed on the local track: \(local.map(\.text))"
+                )
+                expect.isTrue(local.contains { $0.text.contains("Have you been?") })
+                expect.isTrue(local.contains { $0.text.contains("Red Sox") })
+                expect.isTrue(
+                    transcript.utterances.contains {
+                        $0.track == .remote && $0.text.contains("Blue Jays")
+                    },
+                    "the remote track keeps the sentence"
+                )
+            },
+
+            test("continuous audio cannot merge into one multi-minute utterance") { expect in
+                // Without headphones the microphone never goes silent, so the
+                // pause rule alone chained a real recording into one 219-second
+                // utterance and every remote reply rendered after the whole
+                // block. A turn is capped so other speakers interleave.
+                var segments: [RawTranscriptSegment] = []
+                for index in 0..<12 {
+                    let start = Double(index) * 6.5
+                    segments.append(RawTranscriptSegment(
+                        start: start, end: start + 6,
+                        text: "Sentence number \(index) of a long stretch.", speaker: nil
+                    ))
+                }
+                let mic = chunk(id: "mic_chunk_001", track: .mic, offset: 0, segments: segments)
+                let remote = chunk(id: "remote_chunk_001", track: .remote, offset: 0, segments: [
+                    RawTranscriptSegment(start: 35, end: 38, text: "A short remote reply.", speaker: "00"),
+                ])
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [mic, remote]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let local = transcript.utterances.filter { $0.speakerKey == SpeakerLabel.localUser }
+                expect.isTrue(local.count >= 3, "expected several turns, got \(local.count)")
+                let longest = local.map { $0.end - $0.start }.max() ?? 0
+                expect.isTrue(longest <= 30.01, "an utterance still spans \(longest)s")
+                let order = transcript.utterances.map(\.track)
+                expect.isTrue(
+                    order.firstIndex(of: .remote).map { $0 > 0 && $0 < order.count - 1 } == true,
+                    "the remote reply should land between local turns, not after the block"
+                )
+            },
+
             test("a phrase repeated inside one chunk is kept") { expect in
                 // De-duplication exists for the overlap between chunks. A speaker
                 // who repeats themselves inside a single chunk said it twice.

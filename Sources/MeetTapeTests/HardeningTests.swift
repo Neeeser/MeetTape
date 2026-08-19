@@ -706,6 +706,25 @@ extension HardeningTests {
                     )
                     expect.equal(info.frameCount, segment.frameCount ?? -1, "mismatch in \(segment.file)")
                 }
+                // Read back the way processing reads it. A device with more than
+                // two channels used to convert to exact zeros, so a recording of
+                // the right length could contain no audio at all.
+                let stream = TrackAudioStream(
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                )
+                var peak: Float = 0
+                try stream.forEachBuffer { buffer, _ in
+                    if let data = buffer.floatChannelData {
+                        for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(data[0][frame])) }
+                    }
+                    return true
+                }
+                expect.isTrue(
+                    peak > 0,
+                    "the recording read back as digital silence from a \(timeline.segments(track: .mic).first?.format.channelCount ?? 0)-channel device"
+                )
                 expect.isTrue(
                     snapshot.micSeconds > 5,
                     "the final snapshot should report what was written"

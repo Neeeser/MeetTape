@@ -65,7 +65,9 @@ Each row below covers a failure mode observed during development:
 runs the shipping `CaptureEngine` with `AVAudioEngine` and a CoreAudio process
 tap for ten seconds. Verified: microphone audio recorded, segments rotated, the
 manifest closed with no open segments, every segment's frame count matching the
-file on disk, and the pre-roll captured before commit flushed into the recording.
+file on disk, the recording reading back through the processing path with a
+non-zero peak, and the pre-roll captured before commit flushed into the
+recording.
 
 **Manual recording through the runtime.** The same command runs a second live
 test that drives `MeetTapeRuntime` instead of the engine directly. It starts a

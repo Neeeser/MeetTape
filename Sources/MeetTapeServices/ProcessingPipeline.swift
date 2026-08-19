@@ -26,8 +26,15 @@ public actor ProcessingPipeline {
     private let onProgress: @Sendable (Progress) -> Void
     private let onFailure: @Sendable (String, ProcessingError) -> Void
     private let calendar: CalendarService?
+    private let wait: @Sendable (TimeInterval) async -> Void
 
     private var running: Set<String> = []
+
+    /// How many times one stage is attempted before the meeting is left for the
+    /// user, and the delays between those attempts.
+    static let maxAttemptsPerStage = 3
+    static let retryDelaysSeconds: [TimeInterval] = [20, 90]
+    static let maxRetryDelaySeconds: TimeInterval = 300
 
     public init(
         repository: MeetingRepository,
@@ -36,7 +43,10 @@ public actor ProcessingPipeline {
         clock: any Clock = SystemClock(),
         settingsProvider: @escaping @Sendable () -> AppSettings,
         onProgress: @escaping @Sendable (Progress) -> Void = { _ in },
-        onFailure: @escaping @Sendable (String, ProcessingError) -> Void = { _, _ in }
+        onFailure: @escaping @Sendable (String, ProcessingError) -> Void = { _, _ in },
+        wait: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        }
     ) {
         self.repository = repository
         self.backend = backend
@@ -45,6 +55,7 @@ public actor ProcessingPipeline {
         self.settingsProvider = settingsProvider
         self.onProgress = onProgress
         self.onFailure = onFailure
+        self.wait = wait
     }
 
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
@@ -105,11 +116,31 @@ public actor ProcessingPipeline {
                 Log.processing.error(
                     "stage \(stage.rawValue, privacy: .public) failed: \(failure.logSafeDescription, privacy: .public)"
                 )
-                onFailure(metadata.id, failure)
                 report(metadata, chunks: nil)
+
+                // A rate limit or a server error usually clears on its own, and the
+                // failure message tells the user MeetTape will try again. Attempts
+                // are bounded so a persistent outage stops asking.
+                let attempts = metadata.processing.attemptCount(for: stage)
+                if failure.isRetryable, attempts < Self.maxAttemptsPerStage {
+                    await wait(retryDelay(after: failure, attempt: attempts))
+                    metadata.processing.advance(to: stage, at: clock.now)
+                    continue
+                }
+                onFailure(metadata.id, failure)
                 return
             }
         }
+    }
+
+    /// How long to wait before attempting a stage again. The server's own
+    /// `Retry-After` wins when it sent one.
+    private func retryDelay(after failure: ProcessingError, attempt: Int) -> TimeInterval {
+        if case .rateLimited(let retryAfter) = failure, let retryAfter {
+            return min(max(retryAfter, 0), Self.maxRetryDelaySeconds)
+        }
+        let index = min(max(attempt - 1, 0), Self.retryDelaysSeconds.count - 1)
+        return Self.retryDelaysSeconds[index]
     }
 
     /// Retries a failed meeting from the stage that failed.
@@ -236,6 +267,11 @@ public actor ProcessingPipeline {
             : .empty
         let plans = planner.plan(durationSeconds: duration, energy: energy)
 
+        // A chunk's start is a position inside this track's own audio. The tracks
+        // do not begin at the same instant, so the track's lead-in is added to put
+        // the chunk on the meeting timeline the same way the mixdown does.
+        let leadIn = (try? store.readTimeline())?.leadIn(track: track) ?? 0
+
         var raw = try store.readRawTranscript()
         // A unique directory, not a predictable one: a same-user process could
         // otherwise pre-create the path and have meeting audio written through a
@@ -263,7 +299,7 @@ public actor ProcessingPipeline {
             raw.chunks.append(RawTranscriptChunk(
                 id: chunkID,
                 track: track,
-                timelineOffset: plan.start,
+                timelineOffset: plan.start + leadIn,
                 durationSeconds: plan.duration,
                 model: model,
                 responseFormat: response.segments.contains { $0.speaker != nil }
@@ -272,7 +308,7 @@ public actor ProcessingPipeline {
                 rawResponseFile: "api/\(chunkID).json"
             ))
             try store.writeRawTranscript(raw)
-            report(metadata, chunks: (raw.chunks.count, plans.count))
+            report(metadata, chunks: (raw.chunks(track: track).count, plans.count))
             try? FileManager.default.removeItem(at: audioURL)
         }
     }

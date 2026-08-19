@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 112 tests, all passing, no failures, in about 3 seconds.
+`./scripts/test.sh` — 116 tests, all passing, no failures, in about 4 seconds.
 Eleven further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` — 9 tests, all passing.
@@ -39,6 +39,9 @@ Each row below covers a failure mode observed during development:
 | Chunk overlap is de-duplicated | `ProcessingTests` |
 | Renaming a speaker re-renders without modifying raw diarization | `ProcessingTests`, `PipelineTests` |
 | An API failure keeps the audio and stays retryable | `PipelineTests` |
+| A rate limit is retried automatically, then bounded after three attempts | `PipelineTests` |
+| Each track is placed on the meeting timeline at its own start | `PipelineTests` |
+| A phrase repeated inside one chunk is not treated as overlap | `ProcessingTests` |
 | Remote audio arriving after commit is still written | `HardeningTests` |
 | An unsupported call keeps recording for as long as it runs | `HardeningTests` |
 | Only MeetTape's own relay, launched by a browser, may connect | `HardeningTests` |

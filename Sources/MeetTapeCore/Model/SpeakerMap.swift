@@ -78,12 +78,28 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     }
 
     /// A readable fallback for a label nobody has named yet.
+    ///
+    /// The chunk is part of the name because the model's labels are stable only
+    /// within one request. Two chunks both reporting `speaker_00` are two
+    /// different clusters until speaker resolution or a person says otherwise, so
+    /// they must not read as one person.
     public static func fallbackName(for key: String) -> String {
         if key == SpeakerLabel.localUser { return "Me" }
         guard let range = key.range(of: "_speaker_") else { return key }
         let suffix = String(key[range.upperBound...])
-        if let numeric = Int(suffix) { return "Speaker \(numeric + 1)" }
-        return "Speaker \(suffix.uppercased())"
+        let number = Int(suffix).map { "\($0 + 1)" } ?? suffix.uppercased()
+        // The first chunk carries no suffix, which keeps the common case of a
+        // meeting short enough for one request reading as "Speaker 1".
+        guard let chunk = chunkIndex(in: key), chunk > 1 else { return "Speaker \(number)" }
+        return "Speaker \(number) (part \(chunk))"
+    }
+
+    /// The chunk number embedded in a namespaced label, if it has one.
+    private static func chunkIndex(in key: String) -> Int? {
+        guard let range = key.range(of: "_chunk_") else { return nil }
+        let rest = key[range.upperBound...]
+        let digits = rest.prefix { $0.isNumber }
+        return Int(digits)
     }
 
     public func resolvedName(for key: String) -> String {

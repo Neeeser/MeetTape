@@ -9,7 +9,8 @@ import TestKit
 enum PipelineTests {
     /// Builds a finished two-track recording on disk, ready for processing.
     static func makeRecordedMeeting(
-        root: URL, source: MeetingSource = .googleMeet, seconds: Double = 6
+        root: URL, source: MeetingSource = .googleMeet, seconds: Double = 6,
+        remoteStartOffset: Double = 0
     ) throws -> (metadata: MeetingMetadata, store: MeetingStore, repository: MeetingRepository) {
         let repository = MeetingRepository(root: root)
         let started = Date(timeIntervalSince1970: 1_787_070_000)
@@ -41,7 +42,7 @@ enum PipelineTests {
             )
             remoteWriter.enqueueSynchronously(AudioBufferPacket(
                 buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000, frequency: 220),
-                hostTime: 100
+                hostTime: 100 + remoteStartOffset
             ))
             remoteWriter.finish(reason: "test")
         }
@@ -66,12 +67,42 @@ enum PipelineTests {
             repository: repository,
             backend: backend,
             clock: ManualClock(),
-            settingsProvider: { settings }
+            settingsProvider: { settings },
+            wait: { _ in }
         )
     }
 
     static var suite: Suite {
         Suite("ProcessingPipeline", [
+            test("each track is placed at its own start on the meeting timeline") { expect in
+                // The remote writer opens on the first packet from the meeting
+                // application, which here is 12 s after the microphone started. A
+                // chunk offset is a position inside one track, so without the
+                // track's lead-in every remote utterance lands 12 s early.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6, remoteStartOffset: 12)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Mine.", speaker: nil),
+                ]
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let transcript = try meeting.store.readCanonicalTranscript()
+                let mine = transcript?.utterances.first { $0.text == "Mine." }
+                let theirs = transcript?.utterances.first { $0.text == "Theirs." }
+                expect.equal(mine?.start, 0, "the earlier track starts the timeline")
+                expect.equal(
+                    theirs?.start, 12,
+                    "the later track is offset by when it actually started"
+                )
+            },
+
             test("a recorded meeting runs through to complete") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -121,7 +152,28 @@ enum PipelineTests {
                 expect.equal(backend.calls.filter { $0.kind == "diarize" }.count, 1)
             },
 
-            test("an API failure keeps the audio and stays retryable") { expect in
+            test("a rate limit is retried on its own and the meeting completes") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root)
+
+                let backend = FakeAIBackend()
+                backend.failNextTranscription = .rateLimited(retryAfter: 30)
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Back again.", speaker: nil),
+                ]
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Welcome back.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let recovered = try meeting.store.readMetadata()
+                expect.equal(recovered.processing.state, .complete, "the second attempt succeeded")
+                expect.equal(recovered.processing.attemptCount(for: .transcribing), 2)
+            },
+
+            test("a failure that keeps happening stops asking and keeps the audio") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let meeting = try makeRecordedMeeting(root: root)
@@ -130,7 +182,7 @@ enum PipelineTests {
                 ).sorted()
 
                 let backend = FakeAIBackend()
-                backend.failNextTranscription = .rateLimited(retryAfter: 30)
+                backend.alwaysFailTranscription = .serverError(status: 503)
                 let pipeline = makePipeline(repository: meeting.repository, backend: backend)
                 await pipeline.process(meetingID: meeting.metadata.id)
 
@@ -138,13 +190,17 @@ enum PipelineTests {
                 expect.equal(failed.processing.state, .failed)
                 expect.equal(failed.processing.resumeStage, .transcribing)
                 expect.equal(failed.processing.lastFailure?.isRetryable, true)
-
+                expect.equal(
+                    failed.processing.attemptCount(for: .transcribing), 3,
+                    "three attempts, then the meeting waits for the user"
+                )
                 let segmentsAfter = try FileManager.default.contentsOfDirectory(
                     atPath: meeting.store.layout.segments.path
                 ).sorted()
                 expect.equal(segmentsAfter, segmentsBefore, "source audio must be untouched")
 
-                // Retrying picks up from the stage that failed and completes.
+                // The Retry action still works once the outage is over.
+                backend.alwaysFailTranscription = nil
                 backend.transcriptionSegments = [
                     RawTranscriptSegment(start: 0, end: 2, text: "Back again.", speaker: nil),
                 ]
@@ -152,10 +208,7 @@ enum PipelineTests {
                     RawTranscriptSegment(start: 0, end: 2, text: "Welcome back.", speaker: "A"),
                 ]
                 await pipeline.retry(meetingID: meeting.metadata.id)
-
-                let recovered = try meeting.store.readMetadata()
-                expect.equal(recovered.processing.state, .complete)
-                expect.equal(recovered.processing.attemptCount(for: .transcribing), 2)
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
             },
 
             test("an authentication failure is not retried in a loop") { expect in
@@ -187,17 +240,18 @@ enum PipelineTests {
                     RawTranscriptSegment(start: 0, end: 2, text: "First half.", speaker: nil),
                 ]
                 backend.failNextDiarization = .serverError(status: 503)
-                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
-                await pipeline.process(meetingID: meeting.metadata.id)
-                expect.equal(try meeting.store.readMetadata().processing.state, .failed)
-                let transcribeCalls = backend.calls.filter { $0.kind == "transcribe" }.count
-                expect.equal(transcribeCalls, 1)
-
                 backend.diarizationSegments = [
                     RawTranscriptSegment(start: 0, end: 2, text: "Second half.", speaker: "A"),
                 ]
-                await pipeline.retry(meetingID: meeting.metadata.id)
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
                 expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                let transcribeCalls = backend.calls.filter { $0.kind == "transcribe" }.count
+                expect.equal(
+                    transcribeCalls, 1,
+                    "diarization failed and was retried; transcription was already done"
+                )
+                await pipeline.retry(meetingID: meeting.metadata.id)
                 expect.equal(
                     backend.calls.filter { $0.kind == "transcribe" }.count, transcribeCalls,
                     "a completed chunk must not be sent again"

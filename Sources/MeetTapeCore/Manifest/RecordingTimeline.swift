@@ -92,6 +92,23 @@ public struct RecordingTimeline: Sendable, Equatable {
         max(duration(track: .mic), duration(track: .remote))
     }
 
+    /// Host time of a track's first recorded frame.
+    public func firstFrameHostTime(track: CaptureTrack) -> Double? {
+        segments(track: track).compactMap(\.resolvedFirstFrameHostTime).first
+    }
+
+    /// How long after the meeting started this track's first frame arrived.
+    ///
+    /// The two sources start at different moments. The remote writer opens on the
+    /// first packet from the meeting application, which can be many seconds after
+    /// the microphone begins, so a position within one track's audio is not a
+    /// position on the meeting timeline until this offset is added.
+    public func leadIn(track: CaptureTrack) -> Double {
+        let starts = CaptureTrack.allCases.compactMap { firstFrameHostTime(track: $0) }
+        guard let earliest = starts.min(), let own = firstFrameHostTime(track: track) else { return 0 }
+        return max(0, own - earliest)
+    }
+
     /// Segments with no close record. Their audio is intact; only the manifest is.
     public var openSegments: [RecordedSegment] {
         segments.filter { !$0.isClosed }

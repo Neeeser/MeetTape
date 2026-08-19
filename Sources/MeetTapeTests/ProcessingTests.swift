@@ -21,6 +21,8 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     var enrichment = MeetingEnrichment(title: "Retrieval logic", summary: "Discussed retrieval.")
     var failNextTranscription: ProcessingError?
     var failNextDiarization: ProcessingError?
+    /// Fails every request, for the bounded-retry path.
+    var alwaysFailTranscription: ProcessingError?
     /// Returns a different segment set per chunk index, for overlap tests.
     var diarizationByChunk: [[RawTranscriptSegment]] = []
 
@@ -33,6 +35,10 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     func verifyCredentials(model: String) async throws {}
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {
+        if let failure = alwaysFailTranscription {
+            record(Call(kind: "transcribe", model: request.model, file: request.audio.lastPathComponent))
+            throw failure
+        }
         if let failure = failNextTranscription {
             failNextTranscription = nil
             throw failure
@@ -184,6 +190,38 @@ enum ProcessingTests {
                     "the overlapping sentence appears twice: \(texts)"
                 )
                 expect.isTrue(texts.contains("Agreed, let's cache it."))
+            },
+
+            test("a phrase repeated inside one chunk is kept") { expect in
+                // De-duplication exists for the overlap between chunks. A speaker
+                // who repeats themselves inside a single chunk said it twice.
+                let only = chunk(id: "remote_chunk_001", track: .remote, offset: 0, segments: [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Yes, exactly.", speaker: "A"),
+                    RawTranscriptSegment(start: 4, end: 8, text: "So the index is the slow part.", speaker: "B"),
+                    RawTranscriptSegment(start: 9, end: 11, text: "Yes, exactly.", speaker: "A"),
+                ])
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [only]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let texts = transcript.utterances.map(\.text)
+                expect.equal(
+                    texts.filter { $0 == "Yes, exactly." }.count, 2,
+                    "both repetitions should survive: \(texts)"
+                )
+            },
+
+            test("anonymous labels from different chunks read as different speakers") { expect in
+                let first = SpeakerMap.fallbackName(for: "remote_chunk_001_speaker_00")
+                let second = SpeakerMap.fallbackName(for: "remote_chunk_002_speaker_00")
+                expect.equal(first, "Speaker 1", "one chunk of audio should read plainly")
+                expect.notEqual(
+                    first, second,
+                    "two chunks' labels are different clusters until someone maps them"
+                )
+                expect.equal(second, "Speaker 1 (part 2)")
+                expect.equal(SpeakerMap.fallbackName(for: SpeakerLabel.localUser), "Me")
             },
 
             test("timestamps stay monotonic across chunks") { expect in

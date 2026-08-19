@@ -109,6 +109,11 @@ change, restart, health transition and marker is appended to
 `segments/manifest.jsonl` and flushed with `fsync`, so a hard kill loses at most
 a partial final line, which the reader tolerates.
 
+A chunk's offset is a position inside one track's audio, so the track's lead-in,
+the delay between the first frame of the earliest track and the first frame of
+this one, is added when the chunk is recorded. The mixdown applies the same
+offset as silence, so `mixed.caf` and the transcript agree.
+
 Duration is the sum of each segment's own frame count over that segment's own
 sample rate. A Bluetooth profile switch drops the input to 16 kHz mid-meeting,
 and dividing an accumulated frame count by the current sample rate under-reported
@@ -146,7 +151,10 @@ recording → finalizing → audio_safe → transcribing → diarizing
 
 `audio_safe` is the boundary between capture and network work. Nothing is sent to
 OpenAI before it, and every stage after it can be retried without risking the
-recording. Each transition is written to `metadata.json` before the next stage
+recording. A rate limit, a server error or a transport failure is retried in
+place, honouring the server's `Retry-After` when it sends one, up to three
+attempts per stage; after that the meeting waits for the user, who can retry it
+from the review panel or the notification. Each transition is written to `metadata.json` before the next stage
 starts, and each completed chunk is appended to `transcript.raw.json` as it
 arrives, so a resumed run does not repeat work that already succeeded.
 
@@ -159,7 +167,9 @@ diarizing a mixdown of both tracks, and the local speaker is identified by
 construction.
 
 Anonymous labels are namespaced per chunk (`remote_chunk_002_speaker_01`) because
-the API's labels are stable only within a single request. Mapping several raw
+the API's labels are stable only within a single request, and an unnamed label
+renders with its chunk ("Speaker 1 (part 2)") so two clusters are never displayed
+as one person. Mapping several raw
 clusters onto one person is the job of the speaker-resolution stage, whose output
 is a suggestion stored in `speakers.map.json`. An assignment made by the user
 takes precedence, and renaming re-renders the Markdown without another API

@@ -163,6 +163,9 @@ public struct TranscriptAssembler: Sendable {
     private func isDuplicate(_ candidate: Utterance, of accepted: [Utterance]) -> Bool {
         for existing in accepted.reversed() {
             if candidate.start - existing.end > configuration.duplicateSearchSeconds { break }
+            // Repeats inside one chunk are speech, not overlap. A speaker who says
+            // "yes, exactly" twice in a minute keeps both.
+            guard existing.chunkID != candidate.chunkID else { continue }
             guard abs(existing.start - candidate.start) <= configuration.duplicateSearchSeconds
                 || rangesOverlap(existing, candidate)
             else { continue }

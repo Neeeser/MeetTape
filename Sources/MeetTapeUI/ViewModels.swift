@@ -99,6 +99,7 @@ public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
     public var inputDescription = "—"
+    public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String
     public var apiKey = ""
     public var hasStoredKey: Bool
@@ -123,6 +124,7 @@ public final class SettingsModel {
         statuses = await runtime.permissions.allStatuses()
         hostStatus = NativeMessagingInstaller().status()
         inputDescription = CoreAudioSystem.describeDefaultInput()
+        sensorStatus = runtime.sensorStatus
     }
 
     public func request(_ kind: PermissionKind) async {

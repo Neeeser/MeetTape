@@ -354,6 +354,12 @@ public final class MeetTapeRuntime {
 
     // MARK: - meeting actions
 
+    /// Transport-level state of the browser sensor, including connections refused
+    /// because the peer was not MeetTape's own relay.
+    public var sensorStatus: BrowserSensorServer.Status? {
+        detectionEngine.sensorStatus
+    }
+
     public func refreshRecentMeetings() {
         recentMeetings = repository.listMeetings(limit: 40)
         onStatusChange?()

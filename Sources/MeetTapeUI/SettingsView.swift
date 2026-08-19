@@ -336,6 +336,15 @@ struct PermissionsSettingsTab: View {
                     Text(path).font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Re-install Host") { model.installHost() }
+                if let rejected = model.sensorStatus?.rejectedConnections, rejected > 0 {
+                    Label(
+                        "\(rejected) connection\(rejected == 1 ? "" : "s") refused: only MeetTape's "
+                            + "own relay, launched by a browser, may report meetings.",
+                        systemImage: "shield.lefthalf.filled"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
             }
             Section {
                 Button("Re-check Everything") { Task { await model.refresh() } }

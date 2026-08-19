@@ -9,8 +9,8 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 112 tests, all passing, no failures, in about 3 seconds. Ten
-further tests are skipped unless explicitly enabled (see below).
+`./scripts/test.sh` — 112 tests, all passing, no failures, in about 3 seconds.
+Eleven further tests are skipped unless explicitly enabled (see below).
 
 `cd extension && npm test` — 9 tests, all passing.
 
@@ -53,10 +53,21 @@ tap for ten seconds. Verified: microphone audio recorded, segments rotated,
 manifest closed with no open segments, every segment's frame count matching the
 file on disk, and the pre-roll captured before commit flushed into the recording.
 
+**A manual recording through the runtime.** The same command runs a second live
+test that drives `MeetTapeRuntime` rather than the engine directly: it starts a
+manual recording, captures for nine seconds, stops, and waits for the archive.
+Verified: one meeting directory written under the configured storage root, source
+`manual`, the manifest closed with no open segments, 9 s of microphone audio in
+rotating segments whose frame counts match the files, the meeting duration
+matching the capture, and processing reaching `audio_safe`. With no key in the
+keychain it then fails at the first API call with a missing-credential error and
+the recording is still intact, which is the guarantee that boundary exists for.
+
 **The packaged app.** Built with `scripts/bundle-app.sh`, launched, and observed:
-the menu bar item appears, the app runs as an accessory with no Dock presence,
-the native messaging host and its Firefox manifest are installed on launch, and
-the sensor socket is created in Application Support.
+`menu bar item ready: true, visible: true` and `browser sensor server listening`
+in the log, `lsappinfo` reporting `type="UIElement"` so there is no Dock
+presence, and the native messaging host, its Firefox manifest and the sensor
+socket all present in Application Support.
 
 **A recording driven by a sensor event, end to end.** Before peer verification
 existed, a simulated `in_call` event over the socket produced a real Google Meet

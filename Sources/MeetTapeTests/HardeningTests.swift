@@ -3,6 +3,7 @@ import Foundation
 import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeDetection
+import MeetTapeServices
 import TestKit
 
 /// Regressions for defects found by adversarial review. Each one failed against
@@ -631,6 +632,75 @@ extension HardeningTests {
                     timeline.preRollFlushes.contains { $0.track == .mic && $0.seconds > 1 },
                     "the two seconds before commit should have been flushed"
                 )
+            },
+
+            // The whole menu-bar path minus the click: the runtime creates the
+            // meeting, drives the engine, finalises and hands the recording to the
+            // pipeline. Everything below MeetTapeRuntime is the shipping code.
+            test("a manual recording started through the runtime lands in the archive") { expect in
+                guard ProcessInfo.processInfo.environment["MEETTAPE_LIVE_CAPTURE"] == "1" else {
+                    throw TestSkip("set MEETTAPE_LIVE_CAPTURE=1 to record from real hardware")
+                }
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let archive = root.appendingPathComponent("Meetings")
+
+                let runtime = await MainActor.run { () -> MeetTapeRuntime in
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = archive.path
+                    settings.segmentSeconds = 3
+                    settings.showNotifications = false
+                    runtime.update(settings: settings)
+                    runtime.startManualRecording()
+                    return runtime
+                }
+                try await Task.sleep(nanoseconds: 9_000_000_000)
+                await MainActor.run { runtime.stopRecording(reason: "test") }
+
+                let repository = MeetingRepository(root: archive)
+                var summaries = repository.listMeetings()
+                for _ in 0..<40 where summaries.first?.processingState.isAudioSafe != true {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    summaries = repository.listMeetings()
+                }
+                expect.equal(summaries.count, 1, "one manual recording, one meeting")
+                guard let summary = summaries.first,
+                      let meeting = repository.findMeeting(id: summary.id)
+                else { return expect.fail("the meeting was never written") }
+
+                expect.equal(meeting.metadata.source, .manual)
+                expect.isTrue(
+                    meeting.metadata.processing.state.isAudioSafe,
+                    "state is \(meeting.metadata.processing.state.rawValue); the audio must be durable"
+                )
+                let timeline = try meeting.store.readTimeline()
+                expect.isTrue(timeline.isComplete, "the manifest should close cleanly")
+                expect.equal(timeline.openSegments.count, 0)
+                expect.isTrue(
+                    timeline.duration(track: .mic) > 5,
+                    "expected microphone audio, got \(timeline.duration(track: .mic))s"
+                )
+                expect.isTrue(
+                    meeting.metadata.durationSeconds > 5,
+                    "the meeting duration should match what was captured"
+                )
+                for segment in timeline.segments(track: .mic) {
+                    let info = try AudioFileInspector().inspect(
+                        url: meeting.store.layout.segments.appendingPathComponent(segment.file)
+                    )
+                    expect.equal(info.frameCount, segment.frameCount ?? -1, "mismatch in \(segment.file)")
+                }
+                // No key is configured here, so processing stops at the first API
+                // call. That is the guarantee worth pinning: the recording survives
+                // a processing failure intact.
+                if meeting.metadata.processing.state == .failed {
+                    let failure = meeting.metadata.processing.lastFailure
+                    expect.isTrue(
+                        failure?.message.lowercased().contains("key") ?? false,
+                        "expected a missing-credential failure, got \(failure?.message ?? "none")"
+                    )
+                }
             },
         ])
     }

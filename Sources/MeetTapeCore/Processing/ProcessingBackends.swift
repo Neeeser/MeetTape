@@ -72,6 +72,9 @@ public struct DiarizationChunkEmbedding: Sendable, Equatable, Codable {
 public struct DiarizationOutput: Sendable, Equatable {
     public var intervals: [DiarizationInterval]
     public var clusters: [DiarizationCluster]
+    /// The words, for a backend that transcribes and diarizes in one request.
+    /// Empty for a diarizer that only decides who spoke when.
+    public var segments: [RawTranscriptSegment]
     /// Empty when the backend returns labels without vectors, which is the case
     /// for every cloud diarizer. Speaker memory then extracts them locally.
     public var chunkEmbeddings: [DiarizationChunkEmbedding]
@@ -81,11 +84,13 @@ public struct DiarizationOutput: Sendable, Equatable {
 
     public init(
         intervals: [DiarizationInterval], clusters: [DiarizationCluster],
+        segments: [RawTranscriptSegment] = [],
         chunkEmbeddings: [DiarizationChunkEmbedding] = [], configuration: [String: String] = [:],
         rawBody: Data? = nil
     ) {
         self.intervals = intervals
         self.clusters = clusters
+        self.segments = segments
         self.chunkEmbeddings = chunkEmbeddings
         self.configuration = configuration
         self.rawBody = rawBody
@@ -119,6 +124,10 @@ public protocol DiarizationBackend: Sendable {
     /// pipeline runs local embedding extraction over the returned intervals so
     /// voice memory keeps working whatever produced the labels.
     var producesEmbeddings: Bool { get }
+    /// Whether the backend returns the words as well as the speakers. The cloud
+    /// diarizer does both in one request; the local one decides speakers only,
+    /// so its track has to be transcribed separately.
+    var producesTranscript: Bool { get }
 
     func diarize(
         audio: URL, progress: @escaping @Sendable (Double) -> Void

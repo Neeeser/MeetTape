@@ -105,7 +105,11 @@ public enum SpeakerLabel {
     public static let localUser = "local"
 
     public static func namespaced(chunkID: String, rawLabel: String) -> String {
-        "\(chunkID)_speaker_\(normalise(rawLabel))"
+        // A label that already carries a namespace keeps it. Attribution against
+        // a diarization run stamps the run into the key so a re-analysis cannot
+        // inherit names that belonged to the previous clustering.
+        if rawLabel.contains("_speaker_") { return rawLabel }
+        return "\(chunkID)_speaker_\(normalise(rawLabel))"
     }
 
     public static func chunkID(index: Int) -> String {

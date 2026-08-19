@@ -19,26 +19,25 @@ public struct DiarizationInterval: Codable, Sendable, Equatable {
     public var duration: Double { max(0, end - start) }
 }
 
-/// One cluster the diarizer found, with the vector that represents it.
+/// One cluster the diarizer found.
+///
+/// Carries no vector on purpose. This structure is written into the meeting
+/// folder, which is the user's export, and a speaker embedding is a biometric
+/// identifier that matches the same person across devices, rooms and years.
+/// Vectors live in the identity store under Application Support and nowhere
+/// else.
 public struct DiarizationCluster: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var speechSeconds: Double
     public var quality: Double
-    /// Centroid over the cluster's chunk embeddings, already L2-normalized.
-    /// Absent when the backend returned intervals without vectors.
-    public var embedding: [Float]?
-    public var embeddingModel: String?
+    /// How many embedding windows the cluster covered, as a rough measure of
+    /// how much the diarizer had to work with.
     public var chunkCount: Int
 
-    public init(
-        id: String, speechSeconds: Double, quality: Double = 1,
-        embedding: [Float]? = nil, embeddingModel: String? = nil, chunkCount: Int = 0
-    ) {
+    public init(id: String, speechSeconds: Double, quality: Double = 1, chunkCount: Int = 0) {
         self.id = id
         self.speechSeconds = speechSeconds
         self.quality = quality
-        self.embedding = embedding
-        self.embeddingModel = embeddingModel
         self.chunkCount = chunkCount
     }
 }
@@ -55,7 +54,8 @@ public struct DiarizationRun: Codable, Sendable, Equatable, Identifiable {
     /// `fluidaudio-offline-0.15.6` or `gpt-4o-transcribe-diarize`.
     public var backend: String
     public var producedAt: Date
-    /// Seconds added to every interval to put it on the meeting timeline.
+    /// The track lead-in already added to every interval below, kept as
+    /// provenance. Intervals are stored on the meeting timeline.
     public var timelineOffset: Double
     /// Only one run per track renders. The others are history.
     public var isActive: Bool

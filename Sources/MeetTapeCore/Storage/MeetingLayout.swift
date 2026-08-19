@@ -13,6 +13,10 @@ public struct MeetingLayout: Sendable, Equatable {
     public var manifest: URL { segments.appendingPathComponent("manifest.jsonl") }
     public var metadata: URL { root.appendingPathComponent("metadata.json") }
     public var rawTranscript: URL { root.appendingPathComponent("transcript.raw.json") }
+    /// Who spoke when, as the diarizer produced it. Immutable, and separate from
+    /// the words because the two come from independently chosen backends and
+    /// re-analysing speakers must never invalidate a transcription.
+    public var rawDiarization: URL { root.appendingPathComponent("diarization.raw.json") }
     public var speakerMap: URL { root.appendingPathComponent("speakers.map.json") }
     public var canonicalTranscript: URL { root.appendingPathComponent("transcript.json") }
     public var transcriptMarkdown: URL { root.appendingPathComponent("transcript.md") }

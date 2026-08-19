@@ -18,19 +18,25 @@ public struct Participant: Codable, Sendable, Equatable, Identifiable {
     /// True for the person holding the microphone. Their speech is attributed by
     /// construction and never diarized.
     public var isLocalUser: Bool
+    /// The persistent identity this participant is, when the user has linked
+    /// one. Present only as a soft prior for speaker recognition: it relaxes the
+    /// margin the identity needs and never restricts the search.
+    public var identityID: IdentityID?
 
     public init(
         id: String = UUID().uuidString,
         displayName: String,
         email: String? = nil,
         origin: ParticipantOrigin,
-        isLocalUser: Bool = false
+        isLocalUser: Bool = false,
+        identityID: IdentityID? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.email = email
         self.origin = origin
         self.isLocalUser = isLocalUser
+        self.identityID = identityID
     }
 }
 

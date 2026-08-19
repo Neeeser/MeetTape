@@ -89,6 +89,18 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(transcript), to: layout.rawTranscript)
     }
 
+    public func readRawDiarization() throws -> RawDiarization {
+        guard FileManager.default.fileExists(atPath: layout.rawDiarization.path) else {
+            return RawDiarization()
+        }
+        let data = try read(layout.rawDiarization)
+        return try ArchiveCoding.decode(RawDiarization.self, from: data, path: layout.rawDiarization.path)
+    }
+
+    public func writeRawDiarization(_ diarization: RawDiarization) throws {
+        try AtomicFile.write(try ArchiveCoding.encode(diarization), to: layout.rawDiarization)
+    }
+
     public func readSpeakerMap() throws -> SpeakerMap {
         guard FileManager.default.fileExists(atPath: layout.speakerMap.path) else { return SpeakerMap() }
         let data = try read(layout.speakerMap)

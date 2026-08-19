@@ -193,7 +193,7 @@ public struct MeetingReviewView: View {
                     ForEach(transcript.utterances) { utterance in
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
-                                Text(model.speakers.resolvedName(for: utterance.speakerKey))
+                                Text(model.speakers.resolvedName(for: utterance))
                                     .font(.callout.weight(.semibold))
                                 Text(TranscriptRenderer().timecode(utterance.start))
                                     .font(.caption2)

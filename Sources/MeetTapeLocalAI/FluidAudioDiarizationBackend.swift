@@ -23,6 +23,9 @@ public struct FluidAudioDiarizationBackend: DiarizationBackend {
     public var isLocal: Bool { true }
     public var limits: BackendAudioLimits { .none }
     public var producesEmbeddings: Bool { true }
+    /// Speakers only. The track's words come from the transcription backend,
+    /// whichever one that is.
+    public var producesTranscript: Bool { false }
 
     public func diarize(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
@@ -172,19 +175,16 @@ extension LocalModelManager {
             entry.count += 1
             qualityByCluster[interval.clusterID] = entry
         }
-        var vectorsByCluster: [String: [[Float]]] = [:]
-        for chunk in chunks { vectorsByCluster[chunk.clusterID, default: []].append(chunk.vector) }
+        var chunkCounts: [String: Int] = [:]
+        for chunk in chunks { chunkCounts[chunk.clusterID, default: 0] += 1 }
 
         let clusters = speechByCluster.keys.sorted().map { id -> DiarizationCluster in
             let quality = qualityByCluster[id].map { $0.count > 0 ? $0.total / Double($0.count) : 1 } ?? 1
-            let vectors = vectorsByCluster[id] ?? []
             return DiarizationCluster(
                 id: id,
                 speechSeconds: speechByCluster[id] ?? 0,
                 quality: quality,
-                embedding: vectors.isEmpty ? nil : VoiceVector.centroid(vectors),
-                embeddingModel: vectors.isEmpty ? nil : EmbeddingModelIdentifier.fluidAudioOffline.rawValue,
-                chunkCount: vectors.count
+                chunkCount: chunkCounts[id] ?? 0
             )
         }
         return DiarizationOutput(

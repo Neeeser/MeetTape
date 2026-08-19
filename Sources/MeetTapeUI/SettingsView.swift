@@ -202,6 +202,25 @@ struct AudioSettingsTab: View {
                         + "transcribes less accurately than the built-in microphone at 48 kHz."
                 )
                 .font(.caption).foregroundStyle(.secondary)
+                Toggle(
+                    "Remove speaker audio from the microphone",
+                    isOn: Binding(
+                        get: { runtime.settings.echoCancellation },
+                        set: { newValue in
+                            var settings = runtime.settings
+                            settings.echoCancellation = newValue
+                            runtime.update(settings: settings)
+                        }
+                    )
+                )
+                Text(
+                    "Uses the system voice-processing unit to subtract what the speakers are "
+                        + "playing, so a call taken without headphones does not record the "
+                        + "other side onto your track. Applies to the next recording. When the "
+                        + "input and output devices cannot be paired, recording continues "
+                        + "without it."
+                )
+                .font(.caption).foregroundStyle(.secondary)
             }
             Section("Recording health") {
                 HealthIndicator(state: runtime.status.displayHealth)

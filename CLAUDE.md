@@ -55,6 +55,7 @@ any of them changes verified behaviour. The numbers live in `CaptureThresholds`.
 | Content scripts are plain scripts and never ES modules | An `import` statement makes the whole script fail to load and the sensor silently never runs |
 | No file I/O, manifest write or device work on an audio callback | An `fsync` on a render thread drops the audio being recorded |
 | Every device build, teardown and poll runs on the capture control queue | Otherwise a poll-driven rebuild races a user-driven stop and leaves a live engine running |
+| Echo cancellation disables ducking and falls back to plain capture if the voice unit refuses to build | Default ducking quiets the meeting audio being recorded, and the unit rejects some input/output pairings (virtual outputs, AirPods input with built-in output) |
 
 Regression tests for these rules are in
 `Sources/MeetTapeTests/CaptureRecoveryTests.swift`, `DetectionTests.swift`,

@@ -18,13 +18,17 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     private let state = LockedBox(State())
     private let sink: AudioBufferSink
     private let onConfigurationChange: @Sendable () -> Void
+    /// Read at build time so a settings change applies to the next engine.
+    private let voiceProcessingWanted: @Sendable () -> Bool
 
     public init(
         sink: @escaping AudioBufferSink,
-        onConfigurationChange: @escaping @Sendable () -> Void
+        onConfigurationChange: @escaping @Sendable () -> Void,
+        voiceProcessing: @escaping @Sendable () -> Bool = { true }
     ) {
         self.sink = sink
         self.onConfigurationChange = onConfigurationChange
+        self.voiceProcessingWanted = voiceProcessing
         observeConfigurationChanges()
     }
 
@@ -79,11 +83,41 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             throw CaptureError.microphonePermissionDenied
         }
 
+        // Voice processing subtracts what the speakers are playing from the
+        // microphone signal. Without it, a user on speakers gets the remote side
+        // of the call transcribed onto their own track. It refuses to build for
+        // some input/output pairings (a virtual output device, AirPods input
+        // with built-in output), so a failed attempt falls back to plain
+        // capture rather than costing the meeting.
+        if voiceProcessingWanted() {
+            do {
+                return try build(voiceProcessing: true)
+            } catch {
+                Log.capture.notice(
+                    "voice processing unavailable, capturing without echo cancellation: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
+        }
+        return try build(voiceProcessing: false)
+    }
+
+    private func build(voiceProcessing: Bool) throws -> AudioFormatDescriptor {
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        if voiceProcessing {
+            try input.setVoiceProcessingEnabled(true)
+            // The voice unit ducks every other audio stream by default, which
+            // quiets the meeting audio being recorded on the remote track.
+            if #available(macOS 14.0, *) {
+                input.voiceProcessingOtherAudioDuckingConfiguration = .init(
+                    enableAdvancedDucking: false, duckingLevel: .min
+                )
+            }
+        }
         // Install against the node's own format. Passing a format the hardware is
         // not actually running at throws inside CoreAudio, so `preferred` informs
-        // the choice but the node decides.
+        // the choice but the node decides. With voice processing on, the node's
+        // format is the voice unit's, which can differ from the raw device.
         let tapFormat = input.outputFormat(forBus: 0)
         guard tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
             throw CaptureError.microphoneEngineStartFailed(status: -1)

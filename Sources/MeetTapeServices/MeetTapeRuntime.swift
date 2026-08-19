@@ -119,6 +119,15 @@ public final class MeetTapeRuntime {
             clock: clock,
             segmentSeconds: loaded.segmentSeconds,
             preRollSeconds: loaded.preRollSeconds,
+            makeMicrophone: { sink, onChange in
+                MicrophoneSource(
+                    sink: sink,
+                    onConfigurationChange: onChange,
+                    // Read per engine build, so toggling the setting applies to
+                    // the next recording without a relaunch.
+                    voiceProcessing: { snapshot.withLock { $0.echoCancellation } }
+                )
+            },
             delegate: relay
         )
         detectionEngine = DetectionEngine(clock: clock, delegate: relay)

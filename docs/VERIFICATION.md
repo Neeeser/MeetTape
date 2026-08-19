@@ -178,6 +178,18 @@ that (6-second end grace plus the 90-second reconnect window). These runs
 predate the change that pauses capture during the reconnect window; the timing
 of the evidence decay is what they establish.
 
+**Echo cancellation.** Measured A/B on the built-in microphone and speakers.
+Without voice processing, speech played through the speakers into an open
+microphone recorded at -43 dBFS against a -59 dBFS room floor, and whisper
+transcribed it onto the local track. With `setVoiceProcessingEnabled` and
+ducking disabled, the same test left the microphone track at the noise floor
+(-55 to -65 dBFS) for the full recording, with no speech-shaped energy in
+either playback window. Enabling the voice unit changed the input format after
+the writer opened, which the format-mismatch rotation absorbed in half a
+second with one coalesced restart and no storm. The near-end case, a person
+speaking while the far end also plays, has not been measured; nobody was in
+the room.
+
 **How meeting applications release audio on leave.** Measured with a CoreAudio
 process probe on macOS 26: Firefox acquires the input stream on the Meet
 prejoin screen and releases it within a second of leaving the call, keeping

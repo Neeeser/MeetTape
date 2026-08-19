@@ -128,6 +128,33 @@ enum UITests {
                 expect.isFalse(raw.lowercased().contains("sk-"))
             },
 
+            test("a settings file from an older build keeps its values when a field is added") { expect in
+                // Synthesized Codable throws on a missing key, and load() falls
+                // back to defaults, so adding one field silently reset every
+                // setting a user had chosen.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let store = SettingsStore(directory: root)
+
+                var settings = AppSettings()
+                settings.localUserName = "Andrew"
+                settings.hasCompletedOnboarding = true
+                try store.save(settings)
+
+                // Strip a field, as if the file were written before it existed.
+                var object = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: store.url)
+                ) as! [String: Any]
+                object.removeValue(forKey: "echoCancellation")
+                object.removeValue(forKey: "preferBuiltInMicrophone")
+                try JSONSerialization.data(withJSONObject: object).write(to: store.url)
+
+                let reloaded = store.load()
+                expect.equal(reloaded.localUserName, "Andrew", "existing values must survive")
+                expect.isTrue(reloaded.hasCompletedOnboarding, "onboarding must not reappear")
+                expect.isTrue(reloaded.echoCancellation, "the missing field takes its default")
+            },
+
             test("every menu row draws in a colour that is readable on a dark menu") { expect in
                 // An attributed menu title with no foreground colour draws in
                 // black, and a disabled row draws in the system's disabled grey.

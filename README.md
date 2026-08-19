@@ -70,6 +70,12 @@ one addresses a failure that was observed on real hardware:
 - Segments are written as CAF. After `SIGKILL`, CAF files remained fully
   readable, WAV files under-reported their tail, and M4A files could not be
   opened.
+- The microphone runs through the system voice-processing unit by default,
+  which subtracts what the speakers are playing. A call taken without
+  headphones otherwise records the remote side onto the local track, where it
+  is transcribed under the local user's name. Ducking is disabled so the
+  meeting audio being recorded is not attenuated, and capture falls back to
+  the plain input when the unit refuses the device pairing.
 
 ## Architecture
 

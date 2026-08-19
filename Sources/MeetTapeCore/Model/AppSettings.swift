@@ -89,6 +89,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
     /// Prefer the built-in microphone when a Bluetooth headset is used for output,
     /// which avoids the hands-free profile dropping input to 16 kHz.
     public var preferBuiltInMicrophone: Bool
+    /// Run the microphone through the system voice-processing unit, which
+    /// subtracts what the speakers are playing. Without it, a user on speakers
+    /// gets the remote side of the call recorded onto their own track.
+    public var echoCancellation: Bool
 
     public init(
         version: Int = AppSettings.currentVersion,
@@ -104,7 +108,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         alwaysRecordApplications: [String] = [],
         neverRecordApplications: [String] = [],
         hasCompletedOnboarding: Bool = false,
-        preferBuiltInMicrophone: Bool = false
+        preferBuiltInMicrophone: Bool = false,
+        echoCancellation: Bool = true
     ) {
         self.version = version
         self.storageRootPath = storageRootPath
@@ -120,6 +125,54 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.neverRecordApplications = neverRecordApplications
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.preferBuiltInMicrophone = preferBuiltInMicrophone
+        self.echoCancellation = echoCancellation
+    }
+
+    /// Every field decodes with its default when absent, so a settings file
+    /// written by an older build survives a new field instead of resetting the
+    /// whole configuration to defaults.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings()
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? defaults.version
+        storageRootPath =
+            try container.decodeIfPresent(String.self, forKey: .storageRootPath)
+            ?? defaults.storageRootPath
+        launchAtLogin =
+            try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? defaults.launchAtLogin
+        showNotifications =
+            try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
+            ?? defaults.showNotifications
+        models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
+        enrichment =
+            try container.decodeIfPresent(EnrichmentSettings.self, forKey: .enrichment)
+            ?? defaults.enrichment
+        providers =
+            try container.decodeIfPresent(ProviderPolicies.self, forKey: .providers)
+            ?? defaults.providers
+        localUserName =
+            try container.decodeIfPresent(String.self, forKey: .localUserName) ?? defaults.localUserName
+        segmentSeconds =
+            try container.decodeIfPresent(Double.self, forKey: .segmentSeconds)
+            ?? defaults.segmentSeconds
+        preRollSeconds =
+            try container.decodeIfPresent(Double.self, forKey: .preRollSeconds)
+            ?? defaults.preRollSeconds
+        alwaysRecordApplications =
+            try container.decodeIfPresent([String].self, forKey: .alwaysRecordApplications)
+            ?? defaults.alwaysRecordApplications
+        neverRecordApplications =
+            try container.decodeIfPresent([String].self, forKey: .neverRecordApplications)
+            ?? defaults.neverRecordApplications
+        hasCompletedOnboarding =
+            try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding)
+            ?? defaults.hasCompletedOnboarding
+        preferBuiltInMicrophone =
+            try container.decodeIfPresent(Bool.self, forKey: .preferBuiltInMicrophone)
+            ?? defaults.preferBuiltInMicrophone
+        echoCancellation =
+            try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
+            ?? defaults.echoCancellation
     }
 
     public var storageRoot: URL { URL(fileURLWithPath: storageRootPath) }

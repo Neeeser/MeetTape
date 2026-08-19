@@ -61,25 +61,42 @@ api.tabs.onRemoved.addListener((tabId) => {
   post({ type: 'tab_removed', tabId, sentAt: Date.now() });
 });
 
+// Order matters: provider.js defines what content.js calls.
+const CONTENT_FILES = ['shared/provider.js', 'shared/content.js'];
+
+// MV3 has scripting.executeScript; MV2 has tabs.executeScript, and one file at a
+// time. Firefox ships MV2 here, so both paths are needed.
+async function injectInto(tabId) {
+  if (api.scripting && api.scripting.executeScript) {
+    await api.scripting.executeScript({
+      target: { tabId },
+      files: CONTENT_FILES,
+      injectImmediately: true,
+    });
+    return;
+  }
+  for (const file of CONTENT_FILES) {
+    await api.tabs.executeScript(tabId, { file, runAt: 'document_idle' });
+  }
+}
+
 // Content scripts do not appear in tabs that were already open when the
-// extension loaded, so they are injected explicitly at startup.
+// extension loaded, so they are injected explicitly at startup. Without this a
+// meeting already on screen is invisible until the tab is reloaded.
 async function injectIntoOpenTabs() {
   try {
-    const tabs = await api.tabs.query({ url: ['*://meet.google.com/*', '*://*.zoom.us/*'] });
+    const tabs = await api.tabs.query({
+      url: ['https://meet.google.com/*', 'https://*.zoom.us/*'],
+    });
     for (const tab of tabs) {
       try {
-        await api.scripting.executeScript({
-          target: { tabId: tab.id },
-          // Order matters: provider.js defines what content.js calls.
-          files: ['shared/provider.js', 'shared/content.js'],
-          injectImmediately: true,
-        });
+        await injectInto(tab.id);
       } catch {
         // A tab that refuses injection simply reports nothing.
       }
     }
   } catch {
-    // scripting is unavailable; new tabs still work.
+    // Injection is unavailable; newly opened tabs still work.
   }
 }
 

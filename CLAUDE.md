@@ -59,8 +59,11 @@ any of them changes verified behaviour. The numbers live in `CaptureThresholds`.
 Regression tests for these rules are in
 `Sources/MeetTapeTests/CaptureRecoveryTests.swift`, `DetectionTests.swift`,
 `ManifestTests.swift` and `HardeningTests.swift`. A failure in one of them
-indicates a behavioural regression. `docs/VERIFICATION.md` records what has been
-run against real hardware and what has not.
+indicates a behavioural regression. The last two rules, about audio callbacks and
+the control queue, are structural: they are enforced by where the code lives
+rather than by a test, so review changes to `CaptureEngine` and the segment
+writers with them in mind. `docs/VERIFICATION.md` records what has been run
+against real hardware and what has not.
 
 ## Architectural boundaries
 

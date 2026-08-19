@@ -185,6 +185,42 @@ enum DetectionTests {
                 expect.equal(joined.muted, false)
             },
 
+            test("a prejoin screen is not recorded while the extension is reporting") { expect in
+                // Meet holds the microphone on its prejoin screen, so the native
+                // dwell confirms a meeting that has not been joined. The sensor
+                // knows better, and an abandoned prejoin must leave no directory.
+                var detector = BrowserMeetingDetector()
+                var now = 100.0
+                let native = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: false,
+                    windowTitles: ["Meet - jfp-btbt-owm"]
+                )
+                detector.sensorConnected(at: now)
+                _ = detector.update(native: native, at: now)
+                now += 30
+                detector.receive(
+                    BrowserMeetingEvent(
+                        browser: .firefox, provider: .googleMeet, state: .prejoin,
+                        timestamp: now, url: "https://meet.google.com/jfp-btbt-owm",
+                        meetingID: "jfp-btbt-owm"
+                    ),
+                    at: now
+                )
+                let waiting = detector.update(native: native, at: now)
+                expect.equal(
+                    waiting.confidence, .candidate,
+                    "the native dwell must not commit a prejoin the sensor can see"
+                )
+
+                // When the sensor goes quiet the native path takes over again.
+                now += 30
+                let silent = detector.update(native: native, at: now)
+                expect.equal(
+                    silent.confidence, .confirmed,
+                    "losing the extension costs precision, and the meeting is still recorded"
+                )
+            },
+
             test("Zoom's title arrives before the microphone, and that is fine") { expect in
                 var detector = BrowserMeetingDetector()
                 var now = 100.0
@@ -291,6 +327,42 @@ enum DetectionTests {
                     now += 0.5
                     expect.equal(detector.update(states: states, at: now), [])
                 }
+            },
+
+            test("an unknown call is a candidate before it is confirmed") { expect in
+                // The ring has to be armed while the dwell is still running,
+                // otherwise the first eight to twenty-five seconds of the call
+                // exist nowhere by the time it is promoted.
+                var detector = GenericCallDetector()
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.example.videochat", processID: 4242,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: true, windowTitle: "Team call"
+                    ),
+                ]
+                _ = detector.update(states: states, at: 100)
+                let early = detector.currentEvidence()
+                expect.equal(early.count, 1)
+                expect.equal(early.first?.confidence, .candidate, "armed but not committed")
+                expect.equal(early.first?.audioBundlePrefixes, ["com.example.videochat"])
+
+                _ = detector.update(states: states, at: 100 + 9)
+                let promoted = detector.currentEvidence()
+                expect.equal(promoted.first?.confidence, .confirmed, "the dwell has passed")
+
+                // An ignored process never reaches the evidence at all.
+                _ = detector.update(states: [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.apple.CoreSpeech", processID: 808,
+                        holdsMicrophone: true, producesOutput: false,
+                        isFrontmost: false, windowTitle: nil
+                    ),
+                ], at: 110)
+                expect.isFalse(
+                    detector.currentEvidence().contains { $0.applicationBundleID == "com.apple.CoreSpeech" },
+                    "the ignore list keeps system services out entirely"
+                )
             },
 
             test("a sustained two-way call in an unknown app is promoted") { expect in

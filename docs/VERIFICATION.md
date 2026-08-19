@@ -9,10 +9,10 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 116 tests, all passing, no failures, in about 4 seconds.
+`./scripts/test.sh` — 121 tests, all passing, no failures, in about 4 seconds.
 Eleven further tests are skipped unless explicitly enabled, as described below.
 
-`cd extension && npm test` — 9 tests, all passing.
+`cd extension && npm test` — 10 tests, all passing.
 
 CI runs the same two suites plus a release-configuration build, the application
 bundling script, bundle verification, and repository hygiene checks on every
@@ -45,6 +45,12 @@ Each row below covers a failure mode observed during development:
 | Remote audio arriving after commit is still written | `HardeningTests` |
 | An unsupported call keeps recording for as long as it runs | `HardeningTests` |
 | Only MeetTape's own relay, launched by a browser, may connect | `HardeningTests` |
+| An application installed beside a browser is not accepted as one | `HardeningTests` |
+| An unknown call arms the ring before it is confirmed | `DetectionTests` |
+| A provider change between candidate and confirm retargets the tap | `SessionTests` |
+| Starting a recording by hand during a candidate keeps the pre-roll | `SessionTests` |
+| A prejoin screen the extension can see is not committed | `DetectionTests` |
+| A call in one state still reports inside the freshness window | `extension/test` |
 | Every panel builds and lays out against a real view tree | `UITests` |
 | Choosing a new storage folder takes effect without a relaunch | `UITests` |
 
@@ -152,3 +158,7 @@ be assumed to work.
   or manual walkthrough of the panels has been done.
 - **FaceTime.** Not implemented as a provider. A FaceTime call would be detected
   only through the generic path, if at all.
+- **Calendar matching.** `CalendarService` reads EventKit and scores events
+  against a recording's time window, and it has no tests and has not been run
+  against a real calendar. A wrong match shows the wrong title and attendees on a
+  meeting; the recording and transcript are unaffected.

@@ -30,6 +30,7 @@ function readPageText() {
 }
 
 let previous = null;
+let lastSentAt = 0;
 
 function tick() {
   if (providerForURL(location.href) === 'unknown') return;
@@ -41,8 +42,9 @@ function tick() {
     tabId: null,
     now: Date.now(),
   });
-  if (!isMeaningfulChange(previous, snapshot)) return;
+  if (!shouldSend(previous, snapshot, lastSentAt, snapshot.sentAt)) return;
   previous = snapshot;
+  lastSentAt = snapshot.sentAt;
   try {
     api.runtime.sendMessage(snapshot);
   } catch {

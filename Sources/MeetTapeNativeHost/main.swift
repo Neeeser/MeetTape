@@ -118,7 +118,7 @@ func sensorMessage(from raw: [String: Any], browser: BrowserKind) -> SensorMessa
         ))
     case "tab_removed":
         guard let tabID = raw["tabId"] as? Int else { return nil }
-        return .tabClosed(tabID: tabID)
+        return .tabClosed(browser: browser, tabID: tabID)
     case "state":
         let provider: MeetingProvider = switch raw["provider"] as? String {
         case "meet": .googleMeet

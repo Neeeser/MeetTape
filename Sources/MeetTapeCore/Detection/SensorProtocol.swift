@@ -9,7 +9,7 @@ import Foundation
 public enum SensorMessage: Codable, Sendable, Equatable {
     case hello(Hello)
     case event(BrowserMeetingEvent)
-    case tabClosed(tabID: Int)
+    case tabClosed(browser: BrowserKind, tabID: Int)
     case goodbye(browser: BrowserKind)
 
     public struct Hello: Codable, Sendable, Equatable {
@@ -41,8 +41,9 @@ public enum SensorMessage: Codable, Sendable, Equatable {
         case .event(let payload):
             try container.encode("event", forKey: .type)
             try container.encode(payload, forKey: .event)
-        case .tabClosed(let tabID):
+        case .tabClosed(let browser, let tabID):
             try container.encode("tab_closed", forKey: .type)
+            try container.encode(browser, forKey: .browser)
             try container.encode(tabID, forKey: .tabID)
         case .goodbye(let browser):
             try container.encode("goodbye", forKey: .type)
@@ -58,7 +59,10 @@ public enum SensorMessage: Codable, Sendable, Equatable {
         case "event":
             self = .event(try container.decode(BrowserMeetingEvent.self, forKey: .event))
         case "tab_closed":
-            self = .tabClosed(tabID: try container.decode(Int.self, forKey: .tabID))
+            self = .tabClosed(
+                browser: try container.decodeIfPresent(BrowserKind.self, forKey: .browser) ?? .firefox,
+                tabID: try container.decode(Int.self, forKey: .tabID)
+            )
         case "goodbye":
             self = .goodbye(browser: try container.decodeIfPresent(BrowserKind.self, forKey: .browser) ?? .firefox)
         case let other:

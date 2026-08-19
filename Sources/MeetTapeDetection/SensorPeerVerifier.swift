@@ -34,10 +34,18 @@ public struct SensorPeerVerifier: Sendable {
     /// Bundle identifiers of browsers allowed to be the host's parent.
     public let allowedParentBundleIDs: Set<String>
 
+    /// Resolves a bundle identifier to the application's location. Injected so the
+    /// parent check can be tested on a machine without that browser installed.
+    private let applicationURL: @Sendable (String) -> URL?
+
     public init(
         allowedHostPaths: Set<String>? = nil,
-        allowedParentBundleIDs: Set<String>? = nil
+        allowedParentBundleIDs: Set<String>? = nil,
+        applicationURL: @escaping @Sendable (String) -> URL? = { identifier in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier)
+        }
     ) {
+        self.applicationURL = applicationURL
         if let allowedHostPaths {
             self.allowedHostPaths = allowedHostPaths
         } else {
@@ -85,10 +93,10 @@ public struct SensorPeerVerifier: Sendable {
         }
         guard let parentPath = peer.parentPath else { return false }
         return allowedParentBundleIDs.contains { identifier in
-            guard let applicationURL = NSWorkspace.shared
-                .urlForApplication(withBundleIdentifier: identifier)
-            else { return false }
-            return parentPath.hasPrefix(applicationURL.deletingLastPathComponent().path)
+            guard let bundle = applicationURL(identifier) else { return false }
+            // The path of the bundle itself, with a separator, so that a sibling
+            // in the same folder cannot pass as the browser.
+            return parentPath.hasPrefix(bundle.path + "/")
         }
     }
 

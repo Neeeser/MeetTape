@@ -157,12 +157,10 @@ public final class DetectionEngine: @unchecked Sendable {
             browserDetectors[hello.browser]?.sensorConnected(at: now)
         case .event(let event):
             browserDetectors[event.browser]?.receive(event, at: now)
-        case .tabClosed(let tabID):
-            // Only that tab's state goes; another tab may still be in a call.
-            for (browser, var detector) in browserDetectors {
-                detector.closeTab(tabID, at: now)
-                browserDetectors[browser] = detector
-            }
+        case .tabClosed(let browser, let tabID):
+            // Tab identifiers are per browser, and another tab in the same browser
+            // may still be in a call, so only this one entry is dropped.
+            browserDetectors[browser]?.closeTab(tabID, at: now)
         case .goodbye(let browser):
             // One browser's host exiting says nothing about another's.
             browserDetectors[browser]?.sensorDisconnected(at: now)

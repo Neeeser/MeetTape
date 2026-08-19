@@ -171,17 +171,21 @@ public struct GenericCallDetector: Sendable {
         return events
     }
 
-    /// Evidence for every promoted call still in progress.
+    /// Evidence for every call being watched.
     ///
-    /// Detection has to keep asserting the meeting, not just announce its start:
-    /// the session lifecycle ends a recording whose evidence disappears, so a
-    /// one-shot event would cut every unsupported call short.
+    /// An application that has just taken the microphone is a candidate, which
+    /// arms capture into the memory ring without writing anything to disk. It
+    /// becomes confirmed once it has held the microphone past the dwell. Without
+    /// the candidate step the ring is empty at promotion and the first eight to
+    /// twenty-five seconds of an unsupported call are lost.
+    ///
+    /// Evidence is reasserted on every poll because the session lifecycle ends a
+    /// recording whose evidence disappears.
     public func currentEvidence() -> [ProviderEvidence] {
-        tracked.compactMap { bundleIdentifier, entry in
-            guard entry.promoted else { return nil }
-            return ProviderEvidence(
+        tracked.map { bundleIdentifier, entry in
+            ProviderEvidence(
                 provider: .unknown,
-                confidence: .confirmed,
+                confidence: entry.promoted ? .confirmed : .candidate,
                 source: .native,
                 title: entry.windowTitle,
                 applicationBundleID: bundleIdentifier,

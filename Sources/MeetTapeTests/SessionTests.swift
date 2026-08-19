@@ -36,6 +36,71 @@ enum SessionTests {
                 )
             },
 
+            test("a provider change between candidate and confirm retargets the tap") { expect in
+                // A generic call arms the tap on the unknown application. When the
+                // call turns out to be Meet in Firefox, the tap has to follow, or
+                // the meeting records the wrong process for its whole length.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let generic = ProviderEvidence(
+                    provider: .unknown, confidence: .candidate, source: .native,
+                    meetingID: nil, url: nil, title: nil, browser: nil,
+                    applicationBundleID: "com.example.videochat",
+                    audioBundlePrefixes: ["com.example.videochat"]
+                )
+                _ = controller.update(evidence: [generic], now: 100, wallClock: wall)
+                expect.equal(controller.snapshot.state, .candidate)
+
+                let actions = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 104, wallClock: wall
+                )
+                let retargetIndex = actions.firstIndex { action in
+                    if case .retargetCapture(let prefixes) = action {
+                        return prefixes == ["org.mozilla.firefox"]
+                    }
+                    return false
+                }
+                let commitIndex = actions.firstIndex {
+                    if case .commitRecording = $0 { true } else { false }
+                }
+                guard let retargetIndex, let commitIndex else {
+                    expect.fail("expected a retarget and a commit, got \(actions)")
+                    return
+                }
+                expect.isTrue(
+                    retargetIndex < commitIndex,
+                    "the tap must follow the provider before the meeting is committed"
+                )
+            },
+
+            test("starting a recording by hand during a candidate keeps the pre-roll") { expect in
+                // Slack opens the microphone about twelve seconds before the user
+                // joins, so the menu item is often pressed while a candidate is
+                // armed. Arming again would throw away the ring.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .candidate)], now: 100, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .candidate)
+
+                let actions = controller.startManual(
+                    source: .manual, bundlePrefixes: ["org.mozilla.firefox"],
+                    titles: TitleCandidates(timestampFallback: "manual"),
+                    now: 104, wallClock: wall
+                )
+                expect.equal(controller.snapshot.state, .recording)
+                expect.isTrue(controller.snapshot.isManual)
+                expect.isFalse(
+                    actions.contains { if case .armCapture = $0 { true } else { false } },
+                    "arming again discards the pre-roll: \(actions)"
+                )
+                expect.isTrue(
+                    actions.contains { if case .commitRecording = $0 { true } else { false } },
+                    "the recording still starts: \(actions)"
+                )
+            },
+
             test("confirmation commits the recording and flushes the pre-roll") { expect in
                 var controller = SessionController()
                 let wall = Date(timeIntervalSince1970: 1_787_070_000)

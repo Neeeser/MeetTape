@@ -7,6 +7,8 @@ import {
   mutedFromControls,
   buildState,
   isMeaningfulChange,
+  shouldSend,
+  HEARTBEAT_MS,
 } from '../shared/provider.js';
 
 const leaveControl = { ariaLabel: 'Leave call' };
@@ -114,8 +116,23 @@ test('the built provider still defines what the content script calls', async () 
   const content = fs.readFileSync(
     path.join(root, 'dist', 'firefox', 'shared', 'content.js'), 'utf8',
   );
-  for (const name of ['buildState', 'isMeaningfulChange', 'providerForURL']) {
+  for (const name of ['buildState', 'isMeaningfulChange', 'shouldSend', 'providerForURL']) {
     assert.ok(new RegExp(`function ${name}\\b`).test(provider), `${name} missing from provider.js`);
+  }
+  for (const name of ['buildState', 'shouldSend', 'providerForURL']) {
     assert.ok(content.includes(name), `${name} unused by content.js`);
   }
+  assert.ok(/const HEARTBEAT_MS/.test(provider), 'the heartbeat interval survived the build');
+});
+
+test('an unchanged call still reports before the app stops trusting it', () => {
+  const state = { provider: 'meet', state: 'in_call', meetingId: 'abc', url: 'u', title: 't', muted: false };
+  // Nothing changed and the last message was recent: stay quiet.
+  assert.equal(shouldSend(state, state, 1000, 1000 + HEARTBEAT_MS - 1), false);
+  // Nothing changed but the app is about to treat the tab as silent.
+  assert.equal(shouldSend(state, state, 1000, 1000 + HEARTBEAT_MS), true);
+  // A change always sends, however recent the last message was.
+  assert.equal(shouldSend(state, { ...state, state: 'ended' }, 1000, 1001), true);
+  // The first snapshot of a tab always sends.
+  assert.equal(shouldSend(null, state, 0, 500), true);
 });

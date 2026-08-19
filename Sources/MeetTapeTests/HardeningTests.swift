@@ -571,6 +571,36 @@ extension HardeningTests {
                 expect.isFalse(verifier.isTrusted(shellLaunched))
                 expect.isTrue(verifier.rejectionReason(shellLaunched).contains("browser"))
             },
+
+            test("a neighbour of the browser bundle is not the browser") { expect in
+                // The parent check compares against the browser's own bundle. An
+                // earlier version compared against the containing folder, which
+                // accepted any application installed alongside it.
+                let verifier = SensorPeerVerifier(
+                    allowedHostPaths: ["/host/meettape-nativehost"],
+                    allowedParentBundleIDs: ["org.mozilla.firefox"],
+                    applicationURL: { _ in URL(fileURLWithPath: "/Applications/Firefox.app") }
+                )
+                let neighbour = SensorPeerVerifier.Peer(
+                    processID: 200,
+                    executablePath: "/host/meettape-nativehost",
+                    parentPath: "/Applications/NotFirefox.app/Contents/MacOS/NotFirefox",
+                    parentBundleIdentifier: "com.example.notfirefox"
+                )
+                expect.isFalse(
+                    verifier.isTrusted(neighbour),
+                    "another application in /Applications is not a browser"
+                )
+                expect.isTrue(verifier.rejectionReason(neighbour).contains("browser"))
+
+                let real = SensorPeerVerifier.Peer(
+                    processID: 201,
+                    executablePath: "/host/meettape-nativehost",
+                    parentPath: "/Applications/Firefox.app/Contents/MacOS/firefox",
+                    parentBundleIdentifier: nil
+                )
+                expect.isTrue(verifier.isTrusted(real), "the browser itself still passes")
+            },
         ])
     }
 }

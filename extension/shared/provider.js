@@ -117,3 +117,15 @@ export function isMeaningfulChange(previous, next) {
   const keys = ['provider', 'state', 'meetingId', 'url', 'title', 'muted', 'otherAudibleTabs'];
   return keys.some((key) => previous[key] !== next[key]);
 }
+
+/// How long a tab may stay silent before the app stops counting it as reporting.
+/// The app drops an entry after 10 s, so this leaves room for a missed message.
+export const HEARTBEAT_MS = 4000;
+
+/// True when the snapshot should be sent: either it changed, or the last message
+/// is old enough that the app would otherwise consider this tab silent. A call
+/// that sits in one state for an hour still reports throughout it.
+export function shouldSend(previous, next, lastSentAt, now) {
+  if (isMeaningfulChange(previous, next)) return true;
+  return !lastSentAt || now - lastSentAt >= HEARTBEAT_MS;
+}

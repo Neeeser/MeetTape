@@ -29,9 +29,11 @@ confirmed.
 | Speaker names | Suggested by the model and editable by hand |
 | Crash recovery | Interrupted recordings are adopted on the next launch |
 
-FaceTime detection and Safari support are not implemented. Chrome uses the same
-extension, but its MV3 service worker suspends when idle, so the sensor is less
-reliable there than in Firefox. Native detection covers Chrome either way.
+FaceTime detection and Safari support are not implemented. The extension builds
+for Chrome, but its native messaging manifest is not installed, because that
+requires the ID of a packed extension, so the sensor does not run on Chrome at
+all today. Chrome meetings are detected through window titles and microphone
+state, the same path Firefox uses without the extension.
 
 ## How capture works
 

@@ -236,7 +236,13 @@ public struct BrowserMeetingDetector: Sendable {
         // The two are combined rather than the sensor replacing the native path.
         // A provider changing the label on its leave button would otherwise take
         // a live meeting from confirmed to nothing.
-        if native.confidence > sensed.confidence {
+        //
+        // The exception is a fresh sensor saying the user is still on a prejoin or
+        // waiting screen. Native evidence cannot tell that apart from a joined
+        // call, and telling them apart is what the extension is for, so a prejoin
+        // stays a candidate and commits nothing to disk.
+        let sensorSaysNotJoinedYet = event.state == .prejoin || event.state == .waiting
+        if native.confidence > sensed.confidence, !sensorSaysNotJoinedYet {
             var merged = native
             merged.meetingID = sensed.meetingID ?? native.meetingID
             merged.url = sensed.url ?? native.url

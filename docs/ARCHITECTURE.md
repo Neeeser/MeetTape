@@ -192,6 +192,11 @@ Adjacent chunks overlap by eight seconds so that a sentence crossing a boundary
 survives, and the overlap is de-duplicated by text similarity when the canonical
 transcript is assembled.
 
+Chunks are independent requests and are sent three at a time. The endpoint
+processes long audio at close to real time, so sending chunks one after another
+made a 25-minute import take over ten minutes. Each result is committed to disk
+as it arrives, and an interrupted run resumes at the chunks that never landed.
+
 ## Browser sensor
 
 ```

@@ -278,7 +278,9 @@ public final class DetectionEngine: @unchecked Sendable {
         lock.unlock()
 
         if evidenceChanged {
-            Log.detection.info(
+            // Notice rather than info so a `log show` after the fact still has
+            // the trail; this fires only when the evidence set changes.
+            Log.detection.notice(
                 "evidence: \(labels.isEmpty ? "none" : labels.joined(separator: ", "), privacy: .public)"
             )
         }

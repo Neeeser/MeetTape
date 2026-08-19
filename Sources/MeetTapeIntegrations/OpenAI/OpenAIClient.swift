@@ -143,7 +143,7 @@ public struct OpenAIClient: AIBackend {
         belong to the same person; map them to the same name when the evidence says so.
         """
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "input": [
                 ["role": "system", "content": instructions],
@@ -161,6 +161,11 @@ public struct OpenAIClient: AIBackend {
                 ],
             ],
         ]
+        // Mapping labels to names is extraction, not problem solving; low effort
+        // returns the same mapping in a fraction of the time.
+        if AIModelSettings.acceptsReasoningEffort(model) {
+            body["reasoning"] = ["effort": "low"]
+        }
 
         let data = try await postJSON(path: "responses", body: body)
         let text = try extractOutputText(from: data)
@@ -226,7 +231,7 @@ public struct OpenAIClient: AIBackend {
             context += "\nThe user's own notes (do not repeat them verbatim): \(notes)"
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "input": [
                 ["role": "system", "content": instructions],
@@ -241,6 +246,11 @@ public struct OpenAIClient: AIBackend {
                 ],
             ],
         ]
+        // Titles and summaries need no deliberation; low effort keeps enrichment
+        // fast and cheap.
+        if AIModelSettings.acceptsReasoningEffort(model) {
+            body["reasoning"] = ["effort": "low"]
+        }
         let data = try await postJSON(path: "responses", body: body)
         let text = try extractOutputText(from: data)
         guard let payload = text.data(using: .utf8),

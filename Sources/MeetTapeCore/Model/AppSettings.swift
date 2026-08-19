@@ -15,7 +15,7 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
     public init(
         transcription: String = "whisper-1",
         diarization: String = "gpt-4o-transcribe-diarize",
-        metadata: String = "gpt-5.1"
+        metadata: String = "gpt-5.6-luna"
     ) {
         self.transcription = transcription
         self.diarization = diarization
@@ -25,7 +25,15 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
     /// Models known to return the timing structure the canonical timeline needs.
     public static let timestampCapableTranscription = ["whisper-1"]
     public static let diarizationCapable = ["gpt-4o-transcribe-diarize"]
-    public static let metadataChoices = ["gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
+    public static let metadataChoices = ["gpt-5.6-luna", "gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
+
+    /// Whether the responses endpoint accepts a `reasoning` parameter for this
+    /// model. GPT-4-generation models reject the field with a 400.
+    public static func acceptsReasoningEffort(_ model: String) -> Bool {
+        if model.hasPrefix("gpt-5") { return true }
+        // The o-series: o1, o3, o4-mini and their dated variants.
+        return model.range(of: "^o[0-9]", options: .regularExpression) != nil
+    }
 }
 
 /// Which AI enrichment runs. Recording and the transcript stay useful with every

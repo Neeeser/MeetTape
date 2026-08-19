@@ -448,7 +448,9 @@ public final class MeetTapeRuntime {
 
     private func perform(_ actions: [SessionAction]) async {
         if !actions.isEmpty {
-            Log.session.info(
+            // Notice rather than info: these are the session's lifecycle
+            // decisions, and they need to survive into `log show`.
+            Log.session.notice(
                 "actions: \(actions.map(\.logLabel).joined(separator: ", "), privacy: .public)"
             )
         }

@@ -27,6 +27,9 @@ public actor ProcessingPipeline {
     private let onFailure: @Sendable (String, ProcessingError) -> Void
     private let calendar: CalendarService?
     private let wait: @Sendable (TimeInterval) async -> Void
+    /// Chunk sizing, injectable so tests can exercise multi-chunk behaviour
+    /// without minutes of audio.
+    private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
 
@@ -46,7 +49,8 @@ public actor ProcessingPipeline {
         onFailure: @escaping @Sendable (String, ProcessingError) -> Void = { _, _ in },
         wait: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        }
+        },
+        chunking: ChunkPlanner.Configuration = .openAIDiarization
     ) {
         self.repository = repository
         self.backend = backend
@@ -56,6 +60,7 @@ public actor ProcessingPipeline {
         self.onProgress = onProgress
         self.onFailure = onFailure
         self.wait = wait
+        self.chunking = chunking
     }
 
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
@@ -251,7 +256,7 @@ public actor ProcessingPipeline {
         track: CaptureTrack,
         segments: [RecordedSegment],
         model: String,
-        send: (URL, String) async throws -> TranscriptionResponse
+        send: @Sendable @escaping (URL, String) async throws -> TranscriptionResponse
     ) async throws {
         let exporter = ChunkExporter()
         let stream = TrackAudioStream(
@@ -264,7 +269,7 @@ public actor ProcessingPipeline {
 
         // A pause-aware boundary needs an energy profile; skip the pass entirely
         // for recordings short enough to send in one request.
-        let planner = ChunkPlanner()
+        let planner = ChunkPlanner(configuration: chunking)
         let energy: EnergyProfile = duration > planner.configuration.maxChunkSeconds
             ? ((try? EnergyProfile.compute(stream: stream)) ?? .empty)
             : .empty
@@ -287,6 +292,13 @@ public actor ProcessingPipeline {
         )
         defer { try? FileManager.default.removeItem(at: workingDirectory) }
 
+        // Export locally first; the exports are quick next to the requests.
+        struct PreparedChunk: Sendable {
+            let plan: ChunkPlan
+            let chunkID: String
+            let audioURL: URL
+        }
+        var pending: [PreparedChunk] = []
         for plan in plans {
             let chunkID = "\(track.rawValue)_\(plan.chunkID)"
             if raw.chunks.contains(where: { $0.id == chunkID }) { continue }
@@ -296,23 +308,45 @@ public actor ProcessingPipeline {
                 plan: plan, segments: segments, segmentsDirectory: store.layout.segments, to: audioURL
             )
             guard frames > 0 else { continue }
+            pending.append(PreparedChunk(plan: plan, chunkID: chunkID, audioURL: audioURL))
+        }
 
-            let response = try await send(audioURL, model)
-            try? store.writeAPIResponse(response.rawBody, named: "\(chunkID).json")
-            raw.chunks.append(RawTranscriptChunk(
-                id: chunkID,
-                track: track,
-                timelineOffset: plan.start + leadIn,
-                durationSeconds: plan.duration,
-                model: model,
-                responseFormat: response.segments.contains { $0.speaker != nil }
-                    ? "diarized_json" : "verbose_json",
-                segments: response.segments,
-                rawResponseFile: "api/\(chunkID).json"
-            ))
-            try store.writeRawTranscript(raw)
-            report(metadata, chunks: (raw.chunks(track: track).count, plans.count))
-            try? FileManager.default.removeItem(at: audioURL)
+        // Chunks are independent requests and the endpoint processes long audio
+        // near real time, so sending them one after another made a 25-minute
+        // import take over ten minutes. Three at a time stays inside the API's
+        // concurrency limits. Each result is committed to disk as it arrives, in
+        // completion order; the assembler orders utterances by timeline offset,
+        // and an interrupted run still resumes at the chunks that never landed.
+        let maxConcurrentUploads = 3
+        try await withThrowingTaskGroup(of: (PreparedChunk, TranscriptionResponse).self) { group in
+            var nextIndex = 0
+            while nextIndex < min(maxConcurrentUploads, pending.count) {
+                let chunk = pending[nextIndex]
+                nextIndex += 1
+                group.addTask { (chunk, try await send(chunk.audioURL, model)) }
+            }
+            while let (chunk, response) = try await group.next() {
+                try? store.writeAPIResponse(response.rawBody, named: "\(chunk.chunkID).json")
+                raw.chunks.append(RawTranscriptChunk(
+                    id: chunk.chunkID,
+                    track: track,
+                    timelineOffset: chunk.plan.start + leadIn,
+                    durationSeconds: chunk.plan.duration,
+                    model: model,
+                    responseFormat: response.segments.contains { $0.speaker != nil }
+                        ? "diarized_json" : "verbose_json",
+                    segments: response.segments,
+                    rawResponseFile: "api/\(chunk.chunkID).json"
+                ))
+                try store.writeRawTranscript(raw)
+                report(metadata, chunks: (raw.chunks(track: track).count, plans.count))
+                try? FileManager.default.removeItem(at: chunk.audioURL)
+                if nextIndex < pending.count {
+                    let next = pending[nextIndex]
+                    nextIndex += 1
+                    group.addTask { (next, try await send(next.audioURL, model)) }
+                }
+            }
         }
     }
 
@@ -337,6 +371,8 @@ public actor ProcessingPipeline {
         try store.writeSpeakerMap(speakers)
 
         guard settings.enrichment.suggestSpeakers else { return }
+        // An empty identifier means the user is mid-edit in Settings.
+        guard !settings.models.metadata.isEmpty else { return }
         let labels = transcript.speakerKeys.filter { $0 != SpeakerLabel.localUser }
         guard !labels.isEmpty else { return }
 
@@ -385,6 +421,7 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
         guard settings.enrichment.wantsAnything else { return }
+        guard !settings.models.metadata.isEmpty else { return }
         guard let transcript = try store.readCanonicalTranscript(), !transcript.utterances.isEmpty else {
             return
         }

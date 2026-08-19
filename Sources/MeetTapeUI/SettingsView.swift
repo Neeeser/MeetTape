@@ -263,7 +263,7 @@ struct OpenAISettingsTab: View {
             Section("Models") {
                 modelField("Transcription", keyPath: \.transcription, hint: "Needs word or segment timestamps")
                 modelField("Diarization", keyPath: \.diarization, hint: "Speaker-attributed transcription")
-                modelField("Metadata", keyPath: \.metadata, hint: "Titles, summaries, speaker suggestions")
+                metadataModelRow()
             }
             Section("Enrichment") {
                 enrichmentToggle("Generate a title", keyPath: \.generateTitle)
@@ -276,6 +276,48 @@ struct OpenAISettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The sentinel the picker uses for a model identifier typed by hand.
+    private static let customModelTag = "custom"
+
+    /// A dropdown of known metadata models, with a text field for any other
+    /// identifier. Whether the field shows is derived from the stored value, so
+    /// no view-local state is needed.
+    private func metadataModelRow() -> some View {
+        let current = runtime.settings.models.metadata
+        let isPreset = AIModelSettings.metadataChoices.contains(current)
+        return LabeledContent("Metadata") {
+            VStack(alignment: .trailing, spacing: 2) {
+                Picker("", selection: Binding(
+                    get: { isPreset ? current : Self.customModelTag },
+                    set: { newValue in
+                        var settings = runtime.settings
+                        settings.models.metadata = newValue == Self.customModelTag ? "" : newValue
+                        runtime.update(settings: settings)
+                    }
+                )) {
+                    ForEach(AIModelSettings.metadataChoices, id: \.self) { choice in
+                        Text(choice).tag(choice)
+                    }
+                    Text("Other…").tag(Self.customModelTag)
+                }
+                .labelsHidden()
+                .frame(width: 240)
+                if !isPreset {
+                    TextField("model identifier", text: Binding(
+                        get: { runtime.settings.models.metadata },
+                        set: { newValue in
+                            var settings = runtime.settings
+                            settings.models.metadata = newValue
+                            runtime.update(settings: settings)
+                        }
+                    ))
+                    .frame(width: 240)
+                }
+                Text("Titles, summaries, speaker suggestions").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func modelField(

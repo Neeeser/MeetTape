@@ -375,6 +375,92 @@ enum PipelineTests {
                     "raw diarization stays as the API returned it"
                 )
             },
+
+            test("chunks of one track upload concurrently") { expect in
+                // A 25-minute import took over ten minutes because its chunks
+                // were sent one at a time. Each request here blocks until it has
+                // seen a second request in flight, so a sequential pipeline
+                // never reaches 2 and the assertion fails.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, source: .inPerson, seconds: 12)
+
+                let backend = ConcurrencyProbeBackend()
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    clock: ManualClock(),
+                    settingsProvider: { AppSettings() },
+                    wait: { _ in },
+                    chunking: ChunkPlanner.Configuration(
+                        targetChunkSeconds: 3, maxChunkSeconds: 4, minChunkSeconds: 1,
+                        searchWindowSeconds: 0.5, overlapSeconds: 0.5
+                    )
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.isTrue(backend.requestCount >= 3, "the recording split into several chunks")
+                expect.isTrue(
+                    backend.peakInFlight >= 2,
+                    "chunk requests overlap instead of running one at a time"
+                )
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+            },
+
+            test("reasoning effort is requested only from models that accept it") { expect in
+                expect.isTrue(AIModelSettings.acceptsReasoningEffort("gpt-5.6-luna"))
+                expect.isTrue(AIModelSettings.acceptsReasoningEffort("gpt-5.1-mini"))
+                expect.isTrue(AIModelSettings.acceptsReasoningEffort("o4-mini"))
+                // GPT-4-generation models reject the field with a 400.
+                expect.isTrue(!AIModelSettings.acceptsReasoningEffort("gpt-4.1"))
+                expect.isTrue(!AIModelSettings.acceptsReasoningEffort("gpt-4o-transcribe-diarize"))
+                expect.isTrue(!AIModelSettings.acceptsReasoningEffort("whisper-1"))
+            },
         ])
+    }
+}
+
+/// Blocks each diarization request until another one is running alongside it,
+/// which distinguishes concurrent uploads from sequential ones.
+final class ConcurrencyProbeBackend: AIBackend, @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight = 0
+    private(set) var peakInFlight = 0
+    private(set) var requestCount = 0
+
+    func verifyCredentials(model: String) async throws {}
+
+    func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {
+        try await diarize(DiarizationRequest(audio: request.audio, model: request.model))
+    }
+
+    func diarize(_ request: DiarizationRequest) async throws -> TranscriptionResponse {
+        lock.withLock {
+            inFlight += 1
+            requestCount += 1
+            peakInFlight = max(peakInFlight, inFlight)
+        }
+        // Wait briefly for a companion request; a sequential caller times out
+        // here with peakInFlight stuck at 1.
+        for _ in 0..<100 {
+            let overlapped = lock.withLock { peakInFlight >= 2 }
+            if overlapped { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        lock.withLock { inFlight -= 1 }
+        return TranscriptionResponse(
+            segments: [RawTranscriptSegment(start: 0, end: 1, text: "Chunk.", speaker: "A")],
+            text: "Chunk.",
+            durationSeconds: nil,
+            rawBody: Data("{}".utf8)
+        )
+    }
+
+    func resolveSpeakers(
+        _ request: SpeakerResolutionRequest, model: String
+    ) async throws -> [SpeakerSuggestion] { [] }
+
+    func enrich(_ request: EnrichmentRequest, model: String) async throws -> MeetingEnrichment {
+        MeetingEnrichment()
     }
 }

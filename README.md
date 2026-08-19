@@ -175,7 +175,9 @@ Model identifiers are settings rather than constants:
 - transcription defaults to `whisper-1`, which returns the segment timings the
   timeline needs, while several newer models return good text with no timings;
 - diarization defaults to `gpt-4o-transcribe-diarize`;
-- metadata defaults to `gpt-5.1`.
+- metadata defaults to `gpt-5.6-luna`, selectable from a dropdown or entered by
+  hand. Metadata requests run at low reasoning effort, because titles, summaries
+  and speaker mapping are extraction rather than problem solving.
 
 Every enrichment step is optional. With all of them disabled, MeetTape still
 records and transcribes.

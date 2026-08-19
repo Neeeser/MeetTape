@@ -119,8 +119,12 @@ These are implemented but have not been exercised. Do not treat them as working.
 
 ## Long-meeting processing
 
-`MEETTAPE_LIVE_LONG=1` runs a 65-minute recording through the chunked pipeline
-and asserts that it chunks, that no chunk exceeds the model's duration limit,
-that raw speaker labels stay distinct per chunk, that timestamps stay monotonic,
-and that overlap does not duplicate text. It takes tens of minutes and costs
-real money, so it is not part of an ordinary run.
+**Run and passed.** `MEETTAPE_LIVE_LONG=1` put a 65-minute recording through the
+chunked pipeline against the live API, taking 30 minutes. Verified: the recording
+chunked, no chunk exceeded the model's 1400-second duration limit, raw speaker
+labels stayed distinct per chunk, canonical timestamps stayed monotonic across
+chunk boundaries, the transcript spanned the recording, and the deliberate
+overlap between chunks produced no duplicated utterances.
+
+It costs real money and takes tens of minutes, so it is not part of an ordinary
+run.

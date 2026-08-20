@@ -98,6 +98,16 @@ public struct SpeakerResolutionPolicy: Sendable, Equatable, Codable {
     /// How many candidates to offer in the suggestion band.
     public var maximumSuggestions: Int
 
+    /// Overlapping speech beyond which two clusters cannot be one person.
+    ///
+    /// The tuned clusterer prefers splitting a speaker over merging two, which
+    /// is the recoverable failure, so one recurring voice arriving as two
+    /// clusters is expected and both may resolve to that identity. Two clusters
+    /// that talk over each other are two people, whatever they score. A second
+    /// of it rather than any at all, because a boundary shared between two runs
+    /// or two tracks routinely disagrees by a few tens of milliseconds.
+    public var simultaneousSpeechSeconds: Double
+
     public init(
         namedHighScore: Double = 0.70,
         namedHighMargin: Double = 0.10,
@@ -114,7 +124,8 @@ public struct SpeakerResolutionPolicy: Sendable, Equatable, Codable {
         enrolmentSpeechSeconds: Double = 45,
         maximumEmbeddingsPerIdentity: Int = 20,
         ephemeralExpiryDays: Int = 90,
-        maximumSuggestions: Int = 3
+        maximumSuggestions: Int = 3,
+        simultaneousSpeechSeconds: Double = 1
     ) {
         self.namedHighScore = namedHighScore
         self.namedHighMargin = namedHighMargin
@@ -132,6 +143,7 @@ public struct SpeakerResolutionPolicy: Sendable, Equatable, Codable {
         self.maximumEmbeddingsPerIdentity = maximumEmbeddingsPerIdentity
         self.ephemeralExpiryDays = ephemeralExpiryDays
         self.maximumSuggestions = maximumSuggestions
+        self.simultaneousSpeechSeconds = simultaneousSpeechSeconds
     }
 
     public static let shipping = SpeakerResolutionPolicy()
@@ -201,26 +213,33 @@ extension SpeakerResolutionPolicy {
     /// Only the top-ranked candidate can ever be named automatically. That is
     /// what the margin means: if a different identity scores higher, naming the
     /// runner-up would be naming someone the audio matches less well.
+    /// - Parameter concurrent: identities already speaking over this
+    ///   occurrence's audio in the same meeting. One person is not two people
+    ///   talking at once, so a candidate in here is offered rather than applied.
     public func resolve(
-        candidates: [SpeakerCandidate], speechSeconds: Double
+        candidates: [SpeakerCandidate], speechSeconds: Double,
+        concurrent: Set<IdentityID> = []
     ) -> SpeakerResolution {
         let ranked = candidates.sorted { $0.score > $1.score }
         guard let best = ranked.first else { return .unknown(speechSeconds: speechSeconds) }
         let runnerUp = ranked.dropFirst().first
-        let margin = best.score - (runnerUp?.score ?? 0)
+        let margin = runnerUp.map { best.score - $0.score }
 
         /// Whether the separation from the runner-up is enough.
         ///
-        /// With one candidate there is no runner-up and so no margin, and
-        /// reporting the whole score as the margin made the gate free: any
-        /// score above 0.10 passed it, so a gallery holding one voice decided
-        /// on score alone. Over 326 verified-distinct speakers the worst
-        /// impostor scored 0.957 against the true speaker's own 0.951, which is
-        /// the measurement this gate exists because of. With nothing to compare
-        /// against, the absolute score has to reach what it would have needed
-        /// including the separation.
-        func clearsMargin(required: Double, score: Double) -> Bool {
-            guard runnerUp != nil else { return best.score >= score + required }
+        /// With one candidate there is no runner-up and so no separation to
+        /// measure. Neither answer available here is a measured one: treating
+        /// the absent runner-up as scoring zero made the margin the whole score,
+        /// so anything over 0.10 passed and a gallery holding one voice decided
+        /// on score alone; requiring the score to reach the sum of the two
+        /// thresholds instead invents a single-candidate bar nothing was
+        /// calibrated against. Over 326 verified-distinct speakers the worst
+        /// impostor scored 0.957 against the true speaker's own 0.951, so no
+        /// absolute score separates a stranger from the person they resemble.
+        /// With nothing to compare against the honest answer is a suggestion,
+        /// and the user confirms it once.
+        func clearsMargin(required: Double) -> Bool {
+            guard let margin else { return false }
             return margin >= required
         }
 
@@ -237,7 +256,8 @@ extension SpeakerResolutionPolicy {
         case .person:
             let requiredMargin = best.isExpectedParticipant ? expectedParticipantMargin : namedHighMargin
             if best.score >= namedHighScore,
-               clearsMargin(required: requiredMargin, score: namedHighScore),
+               clearsMargin(required: requiredMargin),
+               !concurrent.contains(best.identityID),
                speechSeconds >= namedHighSpeechSeconds {
                 return SpeakerResolution(
                     outcome: .assign(best.identityID), band: .high, best: best,
@@ -247,7 +267,8 @@ extension SpeakerResolutionPolicy {
             }
         case .anonymous:
             if best.score >= anonymousLinkScore,
-               clearsMargin(required: anonymousLinkMargin, score: anonymousLinkScore),
+               clearsMargin(required: anonymousLinkMargin),
+               !concurrent.contains(best.identityID),
                speechSeconds >= anonymousLinkSpeechSeconds {
                 return SpeakerResolution(
                     outcome: .seenBefore(best.identityID), band: .high, best: best,

@@ -42,6 +42,12 @@ enum SpeakerIdentityTests {
         return VoiceVector.l2Normalized(out)
     }
 
+    /// A vector `towards` of the way from `base` to `other`, for building a
+    /// fixture that lands between two thresholds.
+    static func blended(_ base: [Float], with other: [Float], towards: Float) -> [Float] {
+        VoiceVector.l2Normalized(zip(base, other).map { $0 * (1 - towards) + $1 * towards })
+    }
+
     static func makeStore() throws -> (SpeakerStore, URL) {
         let root = try ManifestTests.makeTemporaryDirectory()
         let store = try SpeakerStore(url: root.appendingPathComponent("voices.sqlite"))
@@ -125,31 +131,69 @@ enum SpeakerIdentityTests {
                 expect.equal(linked.band, .high)
             },
 
-            test("one candidate has no runner-up, so it clears the whole bar alone") { expect in
+            test("one candidate has no runner-up, so it is offered rather than applied") { expect in
                 // The margin gate exists because the worst impostor over 326
                 // verified-distinct speakers scored 0.957 against the true
-                // speaker's own 0.951. Treating an absent runner-up as scoring
-                // zero made the margin the whole score, so any score over 0.10
-                // passed and a gallery holding one voice decided on score alone.
-                let alone = policy.resolve(candidates: [person(1, 0.72)], speechSeconds: 300)
-                expect.isFalse(
-                    alone.outcome.isAutomatic,
-                    "0.72 clears the score but proves no separation from anyone"
-                )
-                let clear = policy.resolve(candidates: [person(1, 0.81)], speechSeconds: 300)
+                // speaker's own 0.951: no absolute score separates a stranger
+                // from the person they resemble. With one voice in the gallery
+                // there is no separation to measure, and both ways of pretending
+                // otherwise are wrong. Treating the absent runner-up as scoring
+                // zero made the margin the whole score, so anything over 0.10
+                // passed. Requiring score plus margin instead invents a
+                // single-candidate bar nothing was calibrated against.
+                for score in [0.72, 0.81, 0.95] {
+                    let alone = policy.resolve(candidates: [person(1, score)], speechSeconds: 300)
+                    expect.isFalse(
+                        alone.outcome.isAutomatic,
+                        "\(score) against one candidate proves no separation from anyone"
+                    )
+                    expect.equal(alone.band, .medium, "it is offered, and the user confirms once")
+                    expect.equal(alone.suggestions.first?.identityID, IdentityID(1))
+                    expect.isNil(alone.margin, "and no margin is reported, because none was measured")
+                }
+
+                // A real runner-up is what makes the separation measurable.
                 expect.equal(
-                    clear.outcome, .assign(IdentityID(1)),
-                    "0.70 plus the 0.10 it would have needed over a runner-up"
+                    policy.resolve(
+                        candidates: [person(1, 0.81), person(2, 0.60)], speechSeconds: 300
+                    ).outcome,
+                    .assign(IdentityID(1))
                 )
 
                 // The same for a remembered unnamed voice, at its own bar.
                 expect.isFalse(
-                    policy.resolve(candidates: [anonymous(7, 0.80)], speechSeconds: 120)
+                    policy.resolve(candidates: [anonymous(7, 0.95)], speechSeconds: 120)
                         .outcome.isAutomatic
                 )
                 expect.equal(
-                    policy.resolve(candidates: [anonymous(7, 0.86)], speechSeconds: 120).outcome,
+                    policy.resolve(
+                        candidates: [anonymous(7, 0.86), anonymous(8, 0.60)], speechSeconds: 120
+                    ).outcome,
                     .seenBefore(IdentityID(7))
+                )
+            },
+
+            test("two clusters that do not overlap may be one person") { expect in
+                // The tuned clusterer prefers splitting a speaker over merging
+                // two, so one recurring voice arriving as two clusters is the
+                // expected failure and is recoverable by naming both.
+                let candidates = [person(1, 0.85), person(2, 0.55)]
+                expect.equal(
+                    policy.resolve(candidates: candidates, speechSeconds: 90).outcome,
+                    .assign(IdentityID(1))
+                )
+                // Once that person is already speaking over this audio they are
+                // not available: one person is not two people talking at once.
+                let overlapping = policy.resolve(
+                    candidates: candidates, speechSeconds: 90, concurrent: [IdentityID(1)]
+                )
+                expect.isFalse(
+                    overlapping.outcome.isAutomatic,
+                    "two clusters talking over each other are two people, whatever they score"
+                )
+                expect.equal(
+                    overlapping.suggestions.first?.identityID, IdentityID(1),
+                    "still offered, because the user may know the diarizer doubled a turn"
                 )
             },
 
@@ -272,6 +316,17 @@ enum SpeakerIdentityTests {
                     identityID: chris.id, vector: vector(seed: 5), model: .fluidAudioOffline,
                     speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster,
                     evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 120, source: .humanConfirmedCluster)
+                ))
+                // A gallery of one has no runner-up and so no measurable
+                // separation, which the policy answers with a suggestion. Two
+                // voices is what a real gallery looks like.
+                let other = try await store.createPerson(name: "Priya")
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: other.id, vector: vector(seed: 200), model: .fluidAudioOffline,
+                    speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(
+                        meeting: "m0", seconds: 120, source: .humanConfirmedCluster
+                    )
                 ))
                 let before = try await store.profileStatus(of: chris.id, model: .fluidAudioOffline)
 
@@ -1028,8 +1083,20 @@ enum SpeakerIdentityTests {
                         end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
                     )]
                 )
+                // A second voice in that first meeting, so voice memory holds
+                // more than one candidate. With exactly one there is no
+                // runner-up, no separation to measure, and the policy correctly
+                // declines to link automatically.
+                let alsoThere = SpeakerClusterInput(
+                    clusterID: "run-001_speaker_09", track: .remote,
+                    speechSeconds: 120, centroid: vector(seed: 199),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("run-001_speaker_09"),
+                        end: VoiceEvidenceFixture.lane("run-001_speaker_09") + 120
+                    )]
+                )
                 _ = try await service.resolve(
-                    meetingID: "m1", clusters: [cluster],
+                    meetingID: "m1", clusters: [cluster, alsoThere],
                     settings: SpeakerRecognitionSettings(), now: Date()
                 )
                 let second = try await service.resolve(
@@ -1076,31 +1143,28 @@ enum SpeakerIdentityTests {
                 )
             },
 
-            test("two clusters in one meeting are not linked to each other as heard before") { expect in
+            test("a voice the diarizer split in two is remembered once") { expect in
+                // The tuned clusterer prefers splitting a speaker over merging
+                // two, so this is the expected failure. Remembering it twice is
+                // what makes it unrecoverable: two centroids a few hundredths
+                // apart split each other's margin, so from then on that person
+                // is never recognised in any meeting.
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let service = SpeakerRecognitionService(store: store)
-                // The diarizer split one person into two clusters. Merging them
-                // is the user's call; claiming the second was "heard before"
-                // when both are in this one meeting is not.
+                let voice = vector(seed: 52)
                 let resolved = try await service.resolve(
                     meetingID: "m1",
                     clusters: [
                         SpeakerClusterInput(
                             clusterID: "run-001_speaker_00", track: .remote,
-                            speechSeconds: 120, centroid: vector(seed: 52),
-                            spans: [AudioSpan(
-                                start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
-                                end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
-                            )]
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 0, end: 120)]
                         ),
                         SpeakerClusterInput(
                             clusterID: "run-001_speaker_01", track: .remote,
-                            speechSeconds: 120, centroid: vector(seed: 52),
-                            spans: [AudioSpan(
-                                start: VoiceEvidenceFixture.lane("run-001_speaker_01"),
-                                end: VoiceEvidenceFixture.lane("run-001_speaker_01") + 120
-                            )]
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 300, end: 420)]
                         ),
                     ],
                     settings: SpeakerRecognitionSettings(), now: Date()
@@ -1108,7 +1172,76 @@ enum SpeakerIdentityTests {
                 expect.equal(resolved.count, 2)
                 expect.isTrue(
                     resolved.allSatisfy { $0.source != .anonymousVoice },
-                    "neither cluster was heard before this meeting"
+                    "neither half was heard before this meeting, so neither is announced"
+                )
+                expect.equal(
+                    try await store.identities(kind: .anonymous).count, 1,
+                    "and the two halves leave one voice behind, not two that cancel out"
+                )
+            },
+
+            test("two clusters talking over each other stay two voices") { expect in
+                // One person is not two people at once, whatever they score.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let voice = vector(seed: 52)
+                _ = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_00", track: .remote,
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 0, end: 120)]
+                        ),
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_01", track: .remote,
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 60, end: 180)]
+                        ),
+                    ],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.equal(
+                    try await store.identities(kind: .anonymous).count, 2,
+                    "an hour of overlap is two people, however alike the audio scores"
+                )
+            },
+
+            test("an ambiguous split is remembered as nothing rather than as two") { expect in
+                // Between the two bars: too close to be certainly somebody else,
+                // too far to be certainly the same. Seeding a second profile here
+                // is the case that poisons voice memory, and the cost of
+                // abstaining is one meeting's worth of learning.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let first = vector(seed: 52)
+                let near = blended(first, with: vector(seed: 53), towards: 0.52)
+                let score = VoiceVector.cosine(first, near)
+                expect.isTrue(
+                    score > policy.anonymousSuggestScore && score < policy.anonymousLinkScore,
+                    "the fixture has to sit between the bars, and scores \(score)"
+                )
+                _ = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_00", track: .remote,
+                            speechSeconds: 120, centroid: first,
+                            spans: [AudioSpan(start: 0, end: 120)]
+                        ),
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_01", track: .remote,
+                            speechSeconds: 120, centroid: near,
+                            spans: [AudioSpan(start: 300, end: 420)]
+                        ),
+                    ],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.equal(
+                    try await store.identities(kind: .anonymous).count, 1,
+                    "the ambiguous half leaves nothing behind rather than a rival profile"
                 )
             },
 
@@ -1125,8 +1258,20 @@ enum SpeakerIdentityTests {
                         end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
                     )]
                 )
+                // A second voice in that first meeting, so voice memory holds
+                // more than one candidate. With exactly one there is no
+                // runner-up, no separation to measure, and the policy correctly
+                // declines to link automatically.
+                let alsoThere = SpeakerClusterInput(
+                    clusterID: "run-001_speaker_09", track: .remote,
+                    speechSeconds: 120, centroid: vector(seed: 199),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("run-001_speaker_09"),
+                        end: VoiceEvidenceFixture.lane("run-001_speaker_09") + 120
+                    )]
+                )
                 _ = try await service.resolve(
-                    meetingID: "m1", clusters: [cluster],
+                    meetingID: "m1", clusters: [cluster, alsoThere],
                     settings: SpeakerRecognitionSettings(), now: Date()
                 )
                 let second = try await service.resolve(

@@ -117,25 +117,45 @@ public actor SpeakerRecognitionService {
         if !settings.rememberRecurringVoices { profiles.removeAll { $0.identity.kind == .anonymous } }
 
         var results: [ResolvedCluster] = []
-        // Two clusters in one meeting are two people by construction, so an
-        // identity one cluster owns is not available to the next.
-        var claimed: Set<IdentityID> = []
-        for cluster in clusters {
+        // Which audio each identity has already been given in this meeting.
+        //
+        // Not a flat exclusion. The tuned clusterer prefers splitting a speaker
+        // over merging two, so one recurring voice arriving as two clusters is
+        // the expected failure and both may be that person. What one person
+        // cannot do is talk over themselves, so the test is overlap in time
+        // rather than "already used".
+        var claimed: [IdentityID: [AudioSpan]] = [:]
+        let ordered = clusters.sorted {
+            ($0.spans.first?.start ?? 0) < ($1.spans.first?.start ?? 0)
+        }
+        for cluster in ordered {
             let resolved = try await resolveOne(
                 meetingID: meetingID, cluster: cluster, profiles: profiles,
                 expectedParticipants: expectedParticipants, settings: settings,
                 model: model, claimed: claimed, now: now
             )
-            if let identity = resolved.identity {
-                claimed.insert(identity.id)
-            } else if let seeded = try await existingLink(
-                meetingID: meetingID, clusterID: cluster.clusterID
-            ) {
-                claimed.insert(seeded.id)
+            var owner = resolved.identity?.id
+            if owner == nil {
+                owner = try await existingLink(
+                    meetingID: meetingID, clusterID: cluster.clusterID
+                )?.id
             }
+            if let owner { claimed[owner, default: []] += cluster.spans }
             results.append(resolved)
         }
         return results
+    }
+
+    /// Identities already speaking over this cluster's audio.
+    private func concurrent(
+        with cluster: SpeakerClusterInput, claimed: [IdentityID: [AudioSpan]]
+    ) -> Set<IdentityID> {
+        var out: Set<IdentityID> = []
+        for (identity, spans) in claimed
+        where AudioSpan.intersect(spans, cluster.spans) > policy.simultaneousSpeechSeconds {
+            out.insert(identity)
+        }
+        return out
     }
 
     private func resolveOne(
@@ -145,7 +165,7 @@ public actor SpeakerRecognitionService {
         expectedParticipants: Set<IdentityID>,
         settings: SpeakerRecognitionSettings,
         model: EmbeddingModelIdentifier,
-        claimed: Set<IdentityID>,
+        claimed: [IdentityID: [AudioSpan]],
         now: Date
     ) async throws -> ResolvedCluster {
         let probe = VoiceVector.l2Normalized(cluster.centroid)
@@ -158,7 +178,10 @@ public actor SpeakerRecognitionService {
                 isExpectedParticipant: expectedParticipants.contains(profile.identity.id)
             )
         }
-        let resolution = policy.resolve(candidates: candidates, speechSeconds: cluster.speechSeconds)
+        let resolution = policy.resolve(
+            candidates: candidates, speechSeconds: cluster.speechSeconds,
+            concurrent: concurrent(with: cluster, claimed: claimed)
+        )
 
         var identity: Identity?
         var source: SpeakerAssignmentOrigin = .ai
@@ -187,34 +210,39 @@ public actor SpeakerRecognitionService {
             // this meeting and leaves nothing behind.
             if settings.rememberRecurringVoices, !probe.isEmpty,
                policy.qualifiesForAnonymousProfile(speechSeconds: cluster.speechSeconds) {
-                // This cluster may already have made a candidate on an earlier
-                // pass over the same meeting. Reuse it: resolving twice must
-                // remember one voice, not two.
-                if let existing = try await existingCandidate(
-                    meetingID: meetingID, clusterID: cluster.clusterID, probe: probe,
+                switch try await sameMeetingCandidate(
+                    meetingID: meetingID, cluster: cluster, probe: probe,
                     model: model, claimed: claimed
                 ) {
+                case .reuse(let existing):
                     identity = existing
                     created = true
+                case .abstain:
+                    // Close to a voice this meeting already made a candidate of,
+                    // but not close enough to be it. Remembering it anyway is
+                    // what poisons the memory: two profiles a few hundredths
+                    // apart split each other's margin, so neither is ever
+                    // recognised again, and that outlives the meeting.
                     break
+                case .fresh:
+                    let fresh = try await store.createAnonymous(state: .ephemeral, now: now)
+                    _ = try await store.enrol(
+                        VoiceEnrollmentCandidate(
+                            identityID: fresh.id,
+                            vector: probe,
+                            model: model,
+                            speechSeconds: cluster.speechSeconds,
+                            qualityScore: cluster.quality,
+                            source: .anonymousSeed,
+                            evidence: [cluster.evidence(
+                                meetingID: meetingID, confirmation: .anonymousSeed
+                            )]
+                        ),
+                        now: now
+                    )
+                    identity = fresh
+                    created = true
                 }
-                let fresh = try await store.createAnonymous(state: .ephemeral, now: now)
-                _ = try await store.enrol(
-                    VoiceEnrollmentCandidate(
-                        identityID: fresh.id,
-                        vector: probe,
-                        model: model,
-                        speechSeconds: cluster.speechSeconds,
-                        qualityScore: cluster.quality,
-                        source: .anonymousSeed,
-                        evidence: [cluster.evidence(
-                            meetingID: meetingID, confirmation: .anonymousSeed
-                        )]
-                    ),
-                    now: now
-                )
-                identity = fresh
-                created = true
             }
         }
 
@@ -250,43 +278,67 @@ public actor SpeakerRecognitionService {
         )
     }
 
-    /// The unnamed candidate this cluster created on an earlier pass, if it is
-    /// still an unnamed candidate.
-    private func existingCandidate(
-        meetingID: String, clusterID: String, probe: [Float],
-        model: EmbeddingModelIdentifier, claimed: Set<IdentityID>
-    ) async throws -> Identity? {
-        if let identity = try await existingLink(meetingID: meetingID, clusterID: clusterID) {
-            return identity
+    /// What to do about an unnamed voice this meeting has already made a
+    /// candidate of.
+    enum SameMeetingCandidate {
+        /// This cluster is that voice: the same cluster on an earlier pass, or
+        /// the other half of a speaker the clusterer split.
+        case reuse(Identity)
+        /// Close, but not close enough to say. Remember nothing.
+        case abstain
+        /// A different voice. Worth remembering on its own.
+        case fresh
+    }
+
+    /// Decides whether this cluster is a voice this meeting already remembered.
+    ///
+    /// Three answers rather than two, because the middle case is the one that
+    /// does lasting damage. A cluster half-matching a candidate this meeting
+    /// seeded is either the same person the clusterer split or a different
+    /// person who sounds like them, and creating a second profile is wrong
+    /// either way: two centroids a few hundredths apart split each other's
+    /// margin, so from then on neither is recognised anywhere.
+    private func sameMeetingCandidate(
+        meetingID: String, cluster: SpeakerClusterInput, probe: [Float],
+        model: EmbeddingModelIdentifier, claimed: [IdentityID: [AudioSpan]]
+    ) async throws -> SameMeetingCandidate {
+        // The same cluster on an earlier pass over this meeting. Resolving twice
+        // must remember one voice, not two.
+        if let identity = try await existingLink(
+            meetingID: meetingID, clusterID: cluster.clusterID
+        ) {
+            return .reuse(identity)
         }
 
         // Re-analysis renumbers the runs, so the same voice arrives under a new
         // key and the check above misses it. The candidates this meeting seeded
         // are excluded from the gallery, correctly, so without this the voice
         // creates a second unnamed identity holding the same vector, and a third
-        // on the next re-analysis. Their centroids are then near-identical, so
-        // the margin gate means that person is never recognised anywhere again.
+        // on the next re-analysis.
         //
-        // Reused rather than linked: this is still a voice heard once, so it
-        // does not become one heard before.
-        guard !probe.isEmpty else { return nil }
-        // Not one another cluster of this meeting already owns: those are
-        // different people, and reusing one here would link them, which is the
-        // sibling match the gallery exclusion exists to prevent.
+        // Reused rather than linked: this is still a voice heard once, so it does
+        // not become one heard before.
+        guard !probe.isEmpty else { return .fresh }
+        // Not one that is speaking over this cluster. Those are two people, and
+        // reusing one here would merge them. A candidate that merely spoke
+        // elsewhere in the meeting is the split this exists to repair.
+        let concurrent = concurrent(with: cluster, claimed: claimed)
         let seeded = try await store.profilesSeededOnlyIn(meetingID: meetingID, model: model)
-            .filter { !claimed.contains($0.identity.id) }
+            .filter { !concurrent.contains($0.identity.id) }
         var ranked: [(identity: Identity, score: Double)] = []
         for profile in seeded {
             ranked.append((profile.identity, VoiceVector.cosine(probe, profile.centroid)))
         }
         ranked.sort { $0.score > $1.score }
-        guard let best = ranked.first, best.score >= policy.anonymousLinkScore else { return nil }
-        // The same separation a link to a remembered voice needs. Two seeds a
-        // few hundredths apart are two people the clusterer split, and picking
-        // the higher would merge them on nothing.
-        let runnerUp = ranked.dropFirst().first?.score ?? 0
-        guard best.score - runnerUp >= policy.anonymousLinkMargin else { return nil }
-        return best.identity
+        guard let best = ranked.first else { return .fresh }
+        // The same separation a link to a remembered voice needs. Two seeds a few
+        // hundredths apart are two people the clusterer split, and picking the
+        // higher would merge them on nothing.
+        let runnerUp = ranked.dropFirst().first?.score
+        let separated = runnerUp.map { best.score - $0 >= policy.anonymousLinkMargin } ?? true
+        if best.score >= policy.anonymousLinkScore, separated { return .reuse(best.identity) }
+        if best.score >= policy.anonymousSuggestScore { return .abstain }
+        return .fresh
     }
 
     /// The unnamed identity a cluster is already linked to in this meeting.

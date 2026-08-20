@@ -183,6 +183,21 @@ public actor LocalModelManager {
         publish(.notInstalled)
     }
 
+    /// Waits for an install already running, and refuses rather than starting
+    /// one.
+    ///
+    /// For the work that happens because voice memory is on rather than because
+    /// the user chose a local backend. A cloud-only configuration must not
+    /// discover, mid-meeting, that it is fetching 650 MB nobody asked for.
+    public func ensureInstalled() async throws {
+        if state.isUsable { return }
+        if let installTask {
+            _ = try await installTask.value
+            return
+        }
+        throw LocalModelError.notInstalled
+    }
+
     public func retry() async throws {
         publish(.notInstalled)
         _ = try await install()

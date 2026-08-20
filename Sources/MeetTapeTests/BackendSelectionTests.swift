@@ -67,9 +67,18 @@ enum BackendSelectionTests {
                     "the absent siblings fall back individually, not as a block"
                 )
                 expect.equal(
-                    settings.processing.transcription, .local,
-                    "a file that never knew about backends gets the new default"
+                    settings.processing.transcription, .openAI,
+                    "an existing installation keeps the backend it was configured with"
                 )
+                expect.equal(settings.processing.diarization, .openAI)
+            },
+
+            test("a fresh installation with no file at all starts local") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let settings = SettingsStore(directory: root).load()
+                expect.isTrue(settings.processing.isFullyLocal)
+                expect.equal(settings.version, 2)
             },
 
             test("a partly-written processing block keeps what it has") { expect in

@@ -228,28 +228,50 @@ extension LocalModelManager {
 
     // MARK: - embedding a track whose speakers are already known
 
-    /// One vector for a whole file assumed to hold one speaker.
+    /// One vector for the dominant voice in a file that should hold one person.
     ///
-    /// Used on the microphone track of a remote call, where the speaker is the
-    /// local user by construction, so there is nothing to cluster.
+    /// Used on the microphone track of a remote call. It is not forced to a
+    /// single cluster: a user on speakers records the remote side onto their own
+    /// track, which the transcript assembler already exists to undo, and forcing
+    /// one cluster would fold that person into the local user's profile. This is
+    /// the one profile built without a human confirmation, so it refuses
+    /// anything it cannot attribute cleanly.
+    ///
+    /// Returns nil when the track's dominant voice does not clearly dominate.
     public func embedSingleSpeaker(
-        audio: URL
+        audio: URL, minimumDominantShare: Double = 0.75
     ) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)? {
         let models = try await loadedDiarizerModels()
-        var config = Self.diarizerConfiguration(speakerCount: 1)
+        var config = Self.diarizerConfiguration(speakerCount: nil)
         config.exposeChunkEmbeddings = true
         let manager = OfflineDiarizerManager(config: config)
         manager.initialize(models: models)
         let result = try await manager.process(audio)
-        let vectors = (result.chunkEmbeddings ?? []).map(\.embedding256)
-        guard !vectors.isEmpty else { return nil }
-        let speech = result.segments.reduce(0.0) {
-            $0 + Double($1.endTimeSeconds - $1.startTimeSeconds)
+        guard !result.segments.isEmpty else { return nil }
+
+        var speech: [String: Double] = [:]
+        for segment in result.segments {
+            speech[segment.speakerId, default: 0] +=
+                Double(segment.endTimeSeconds - segment.startTimeSeconds)
         }
-        let quality = result.segments.isEmpty
+        let total = speech.values.reduce(0, +)
+        guard total > 0, let dominant = speech.max(by: { $0.value < $1.value }) else { return nil }
+        guard dominant.value / total >= minimumDominantShare else {
+            Log.processing.notice(
+                "mic track not enrolled: dominant voice holds \(Int(dominant.value / total * 100), privacy: .public)% of speech"
+            )
+            return nil
+        }
+
+        let vectors = (result.chunkEmbeddings ?? [])
+            .filter { $0.speakerId == dominant.key }
+            .map(\.embedding256)
+        guard !vectors.isEmpty else { return nil }
+        let ownSegments = result.segments.filter { $0.speakerId == dominant.key }
+        let quality = ownSegments.isEmpty
             ? 1.0
-            : result.segments.reduce(0.0) { $0 + Double($1.qualityScore) } / Double(result.segments.count)
-        return (VoiceVector.centroid(vectors), speech, quality)
+            : ownSegments.reduce(0.0) { $0 + Double($1.qualityScore) } / Double(ownSegments.count)
+        return (VoiceVector.centroid(vectors), dominant.value, quality)
     }
 
     /// Vectors for intervals another backend decided.

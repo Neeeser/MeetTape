@@ -1,6 +1,7 @@
 import Foundation
 import MeetTapeCore
 import MeetTapeIntegrations
+import MeetTapeLocalAI
 import MeetTapeServices
 import MeetTapeSpeakers
 import TestKit
@@ -48,6 +49,15 @@ struct StubLocalDiarizer: DiarizationBackend, @unchecked Sendable {
             chunkEmbeddings: chunkEmbeddings,
             configuration: ["warmStartFa": "0.2"]
         )
+    }
+}
+
+/// Stands in for the embedding extractor on a machine with no models installed.
+struct RefusingEmbeddingExtractor: SpeakerEmbeddingExtractor {
+    var model: EmbeddingModelIdentifier { .fluidAudioOffline }
+
+    func embed(audio: URL, intervals: [DiarizationInterval]) async throws -> [DiarizationChunkEmbedding] {
+        throw LocalModelError.notInstalled
     }
 }
 
@@ -314,6 +324,64 @@ enum LocalPipelineTests {
                 expect.equal(
                     transcript.utterances.filter { $0.track == .remote }.count, 2,
                     "the cloud path's own labels are kept exactly as they were"
+                )
+            },
+
+            test("a cloud-only meeting never starts a model download for voice memory") { expect in
+                // Recognizing voices is on by default. On a machine that chose
+                // OpenAI for both stages and never pressed Download, wanting
+                // vectors must not fetch 650 MB from inside a processing stage.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let store = try SpeakerStore(url: root.appendingPathComponent("voices.sqlite"))
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Mine.", speaker: nil),
+                ]
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.processing.diarization = .openAI
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+
+                let installs = LockedCounter()
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    backends: ProcessingBackends(
+                        transcription: { _, model in
+                            OpenAITranscriptionBackend(backend: backend, model: model)
+                        },
+                        diarization: { _, model in
+                            OpenAIDiarizationBackend(backend: backend, model: model)
+                        },
+                        embeddings: RefusingEmbeddingExtractor(),
+                        speakers: SpeakerRecognitionService(store: store),
+                        prepareLocalModels: { installs.enter(); installs.leave() },
+                        requireLocalModels: { throw LocalModelError.notInstalled }
+                    ),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { resolved },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(installs.total, 0, "no local model install was started")
+                expect.equal(
+                    try meeting.store.readMetadata().processing.state, .complete,
+                    "and the meeting still finished"
+                )
+                expect.isTrue(
+                    try await store.searchableProfiles(model: .fluidAudioOffline).isEmpty
                 )
             },
 

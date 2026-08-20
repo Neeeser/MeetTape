@@ -548,6 +548,22 @@ public actor ProcessingPipeline {
         try await prepare()
     }
 
+    /// For work voice memory wants rather than work the user chose. Returns
+    /// false when the models are not installed, so the caller skips instead of
+    /// starting a download nobody asked for.
+    private func localModelsAvailable() async -> Bool {
+        guard let require = backends.requireLocalModels else {
+            return backends.prepareLocalModels == nil
+        }
+        do {
+            try await require()
+            return true
+        } catch {
+            Log.processing.notice("voice memory skipped: on-device models are not installed")
+            return false
+        }
+    }
+
     /// Chunks a track, sends each chunk, and records results as they arrive so an
     /// interrupted run resumes at the chunk it stopped on.
     private func runChunks(
@@ -801,7 +817,7 @@ public actor ProcessingPipeline {
 
             let segments = timeline.segments(track: run.track)
             guard !segments.isEmpty else { continue }
-            try await prepareLocalModels(metadata: metadata)
+            guard await localModelsAvailable() else { return }
             guard let audio = try scratch.trackAudio(
                 meetingID: metadata.id, track: run.track, segments: segments,
                 segmentsDirectory: store.layout.segments
@@ -857,7 +873,7 @@ public actor ProcessingPipeline {
         let timeline = try store.readTimeline()
         let segments = timeline.segments(track: .mic)
         guard !segments.isEmpty else { return }
-        try await prepareLocalModels(metadata: metadata)
+        guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: .mic, segments: segments,
             segmentsDirectory: store.layout.segments
@@ -926,8 +942,13 @@ public actor ProcessingPipeline {
         }
         try store.writeSpeakerMap(updated)
 
+        // The same gate the speaker map applies. Without it a name the pipeline
+        // had just rejected as too weak was still recorded as a participant, and
+        // then fed back as context on the next suggestion request.
         var participants = metadata.participants
-        for suggestion in suggestions where !participants.contains(where: { $0.displayName == suggestion.name }) {
+        for suggestion in suggestions
+        where suggestion.confidence >= 0.35 && !suggestion.name.isEmpty
+            && !participants.contains(where: { $0.displayName == suggestion.name }) {
             participants.append(Participant(displayName: suggestion.name, origin: .ai))
         }
         metadata.participants = participants
@@ -1279,6 +1300,12 @@ public actor ProcessingPipeline {
         guard let found = repository.findMeeting(id: meetingID) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
+        // Where a cloud diarizer left no vectors this reads a whole track and
+        // runs the embedding model, which is a processing stage in everything
+        // but name and waits for the same things.
+        await gate.waitUntilAllowed()
+        await jobLock.acquire()
+        defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
         var metadata = found.metadata
         try await recognizeVoices(
@@ -1405,7 +1432,7 @@ public actor ProcessingPipeline {
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: metadata.id) }
 
-        try await prepareLocalModels(metadata: metadata)
+        guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: track, segments: segments,
             segmentsDirectory: store.layout.segments

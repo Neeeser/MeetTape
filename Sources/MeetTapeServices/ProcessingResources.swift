@@ -21,6 +21,11 @@ public struct ProcessingBackends: Sendable {
     /// Called before a local stage runs, so a meeting queued while the models
     /// are still downloading waits instead of failing.
     public var prepareLocalModels: (@Sendable () async throws -> Void)?
+    /// Called before work that happens because voice memory is on rather than
+    /// because the user chose a local backend. Waits for an install already
+    /// running and refuses rather than starting one, so a cloud-only setup never
+    /// downloads models it was not asked for.
+    public var requireLocalModels: (@Sendable () async throws -> Void)?
     /// Extracts one vector for a track known to hold a single speaker, used for
     /// the microphone track where the speaker is the local user by construction.
     public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)?)?
@@ -35,6 +40,7 @@ public struct ProcessingBackends: Sendable {
         embeddings: (any SpeakerEmbeddingExtractor)? = nil,
         speakers: SpeakerRecognitionService? = nil,
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
+        requireLocalModels: (@Sendable () async throws -> Void)? = nil,
         singleSpeakerEmbedding: (@Sendable (URL) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)?)? = nil,
         reanalyzeDiarization: (@Sendable (String, URL, Int?) async throws -> DiarizationOutput)? = nil
     ) {
@@ -43,6 +49,7 @@ public struct ProcessingBackends: Sendable {
         self.embeddings = embeddings
         self.speakers = speakers
         self.prepareLocalModels = prepareLocalModels
+        self.requireLocalModels = requireLocalModels
         self.singleSpeakerEmbedding = singleSpeakerEmbedding
         self.reanalyzeDiarization = reanalyzeDiarization
     }

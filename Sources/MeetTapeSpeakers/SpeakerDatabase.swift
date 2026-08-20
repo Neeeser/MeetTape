@@ -61,6 +61,10 @@ final class SpeakerDatabase {
             throw SpeakerDatabaseError.cannotOpen(path: url.path, message: message)
         }
         handle = db
+        // Without this, any contention returns SQLITE_BUSY on the first attempt.
+        // The app and the evaluation tool open the same file, and a five second
+        // wait turns a dropped enrolment into a short pause.
+        sqlite3_busy_timeout(db, 5_000)
         try execute("PRAGMA journal_mode=WAL;")
         try execute("PRAGMA foreign_keys=ON;")
         try execute("PRAGMA synchronous=NORMAL;")
@@ -73,10 +77,17 @@ final class SpeakerDatabase {
 
     private func migrate() throws {
         var version = try scalarInt("PRAGMA user_version;").map(Int32.init) ?? 0
+        // A file written by a newer build is not something this one can reason
+        // about. Refusing is safer than reading it against the older schema.
+        guard version <= Self.latestVersion else {
+            throw SpeakerDatabaseError.migrationFailed(
+                version: Int(version), message: "written by a newer build"
+            )
+        }
         while version < Self.latestVersion {
             let next = version + 1
             do {
-                try execute("BEGIN;")
+                try execute("BEGIN IMMEDIATE;")
                 try applyMigration(to: next)
                 try execute("PRAGMA user_version = \(next);")
                 try execute("COMMIT;")
@@ -93,7 +104,13 @@ final class SpeakerDatabase {
     private func applyMigration(to version: Int32) throws {
         switch version {
         case 1: try execute(Self.schemaV1)
-        default: break
+        default:
+            // Advancing user_version for a step that did nothing marks the
+            // schema as migrated when it is not, and the loop never retries.
+            // Failing here rolls the transaction back instead.
+            throw SpeakerDatabaseError.migrationFailed(
+                version: Int(version), message: "no migration defined"
+            )
         }
     }
 

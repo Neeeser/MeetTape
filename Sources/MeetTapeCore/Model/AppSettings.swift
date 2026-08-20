@@ -208,7 +208,10 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
 /// is readable and portable, with the API key deliberately absent: that lives in
 /// the keychain and nowhere else.
 public struct AppSettings: Codable, Sendable, Equatable {
-    public static let currentVersion = 1
+    /// 2 added the processing backends. The number is read on decode, because a
+    /// file written before it existed was configured under a different default
+    /// and must not be moved off it silently.
+    public static let currentVersion = 2
 
     public var version: Int
     public var storageRootPath: String
@@ -287,9 +290,19 @@ public struct AppSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
         models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
-        processing =
-            try container.decodeIfPresent(ProcessingSettings.self, forKey: .processing)
-            ?? defaults.processing
+        // An existing installation keeps the backend it was configured with. A
+        // settings file written before local processing existed described a
+        // machine that transcribed in the cloud, and switching it over on the
+        // next launch would change the transcript, the model recorded on every
+        // chunk, and start a 650 MB download nobody asked for. Local is the
+        // default for a fresh installation, which has no file at all.
+        if let stored = try container.decodeIfPresent(ProcessingSettings.self, forKey: .processing) {
+            processing = stored
+        } else if version < 2 {
+            processing = ProcessingSettings(transcription: .openAI, diarization: .openAI)
+        } else {
+            processing = defaults.processing
+        }
         enrichment =
             try container.decodeIfPresent(EnrichmentSettings.self, forKey: .enrichment)
             ?? defaults.enrichment

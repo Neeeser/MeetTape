@@ -198,6 +198,7 @@ public final class MeetTapeRuntime {
                 embeddings: FluidAudioEmbeddingExtractor(models: modelManager),
                 speakers: recognition,
                 prepareLocalModels: { _ = try await modelManager.install() },
+                requireLocalModels: { try await modelManager.ensureInstalled() },
                 singleSpeakerEmbedding: { url in
                     try await modelManager.embedSingleSpeaker(audio: url)
                 },

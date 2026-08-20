@@ -719,7 +719,8 @@ public actor SpeakerStore {
     private static let occurrenceColumns = """
         id, meeting_id, cluster_id, track, speech_seconds, resolved_identity_id,
         resolution_source, score, runner_up_score, margin, threshold_band,
-        human_verified, expected_participant, model_identifier, created_at, updated_at
+        human_verified, expected_participant, model_identifier, created_at, updated_at,
+        embedding_dim
         """
 
     private func occurrence(from row: SpeakerDatabase.Row) -> SpeakerOccurrence {
@@ -737,8 +738,10 @@ public actor SpeakerStore {
             band: SpeakerConfidenceBand(rawValue: row.text(10)) ?? .unknown,
             humanVerified: row.bool(11),
             wasExpectedParticipant: row.bool(12),
+            // The row's own dimension, not the current constant. Reporting
+            // every vector as 256 would defeat the check the column exists for.
             embeddingModel: row.optionalText(13).map {
-                EmbeddingModelIdentifier(rawValue: $0, dimension: EmbeddingModelIdentifier.fluidAudioOffline.dimension)
+                EmbeddingModelIdentifier(rawValue: $0, dimension: row.int(16))
             },
             createdAt: row.date(14),
             updatedAt: row.date(15)
@@ -827,11 +830,21 @@ public actor SpeakerStore {
         return out
     }
 
-    public func occurrenceEmbedding(meetingID: String, clusterID: String) throws -> [Float]? {
+    /// The vector one cluster was decided from, for one embedding model.
+    ///
+    /// Filtered by model on purpose: a vector from another extractor is not
+    /// comparable, and returning it would let it be scored or enrolled against
+    /// the wrong centroid.
+    public func occurrenceEmbedding(
+        meetingID: String, clusterID: String, model: EmbeddingModelIdentifier = .fluidAudioOffline
+    ) throws -> [Float]? {
         var vector: [Float]?
         try database.query(
-            "SELECT embedding FROM speaker_occurrence WHERE meeting_id = ? AND cluster_id = ?",
-            [.text(meetingID), .text(clusterID)]
+            """
+            SELECT embedding FROM speaker_occurrence
+            WHERE meeting_id = ? AND cluster_id = ? AND model_identifier = ?
+            """,
+            [.text(meetingID), .text(clusterID), .text(model.rawValue)]
         ) { vector = $0.vector(0) }
         return vector
     }

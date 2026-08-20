@@ -70,15 +70,24 @@ bump.
 | An optional cloud stage asks `isConfigured()` first | Both speech backends default to local and the enrichment switches default on, so without it every meeting on a fresh install failed before the step that writes the markdown and the mixdown |
 | A key store answers `isKnownAbsent` for itself | Taking the protocol default meant "a read that failed" read as "no key", which is the same failure by another route |
 | The microphone track enrols only when the far end has its own track, and only a voice unlike its clusters | Dominance is not identity: on a pairing where echo cancellation falls back, the presenter dominates the user's own track |
-| A cluster's audio belongs to one identity, enforced by deleting its earlier enrolment | Naming twice left the first name holding that voice, human-verified, and the next meeting named them as the person corrected away |
-| Re-analysis drops that meeting's cluster enrolments | It renumbers the runs, so a wrong name confirmed beforehand is unreachable: the key that would remove it no longer appears |
+| Every stored vector records the audio it came from: a recording, a track and time spans | Provenance kept as a cluster label stops matching the moment a re-analysis renumbers the runs, and a line-level correction produces material belonging to no cluster at all |
+| Retraction is a span lookup, never an inference from current cluster state | Overlapping audio cannot belong to two people. Answering from labels was wrong after every re-analysis, merge and line correction |
+| A partially contradicted vector survives while 45 s of its audio is still its owner's | The bar that let it be stored. Dropping on any overlap destroyed twenty minutes of confirmed material over a three-second correction; keeping regardless let a vector be corrected away a little at a time |
+| Contradicted spans stay on the row and stop counting | Deleting them would make the row claim the vector is purer than it is; leaving them counted would measure every correction against the original |
 | Chunk purpose is decided by which backend owns the words, once per track | Deciding it from what is on disk flipped mid-meeting on a resume and the assembler dropped the far end permanently |
 | Display and confirmation are separate predicates | A correction must survive its line being merged, and must not then enrol the rest of that line's voice |
+| A batch correction is resolved, applied in memory and written once | A failure at line 18 of 30 left seventeen renamed with no error shown, and nothing recording that a rebuild was owed |
+| One candidate in the gallery is a suggestion, never an automatic name | There is no runner-up and so no separation to measure. The worst impostor over 326 speakers scored 0.957 against the true speaker's own 0.951, so no absolute score separates them |
+| Two clusters may be one identity when they do not overlap in time, and never when they do | The tuned clusterer prefers splitting over merging, so one voice as two clusters is expected. One person cannot talk over themselves |
+| A half-match against a candidate this meeting seeded is remembered as nothing | Two centroids a few hundredths apart split each other's margin, so that voice is never recognised again, in any meeting |
 | Processing reaches a meeting folded into another | `combine` links metadata and moves no audio, so the folded folder is the only copy of the second half of a dropped call |
+| A dropped and rejoined call is one logical meeting over two immutable recordings | Each keeps its own segments, manifest, raw output and speaker map. The combined duration and transcript are derived on read, so separating them again is clearing two fields |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
 decoder settings in `LocalDiarizationTuning` and `LocalTranscriptionTuning`, and
-`LocalConfigurationTests` and `SpeakerIdentityTests` assert them. A change to any
+`LocalConfigurationTests` and `SpeakerIdentityTests` assert them.
+`VoiceEvidenceTests` covers what a vector was derived from and what may be taken
+back, and `ReconnectTests` covers a call recorded in two halves. A change to any
 of these numbers should fail a test before it reaches a user.
 
 Four rules that an adversarial review found were easy to break by accident, each
@@ -160,6 +169,16 @@ against real hardware and what has not.
   because re-assembly and re-analysis move where turns begin and end.
 - Re-analysing speakers appends a diarization run and marks it active. The
   previous one stays on disk.
+- `MeetTapeSpeakers` records what every stored vector was derived from, in
+  coordinates the application never rewrites: a recording, a track and time
+  spans on the meeting timeline. Cluster and analysis identifiers travel
+  alongside as context for a reader and decide nothing. That is what makes
+  retraction a lookup rather than a reconstruction from whatever the clustering
+  looks like now.
+- A conversation recorded in two halves is a `LogicalMeeting` over two
+  recordings, each immutable and complete on its own. The combined duration and
+  transcript are derived on read; linking and separating write one field on each
+  side and move no audio.
 - Nothing before `audio_safe` sends data to OpenAI. Every stage after it is
   retryable and must never delete source audio.
 

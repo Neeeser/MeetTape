@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` runs 250 tests, all passing, in about 9 seconds.
+`./scripts/test.sh` runs 276 tests, all passing, in about 9 seconds.
 Fifteen further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` runs 10 tests, all passing.
@@ -88,6 +88,29 @@ Each row below covers a failure mode observed during development:
 | A local run leaves no voice vectors in the meeting folder | `LocalPipelineTests` |
 | A cloud diarization still records speakers for voice memory | `LocalPipelineTests` |
 | Re-analysing keeps the previous analysis and the words | `LocalPipelineTests` |
+| A re-analysis renumbers clusters and the voice can still be taken back | `VoiceEvidenceTests` |
+| A correction records the audio it confirmed, not the label | `VoiceEvidenceTests` |
+| A vector keeps standing while most of its audio is still its owner's | `VoiceEvidenceTests` |
+| Corrections add up until too little of the audio is left | `VoiceEvidenceTests` |
+| Audio on one track never retracts a vector from the other | `VoiceEvidenceTests` |
+| A merge moves who owns a vector, not what it was derived from | `VoiceEvidenceTests` |
+| Undoing a merge gives each identity back its own audio | `VoiceEvidenceTests` |
+| Removing one vector rebuilds the centroid over what is left | `VoiceEvidenceTests` |
+| A store written before evidence existed opens, keeping its people | `VoiceEvidenceTests` |
+| One candidate is offered rather than named automatically | `SpeakerIdentityTests` |
+| Two non-overlapping clusters may be one person; overlapping ones may not | `SpeakerIdentityTests` |
+| A voice the diarizer split in two is remembered once | `SpeakerIdentityTests` |
+| An ambiguous split is remembered as nothing rather than as two | `SpeakerIdentityTests` |
+| Nothing to check bleed against is a refusal, not a pass | `SpeakerIdentityTests` |
+| Both halves of a reconnected call are one meeting, in order | `ReconnectTests` |
+| The folded half is reachable by its own identifier | `ReconnectTests` |
+| Separating a continuation gives back two meetings and loses nothing | `ReconnectTests` |
+| Linking does not rewrite either recording's own duration | `ReconnectTests` |
+| A batch correction is applied to every line or to none | `LocalPipelineTests` |
+| The local transcriber reads the audio and nothing is uploaded | `LocalPipelineTests` |
+| The panel resolves the archive once, not on every render | `UITests` |
+| Closing the panel does not overwrite a note added elsewhere | `UITests` |
+| A mix that cannot finish leaves no file to be mistaken for one | `AudioTests` |
 
 ## Exercised against real hardware and the real API
 
@@ -389,13 +412,23 @@ be assumed to work.
   Note the shape of the guarantee: a stage does not *start* during capture, but a
   stage already running does not stop, so a meeting beginning part-way through a
   four-minute transcription shares the Neural Engine until that stage ends.
-- **A reconnected meeting is transcribed but not reachable.** When a call drops
-  and the user rejoins, the second recording is folded into the first: the link
-  is metadata only, `combine` moves no audio, and the archive listing hides the
-  folded meeting. Its own audio is now transcribed into its own folder, so
-  nothing is lost on disk, but the app offers no way to open it and the earlier
-  meeting's transcript still covers only the first half. Presenting a
-  continuation as one meeting is a product decision that has not been made.
+- **A reconnected call as one meeting, on hardware.** The two recordings are now
+  linked rather than folded: Recent Meetings shows one row reporting both halves'
+  audio, the panel renders both transcripts in order, opening the continuation by
+  its own identifier resolves to the conversation, and separating it again is
+  clearing one field on each side. `ReconnectTests` covers all of that against
+  the storage layer and the runtime. What has not happened is a real call
+  dropping and being rejoined with this build running.
+- **A one-voice gallery is never named automatically.** With a single profile in
+  voice memory there is no runner-up, so nothing reaches High and the first
+  recognition of a recurring voice waits until memory holds two. Every meeting
+  with two qualifying speakers seeds two candidates, so this is a first-week
+  condition rather than a lasting one, but it has not been watched happening.
+- **A voice the diarizer split across two clusters.** Both halves resolving to
+  one identity, and two clusters that overlap in time refusing to, are covered by
+  tests over synthetic vectors. No recording in the local corpus is known to
+  contain a speaker the tuned clusterer splits, so the case that motivates the
+  rule has not been observed end to end.
 - **The bound on how long a prejoin holds processing.** Capture arms on entering
   the candidate state, and processing stands back from it for two minutes. That
   covers the measured twelve seconds between Slack opening the microphone and a

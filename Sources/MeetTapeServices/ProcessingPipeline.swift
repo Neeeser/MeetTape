@@ -1413,10 +1413,16 @@ public actor ProcessingPipeline {
         // because clearing a line hands it back to whoever the cluster says, and
         // claiming it for nobody took those seconds off that person too.
         var moved: [Claim: [AudioSpan]] = [:]
-        for utterance in lines {
+        // Read before any of them is written. Two selected lines can overlap,
+        // and writing the first changes what the second reads as: the second
+        // would then look like it was already the person being named, and the
+        // audio moving away from its previous owner would go unrecorded.
+        let owners = lines.map { utterance -> SpeakerAssignment? in
             let override = speakers.override(for: utterance)?.assignment
-            let fallback = speakers.entries[utterance.speakerKey]
-            let before = (override?.origin == .human ? override : nil) ?? fallback
+            return (override?.origin == .human ? override : nil)
+                ?? speakers.entries[utterance.speakerKey]
+        }
+        for (utterance, before) in zip(lines, owners) {
             let after: IdentityID?
             if trimmed.isEmpty {
                 speakers.clearOverride(for: utterance)

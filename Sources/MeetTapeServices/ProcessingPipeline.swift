@@ -1302,7 +1302,8 @@ public actor ProcessingPipeline {
     @discardableResult
     private func applyUtteranceSpeaker(
         _ name: String, utteranceID: String, meetingID: String,
-        identityID: IdentityID?, learning: Bool
+        identityID: IdentityID?, learning: Bool,
+        displaced: ((IdentityID) -> Void)? = nil
     ) async throws -> IdentityID? {
         guard let found = repository.findMeeting(id: meetingID) else {
             throw StorageError.meetingNotFound(id: meetingID)
@@ -1321,9 +1322,25 @@ public actor ProcessingPipeline {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             var speakers = try found.store.readSpeakerMap()
+            // Clearing takes the line away from whoever held it just as naming
+            // somebody else does, and their enrolment was built from a set that
+            // included it. The cluster-level control retracts; this one used to
+            // leave the vector behind.
+            let cleared = speakers.assignment(for: utterance)
+                .flatMap { $0.origin == .human ? $0.identityID : nil }
             speakers.clearOverride(for: utterance)
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+            if let cleared {
+                if let displaced {
+                    displaced(cleared)
+                } else {
+                    try await rederiveConfirmedSpeech(
+                        store: found.store, metadata: found.metadata, speakers: speakers,
+                        identityID: cleared, settings: settings
+                    )
+                }
+            }
             return nil
         }
 
@@ -1353,10 +1370,18 @@ public actor ProcessingPipeline {
         try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
 
         if let previous = previousOwner, previous != resolved {
-            try await rederiveConfirmedSpeech(
-                store: found.store, metadata: found.metadata, speakers: speakers,
-                identityID: previous, settings: settings
-            )
+            if let displaced {
+                // The batch collects them and re-derives once. Doing it here
+                // meant a thirty-line correction ran thirty whole-track exports
+                // and thirty embedding passes for the person losing the lines,
+                // twenty-nine of whose results the next line deleted.
+                displaced(previous)
+            } else {
+                try await rederiveConfirmedSpeech(
+                    store: found.store, metadata: found.metadata, speakers: speakers,
+                    identityID: previous, settings: settings
+                )
+            }
         }
 
         if let resolved {
@@ -1385,16 +1410,27 @@ public actor ProcessingPipeline {
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) async throws {
         var linked = identityID
-        // Every override is written first and the profile is considered once at
-        // the end. Learning per line would re-embed the whole growing set on
+        var displaced: Set<IdentityID> = []
+        // Every override is written first and the profiles are considered once
+        // at the end. Learning per line would re-embed the whole growing set on
         // each one, so a single thirty-line correction became thirty full-track
         // passes and thirty near-identical vectors.
         for id in utteranceIDs {
             linked = try await applyUtteranceSpeaker(
-                name, utteranceID: id, meetingID: meetingID, identityID: linked, learning: false
+                name, utteranceID: id, meetingID: meetingID, identityID: linked,
+                learning: false, displaced: { displaced.insert($0) }
             )
         }
-        guard let linked, let found = repository.findMeeting(id: meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID) else { return }
+        let settings = settingsProvider()
+        for previous in displaced where previous != linked {
+            try await rederiveConfirmedSpeech(
+                store: found.store, metadata: found.metadata,
+                speakers: try found.store.readSpeakerMap(),
+                identityID: previous, settings: settings
+            )
+        }
+        guard let linked else { return }
         try await accumulateConfirmedSpeech(
             store: found.store, metadata: found.metadata,
             speakers: try found.store.readSpeakerMap(),
@@ -1600,12 +1636,23 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: MeetingMetadata, speakers: SpeakerMap,
         identityID: IdentityID, settings: AppSettings
     ) async throws {
+        // Gated, like every other write this setting governs. Deleting without
+        // it destroyed confirmed speech that the rebuild below was then
+        // forbidden to restore, which is the defect two earlier rounds hit at
+        // the other call sites.
+        guard settings.processing.speakers.learnFromCorrections else { return }
         guard let service = backends.speakers else { return }
         let speakerStore = await service.speakerStore
-        for stale in try await speakerStore.removeUtteranceEnrolments(
+        let stale = try await speakerStore.removeUtteranceEnrolments(
             meetingID: metadata.id, of: identityID
-        ) {
-            try await speakerStore.recomputeProfiles(for: stale, now: clock.now)
+        )
+        // Nothing was built from these lines, so nothing is contaminated and
+        // there is nothing to rebuild. Accumulating anyway would mint a fresh
+        // same-meeting vector for somebody who has just lost a line, and evict a
+        // genuinely different recording to make room for it.
+        guard !stale.isEmpty else { return }
+        for identity in stale {
+            try await speakerStore.recomputeProfiles(for: identity, now: clock.now)
         }
         try await accumulateConfirmedSpeech(
             store: store, metadata: metadata, speakers: speakers,

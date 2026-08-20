@@ -705,6 +705,48 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("correcting a second person keeps the first person's voice") { expect in
+                // Two people can each hold a legitimate enrolment from one
+                // meeting. Removing everyone else's on each correction meant a
+                // meeting could only ever keep the last-corrected person's.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let alice = try await store.createPerson(name: "Alice")
+                let bob = try await store.createPerson(name: "Bob")
+                for person in [alice, bob] {
+                    _ = try await store.enrol(VoiceEnrollmentCandidate(
+                        identityID: person.id,
+                        vector: SpeakerIdentityTests.vector(seed: person.id.rawValue == alice.id.rawValue ? 91 : 92),
+                        model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 1,
+                        source: .humanConfirmedUtterances, meetingID: "m1"
+                    ))
+                }
+                for person in [alice, bob] {
+                    expect.equal(
+                        try await store.profileStatus(
+                            of: person.id, model: .fluidAudioOffline
+                        ).sampleCount,
+                        1
+                    )
+                }
+
+                // Re-deriving one of them touches only their own rows.
+                let removed = try await store.removeUtteranceEnrolments(
+                    meetingID: "m1", of: alice.id
+                )
+                expect.equal(removed.map(\.rawValue), [alice.id.rawValue])
+                expect.equal(
+                    try await store.profileStatus(
+                        of: bob.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "the other person's enrolment from the same meeting is untouched"
+                )
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

@@ -1324,10 +1324,19 @@ public actor ProcessingPipeline {
             var speakers = try found.store.readSpeakerMap()
             // Clearing takes the line away from whoever held it just as naming
             // somebody else does, and their enrolment was built from a set that
-            // included it. The cluster-level control retracts; this one used to
-            // leave the vector behind.
-            let cleared = speakers.assignment(for: utterance)
-                .flatMap { $0.origin == .human ? $0.identityID : nil }
+            // included it. Only when it actually moves, though: the menu offers
+            // this on every line, and reading the rendered assignment reported
+            // the cluster's owner as displaced by a click on a line that has no
+            // correction, which changes nothing and destroyed their enrolment.
+            let override = speakers.override(for: utterance)?.assignment
+            let remaining = speakers.entries[utterance.speakerKey]
+            let cleared: IdentityID? = {
+                guard let override, override.origin == .human,
+                      let identity = override.identityID,
+                      identity != remaining?.identityID
+                else { return nil }
+                return identity
+            }()
             speakers.clearOverride(for: utterance)
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
@@ -1636,11 +1645,12 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: MeetingMetadata, speakers: SpeakerMap,
         identityID: IdentityID, settings: AppSettings
     ) async throws {
-        // Gated, like every other write this setting governs. Deleting without
-        // it destroyed confirmed speech that the rebuild below was then
-        // forbidden to restore, which is the defect two earlier rounds hit at
-        // the other call sites.
-        guard settings.processing.speakers.learnFromCorrections else { return }
+        // Ungated, like the cluster path beside it. The user has said this audio
+        // is not theirs, and refusing to remove it because learning is switched
+        // off leaves them auto-named from somebody else's voice forever. The
+        // rebuild below carries the gate already, inside
+        // accumulateConfirmedSpeech, so with the setting off the vector goes and
+        // nothing replaces it, which is what the setting asks for.
         guard let service = backends.speakers else { return }
         let speakerStore = await service.speakerStore
         let stale = try await speakerStore.removeUtteranceEnrolments(

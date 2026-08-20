@@ -747,6 +747,58 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("clearing a line that was never corrected changes nothing") { expect in
+                // The menu offers "use this speaker's name" on every line. On a
+                // line with no correction it is a no-op, and reading the
+                // rendered assignment reported the cluster's owner as having
+                // lost the line, which deleted their voice for the meeting.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let alice = try await store.createPerson(name: "Alice")
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: alice.id, vector: SpeakerIdentityTests.vector(seed: 95),
+                    model: .fluidAudioOffline, speechSeconds: 90, qualityScore: 1,
+                    source: .humanConfirmedUtterances, meetingID: meeting.metadata.id
+                ))
+
+                let key = "remote-001_speaker_00"
+                var map = SpeakerMap()
+                map.assign("Alice", to: key, identityID: alice.id)
+                try meeting.store.writeSpeakerMap(map)
+
+                let line = Utterance(
+                    id: "u1", start: 0, end: 4, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: key, text: "hello", chunkID: "c", model: "m"
+                )
+                try meeting.store.writeCanonicalTranscript(
+                    CanonicalTranscript(generatedAt: Date(), utterances: [line])
+                )
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                _ = try await pipeline.applyUtteranceSpeaker(
+                    "", utteranceID: "u1", meetingID: meeting.metadata.id
+                )
+
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "a click that moves no line must not cost a voice profile"
+                )
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

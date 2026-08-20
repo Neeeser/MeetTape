@@ -900,6 +900,75 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("switching backend and retrying does not transcribe the track twice") { expect in
+                // A cloud run failed after writing its chunks. The user switches
+                // transcription to Local and retries, which resumes at this
+                // stage. The two paths namespace their chunk identifiers
+                // differently, so the resume guards missed each other and both
+                // sets landed on the same track: the meeting was assembled
+                // twice, once in each model's phrasing.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                try meeting.store.writeRawTranscript(RawTranscript(chunks: [
+                    RawTranscriptChunk(
+                        id: "remote_0000", track: .remote, timelineOffset: 0,
+                        durationSeconds: 6, model: "gpt-cloud-transcribe",
+                        responseFormat: "json",
+                        segments: [
+                            RawTranscriptSegment(
+                                start: 0, end: 5, text: "the cloud already said this",
+                                speaker: nil
+                            ),
+                        ],
+                        purpose: .words
+                    ),
+                ]))
+
+                let settings: AppSettings = {
+                    var value = AppSettings()
+                    value.processing = ProcessingSettings(
+                        transcription: .local, diarization: .local
+                    )
+                    value.enrichment = EnrichmentSettings(
+                        generateTitle: false, generateDescription: false, generateNotes: false,
+                        generateSummary: false, suggestSpeakers: false
+                    )
+                    return value
+                }()
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "and whisper says it differently",
+                            speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " and")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil, settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let remote = try meeting.store.readRawTranscript()
+                    .chunks(track: .remote, purpose: .words)
+                expect.equal(
+                    remote.map(\.model), ["gpt-cloud-transcribe"],
+                    "the words already on disk stand; a second backend does not add its own"
+                )
+                // The microphone track had no cloud words, so it is transcribed
+                // locally as normal. The far end is what must not be doubled.
+                let farEnd = (try meeting.store.readCanonicalTranscript()?.utterances ?? [])
+                    .filter { $0.track == .remote }.map(\.text).joined(separator: " ")
+                expect.isTrue(farEnd.contains("the cloud already said this"))
+                expect.isFalse(
+                    farEnd.contains("whisper says it differently"),
+                    "so the far end is not assembled twice in two models' phrasing"
+                )
+            },
+
             test("re-analysing a cloud-diarized meeting changes who the lines belong to") { expect in
                 // A backend that transcribes and diarizes in one request writes
                 // its labels into the words, so the assembler kept them and the

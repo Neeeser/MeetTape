@@ -358,9 +358,25 @@ public actor ProcessingPipeline {
 
         if transcriber.isLocal { try await prepareLocalModels(metadata: metadata) }
         let timeline = try store.readTimeline()
+        let existing = try store.readRawTranscript()
         for track in tracks {
             let segments = timeline.segments(track: track)
             guard !segments.isEmpty else { continue }
+            // One track's words come from one backend. A failed cloud run that
+            // the user retried after switching to Local resumed at this stage,
+            // and the resume guards match on chunk identifier, which the two
+            // paths namespace differently: both sets landed on the same track as
+            // `.words` and the meeting was assembled twice, once in each
+            // model's phrasing. Near-duplicate merging only catches pairs that
+            // group turns the same way, which two different decoders do not.
+            let foreign = existing.chunks(track: track, purpose: .words)
+                .contains { $0.model != transcriber.identifier }
+            if foreign {
+                Log.processing.notice(
+                    "track \(track.rawValue, privacy: .public) already transcribed by another backend, keeping those words"
+                )
+                continue
+            }
             if transcriber.limits.requiresChunking {
                 try await runChunks(
                     store: store, metadata: &metadata, track: track, segments: segments,

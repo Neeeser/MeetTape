@@ -706,10 +706,15 @@ public actor ProcessingPipeline {
         }
         guard !clusters.isEmpty else { return }
 
-        // Expected participants are a soft prior. The gallery is searched
-        // globally, so an unexpected guest is left Unknown rather than forced
-        // onto whoever happened to be invited.
-        let expected = Set(metadata.participants.compactMap(\.identityID))
+        // Expected participants are a soft prior, and only a person or a
+        // calendar may state one. A name the recognizer itself wrote back would
+        // otherwise relax the margin on the next pass for the very identity it
+        // guessed, which is the recognizer voting for itself.
+        let expected = Set(
+            metadata.participants
+                .filter { $0.origin == .human || $0.origin == .calendar }
+                .compactMap(\.identityID)
+        )
         let resolved = try await service.resolve(
             meetingID: metadata.id, clusters: clusters, expectedParticipants: expected,
             settings: recognition, now: clock.now
@@ -741,9 +746,9 @@ public actor ProcessingPipeline {
                 for: result.clusterID
             )
             if identity.isNamed,
-               !metadata.participants.contains(where: { $0.identityID == identity.id }) {
+               !metadata.participants.contains(where: { $0.displayName == identity.resolvedName }) {
                 metadata.participants.append(Participant(
-                    displayName: identity.resolvedName, origin: .ai, identityID: identity.id
+                    displayName: identity.resolvedName, origin: .ai
                 ))
             }
         }
@@ -896,7 +901,10 @@ public actor ProcessingPipeline {
                     displayName: suggestion.name,
                     origin: .ai,
                     confidence: suggestion.confidence,
-                    evidence: suggestion.evidence
+                    evidence: suggestion.evidence,
+                    provenance: SpeakerProvenance(
+                        source: .ai, score: suggestion.confidence, band: .medium
+                    )
                 ),
                 for: suggestion.label
             )
@@ -1030,9 +1038,14 @@ public actor ProcessingPipeline {
         }
         let raw = try found.store.readRawTranscript()
         guard !raw.chunks.isEmpty else { return }
+        // The diarization has to come with the words. Without it a locally
+        // processed meeting re-assembles with every speaker collapsed into one
+        // cluster, and every name in the speaker map stops matching.
+        let diarization = try found.store.readRawDiarization()
         let assembler = TranscriptAssembler()
         let transcript = assembler.assemble(
             raw: raw,
+            diarization: diarization,
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )

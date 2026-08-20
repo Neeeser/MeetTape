@@ -86,14 +86,21 @@ public actor SpeakerRecognitionService {
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
     ) async throws -> [ResolvedCluster] {
-        var profiles = try await store.searchableProfiles(model: model)
+        // Voices this meeting itself created are not candidates for it. A
+        // cluster would otherwise score 1.0 against the profile seeded from its
+        // own vector on an earlier pass and be reported as heard before, and a
+        // sibling cluster would link to it within the one meeting it has ever
+        // been heard in.
+        var profiles = try await store.searchableProfiles(
+            model: model, excludingSeededIn: meetingID
+        )
         if !settings.recognizeKnownVoices { profiles.removeAll { $0.identity.kind == .person } }
         if !settings.rememberRecurringVoices { profiles.removeAll { $0.identity.kind == .anonymous } }
 
         var results: [ResolvedCluster] = []
         for cluster in clusters {
             let resolved = try await resolveOne(
-                meetingID: meetingID, cluster: cluster, profiles: &profiles,
+                meetingID: meetingID, cluster: cluster, profiles: profiles,
                 expectedParticipants: expectedParticipants, settings: settings,
                 model: model, now: now
             )
@@ -105,7 +112,7 @@ public actor SpeakerRecognitionService {
     private func resolveOne(
         meetingID: String,
         cluster: SpeakerClusterInput,
-        profiles: inout [SpeakerProfile],
+        profiles: [SpeakerProfile],
         expectedParticipants: Set<IdentityID>,
         settings: SpeakerRecognitionSettings,
         model: EmbeddingModelIdentifier,
@@ -150,6 +157,16 @@ public actor SpeakerRecognitionService {
             // this meeting and leaves nothing behind.
             if settings.rememberRecurringVoices, !probe.isEmpty,
                policy.qualifiesForAnonymousProfile(speechSeconds: cluster.speechSeconds) {
+                // This cluster may already have made a candidate on an earlier
+                // pass over the same meeting. Reuse it: resolving twice must
+                // remember one voice, not two.
+                if let existing = try await existingCandidate(
+                    meetingID: meetingID, clusterID: cluster.clusterID
+                ) {
+                    identity = existing
+                    created = true
+                    break
+                }
                 let fresh = try await store.createAnonymous(state: .ephemeral, now: now)
                 _ = try await store.enrol(
                     VoiceEnrollmentCandidate(
@@ -166,10 +183,6 @@ public actor SpeakerRecognitionService {
                 )
                 identity = fresh
                 created = true
-                if let refreshed = try await store.searchableProfiles(model: model)
-                    .first(where: { $0.identity.id == fresh.id }) {
-                    profiles.append(refreshed)
-                }
             }
         }
 
@@ -203,6 +216,20 @@ public actor SpeakerRecognitionService {
             createdIdentity: created,
             meetingCount: heardIn
         )
+    }
+
+    /// The unnamed candidate this cluster created on an earlier pass, if it is
+    /// still an unnamed candidate.
+    private func existingCandidate(
+        meetingID: String, clusterID: String
+    ) async throws -> Identity? {
+        let occurrences = try await store.occurrences(meetingID: meetingID)
+        guard let occurrence = occurrences.first(where: { $0.clusterID == clusterID }),
+              let identityID = occurrence.resolvedIdentityID,
+              let identity = try await store.current(identityID),
+              identity.kind == .anonymous
+        else { return nil }
+        return identity
     }
 
     // MARK: - human confirmation

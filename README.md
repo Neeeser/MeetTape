@@ -2,9 +2,14 @@
 
 MeetTape is a macOS menu-bar application that records meetings automatically. It
 detects Slack Huddles and Google Meet and Zoom calls in the browser, records the
-microphone and the meeting audio as two separate streams, transcribes and
-diarizes them through the OpenAI API, and writes the results to ordinary files on
+microphone and the meeting audio as two separate streams, transcribes them and
+works out who spoke when on this Mac, and writes the results to ordinary files on
 disk.
+
+Transcription and speaker identification run on device by default and need no API
+key. MeetTape also remembers voices: a person you name once is recognized in
+later meetings, and a voice that recurs without a name is remembered as one until
+you name it. Voice profiles never leave the machine.
 
 It does not join meetings as a participant, does not require a calendar entry,
 does not record video, and does not store anything in a proprietary database.
@@ -25,8 +30,10 @@ confirmed.
 | Manual recording | Started from the menu bar and unaffected by provider state |
 | In-person meeting | Microphone only, diarized |
 | Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation |
-| Transcription and diarization | OpenAI, chunked for long meetings |
-| Speaker names | Suggested by the model and editable by hand |
+| Transcription | Whisper Large-v3-Turbo on device, or OpenAI |
+| Speaker separation | FluidAudio on device, or OpenAI |
+| Speaker recognition | Local voice profiles, named people and recurring unnamed voices |
+| Speaker names | Editable per speaker and per transcript line |
 | Crash recovery | Interrupted recordings are adopted on the next launch |
 
 FaceTime detection and Safari support are not implemented. The extension builds
@@ -34,6 +41,67 @@ for Chrome, but its native messaging manifest is not installed, because that
 requires the ID of a packed extension, so the sensor does not run on Chrome at
 all today. Chrome meetings are detected through window titles and microphone
 state, the same path Firefox uses without the extension.
+
+## Processing
+
+```
+meeting ends
+      ↓
+transcription        Whisper Large-v3-Turbo, on this Mac
+      ↓
+speaker separation   FluidAudio offline diarizer, on this Mac
+      ↓
+speaker recognition  matched against voice profiles held locally
+      ↓
+editable transcript  correct a whole speaker or a single line
+      ↓
+enrichment           optional: titles, summaries and notes from a cloud model
+```
+
+Nothing before the last step needs an API key or a network connection. The first
+run downloads about 650 MB of speech models into MeetTape's Application Support
+folder; recording works while that happens and meetings queue until it finishes.
+
+Transcription and speaker separation are chosen independently in Settings, and
+neither is tied to enrichment. Selecting OpenAI for either one does not move
+voice profiles off the machine: a cloud diarizer returns speaker labels and no
+vectors, so MeetTape extracts them locally over the intervals it reported.
+
+On a 65-minute meeting the whole local pipeline took 4.5 minutes on an M2 Pro,
+peaking under 1 GB and under two of ten cores, with no thermal throttling.
+Capture always outranks processing: a job waits between stages while a recording
+is live, and one meeting is processed at a time.
+
+Local transcription matches `whisper-1` on words and is less consistent about
+punctuation and capitalisation between passages, because the decoder picks a
+style per 30-second window. That is a rendering problem and the optional
+enrichment step can fix it; the word timings underneath, which speaker
+attribution depends on, are what the local configuration protects.
+
+## Speaker recognition
+
+Each speaker MeetTape separates out is matched against the voices it holds. A
+match needs three things at once: a similarity of at least 0.70, a clear margin
+over the next-best candidate, and at least 45 seconds of that person's speech in
+the meeting. The margin is not optional. Over a gallery of 326 verified-distinct
+speakers the highest wrong match scored 0.957, above the true speaker's own
+0.951, so a similarity threshold on its own names the wrong person.
+
+Confidence is shown as High, Likely or Unknown, never as a percentage. The number
+behind it is a cosine similarity whose genuine and impostor ranges overlap at the
+top, and rendering 0.92 as "92% sure" would imply a calibration that does not
+exist.
+
+A voice with at least 45 seconds of clean speech is remembered even when nobody
+knows whose it is. If it turns up in a later meeting it becomes a recurring
+identity, and naming it later updates every meeting it appeared in without
+re-transcribing anything.
+
+Only two things ever add to a voice profile: the microphone track of a remote
+call, where the speaker is the local user by construction, and a speaker name a
+person confirmed. A recognition result, at any confidence, is a read. That rule
+is what stops one wrong automatic match from compounding into a permanently wrong
+profile.
 
 ## How capture works
 
@@ -172,7 +240,12 @@ has no access.
 
 ## OpenAI configuration
 
-The OpenAI tab in Settings accepts an API key, stores it in the login keychain,
+Optional. With no key at all MeetTape records, transcribes, separates speakers
+and recognizes voices; what a key adds is titles, descriptions, summaries, notes
+and textual speaker suggestions, plus the option of running transcription or
+speaker separation in the cloud instead of locally.
+
+The Cloud tab in Settings accepts an API key, stores it in the login keychain,
 and provides a Test Connection button that fetches a single model description to
 confirm both the key and access to that model.
 
@@ -204,8 +277,9 @@ which can be changed in Settings.
 │   └── manifest.jsonl        append-only record of every capture event
 ├── api/                      API responses as received
 ├── metadata.json             title, participants, calendar link, processing state
-├── transcript.raw.json       diarization output as returned by the model
-├── speakers.map.json         mapping from raw labels to names, editable by hand
+├── transcript.raw.json       transcription output as returned, with word timings
+├── diarization.raw.json      who spoke when, as the diarizer decided it
+├── speakers.map.json         speaker names and per-line corrections
 ├── transcript.json           canonical transcript on a single timeline
 ├── transcript.md             rendered transcript for reading
 ├── notes.md                  user notes, which no processing step modifies
@@ -214,19 +288,34 @@ which can be changed in Settings.
 ```
 
 The manifest is the authoritative timeline; audio container headers are not
-trusted. The source segments, the manifest lines, the raw API responses and any
-imported original file are never modified after they are written. The Markdown
-files, `summary.md` and `mixed.caf` are derived from those inputs and can be
-deleted safely.
+trusted. The source segments, the manifest lines, the raw transcription and
+diarization output and any imported original file are never modified after they
+are written. The Markdown files, `summary.md` and `mixed.caf` are derived from
+those inputs and can be deleted safely.
 
-Renaming a speaker updates `speakers.map.json` and re-renders the transcript. It
-does not re-transcribe the audio and does not modify the raw diarization output.
+Renaming a speaker updates `speakers.map.json` and re-renders the transcript, and
+so does correcting a single line. Neither re-transcribes the audio nor modifies
+the raw diarization. Re-analyzing speakers writes a new analysis alongside the
+old one rather than replacing it.
+
+Voice profiles are deliberately absent from this list. They live in
+`~/Library/Application Support/MeetTape/Speakers/voices.sqlite` and are never
+written into a meeting folder or an export.
 
 ## Privacy
 
-Audio is uploaded to the OpenAI API for transcription and diarization, which is
-how the transcripts are produced. It is not sent anywhere else. There is no
-MeetTape account, no telemetry and no analytics.
+By default no audio leaves the machine. Transcription, speaker separation and
+voice recognition all run locally. Audio is uploaded only if you select OpenAI
+for transcription or speaker separation in Settings; transcript text is uploaded
+only if you switch on titles, summaries or notes. There is no MeetTape account,
+no telemetry and no analytics.
+
+Voice profiles are 256-number vectors derived from speech. They are not audio and
+cannot be turned back into it, but they are a stable identifier for a specific
+person, so they are treated as biometric data: stored under Application Support,
+excluded from every meeting folder and every export, and never uploaded. Settings
+offers "Forget learned voice" separately from deleting a person, so a name can
+stay on past transcripts while the biometric goes away.
 
 Logs contain operational information only: identifiers, counts, durations and
 health states. Meeting titles, transcripts, notes, participant names and meeting

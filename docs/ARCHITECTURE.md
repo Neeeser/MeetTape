@@ -12,10 +12,17 @@ MeetTapeApp            LSUIElement executable; owns the application delegate
       └── MeetTapeServices     runtime wiring, processing pipeline
            ├── MeetTapeDetection    accessibility, window titles, sensor socket
            ├── MeetTapeIntegrations OpenAI, Keychain, EventKit, notifications
+           ├── MeetTapeLocalAI      WhisperKit, FluidAudio, model management
+           ├── MeetTapeSpeakers     SQLite voice identity store
            ├── MeetTapeAudio        AVAudioEngine, process taps, files
            └── MeetTapeCore         pure logic, Foundation only
 meettape-nativehost    compiled relay between the browser and the application
+meettape-eval          developer tool; not in the bundle
 ```
+
+`MeetTapeSpeakers` does not depend on `MeetTapeLocalAI`. The store holds vectors
+and knows nothing about what produced them, which is what lets a cloud diarizer's
+labels be embedded locally and resolved against the same memory.
 
 `MeetTapeCore` imports only Foundation. Every decision that can be made without
 I/O is made there, which keeps the interesting failure modes reproducible in unit
@@ -160,6 +167,22 @@ recording → finalizing → audio_safe → transcribing → diarizing
                                           ↘ failed (resumable at the failed stage)
 ```
 
+Each of the first two work-doing stages picks a backend from settings, and the
+two choices are independent. A backend declares whether it needs its audio
+chunked; the cloud endpoints do, because they reject audio past 1400 seconds and
+bodies past 25 MiB, and the local ones do not. A backend also declares whether it
+returns the words as well as the speakers: the cloud diarizer does both in one
+request, so the diarized track needs no separate transcription, while the local
+diarizer decides speakers only.
+
+One meeting is processed at a time and a job waits between stages while a
+recording is live. Transcription is 92% of the work and both local models target
+the Neural Engine, so a second concurrent meeting takes time from the first
+rather than adding any. The gate reads the recording state from a lock-protected
+box rather than hopping to the main actor, which is the same pattern the settings
+snapshot uses and for the same reason: `MainActor.assumeIsolated` from an actor's
+executor is a runtime trap.
+
 `audio_safe` is the boundary between capture and network work. Nothing is sent to
 OpenAI before it, and every stage after it can be retried without risking the
 recording. Each transition is written to `metadata.json` before the next stage
@@ -176,6 +199,134 @@ position inside one track's audio. The track's lead-in, meaning the delay betwee
 the first frame of the earliest track and the first frame of this one, is added
 when the chunk is recorded. The mixdown pads the later track with the same amount
 of silence, so `mixed.caf` and the transcript agree.
+
+### On-device processing
+
+```
+transcription   WhisperKit, openai_whisper-large-v3-v20240930_turbo_632MB
+                skipSpecialTokens = true, wordTimestamps = true
+                no prompt conditioning, no VAD chunking
+diarization     FluidAudio OfflineDiarizerManager, the offline VBx pipeline
+                clustering.warmStartFa = 0.20
+embeddings      the same pipeline's 256-d chunk embeddings, free with diarization
+```
+
+Four of those are load-bearing rather than preferences.
+
+`skipSpecialTokens` defaults to false, which leaks `<|startoftranscript|><|en|>`
+into the transcript text.
+
+Prompt conditioning is absent because it improves punctuation and destroys word
+timings: on a 60-second clip, 198 distinct word starts became 153, with 43 words
+reporting zero duration and 16 collapsed onto a single timestamp. Word timings
+are what speaker attribution consumes, and punctuation is recoverable later while
+timings are not.
+
+VAD chunking is absent because it was 15% faster over 65 minutes and dropped 231
+of 9278 words, and produced a segment whose start went backwards. WhisperKit's
+own long-file handling held timestamps monotonic over the same file.
+
+`warmStartFa` is the VBx acoustic scaling and the library ships 0.07, which
+under-counts badly above eight speakers. Over 32 recordings of 2 to 21 speakers
+the default found 8 where there were 17 and left 35.4% of reference speakers
+without a cluster. At 0.20: DER 6.22% to 4.06%, JER 51.3% to 30.7%, mean
+speaker-count error at ten or more speakers 6.25 to 1.38, word attribution 92.8%
+to 95.5%, and 11.9% of speakers lost. The value is tuned on VoxConverse, which is
+broadcast panels rather than conference calls, so it is a measured default and
+not a solved constant. It lives in `LocalDiarizationTuning`, and a test asserts
+it.
+
+`clustering.numSpeakers` is never set automatically, from any source. The tuned
+automatic configuration beat the exact true speaker count on word attribution
+(95.5% against 94.4%), on merges a user has to perform (0.8 against 2.2 per
+recording) and on speakers recovered (11.9% lost against 21.1%). A participant
+list and a calendar attendee count are worse than not asking, and both are
+usually wrong in the expensive direction: an invited-but-silent attendee inflates
+the count, and under-counting cannot be undone with a merge. The field is reached
+only by the manual "Re-analyze Speakers" control, where the number is the user's
+and is under their review.
+
+Models install under `~/Library/Application Support/MeetTape/Models`. WhisperKit
+defaults to `~/Documents/huggingface`, which puts 624 MB where Finder shows it
+and iCloud Drive syncs it, so `downloadBase` is set explicitly. Loading also
+passes `modelFolder` explicitly on every load, because WhisperKit with
+`download: false` does not resolve its own download cache and fails with "Model
+folder is not set"; without it an installed, offline machine is a broken one.
+
+### Attribution
+
+The transcriber produces words with timings and the diarizer produces intervals.
+Each word goes to the interval it overlaps most, then to the nearest interval
+within half a second, then nowhere. Measured over a 15-minute call: 96.3% landed
+by overlap, 1.2% by the fallback, 2.5% went unattributed and 0.1% straddled a
+boundary. The unattributed remainder is backchannels spoken over another speaker,
+which the diarizer drops and the transcriber keeps, so they stay with the words
+around them rather than being dropped or invented into a speaker.
+
+A track whose transcript segments already name a speaker keeps them. That is the
+cloud diarizer's own output, and re-deriving it from intervals would change a
+working result for nothing.
+
+### Speaker identity
+
+Six concepts, four layers, one identifier space.
+
+```
+RawClusterAssignment    diarization.raw.json, immutable
+ClusterIdentityMapping  speakers.map.json entries, mutable
+UtteranceIdentityOverride  speakers.map.json overrides, mutable
+RenderedIdentity        derived at read time, never stored
+```
+
+Named people and recurring unnamed voices share one identifier space, so naming a
+voice later is a single row update: every occurrence, cluster mapping and
+utterance override already points at the right identifier and none of them has to
+be rewritten. A merge sets a redirect rather than deleting anything, and reads
+follow it, so undoing a merge is clearing one column.
+
+A line-level correction is anchored to a moment on the timeline rather than to an
+utterance identifier, because re-assembling the transcript or re-analysing
+speakers moves where turns begin and end. The moment the user corrected stays
+inside whichever line covers it.
+
+Correction precedence, enforced when an assignment is written rather than when it
+is read:
+
+```
+utterance-level human override
+  > cluster-level human mapping
+  > mic-track deterministic identity
+  > voice recognition at High
+  > anonymous recognition at "seen before"
+  > textual suggestion
+  > Unknown
+```
+
+Recognition needs score, margin and duration together: at least 0.70 similarity,
+at least 0.10 of margin over the runner-up, and at least 45 seconds of speech.
+Over 326 verified-distinct speakers that produced zero wrong automatic names at
+97.9% recall, where a score rule alone would have named the wrong person: the
+worst impostor there scored 0.957 against the true speaker's own 0.951. Linking a
+recurring unnamed voice uses 0.75 rather than 0.70, because the false-link rate
+for a genuinely new voice grows with pool size where named matching does not.
+
+Only the microphone track of a remote call and an explicit human confirmation may
+write a vector into a profile. A recognition result, at any confidence, is a
+read. Without that rule a wrong automatic match widens the profile it matched
+against and the error compounds.
+
+Vectors live in `~/Library/Application Support/MeetTape/Speakers/voices.sqlite`,
+as Float32 blobs with no vector index: a full scan of 100,000 embeddings measured
+1.6 ms and the realistic store for 100 named people plus 500 recurring voices is
+3.1 MB. Scoring is against a derived centroid only. Taking a maximum over
+individual exemplars lifted genuine scores from 0.721 to 0.737 and impostor
+scores from 0.464 to 0.543, costing a quarter of the margin. The raw vectors are
+kept for re-deriving the centroid and for a future model migration, and are not
+used at query time.
+
+Nothing biometric is written into a meeting folder. `diarization.raw.json`
+carries intervals and speech durations and deliberately no vectors, because the
+meeting folder is what a user copies, syncs and shares.
 
 ### Speakers
 

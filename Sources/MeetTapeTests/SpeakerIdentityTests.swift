@@ -478,10 +478,146 @@ enum SpeakerIdentityTests {
                 let heardTwice = try await store.createAnonymous(state: .ephemeral, now: old)
                 _ = try await store.promoteToPersistent(heardTwice.id, now: old)
 
+                // Seeded the way the recognizer actually creates one. A
+                // candidate with no vector at all is not a state production can
+                // produce, and testing only that shape hid an inverted
+                // predicate that made expiry a no-op forever.
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: heardOnce.id, vector: vector(seed: 61),
+                    model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 0.9,
+                    source: .anonymousSeed, meetingID: "m1"
+                ), now: old)
+
                 let removed = try await store.expireEphemeralIdentities(now: Date())
                 expect.equal(removed, 1)
                 expect.isNil(try await store.current(heardOnce.id))
                 expect.equal(try await store.current(heardTwice.id)?.id, heardTwice.id)
+            },
+
+            test("a candidate a person confirmed is never expired") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let old = Date(timeIntervalSince1970: 1_600_000_000)
+                let confirmed = try await store.createAnonymous(state: .ephemeral, now: old)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: confirmed.id, vector: vector(seed: 62),
+                    model: .fluidAudioOffline, speechSeconds: 90, qualityScore: 1,
+                    source: .humanConfirmedCluster, meetingID: "m1"
+                ), now: old)
+
+                expect.equal(try await store.expireEphemeralIdentities(now: Date()), 0)
+                expect.equal(try await store.current(confirmed.id)?.id, confirmed.id)
+            },
+
+            test("an automatic pass never overwrites a speaker a person confirmed") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+
+                try await store.recordOccurrence(
+                    meetingID: "m1", clusterID: "run-001_speaker_02", track: .remote,
+                    speechSeconds: 120, embedding: vector(seed: 63), model: .fluidAudioOffline,
+                    resolution: nil, identityID: chris.id, source: .human,
+                    humanVerified: true, wasExpectedParticipant: false
+                )
+                // The same cluster re-resolved automatically, concluding nothing.
+                try await store.recordOccurrence(
+                    meetingID: "m1", clusterID: "run-001_speaker_02", track: .remote,
+                    speechSeconds: 120, embedding: vector(seed: 63), model: .fluidAudioOffline,
+                    resolution: nil, identityID: nil, source: .ai,
+                    humanVerified: false, wasExpectedParticipant: false
+                )
+
+                let occurrence = try expect.unwrap(
+                    try await store.occurrences(meetingID: "m1").first
+                )
+                expect.equal(
+                    occurrence.resolvedIdentityID, chris.id,
+                    "a later automatic pass must not clear a person's answer"
+                )
+                expect.equal(occurrence.source, .human)
+                expect.isTrue(occurrence.humanVerified)
+                expect.equal(try await store.meetingCount(for: chris.id), 1)
+            },
+
+            test("deleting a person takes the whole merged family's vectors") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let voice = try await store.createAnonymous(state: .persistent)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: voice.id, vector: vector(seed: 64), model: .fluidAudioOffline,
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m1"
+                ))
+                let chris = try await store.createPerson(name: "Chris")
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: chris.id, vector: vector(seed: 64), model: .fluidAudioOffline,
+                    speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
+                    meetingID: "m2"
+                ))
+                try await store.merge(voice.id, into: chris.id)
+
+                try await store.delete(chris.id)
+                expect.isNil(try await store.current(chris.id))
+                expect.isNil(
+                    try await store.current(voice.id),
+                    "the merged identity holds the same person's voice and goes with them"
+                )
+                expect.isTrue(
+                    try await store.searchableProfiles(model: .fluidAudioOffline).isEmpty,
+                    "deleting a person must not leave their voice matchable"
+                )
+                expect.equal(try await store.statistics().embeddings, 0)
+            },
+
+            test("forgetting a voice covers what was merged into it") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let voice = try await store.createAnonymous(state: .persistent)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: voice.id, vector: vector(seed: 65), model: .fluidAudioOffline,
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m1"
+                ))
+                let chris = try await store.createPerson(name: "Chris")
+                try await store.merge(voice.id, into: chris.id)
+
+                try await store.forgetVoice(of: chris.id)
+                try await store.unmerge(voice.id)
+                expect.isTrue(
+                    try await store.searchableProfiles(model: .fluidAudioOffline).isEmpty,
+                    "separating a merge must not resurrect a forgotten voice"
+                )
+                expect.equal(try await store.current(chris.id)?.resolvedName, "Chris")
+            },
+
+            test("merging an unnamed voice into a person keeps the profile human-verified") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: chris.id, vector: vector(seed: 66), model: .fluidAudioOffline,
+                    speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
+                    meetingID: "m1"
+                ))
+                let voice = try await store.createAnonymous(state: .persistent)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: voice.id, vector: vector(seed: 900), model: .fluidAudioOffline,
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m2"
+                ))
+
+                try await store.merge(voice.id, into: chris.id)
+                expect.equal(
+                    try await store.profileStatus(of: chris.id, model: .fluidAudioOffline).sampleCount,
+                    1,
+                    "a provisional seed must not reach a named centroid through a merge"
+                )
+                let profile = try expect.unwrap(
+                    try await store.searchableProfiles(model: .fluidAudioOffline)
+                        .first { $0.identity.id == chris.id }
+                )
+                expect.isTrue(
+                    VoiceVector.cosine(profile.centroid, vector(seed: 66)) > 0.99,
+                    "Chris is still scored against his own confirmed voice alone"
+                )
             },
         ])
     }
@@ -528,6 +664,84 @@ enum SpeakerIdentityTests {
                 expect.equal(identity.state, .persistent)
                 expect.equal(identity.anonymousNumber, 1)
                 expect.equal(second.first?.meetingCount, 2)
+            },
+
+            test("resolving the same meeting twice does not invent a voice heard before") { expect in
+                // The second pass would otherwise score the cluster against the
+                // profile seeded from its own vector, match at 1.0, and promote
+                // a voice heard exactly once into a recurring identity.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let cluster = SpeakerClusterInput(
+                    clusterID: "run-001_speaker_00", track: .remote,
+                    speechSeconds: 120, centroid: vector(seed: 51)
+                )
+                _ = try await service.resolve(
+                    meetingID: "m1", clusters: [cluster],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                let again = try await service.resolve(
+                    meetingID: "m1", clusters: [cluster],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.isNil(again.first?.identity, "it has still only ever been heard once")
+                expect.notEqual(again.first?.source, .anonymousVoice)
+                let identities = try await store.identities(kind: .anonymous)
+                expect.equal(identities.count, 1, "and no second candidate was created")
+                expect.equal(
+                    identities.first?.state, .ephemeral,
+                    "nothing promoted it: promotion means a second meeting"
+                )
+            },
+
+            test("two clusters in one meeting are not linked to each other as heard before") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                // The diarizer split one person into two clusters. Merging them
+                // is the user's call; claiming the second was "heard before"
+                // when both are in this one meeting is not.
+                let resolved = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_00", track: .remote,
+                            speechSeconds: 120, centroid: vector(seed: 52)
+                        ),
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_01", track: .remote,
+                            speechSeconds: 120, centroid: vector(seed: 52)
+                        ),
+                    ],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.equal(resolved.count, 2)
+                expect.isTrue(
+                    resolved.allSatisfy { $0.source != .anonymousVoice },
+                    "neither cluster was heard before this meeting"
+                )
+            },
+
+            test("a voice heard in a second meeting is still recognized") { expect in
+                // The guard above must not cost the feature it protects.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let cluster = SpeakerClusterInput(
+                    clusterID: "run-001_speaker_00", track: .remote,
+                    speechSeconds: 120, centroid: vector(seed: 53)
+                )
+                _ = try await service.resolve(
+                    meetingID: "m1", clusters: [cluster],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                let second = try await service.resolve(
+                    meetingID: "m2", clusters: [cluster],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.equal(second.first?.source, .anonymousVoice)
+                expect.equal(second.first?.identity?.state, .persistent)
             },
 
             test("a brief interjection leaves nothing behind") { expect in

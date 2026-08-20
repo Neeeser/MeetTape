@@ -157,6 +157,25 @@ extension LocalModelManager {
         )
     }
 
+    /// Diarizes at a given acoustic scaling, for the developer evaluation tool.
+    ///
+    /// The production path never takes this parameter: `warmStartFa` is a tuned
+    /// constant, not a setting. This exists so the A/B that produced the number
+    /// can be repeated on real meeting audio.
+    public func evaluateDiarization(
+        audio: URL, warmStartFa: Double, speakerCount: Int? = nil
+    ) async throws -> DiarizationOutput {
+        let models = try await loadedDiarizerModels()
+        var config = Self.diarizerConfiguration(speakerCount: speakerCount)
+        config.clustering.warmStartFa = warmStartFa
+        let manager = OfflineDiarizerManager(config: config)
+        manager.initialize(models: models)
+        let result = try await manager.process(audio)
+        var provenance = Self.diarizerProvenance(speakerCount: speakerCount)
+        provenance["warmStartFa"] = String(warmStartFa)
+        return Self.output(from: result, configuration: provenance)
+    }
+
     func hasPreparedDiarization(cacheKey: String) -> Bool {
         preparedDiarization(for: cacheKey) != nil
     }

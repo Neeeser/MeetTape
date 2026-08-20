@@ -259,7 +259,10 @@ extension MeetTapeRuntime {
             rows.append(MeetingSpeakerRow(
                 clusterID: key,
                 displayName: assignment?.displayName ?? SpeakerMap.fallbackName(for: key),
-                band: assignment?.provenance?.band ?? (assignment == nil ? .unknown : .high),
+                // Absent provenance means nothing measured this, so it is not
+                // High. The badge reads a human or microphone-track assignment
+                // from its origin, and everything else falls back honestly.
+                band: assignment?.provenance?.band ?? .unknown,
                 origin: assignment?.origin ?? .ai,
                 identity: identity,
                 speechSeconds: speech[key] ?? 0,

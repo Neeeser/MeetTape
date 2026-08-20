@@ -13,7 +13,11 @@ code.
 cd extension && npm test             # browser sensor logic
 ```
 
-Three properties of the development environment determine how the project is set
+Always go through the scripts. They source `scripts/spm-env.sh`, which repairs
+two Command Line Tools defects and exports the flags a bare `swift build` would
+miss. Sourcing it from zsh fails: it reads `BASH_SOURCE`.
+
+Four properties of the development environment determine how the project is set
 up:
 
 - The development machine has Command Line Tools installed without Xcode, so
@@ -27,9 +31,47 @@ up:
   Observation macro is available, so views still update automatically. Do not
   reintroduce `@State`.
 
-`scripts/spm-env.sh` repairs a stale `PackageDescription.private.swiftinterface`
+- The same installs ship a stub `usr/include/c++/v1` holding around a dozen
+  headers, which shadows the SDK's real 192-header libc++ and breaks every
+  C-family target. FluidAudio has two, so `spm-env.sh` detects the stub and puts
+  the SDK include path back in front through
+  `-Xcxx -I$(xcrun --show-sdk-path)/usr/include/c++/v1`. The flags land in the
+  `MEETTAPE_SWIFT_FLAGS` array, which every caller of `swift build` in
+  `scripts/` forwards. A new build entry point must do the same.
+
+`scripts/spm-env.sh` also repairs a stale `PackageDescription.private.swiftinterface`
 found in some Command Line Tools installs, without which every manifest fails to
-link. It does nothing on a healthy toolchain and is sourced by the other scripts.
+link. It copies both `ManifestAPI` and `PluginAPI`, because the dependency graph
+builds plugins and the plugin manifests fail the same way, and it strips every
+stale private swiftinterface rather than only `PackageDescription`'s, since
+`PackagePlugin` ships one too. It does nothing on a healthy toolchain.
+
+## Local processing
+
+The speech stack is pinned, not resolved: `argmax-oss-swift` exactly 1.1.0 and
+`FluidAudio` exactly 0.15.6, which are the revisions the accuracy, speed and
+threshold numbers were measured on. Moving either one is a re-evaluation, not a
+bump.
+
+| Rule | Reason |
+|---|---|
+| `clustering.warmStartFa = 0.20` | The library ships 0.07, which found 8 speakers where there were 17 and left 35.4% of reference speakers without a cluster. 0.20 improves DER, JER, speaker count, word attribution and speaker recovery at once |
+| Never set `clustering.numSpeakers` automatically | The tuned automatic configuration beat the exact true count on word attribution, on merges required and on speakers recovered. A participant list is worse than not asking |
+| `skipSpecialTokens = true` | The default is false and leaks `<\|startoftranscript\|>` into the transcript text |
+| `wordTimestamps = true`, no prompt conditioning | Prompting improves punctuation and collapses word timings: 198 distinct word starts became 153, 43 with zero duration. Attribution consumes the timings |
+| No VAD chunking | 15% faster over 65 minutes, dropped 231 of 9278 words, and produced a segment whose start went backwards |
+| Models under Application Support, never Documents | WhisperKit defaults to `~/Documents/huggingface`, putting 624 MB where Finder shows it and iCloud syncs it |
+| Pass `modelFolder` explicitly on every load | WhisperKit with `download: false` does not resolve its own cache and fails with "Model folder is not set" |
+| Score, margin and duration together for a name | Over 326 verified-distinct speakers the worst impostor scored 0.957 against the true speaker's own 0.951. Score alone names the wrong person |
+| Score against a derived centroid only | A maximum over exemplars lifted impostor scores far more than genuine ones and cost a quarter of the margin |
+| Only the mic track and a human confirmation may write a profile | A match that widens the profile it matched against turns one wrong answer into a permanent one |
+| No vectors in a meeting folder | The folder is what a user copies, syncs and shares, and an embedding matches the same person across devices, rooms and years |
+| One heavy job at a time, paused while recording | Transcription is 92% of the work and both models target the Neural Engine, so a second meeting takes time from the first rather than adding any |
+
+The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
+decoder settings in `LocalDiarizationTuning` and `LocalTranscriptionTuning`, and
+`LocalConfigurationTests` and `SpeakerIdentityTests` assert them. A change to any
+of these numbers should fail a test before it reaches a user.
 
 ## Capture invariants
 
@@ -74,15 +116,28 @@ against real hardware and what has not.
   here by default.
 - Provider adapters emit evidence. They do not start, stop or own recordings.
   `SessionController` is the only component that decides lifecycle.
+- Transcription and diarization go through `TranscriptionBackend` and
+  `DiarizationBackend` in `MeetTapeCore`. Local and cloud implement the same
+  protocols, chosen independently per meeting from settings, and neither is
+  coupled to enrichment. Speaker memory is local in every configuration.
+- `MeetTapeSpeakers` owns every vector and knows nothing about what produced
+  them. That is what lets a cloud diarizer's labels be embedded locally and
+  resolved against the same store.
 - The coordinators (`MicrophoneRecoveryCoordinator`, `RemoteTapCoordinator`) hold
   the recovery algorithms, and `MeetTapeAudio` supplies AVFoundation and
   CoreAudio implementations behind `MicrophoneEngineController` and
   `ProcessTapController`. Tests drive the real algorithm through fakes instead of
   reimplementing it.
-- Source CAF segments, manifest lines, raw API responses and imported originals
-  are immutable once written. Titles, notes, the speaker map and metadata are
-  mutable. Markdown files, `mixed.caf` and summaries are derived and can be
-  regenerated.
+- Source CAF segments, manifest lines, raw transcription and diarization output
+  and imported originals are immutable once written. Titles, notes, the speaker
+  map and metadata are mutable. Markdown files, `mixed.caf` and summaries are
+  derived and can be regenerated.
+- Speaker corrections are layers above immutable diarization: a cluster mapping
+  and per-line overrides, both in `speakers.map.json`. A line override is
+  anchored to a moment on the timeline rather than to an utterance identifier,
+  because re-assembly and re-analysis move where turns begin and end.
+- Re-analysing speakers appends a diarization run and marks it active. The
+  previous one stays on disk.
 - Nothing before `audio_safe` sends data to OpenAI. Every stage after it is
   retryable and must never delete source audio.
 
@@ -117,6 +172,24 @@ OPENAI_API_KEY=<your key> \
 ```
 
 The fixture is synthesised locally, so only the API requests are live.
+
+The on-device tests are gated the same way and cost nothing but time and disk:
+
+```bash
+MEETTAPE_LOCAL_MODELS=1 \
+MEETTAPE_LIVE_FIXTURE=/tmp/meettape-fixture \
+  ./scripts/test.sh --filter LocalModels
+```
+
+The first run downloads about 650 MB. `meettape-eval` is the developer tool for
+checking the measured numbers again on real audio:
+
+```bash
+swift run meettape-eval asr      --audio meeting.wav
+swift run meettape-eval diarize  --audio meeting.wav --fa 0.07 --fa 0.20
+swift run meettape-eval identity --audio andrew.wav --audio chris.wav
+swift run meettape-eval voices
+```
 Assertions count how many expected terms survive transcription instead of
 requiring exact wording, because synthetic speech transcribes with variation.
 

@@ -351,22 +351,47 @@ public actor SpeakerStore {
     }
 
     /// Removes the identity and everything biometric that belongs to it.
+    ///
+    /// The whole merged family goes, not just the row named. Anything merged
+    /// into this identity holds that same person's voice, and deleting only the
+    /// survivor would clear the redirect and leave the vectors behind as a live
+    /// match candidate: "delete this person" would be followed by MeetTape
+    /// recognizing them again under a number.
     public func delete(_ id: IdentityID) throws {
-        try database.run("DELETE FROM identity WHERE id = ?", [.int64(id.rawValue)])
+        let family = try identityFamily(id)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        try database.transaction {
+            try database.run(
+                "DELETE FROM identity WHERE id IN (\(placeholders))",
+                family.map { SQLValue.int64($0) }
+            )
+        }
     }
 
     /// Deletes the voice and keeps the name.
     ///
     /// Past transcripts still read "Chris", the occurrences still point at the
     /// same identity, and nothing about him can be matched from audio again
-    /// until he is re-enrolled.
+    /// until he is re-enrolled. Covers the merged family for the same reason
+    /// `delete` does: separating a merge afterwards would otherwise rebuild a
+    /// working profile from the vectors that were supposed to be gone.
     public func forgetVoice(of id: IdentityID, now: Date = Date()) throws {
+        let family = try identityFamily(id)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        let bindings = family.map { SQLValue.int64($0) }
         try database.transaction {
-            try database.run("DELETE FROM voice_embedding WHERE identity_id = ?", [.int64(id.rawValue)])
-            try database.run("DELETE FROM pending_enrollment WHERE identity_id = ?", [.int64(id.rawValue)])
-            try database.run("DELETE FROM derived_profile WHERE identity_id = ?", [.int64(id.rawValue)])
             try database.run(
-                "UPDATE identity SET updated_at = ? WHERE id = ?", [.date(now), .int64(id.rawValue)]
+                "DELETE FROM voice_embedding WHERE identity_id IN (\(placeholders))", bindings
+            )
+            try database.run(
+                "DELETE FROM pending_enrollment WHERE identity_id IN (\(placeholders))", bindings
+            )
+            try database.run(
+                "DELETE FROM derived_profile WHERE identity_id IN (\(placeholders))", bindings
+            )
+            try database.run(
+                "UPDATE identity SET updated_at = ? WHERE id IN (\(placeholders))",
+                [.date(now)] + bindings
             )
         }
     }
@@ -553,11 +578,16 @@ public actor SpeakerStore {
     public func recomputeProfiles(for id: IdentityID, now: Date = Date()) throws {
         let family = try identityFamily(id)
         let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        // A named profile only ever holds material a person stood behind.
+        // `enrol` refuses a provisional seed directly, and merging an unnamed
+        // voice into a person must not smuggle one in through the back door.
+        let isPerson = (try loadIdentity(id))?.kind == .person
+        let purity = isPerson ? " AND is_human_verified = 1" : ""
         var byModel: [String: (vectors: [[Float]], dimension: Int, seconds: Double, recordings: Set<String>)] = [:]
         try database.query(
             """
             SELECT model_identifier, embedding, embedding_dim, speech_seconds, source_meeting
-            FROM voice_embedding WHERE identity_id IN (\(placeholders))
+            FROM voice_embedding WHERE identity_id IN (\(placeholders))\(purity)
             """,
             family.map { SQLValue.int64($0) }
         ) { row in
@@ -617,17 +647,38 @@ public actor SpeakerStore {
     /// Merged identities are excluded because their vectors already count
     /// towards the identity they were merged into; including both would let one
     /// person occupy two ranks and eat their own margin.
-    public func searchableProfiles(model: EmbeddingModelIdentifier) throws -> [SpeakerProfile] {
+    ///
+    /// `excludingSeededIn` drops unnamed voices whose every vector came from one
+    /// meeting, when that is the meeting being resolved. Without it a second
+    /// resolution pass scores a cluster against the profile seeded from that
+    /// same cluster, matches itself at 1.0, and reports a voice heard once as
+    /// one heard before.
+    public func searchableProfiles(
+        model: EmbeddingModelIdentifier, excludingSeededIn meetingID: String? = nil
+    ) throws -> [SpeakerProfile] {
         var rows: [(Identity, [Float], Int, Int, Double)] = []
-        try database.query(
-            """
+        var sql = """
             SELECT \(Self.identityColumns), p.centroid, p.sample_count, p.recording_count, p.speech_seconds
             FROM identity
             JOIN derived_profile p ON p.identity_id = identity.id
             WHERE identity.merged_into IS NULL AND p.model_identifier = ?
-            """,
-            [.text(model.rawValue)]
-        ) { row in
+            """
+        var bindings: [SQLValue] = [.text(model.rawValue)]
+        if let meetingID {
+            sql += """
+
+                AND NOT (
+                  identity.kind = 'anonymous'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM voice_embedding e
+                    WHERE e.identity_id = identity.id
+                      AND (e.source_meeting IS NULL OR e.source_meeting != ?)
+                  )
+                )
+                """
+            bindings.append(.text(meetingID))
+        }
+        try database.query(sql, bindings) { row in
             guard let centroid = row.vector(11) else { return }
             rows.append((self.identity(from: row), centroid, row.int(12), row.int(13), row.double(14)))
         }
@@ -700,15 +751,30 @@ public actor SpeakerStore {
                 embedding = COALESCE(excluded.embedding, speaker_occurrence.embedding),
                 embedding_dim = COALESCE(excluded.embedding_dim, speaker_occurrence.embedding_dim),
                 model_identifier = COALESCE(excluded.model_identifier, speaker_occurrence.model_identifier),
-                resolved_identity_id = excluded.resolved_identity_id,
-                resolution_source = excluded.resolution_source,
                 score = excluded.score,
                 runner_up_score = excluded.runner_up_score,
                 margin = excluded.margin,
-                threshold_band = excluded.threshold_band,
-                human_verified = excluded.human_verified,
                 expected_participant = excluded.expected_participant,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                -- An automatic pass must not undo a person's answer. Scores and
+                -- margins above are diagnostics and are always refreshed; the
+                -- decision itself only moves when the incoming row is itself a
+                -- human confirmation.
+                resolved_identity_id = CASE
+                    WHEN speaker_occurrence.human_verified = 1 AND excluded.human_verified = 0
+                    THEN speaker_occurrence.resolved_identity_id
+                    ELSE excluded.resolved_identity_id END,
+                resolution_source = CASE
+                    WHEN speaker_occurrence.human_verified = 1 AND excluded.human_verified = 0
+                    THEN speaker_occurrence.resolution_source
+                    ELSE excluded.resolution_source END,
+                threshold_band = CASE
+                    WHEN speaker_occurrence.human_verified = 1 AND excluded.human_verified = 0
+                    THEN speaker_occurrence.threshold_band
+                    ELSE excluded.threshold_band END,
+                human_verified = CASE
+                    WHEN speaker_occurrence.human_verified = 1 THEN 1
+                    ELSE excluded.human_verified END
             """,
             [
                 .text(meetingID), .text(clusterID), .text(track.rawValue), .double(speechSeconds),
@@ -805,7 +871,7 @@ public actor SpeakerStore {
             SELECT id FROM identity
             WHERE kind = 'anonymous' AND state = 'ephemeral' AND merged_into IS NULL
               AND COALESCE(last_seen_at, created_at) < ?
-              AND id NOT IN (SELECT identity_id FROM voice_embedding WHERE source_type != 'human_confirmed_cluster')
+              AND id NOT IN (SELECT identity_id FROM voice_embedding WHERE is_human_verified = 1)
             """,
             [.date(cutoff)]
         ) { doomed.append($0.int64(0)) }

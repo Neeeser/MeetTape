@@ -9,10 +9,10 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` — 130 tests, all passing, no failures, in about 4 seconds.
-Eleven further tests are skipped unless explicitly enabled, as described below.
+`./scripts/test.sh` runs 212 tests, all passing, in about 5 seconds.
+Fifteen further tests are skipped unless explicitly enabled, as described below.
 
-`cd extension && npm test` — 10 tests, all passing.
+`cd extension && npm test` runs 10 tests, all passing.
 
 CI runs the same two suites plus a release-configuration build, the application
 bundling script, bundle verification, and repository hygiene checks on every
@@ -58,6 +58,36 @@ Each row below covers a failure mode observed during development:
 | A rename during processing is not overwritten by a stage | `PipelineTests` |
 | Every panel builds and lays out against a real view tree | `UITests` |
 | Choosing a new storage folder takes effect without a relaunch | `UITests` |
+| The tuned `warmStartFa` is what the diarizer is configured with | `LocalConfigurationTests` |
+| No speaker count is passed automatically, from any source | `LocalConfigurationTests` |
+| Special tokens are skipped and word timings are on | `LocalConfigurationTests` |
+| Models resolve under Application Support and never Documents | `LocalConfigurationTests` |
+| Naming needs score, margin and duration together | `SpeakerIdentityTests` |
+| Under ten seconds of speech is Unknown at any score | `SpeakerIdentityTests` |
+| Two candidates 0.006 apart are never named automatically | `SpeakerIdentityTests` |
+| A listed participant relaxes the margin and nothing else | `SpeakerIdentityTests` |
+| A recurring unnamed voice links at a stricter bar than a name | `SpeakerIdentityTests` |
+| A High automatic match never adds a vector to a profile | `SpeakerIdentityTests` |
+| A named profile refuses a vector nobody stood behind | `SpeakerIdentityTests` |
+| Corrected lines accumulate and enrol once, past 45 seconds | `SpeakerIdentityTests` |
+| Naming a recurring voice keeps its history and its profile | `SpeakerIdentityTests` |
+| A merge redirects rather than rewriting, and can be undone | `SpeakerIdentityTests` |
+| Forgetting a voice keeps the name on past transcripts | `SpeakerIdentityTests` |
+| A voice heard once expires; one heard twice does not | `SpeakerIdentityTests` |
+| A word goes to the interval it overlaps most, then the nearest | `SpeakerCorrectionTests` |
+| A segment spanning two speakers is split at the change | `SpeakerCorrectionTests` |
+| Segments that already name a speaker are left as they are | `SpeakerCorrectionTests` |
+| Correcting one line leaves every other line in its cluster alone | `SpeakerCorrectionTests` |
+| A line correction survives the transcript being reassembled | `SpeakerCorrectionTests` |
+| A voice match never overwrites a person's answer | `SpeakerCorrectionTests` |
+| Transcription and speaker separation are chosen independently | `BackendSelectionTests` |
+| A settings file from an older build keeps every field it had | `BackendSelectionTests` |
+| Nothing heavy starts while a recording is live | `BackendSelectionTests` |
+| One heavy job holds the lock at a time | `BackendSelectionTests` |
+| A local run attributes every word and splits at speaker changes | `LocalPipelineTests` |
+| A local run leaves no voice vectors in the meeting folder | `LocalPipelineTests` |
+| A cloud diarization still records speakers for voice memory | `LocalPipelineTests` |
+| Re-analysing keeps the previous analysis and the words | `LocalPipelineTests` |
 
 ## Exercised against real hardware and the real API
 
@@ -196,6 +226,21 @@ prejoin screen and releases it within a second of leaving the call, keeping
 only an output stream, and Slack's helper releases input immediately and
 output within 12 seconds. Neither application holds a stream that would keep
 producing meeting evidence after a leave.
+
+**On-device models.** `MEETTAPE_LOCAL_MODELS=1 MEETTAPE_LIVE_FIXTURE=... ./scripts/test.sh
+--filter LocalModels` downloads and loads the real models and runs them against
+the locally synthesised three-voice fixture. Measured on this machine:
+
+| Step | Result |
+|---|---|
+| First install | 246.1 s, 626 MB Whisper plus 21 MB diarizer, into `~/Library/Application Support/MeetTape/Models` |
+| Transcription of 38.5 s | 5.4 s, word timings present, no special tokens in the text |
+| Diarization of 38.5 s | 0.58 s, RTFx 66, 256-dimension vectors returned, `warmStartFa` recorded as 0.2 |
+| Warm reload with no download | 5.7 s for both models, from a manager with nothing cached in memory |
+
+The install time matches the 244.9 s the probe measured for the same cold path,
+almost all of it Core ML specializing the model for the Neural Engine rather than
+downloading.
 
 ## Not verified
 

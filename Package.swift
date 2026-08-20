@@ -11,6 +11,7 @@ let package = Package(
         .executable(name: "MeetTape", targets: ["MeetTapeApp"]),
         .executable(name: "meettape-nativehost", targets: ["MeetTapeNativeHost"]),
         .executable(name: "meettape-test", targets: ["MeetTapeTests"]),
+        .executable(name: "meettape-eval", targets: ["MeetTapeEval"]),
         .library(name: "MeetTapeCore", targets: ["MeetTapeCore"]),
     ],
     // Pinned to the exact versions the local-processing and speaker-scale probes
@@ -73,6 +74,13 @@ let package = Package(
         // Firefox native messaging host. A compiled binary, because Firefox spawns
         // hosts with a minimal PATH and an interpreter shebang silently fails.
         .executableTarget(name: "MeetTapeNativeHost", dependencies: ["MeetTapeCore"]),
+
+        // Developer evaluation tool. Not bundled into the application: it is how
+        // the local stack's measured numbers get checked again on real audio.
+        .executableTarget(
+            name: "MeetTapeEval",
+            dependencies: ["MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers"]
+        ),
 
         // Minimal test harness. XCTest and swift-testing ship with Xcode, which is
         // not installed here, so the suite runs as an ordinary executable.

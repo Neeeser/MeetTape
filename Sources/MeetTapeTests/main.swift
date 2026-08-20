@@ -18,6 +18,8 @@ suites += SpeakerCorrectionTests.all
 suites += BackendSelectionTests.all
 suites += ProcessingTests.all
 suites.append(PipelineTests.suite)
+suites.append(LocalPipelineTests.suite)
+suites.append(LocalModelTests.suite)
 suites.append(LiveOpenAITests.suite)
 suites.append(LiveEndToEndTests.suite)
 

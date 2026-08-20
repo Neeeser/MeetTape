@@ -391,6 +391,40 @@ enum SpeakerCorrectionTests {
                 )
             },
 
+            test("renaming a person reaches the meetings that saw the merged one") { expect in
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let ann = try await store.createPerson(name: "Ann")
+                let bob = try await store.createPerson(name: "Bob")
+                for (identity, meeting) in [(ann, "m1"), (bob, "m2")] {
+                    try await store.recordOccurrence(
+                        meetingID: meeting, clusterID: "remote-001_speaker_00", track: .remote,
+                        speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+                        identityID: identity.id, source: .human,
+                        humanVerified: true, wasExpectedParticipant: false
+                    )
+                }
+                try await store.merge(ann.id, into: bob.id)
+
+                // The meeting keeps the link it was written with, so a rename
+                // of the survivor has to reach the merged identifier too.
+                let family = try await store.family(of: bob.id)
+                expect.isTrue(family.contains(ann.id), "the family carries what was merged in")
+
+                var map = SpeakerMap()
+                map.assign("Bob", to: "remote-001_speaker_00", identityID: ann.id)
+                _ = try await store.rename(bob.id, to: "Bob Tran")
+                let current = try await store.current(bob.id)
+
+                var changed = false
+                for member in family
+                where map.refreshName(of: member, to: current?.resolvedName ?? "") {
+                    changed = true
+                }
+                expect.isTrue(changed, "the entry written under the merged id is found")
+                expect.equal(map.displayName(for: "remote-001_speaker_00"), "Bob Tran")
+            },
+
             test("a speaker map written before line corrections existed still loads") { expect in
                 let legacy = """
                     {"version":1,"entries":{"local":{"displayName":"Andrew","origin":"deterministic"}}}

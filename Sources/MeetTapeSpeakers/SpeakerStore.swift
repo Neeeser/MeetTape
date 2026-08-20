@@ -578,6 +578,12 @@ public actor SpeakerStore {
     // MARK: - profiles
 
     /// Every identity merged into `id`, plus `id` itself.
+    /// Every identity that reads as this one: itself and anything merged into
+    /// it, transitively.
+    public func family(of id: IdentityID) throws -> [IdentityID] {
+        try identityFamily(id).map(IdentityID.init)
+    }
+
     private func identityFamily(_ id: IdentityID) throws -> [Int64] {
         var family = [id.rawValue]
         var frontier = [id.rawValue]

@@ -1193,16 +1193,23 @@ public actor ProcessingPipeline {
         }
 
         let settings = settingsProvider()
-        var speakers = try found.store.readSpeakerMap()
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
+            var speakers = try found.store.readSpeakerMap()
             speakers.clearOverride(for: utterance)
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
             return nil
         }
 
+        // Resolved before the map is read. This actor is re-entrant at that
+        // suspension, so a map read before it is a snapshot another correction
+        // can write over: two lines named in quick succession both read an
+        // empty map, and the second write dropped the first line's name. It
+        // also reverted the cluster names recognition wrote while the user was
+        // typing. Read, modify and write with nothing awaited between them.
         let resolved = try await identity(named: trimmed, existing: identityID)
+        var speakers = try found.store.readSpeakerMap()
         speakers.overrideUtterance(
             utterance,
             with: SpeakerAssignment(
@@ -1491,6 +1498,12 @@ public actor ProcessingPipeline {
         guard let service = backends.speakers else { return }
         let store = await service.speakerStore
         guard let identity = try await store.current(identityID) else { return }
+        // Every identifier that reads as this person, because a meeting keeps
+        // the link it was written with. Refreshing only the one passed in left
+        // every meeting that saw a merged-away identity showing the old name
+        // forever: meetingsReferencing already walks the family, so those
+        // meetings were visited and then skipped for not matching.
+        let family = try await store.family(of: identityID)
         for meetingID in try await store.meetingsReferencing(identityID) {
             guard let found = repository.findMeeting(id: meetingID) else { continue }
             var speakers = try found.store.readSpeakerMap()
@@ -1499,7 +1512,11 @@ public actor ProcessingPipeline {
             // and rewriting it would make separating the merge unable to find
             // these entries again: the meeting would stay attributed to the
             // wrong person forever.
-            let changed = speakers.refreshName(of: identityID, to: identity.resolvedName)
+            var changed = false
+            for member in family
+            where speakers.refreshName(of: member, to: identity.resolvedName) {
+                changed = true
+            }
             guard changed else { continue }
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)

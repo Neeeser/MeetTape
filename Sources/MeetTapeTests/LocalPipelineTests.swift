@@ -900,6 +900,78 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("re-analysing a cloud-diarized meeting changes who the lines belong to") { expect in
+                // A backend that transcribes and diarizes in one request writes
+                // its labels into the words, so the assembler kept them and the
+                // run a re-analysis produced was never read: pressing Run under
+                // Re-analyze speakers showed the same speakers however many
+                // times it was pressed.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // What a cloud pass leaves behind: words carrying their own
+                // labels, and a run derived from them.
+                try meeting.store.writeRawTranscript(RawTranscript(chunks: [
+                    RawTranscriptChunk(
+                        id: "remote_0000", track: .remote, timelineOffset: 0,
+                        durationSeconds: 6, model: "cloud", responseFormat: "json",
+                        segments: [
+                            RawTranscriptSegment(start: 0, end: 3, text: "first", speaker: "A"),
+                            RawTranscriptSegment(start: 3, end: 6, text: "second", speaker: "A"),
+                        ],
+                        purpose: .words
+                    ),
+                ]))
+                try meeting.store.writeRawDiarization(RawDiarization(runs: [
+                    DiarizationRun(
+                        id: "remote-001", track: .remote, backend: "cloud",
+                        producedAt: Date(), timelineOffset: 0,
+                        clusters: [DiarizationCluster(id: "A", speechSeconds: 6)],
+                        intervals: [DiarizationInterval(start: 0, end: 6, clusterID: "A")]
+                    ),
+                ]))
+
+                let assembler = TranscriptAssembler()
+                let before = assembler.assemble(
+                    raw: try meeting.store.readRawTranscript(),
+                    diarization: try meeting.store.readRawDiarization(),
+                    micTrackIsLocalUser: true, generatedAt: Date()
+                )
+                expect.equal(
+                    Set(before.utterances.filter { $0.track == .remote }.map(\.speakerKey)).count,
+                    1,
+                    "the cloud heard one speaker"
+                )
+
+                // A local re-analysis splits it in two.
+                var diarization = try meeting.store.readRawDiarization()
+                diarization.setActive(DiarizationRun(
+                    id: "remote-002", track: .remote, backend: "fluidaudio",
+                    producedAt: Date(), timelineOffset: 0,
+                    clusters: [
+                        DiarizationCluster(id: "S1", speechSeconds: 3),
+                        DiarizationCluster(id: "S2", speechSeconds: 3),
+                    ],
+                    intervals: [
+                        DiarizationInterval(start: 0, end: 3, clusterID: "S1"),
+                        DiarizationInterval(start: 3, end: 6, clusterID: "S2"),
+                    ]
+                ))
+                try meeting.store.writeRawDiarization(diarization)
+
+                let after = assembler.assemble(
+                    raw: try meeting.store.readRawTranscript(),
+                    diarization: try meeting.store.readRawDiarization(),
+                    micTrackIsLocalUser: true, generatedAt: Date()
+                )
+                expect.equal(
+                    Set(after.utterances.filter { $0.track == .remote }.map(\.speakerKey)).count,
+                    2,
+                    "and the re-analysis is what the transcript now reads from"
+                )
+            },
+
             test("naming a cluster leaves the lines already given to somebody else") { expect in
                 // A line-level correction outranks the cluster's name on screen.
                 // Claiming the whole cluster's audio for the person being named

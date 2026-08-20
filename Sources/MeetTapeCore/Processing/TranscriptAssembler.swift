@@ -134,7 +134,15 @@ public struct TranscriptAssembler: Sendable {
             let carriesSpeakers = chunks.contains { chunk in
                 chunk.segments.contains { $0.speaker != nil }
             }
-            let attributed = (treatAsLocalUser || carriesSpeakers)
+            // A backend that returned its own labels keeps them, unless the user
+            // has since re-analysed this track. A re-analysis is the one control
+            // that says "cluster this again", and a backend that transcribes and
+            // diarizes in one request writes labels into the words themselves,
+            // so leaving them in place made Run under Re-analyze speakers write a
+            // run nothing read: the panel showed the cloud's original speakers
+            // however many times it was pressed.
+            let reanalysed = diarization.runs.filter { $0.track == track }.count > 1
+            let attributed = (treatAsLocalUser || (carriesSpeakers && !reanalysed))
                 ? chunks
                 : attribute(chunks, using: diarization.activeRun(track: track))
             let assembled = assembleTrack(

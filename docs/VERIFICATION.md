@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` runs 276 tests, all passing, in about 9 seconds.
+`./scripts/test.sh` runs 284 tests, all passing, in about 10 seconds.
 Fifteen further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` runs 10 tests, all passing.
@@ -111,6 +111,14 @@ Each row below covers a failure mode observed during development:
 | The panel resolves the archive once, not on every render | `UITests` |
 | Closing the panel does not overwrite a note added elsewhere | `UITests` |
 | A mix that cannot finish leaves no file to be mistaken for one | `AudioTests` |
+| A correction on the second half of a split call reaches that half | `ReconnectTests` |
+| One meeting contributes one vector however often it is confirmed | `VoiceEvidenceTests` |
+| Giving audio back un-debits the owner it came back to | `VoiceEvidenceTests` |
+| Naming a cluster leaves the lines already given to somebody else | `LocalPipelineTests` |
+| Undoing a line correction hands the audio back rather than orphaning it | `LocalPipelineTests` |
+| Re-analysing a cloud-diarized meeting changes who the lines belong to | `LocalPipelineTests` |
+| Switching backend and retrying does not transcribe a track twice | `LocalPipelineTests` |
+| Saying the microphone was somebody else takes back what it taught | `LocalPipelineTests` |
 
 ## Exercised against real hardware and the real API
 

@@ -76,11 +76,14 @@ bump.
 | Contradicted spans stay on the row and stop counting | Deleting them would make the row claim the vector is purer than it is; leaving them counted would measure every correction against the original |
 | Chunk purpose is decided by which backend owns the words, once per track | Deciding it from what is on disk flipped mid-meeting on a resume and the assembler dropped the far end permanently |
 | Display and confirmation are separate predicates | A correction must survive its line being merged, and must not then enrol the rest of that line's voice |
+| One track's words come from one backend | A cloud run that failed and was retried after switching to Local landed both sets on the same track, and the far end was assembled twice in two models' phrasing |
+| A re-analysis supersedes a diarizer's own labels; the first pass does not | A backend that transcribes and diarizes in one request writes labels into the words, so Run under Re-analyze speakers wrote a run nothing read |
 | A batch correction is resolved, applied in memory and written once | A failure at line 18 of 30 left seventeen renamed with no error shown, and nothing recording that a rebuild was owed |
 | One candidate in the gallery is a suggestion, never an automatic name | There is no runner-up and so no separation to measure. The worst impostor over 326 speakers scored 0.957 against the true speaker's own 0.951, so no absolute score separates them |
 | Two clusters may be one identity when they do not overlap in time, and never when they do | The tuned clusterer prefers splitting over merging, so one voice as two clusters is expected. One person cannot talk over themselves |
 | A half-match against a candidate this meeting seeded is remembered as nothing | Two centroids a few hundredths apart split each other's margin, so that voice is never recognised again, in any meeting |
 | Processing reaches a meeting folded into another | `combine` links metadata and moves no audio, so the folded folder is the only copy of the second half of a dropped call |
+| Only the archive listing hides a folded continuation; every operation named by an identifier reaches it | A correction on a line from the second half resolved to nothing and threw, so the panel showed a change nothing had stored |
 | A dropped and rejoined call is one logical meeting over two immutable recordings | Each keeps its own segments, manifest, raw output and speaker map. The combined duration and transcript are derived on read, so separating them again is clearing two fields |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and

@@ -14,7 +14,7 @@ public actor LocalModelManager {
     public nonisolated let locations: LocalModelLocations
     private let receipts: LocalModelReceiptStore
     private var state: LocalModelState
-    private var whisper: WhisperKit?
+    private var whisper: LoadedWhisper?
     private var diarizerModels: OfflineDiarizerModels?
     private var installTask: Task<LocalModelReceipt, Error>?
     /// Segmentation and embeddings for the meeting most recently diarized, so
@@ -140,17 +140,11 @@ public actor LocalModelManager {
             // compiles the CoreML models, so the first real meeting does not pay
             // either cost and neither needs the network.
             publish(.downloading(fraction: 0.9, detail: "Preparing speech model"))
-            let pipeline = try await WhisperKit(WhisperKitConfig(
+            whisper = try await LoadedWhisper.load(
                 model: LocalSpeechStack.whisperModel,
                 downloadBase: locations.whisperBase,
-                modelFolder: whisperFolder.path,
-                verbose: false,
-                logLevel: .error,
-                prewarm: false,
-                load: true,
-                download: false
-            ))
-            whisper = pipeline
+                modelFolder: whisperFolder.path
+            )
 
             publish(.downloading(fraction: 0.94, detail: "Downloading speaker models"))
             let models = try await OfflineDiarizerModels.load(from: locations.diarizerDirectory)
@@ -242,27 +236,17 @@ public actor LocalModelManager {
 
     /// The loaded transcriber.
     ///
-    /// `modelFolder` is passed explicitly on every load. WhisperKit with
-    /// `download: false` does not resolve its own download cache and fails with
-    /// "Model folder is not set", so leaving it out turns an offline machine
-    /// into a broken one.
-    ///
-    /// Kept inside the actor because `WhisperKit` is not `Sendable`, which has a
-    /// useful consequence: every heavy local job runs one at a time, so
-    /// transcription and diarization cannot contend for the Neural Engine.
-    internal func loadedWhisper() async throws -> WhisperKit {
+    /// Reached only through this actor, which is what serialises it: every
+    /// heavy local job runs one at a time, so transcription and diarization
+    /// cannot contend for the Neural Engine.
+    internal func loadedWhisper() async throws -> LoadedWhisper {
         if let whisper { return whisper }
         guard let receipt = installedReceipt() else { throw LocalModelError.notInstalled }
-        let pipeline = try await WhisperKit(WhisperKitConfig(
+        let pipeline = try await LoadedWhisper.load(
             model: receipt.whisperVariant,
             downloadBase: locations.whisperBase,
-            modelFolder: receipt.whisperFolderPath,
-            verbose: false,
-            logLevel: .error,
-            prewarm: false,
-            load: true,
-            download: false
-        ))
+            modelFolder: receipt.whisperFolderPath
+        )
         whisper = pipeline
         return pipeline
     }

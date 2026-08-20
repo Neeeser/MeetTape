@@ -22,7 +22,15 @@ public final class WindowManager {
         // An open review window tracks processing on its own: when the
         // transcript lands, the window shows it without a manual refresh.
         runtime.onProcessingUpdate = { [weak self] meetingID in
-            guard let model = self?.reviewModels[meetingID] else { return }
+            guard let self else { return }
+            // Resolved through the conversation the identifier belongs to. A
+            // panel opened on the first half of a dropped call is keyed by that
+            // recording, while the second half finishes processing under its
+            // own: keying the lookup on the raw identifier meant the panel never
+            // picked up the half it was showing.
+            let logicalID = runtime.repository.logicalMeeting(id: meetingID)?.id ?? meetingID
+            guard let model = self.reviewModels[logicalID] ?? self.reviewModels[meetingID]
+            else { return }
             // The speaker rows come from the identity store, not the files, so
             // reloading only the files left the Speakers card empty for a
             // window opened before the transcript existed.

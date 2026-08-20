@@ -521,6 +521,13 @@ public actor SpeakerStore {
         if keepingClaimant, let claimant = retraction.claimedBy {
             exempt = Set(try identityFamily(try currentID(claimant)))
         }
+        // The claimant is getting this audio, so any of it their own evidence
+        // had been debited for is theirs again. Without this, correcting a line
+        // away and back left the debit standing, and enough of those left a
+        // vector below the bar over audio nobody disputes.
+        if let claimant = retraction.claimedBy {
+            try restoreSpans(for: claimant, retraction: retraction)
+        }
         let contradicted = try contradictedRows(retraction, exempt: exempt)
         guard !contradicted.isEmpty else { return [] }
 
@@ -635,31 +642,71 @@ public actor SpeakerStore {
         return out
     }
 
-    /// Splits an evidence row's spans around the reassigned audio and marks the
-    /// overlapping part as no longer supporting the vector.
-    private func markContradicted(evidenceID: Int64, spans removed: [AudioSpan]) throws {
+    /// Un-marks the spans an identity is being given back.
+    private func restoreSpans(
+        for identity: IdentityID, retraction: VoiceEvidenceRetraction
+    ) throws {
+        let family = try identityFamily(try currentID(identity))
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        var evidenceIDs: [Int64] = []
+        try database.query(
+            """
+            SELECT DISTINCT e.id
+            FROM voice_evidence e
+            LEFT JOIN voice_embedding v ON v.id = e.voice_embedding_id
+            LEFT JOIN pending_enrollment p ON p.id = e.pending_enrollment_id
+            WHERE e.meeting_id = ? AND e.track = ?
+              AND COALESCE(v.identity_id, p.identity_id) IN (\(placeholders))
+            """,
+            [.text(retraction.meetingID), .text(retraction.track.rawValue)]
+                + family.map { SQLValue.int64($0) }
+        ) { evidenceIDs.append($0.int64(0)) }
+        for evidenceID in evidenceIDs {
+            try restamp(
+                evidenceID: evidenceID, spans: retraction.spans,
+                from: true, to: false
+            )
+        }
+    }
+
+    /// Splits an evidence row's spans around a set of times and flips the
+    /// overlapping part.
+    ///
+    /// Splitting rather than flipping whole rows, in both directions. A
+    /// contradicted row records exactly one earlier retraction's overlap, so a
+    /// later claim covering part of it would otherwise give back audio nobody
+    /// claimed.
+    private func restamp(
+        evidenceID: Int64, spans: [AudioSpan], from: Bool, to flag: Bool
+    ) throws {
         var existing: [(id: Int64, span: AudioSpan)] = []
         try database.query(
             "SELECT id, start_time, end_time FROM voice_evidence_span"
-                + " WHERE evidence_id = ? AND contradicted = 0",
-            [.int64(evidenceID)]
+                + " WHERE evidence_id = ? AND contradicted = ?",
+            [.int64(evidenceID), .bool(from)]
         ) { row in
             existing.append((row.int64(0), AudioSpan(start: row.double(1), end: row.double(2))))
         }
         for entry in existing {
-            guard AudioSpan.intersect([entry.span], removed) > 0 else { continue }
+            guard AudioSpan.intersect([entry.span], spans) > 0 else { continue }
             try database.run("DELETE FROM voice_evidence_span WHERE id = ?", [.int64(entry.id)])
-            for kept in AudioSpan.subtracting(removed, from: [entry.span]) {
-                try insertSpan(evidenceID: evidenceID, span: kept, contradicted: false)
+            for kept in AudioSpan.subtracting(spans, from: [entry.span]) {
+                try insertSpan(evidenceID: evidenceID, span: kept, contradicted: from)
             }
-            for gone in AudioSpan.union(removed).compactMap({ cut -> AudioSpan? in
+            for moved in AudioSpan.union(spans).compactMap({ cut -> AudioSpan? in
                 let start = max(entry.span.start, cut.start)
                 let end = min(entry.span.end, cut.end)
                 return end > start ? AudioSpan(start: start, end: end) : nil
             }) {
-                try insertSpan(evidenceID: evidenceID, span: gone, contradicted: true)
+                try insertSpan(evidenceID: evidenceID, span: moved, contradicted: flag)
             }
         }
+    }
+
+    /// Splits an evidence row's spans around the reassigned audio and marks the
+    /// overlapping part as no longer supporting the vector.
+    private func markContradicted(evidenceID: Int64, spans removed: [AudioSpan]) throws {
+        try restamp(evidenceID: evidenceID, spans: removed, from: false, to: true)
     }
 
     private func insertSpan(evidenceID: Int64, span: AudioSpan, contradicted: Bool) throws {

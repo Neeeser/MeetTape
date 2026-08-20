@@ -189,6 +189,54 @@ enum VoiceEvidenceTests {
                 )
             },
 
+            test("giving audio back un-debits the owner it came back to") { expect in
+                // Correcting a line away and then undoing it left the debit
+                // standing, so a run of corrections and undos walked a vector
+                // below the bar over audio nobody ends up disputing.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: chris.id, vector: vector(seed: 83), model: .fluidAudioOffline,
+                    speechSeconds: 60, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: [VoiceEvidence(
+                        meetingID: "m1", track: .remote, spans: [AudioSpan(start: 0, end: 60)],
+                        confirmation: .humanConfirmedCluster
+                    )]
+                ))
+                let other = try await store.createPerson(name: "Dana")
+
+                // Ten seconds go to Dana, then come back.
+                _ = try await store.retractEvidence(
+                    VoiceEvidenceRetraction(
+                        meetingID: "m1", track: .remote,
+                        spans: [AudioSpan(start: 0, end: 10)], claimedBy: other.id
+                    ),
+                    keepingClaimant: true
+                )
+                var stored = try await expect.unwrap(store.storedEmbeddings(of: chris.id).first)
+                expect.close(
+                    stored.evidence.first?.standingSeconds ?? 0, 50, tolerance: 0.001
+                )
+
+                _ = try await store.retractEvidence(
+                    VoiceEvidenceRetraction(
+                        meetingID: "m1", track: .remote,
+                        spans: [AudioSpan(start: 0, end: 10)], claimedBy: chris.id
+                    ),
+                    keepingClaimant: true
+                )
+                stored = try await expect.unwrap(store.storedEmbeddings(of: chris.id).first)
+                expect.close(
+                    stored.evidence.first?.standingSeconds ?? 0, 60, tolerance: 0.001,
+                    "the audio is Chris's again, so it counts for him again"
+                )
+                expect.close(
+                    stored.evidence.first?.speechSeconds ?? 0, 60, tolerance: 0.001,
+                    "and what the vector was computed from never changed"
+                )
+            },
+
             test("audio on one track never retracts a vector from the other") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }

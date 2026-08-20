@@ -1335,6 +1335,12 @@ public actor ProcessingPipeline {
         // typing. Read, modify and write with nothing awaited between them.
         let resolved = try await identity(named: trimmed, existing: identityID)
         var speakers = try found.store.readSpeakerMap()
+        // Whoever this line was confirmed as before it moved. Their enrolment
+        // for this meeting was built from lines that include this one, so it now
+        // contains somebody else's voice and has to be derived again from what
+        // is still theirs.
+        let previousOwner = speakers.assignment(for: utterance)
+            .flatMap { $0.origin == .human ? $0.identityID : nil }
         speakers.overrideUtterance(
             utterance,
             with: SpeakerAssignment(
@@ -1345,6 +1351,13 @@ public actor ProcessingPipeline {
         )
         try found.store.writeSpeakerMap(speakers)
         try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+
+        if let previous = previousOwner, previous != resolved {
+            try await rederiveConfirmedSpeech(
+                store: found.store, metadata: found.metadata, speakers: speakers,
+                identityID: previous, settings: settings
+            )
+        }
 
         if let resolved {
             if learning {
@@ -1572,6 +1585,31 @@ public actor ProcessingPipeline {
             identityID: identityID,
             settings: settings.processing.speakers,
             now: clock.now
+        )
+    }
+
+    /// Rebuilds one person's enrolment for a meeting from the lines that are
+    /// still theirs.
+    ///
+    /// Called when a line moves away from them. The old vector was built from a
+    /// set that included that line, so it holds audio that is now attributed to
+    /// somebody else; dropping it and accumulating again is the only way to get
+    /// a vector that matches what the user actually said. If too little of their
+    /// speech remains they correctly end with none.
+    private func rederiveConfirmedSpeech(
+        store: MeetingStore, metadata: MeetingMetadata, speakers: SpeakerMap,
+        identityID: IdentityID, settings: AppSettings
+    ) async throws {
+        guard let service = backends.speakers else { return }
+        let speakerStore = await service.speakerStore
+        for stale in try await speakerStore.removeUtteranceEnrolments(
+            meetingID: metadata.id, of: identityID
+        ) {
+            try await speakerStore.recomputeProfiles(for: stale, now: clock.now)
+        }
+        try await accumulateConfirmedSpeech(
+            store: store, metadata: metadata, speakers: speakers,
+            identityID: identityID, settings: settings
         )
     }
 

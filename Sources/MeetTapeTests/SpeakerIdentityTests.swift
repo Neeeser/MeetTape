@@ -536,55 +536,6 @@ enum SpeakerIdentityTests {
                 )
             },
 
-            test("leaving a cluster unknown takes back the voice it gave away") { expect in
-                let (store, root) = try makeStore()
-                defer { try? FileManager.default.removeItem(at: root) }
-                let service = SpeakerRecognitionService(store: store)
-                let chris = try await store.createPerson(name: "Chris")
-                let cluster = SpeakerClusterInput(
-                    clusterID: "remote-001_speaker_00", track: .remote,
-                    speechSeconds: 200, centroid: vector(seed: 71)
-                )
-                _ = try await service.confirmCluster(
-                    meetingID: "m1", cluster: cluster, identityID: chris.id,
-                    settings: SpeakerRecognitionSettings()
-                )
-                expect.equal(
-                    try await store.profileStatus(
-                        of: chris.id, model: .fluidAudioOffline
-                    ).sampleCount,
-                    1
-                )
-
-                // What "Leave unknown" does. Retracting the name used to leave
-                // the vector, so Chris kept somebody else's voice and the next
-                // resolution pass scored this very cluster against it and wrote
-                // the cleared name back at High confidence.
-                for stale in try await store.removeClusterEnrolments(
-                    meetingID: "m1", clusterID: cluster.clusterID
-                ) {
-                    try await store.recomputeProfiles(for: stale, now: Date())
-                }
-                try await store.clearOccurrenceIdentity(
-                    meetingID: "m1", clusterID: cluster.clusterID
-                )
-
-                expect.equal(
-                    try await store.profileStatus(
-                        of: chris.id, model: .fluidAudioOffline
-                    ).sampleCount,
-                    0,
-                    "the vector goes with the name"
-                )
-                let occurrence = try await store.occurrences(meetingID: "m1")
-                    .first { $0.clusterID == cluster.clusterID }
-                expect.isNil(occurrence?.resolvedIdentityID, "and so does the link")
-                expect.isFalse(
-                    occurrence?.humanVerified ?? true,
-                    "a retracted answer is not a confirmed one"
-                )
-            },
-
             test("enrolling a merged identity reaches the person it reads as") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }

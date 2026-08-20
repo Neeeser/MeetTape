@@ -362,15 +362,6 @@ public actor SpeakerRecognitionService {
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
-        // Anything this meeting's line corrections enrolled for somebody else
-        // goes whatever the learning setting says: the user has just told us
-        // those lines are this person, so the other profile is holding their
-        // audio and no other path can reach it.
-        for stale in try await store.removeUtteranceEnrolments(
-            meetingID: meetingID, keeping: identityID
-        ) {
-            try await store.recomputeProfiles(for: stale, now: now)
-        }
         guard settings.learnFromCorrections, !vectors.isEmpty else {
             return try await store.profileStatus(of: identityID, model: model)
         }

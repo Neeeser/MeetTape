@@ -657,6 +657,54 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("leaving a cluster unknown takes the voice back, through the panel") { expect in
+                // Driven by the control the user actually has: an empty name
+                // through applySpeakerName. Calling the store directly missed
+                // that the clear path had no retraction at all.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let key = "remote-001_speaker_00"
+                try await store.recordOccurrence(
+                    meetingID: meeting.metadata.id, clusterID: key, track: .remote,
+                    speechSeconds: 200, embedding: SpeakerIdentityTests.vector(seed: 84),
+                    model: .fluidAudioOffline, resolution: nil, identityID: nil,
+                    source: .ai, humanVerified: false, wasExpectedParticipant: false
+                )
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+
+                let chris = try await expect.unwrap(
+                    try await pipeline.applySpeakerName("Chris", to: key, meetingID: meeting.metadata.id)
+                )
+                expect.equal(
+                    try await store.profileStatus(of: chris, model: .fluidAudioOffline).sampleCount,
+                    1,
+                    "confirming a cluster is what builds a profile"
+                )
+
+                _ = try await pipeline.applySpeakerName("", to: key, meetingID: meeting.metadata.id)
+                expect.equal(
+                    try await store.profileStatus(of: chris, model: .fluidAudioOffline).sampleCount,
+                    0,
+                    "and clearing it takes the voice back, or the next pass writes the name again"
+                )
+                expect.isNil(
+                    try await store.occurrences(meetingID: meeting.metadata.id)
+                        .first { $0.clusterID == key }?.resolvedIdentityID
+                )
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

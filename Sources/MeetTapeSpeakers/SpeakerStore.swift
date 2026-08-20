@@ -527,27 +527,39 @@ public actor SpeakerStore {
         )
     }
 
-    /// Drops what a meeting's line-level corrections enrolled, for identities
-    /// other than the one being confirmed now.
+    /// Drops what a meeting's line-level corrections enrolled for one identity,
+    /// so it can be derived again from the lines that are still theirs.
     ///
-    /// Reassigning a set of lines from one person to another left the first
-    /// holding a human-verified vector built from the second's audio, with no
-    /// path anywhere that could remove it: the cluster-scoped removal matches on
-    /// `source_cluster`, which these rows do not carry, and the meeting-scoped
-    /// one matches the cluster source type.
+    /// Reassigning lines from one person to another left the first holding a
+    /// human-verified vector built from the second's audio, and nothing could
+    /// reach it: the cluster-scoped removal matches on `source_cluster`, which
+    /// these rows do not carry. Scoped to the one identity whose lines moved,
+    /// because two people can each hold a legitimate enrolment from one meeting
+    /// and removing everyone else's destroyed the first whenever a second was
+    /// corrected.
     @discardableResult
     public func removeUtteranceEnrolments(
-        meetingID: String, keeping identityID: IdentityID
+        meetingID: String, of identityID: IdentityID
     ) throws -> [IdentityID] {
-        let keep = try currentID(identityID)
-        let family = try identityFamily(keep)
+        let family = try identityFamily(try currentID(identityID))
         let placeholders = family.map { _ in "?" }.joined(separator: ",")
-        return try removeEnrolments(
+        let removed = try removeEnrolments(
             meetingID: meetingID,
-            predicate: "source_type = ? AND identity_id NOT IN (\(placeholders))",
+            predicate: "source_type = ? AND identity_id IN (\(placeholders))",
             bindings: [.text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue)]
                 + family.map { SQLValue.int64($0) }
         )
+        // The parked accumulation too, or the next flush re-enrols the speech
+        // that has just moved to somebody else.
+        try database.run(
+            """
+            DELETE FROM pending_enrollment
+            WHERE source_meeting = ? AND source_type = ? AND identity_id IN (\(placeholders))
+            """,
+            [.text(meetingID), .text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue)]
+                + family.map { SQLValue.int64($0) }
+        )
+        return removed
     }
 
     private func removeEnrolments(

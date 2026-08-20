@@ -278,6 +278,11 @@ extension MeetTapeRuntime {
 
         var rows: [MeetingSpeakerRow] = []
         for key in transcript.speakerKeys {
+            // Words no interval claimed are not a speaker. Offering the row for
+            // naming would put a name on a scatter of backchannels spoken over
+            // other people, and then feed those spans to the enrolment that
+            // builds that person's voice profile.
+            if key.hasSuffix(SpeakerLabel.unattributed) { continue }
             let assignment = map.entries[key]
             var identity: Identity?
             var heardIn = 0

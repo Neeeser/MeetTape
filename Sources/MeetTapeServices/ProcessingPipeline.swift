@@ -200,6 +200,14 @@ public actor ProcessingPipeline {
                 // are bounded so a persistent outage stops asking.
                 let attempts = metadata.processing.attemptCount(for: stage)
                 if failure.isRetryable, attempts < Self.maxAttemptsPerStage {
+                    // The slot goes back first. A rate limit can ask for five
+                    // minutes, and holding the one heavy-job slot through it
+                    // kept a meeting that had just finished recording waiting
+                    // on a job that was doing nothing at all.
+                    if holdsSlot {
+                        jobLock.release()
+                        holdsSlot = false
+                    }
                     await wait(retryDelay(after: failure, attempt: attempts))
                     metadata.processing.advance(to: stage, at: clock.now)
                     continue
@@ -306,7 +314,7 @@ public actor ProcessingPipeline {
         // end's audio is transcribed in the cloud regardless of that choice, and
         // an imported recording, whose only track is the diarized one, would not
         // be transcribed locally at all.
-        if !diarizer.producesTranscript || transcriber.isLocal {
+        if !diarizer.producesTranscript || transcriberOwnsWords(settings) {
             let track = diarizedTrack(metadata)
             if !tracks.contains(track) { tracks.append(track) }
         }
@@ -380,6 +388,16 @@ public actor ProcessingPipeline {
         try store.writeRawTranscript(raw)
     }
 
+    /// Whether the transcription backend supplies the diarized track's words.
+    ///
+    /// When it does, a cloud diarizer's own words are a byproduct of asking who
+    /// spoke and must not be assembled as a second copy of the transcript. The
+    /// same condition decides, in `runTranscription`, whether that track is
+    /// transcribed here at all, so the two cannot disagree.
+    private func transcriberOwnsWords(_ settings: AppSettings) -> Bool {
+        backends.transcription(settings, settings.models.transcription).isLocal
+    }
+
     /// Works out who spoke when on the track that holds unknown people.
     private func runDiarization(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
@@ -395,7 +413,7 @@ public actor ProcessingPipeline {
         if diarizer.limits.requiresChunking {
             try await runChunkedDiarization(
                 store: store, metadata: &metadata, track: track,
-                segments: segments, backend: diarizer
+                segments: segments, backend: diarizer, settings: settings
             )
         } else {
             try await runWholeTrackDiarization(
@@ -416,14 +434,16 @@ public actor ProcessingPipeline {
         metadata: inout MeetingMetadata,
         track: CaptureTrack,
         segments: [RecordedSegment],
-        backend: any DiarizationBackend
+        backend: any DiarizationBackend,
+        settings: AppSettings
     ) async throws {
-        // Words already on this track came from the transcription backend, so
-        // these chunks are here for the labels alone and must not be assembled
-        // as a second copy of the transcript.
-        let existing = try store.readRawTranscript()
-        let purpose: RawChunkPurpose =
-            existing.chunks(track: track, purpose: .words).isEmpty ? .words : .speakers
+        // Decided from which backend owns the words, not from what is on disk.
+        // Reading disk state made the answer change mid-stage: a cloud
+        // diarization interrupted after some chunks had landed came back, saw
+        // its own earlier chunks, and wrote the rest as labels only, so the
+        // assembler dropped the whole far end of the meeting after the
+        // interruption and never recovered.
+        let purpose: RawChunkPurpose = transcriberOwnsWords(settings) ? .speakers : .words
 
         try await runChunks(
             store: store, metadata: &metadata, track: track, segments: segments,
@@ -721,7 +741,16 @@ public actor ProcessingPipeline {
         try store.writeSpeakerMap(speakers)
 
         try await recognizeVoices(store: store, metadata: &metadata, settings: settings)
-        try await learnLocalUserVoice(store: store, metadata: metadata, settings: settings)
+        // Voice memory is a side effect of the meeting, not part of it. A
+        // deleted model folder or an unreadable track must not take the whole
+        // stage down and retry it three times.
+        do {
+            try await learnLocalUserVoice(store: store, metadata: metadata, settings: settings)
+        } catch {
+            Log.processing.notice(
+                "local voice profile skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
         try await suggestSpeakerNames(store: store, metadata: &metadata, settings: settings)
     }
 
@@ -896,6 +925,11 @@ public actor ProcessingPipeline {
         let timeline = try store.readTimeline()
         let segments = timeline.segments(track: .mic)
         guard !segments.isEmpty else { return }
+        // The far end has to be on its own track for "the microphone track is
+        // the local user" to mean anything. Without one there is nothing to
+        // check bleed against, and a call taken on a phone on speaker and
+        // recorded manually would enrol whoever spoke most.
+        guard !timeline.segments(track: diarizedTrack(metadata)).isEmpty else { return }
         guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: .mic, segments: segments,
@@ -1159,9 +1193,16 @@ public actor ProcessingPipeline {
         // holding the same voice, and because their centroids are then
         // identical, every future meeting scored them equally and the margin
         // gate meant that person was never recognised again.
+        // Only an unnamed voice. A cluster the automatic pass already named
+        // carries that person's identifier, and typing a different name is the
+        // user correcting it: reusing it would return the wrong person, enrol
+        // this cluster's audio into their profile, and then rewrite the typed
+        // name back to theirs.
         var existing = identityID
         if existing == nil {
-            existing = try await occurrenceIdentity(meetingID: meetingID, clusterID: key)
+            existing = try await anonymousOccurrenceIdentity(
+                meetingID: meetingID, clusterID: key
+            )
         }
         let resolved = try await identity(named: name, existing: existing)
 
@@ -1248,7 +1289,12 @@ public actor ProcessingPipeline {
                     identityID: resolved, settings: settings
                 )
             }
-            try await refreshCachedNames(for: resolved)
+            // Only when this call owns the batch. refreshCachedNames walks every
+            // meeting the identity appears in and re-renders each one's
+            // markdown, so running it per line made a thirty-line correction on
+            // someone seen in fifty meetings fifteen hundred transcript decodes.
+            // The batch path calls it once at the end.
+            if learning { try await refreshCachedNames(for: resolved) }
         }
         return resolved
     }
@@ -1371,14 +1417,23 @@ public actor ProcessingPipeline {
     // MARK: - identity plumbing
 
     /// The identity a typed name refers to, creating one if it is new.
-    /// The identity a cluster is already linked to, named or not.
-    private func occurrenceIdentity(
+    /// The unnamed identity a cluster is already linked to.
+    ///
+    /// Naming that cluster promotes this identity rather than creating a second
+    /// one holding the same voice. Nil when the cluster has no identity or when
+    /// it has a named one, which is a different situation: a correction.
+    private func anonymousOccurrenceIdentity(
         meetingID: String, clusterID: String
     ) async throws -> IdentityID? {
         guard let service = backends.speakers else { return nil }
         let store = await service.speakerStore
         let occurrences = try await store.occurrences(meetingID: meetingID)
-        return occurrences.first { $0.clusterID == clusterID }?.resolvedIdentityID
+        guard let found = occurrences.first(where: { $0.clusterID == clusterID }),
+              let identityID = found.resolvedIdentityID,
+              let identity = try await store.current(identityID),
+              identity.kind == .anonymous
+        else { return nil }
+        return identity.id
     }
 
     private func identity(named name: String, existing: IdentityID?) async throws -> IdentityID? {
@@ -1391,6 +1446,14 @@ public actor ProcessingPipeline {
             // occurrence already points at this identifier, so nothing else
             // moves.
             if let identity = try await store.current(existing), identity.kind == .anonymous {
+                // Someone by that name already exists, so this voice is theirs.
+                // Promoting instead would leave two people with one name and
+                // near-identical centroids, which splits every future margin
+                // and means neither is ever recognised again.
+                if let match = try await person(named: trimmed) {
+                    try await store.merge(identity.id, into: match)
+                    return match
+                }
                 return try await store.promoteToPerson(identity.id, name: trimmed, now: clock.now)?.id
                     ?? identity.id
             }
@@ -1399,11 +1462,17 @@ public actor ProcessingPipeline {
             // no read reaches.
             return try await store.current(existing)?.id ?? existing
         }
-        let people = try await store.identities(kind: .person)
-        if let match = people.first(where: {
-            $0.resolvedName.compare(trimmed, options: .caseInsensitive) == .orderedSame
-        }) { return match.id }
+        if let match = try await person(named: trimmed) { return match }
         return try await store.createPerson(name: trimmed, now: clock.now).id
+    }
+
+    private func person(named name: String) async throws -> IdentityID? {
+        guard let service = backends.speakers else { return nil }
+        let store = await service.speakerStore
+        let people = try await store.identities(kind: .person)
+        return people.first {
+            $0.resolvedName.compare(name, options: .caseInsensitive) == .orderedSame
+        }?.id
     }
 
     private func confirmCluster(

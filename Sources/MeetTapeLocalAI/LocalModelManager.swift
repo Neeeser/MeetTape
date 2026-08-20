@@ -97,6 +97,10 @@ public actor LocalModelManager {
         // Re-checked on disk rather than trusted from the state decided at
         // launch. A folder deleted while the app runs otherwise stayed
         // "installed" until quit, and the failure surfaced mid-meeting.
+        // What is on disk right now, so a re-download that fails can fall back
+        // to it instead of discarding a working install and leaving the panel
+        // offering only another 650 MB.
+        let fallback = receipts.read().flatMap { Self.filesPresent(locations, $0) ? $0 : nil }
         if case .installed(let receipt) = state {
             if !force, Self.filesPresent(locations, receipt) { return receipt }
             publish(.notInstalled)
@@ -174,7 +178,14 @@ public actor LocalModelManager {
         do {
             return try await task.value
         } catch {
-            publish(.failed(Self.message(for: error)))
+            // A forced re-download published notInstalled before it started, so
+            // failing here discarded an install that is still on disk and left
+            // the panel offering nothing but another 650 MB.
+            if let fallback {
+                publish(fallback.matchesCurrentBuild ? .installed(fallback) : .outdated(fallback))
+            } else {
+                publish(.failed(Self.message(for: error)))
+            }
             throw error
         }
     }
@@ -202,7 +213,11 @@ public actor LocalModelManager {
     /// the user chose a local backend. A cloud-only configuration must not
     /// discover, mid-meeting, that it is fetching 650 MB nobody asked for.
     public func ensureInstalled() async throws {
-        if state.isUsable { return }
+        // Checked on disk for the same reason install() does: a folder deleted
+        // while the app runs otherwise reported usable until quit, and the
+        // failure surfaced inside a stage instead of being skipped here.
+        if case .installed(let receipt) = state, Self.filesPresent(locations, receipt) { return }
+        if case .outdated(let receipt) = state, Self.filesPresent(locations, receipt) { return }
         if let installTask {
             _ = try await installTask.value
             return

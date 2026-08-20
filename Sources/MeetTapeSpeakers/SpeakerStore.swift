@@ -275,6 +275,12 @@ public actor SpeakerStore {
                 .text(VoiceEnrollmentSource.anonymousSeed.rawValue),
             ]
         )
+        // The stored centroid was built while this identity was anonymous, so
+        // it can hold a merged-in seed that nobody confirmed. The purity filter
+        // that keeps such a vector out of a named person's centroid only runs at
+        // recompute time; without this the profile carried it until the next
+        // enrol dropped it, and sample_count fell with no new information.
+        try recomputeProfiles(for: id, now: now)
         return try loadIdentity(id)
     }
 
@@ -548,6 +554,9 @@ public actor SpeakerStore {
         // meetings' audio into a single centroid is the thing recording_count
         // exists to measure, and the row can only name one of them, so the
         // other's hasEnrolment stayed false and it re-embedded forever.
+        // addPendingEnrollment resolves before writing, so reading by the
+        // literal identifier lost a merged-away identity's parked rows.
+        let id = try currentID(id)
         var groups: [String: Group] = [:]
         try database.query(
             """
@@ -606,16 +615,23 @@ public actor SpeakerStore {
         identityID: IdentityID, meetingID: String, source: VoiceEnrollmentSource,
         model: EmbeddingModelIdentifier
     ) throws -> Bool {
+        // The whole family, because enrol writes to the survivor: after a merge
+        // the earlier enrolment sits under the merged-away identifier, and
+        // asking about the survivor alone answered no. The caller then
+        // re-embedded that meeting on every later correction and stacked
+        // near-identical vectors until they evicted the diverse ones.
+        let family = try identityFamily(currentID(identityID))
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
         var found = false
         try database.query(
             """
             SELECT 1 FROM voice_embedding
-            WHERE identity_id = ? AND source_meeting = ? AND source_type = ? AND model_identifier = ?
+            WHERE identity_id IN (\(placeholders))
+              AND source_meeting = ? AND source_type = ? AND model_identifier = ?
             LIMIT 1
             """,
-            [
-                .int64(identityID.rawValue), .text(meetingID), .text(source.rawValue),
-                .text(model.rawValue),
+            family.map { SQLValue.int64($0) } + [
+                .text(meetingID), .text(source.rawValue), .text(model.rawValue),
             ]
         ) { _ in found = true }
         return found
@@ -624,6 +640,7 @@ public actor SpeakerStore {
     public func pendingSpeechSeconds(
         for id: IdentityID, model: EmbeddingModelIdentifier
     ) throws -> Double {
+        let id = try currentID(id)
         var total = 0.0
         try database.query(
             "SELECT COALESCE(SUM(speech_seconds), 0) FROM pending_enrollment WHERE identity_id = ? AND model_identifier = ?",
@@ -639,6 +656,12 @@ public actor SpeakerStore {
     /// it, transitively.
     public func family(of id: IdentityID) throws -> [IdentityID] {
         try identityFamily(id).map(IdentityID.init)
+    }
+
+    /// The identifier an identity currently reads as, or itself when it is not
+    /// merged or has gone missing.
+    private func currentID(_ id: IdentityID) throws -> IdentityID {
+        (try current(id))?.id ?? id
     }
 
     private func identityFamily(_ id: IdentityID) throws -> [Int64] {
@@ -751,6 +774,27 @@ public actor SpeakerStore {
     public func profilesSeededOnlyIn(
         meetingID: String, model: EmbeddingModelIdentifier
     ) throws -> [SpeakerProfile] {
+        try allProfiles(model: model).filter {
+            try $0.identity.kind == .anonymous
+                && !hasEmbeddingOutside(meetingID: meetingID, identityID: $0.identity.id)
+        }
+    }
+
+    public func searchableProfiles(
+        model: EmbeddingModelIdentifier, excludingSeededIn meetingID: String? = nil
+    ) throws -> [SpeakerProfile] {
+        let profiles = try allProfiles(model: model)
+        guard let meetingID else { return profiles }
+        // An unnamed identity whose every vector came from this meeting is not
+        // evidence about this meeting: it would score against the profile seeded
+        // from its own audio and be announced as a voice heard before.
+        return try profiles.filter {
+            try $0.identity.kind != .anonymous
+                || hasEmbeddingOutside(meetingID: meetingID, identityID: $0.identity.id)
+        }
+    }
+
+    private func allProfiles(model: EmbeddingModelIdentifier) throws -> [SpeakerProfile] {
         var rows: [(Identity, [Float], Int, Int, Double)] = []
         try database.query(
             """
@@ -758,17 +802,8 @@ public actor SpeakerStore {
             FROM identity
             JOIN derived_profile p ON p.identity_id = identity.id
             WHERE identity.merged_into IS NULL AND p.model_identifier = ?
-              AND identity.kind = 'anonymous'
-              AND NOT EXISTS (
-                SELECT 1 FROM voice_embedding e
-                WHERE (e.identity_id = identity.id
-                       OR e.identity_id IN (
-                         SELECT id FROM identity m WHERE m.merged_into = identity.id
-                       ))
-                  AND (e.source_meeting IS NULL OR e.source_meeting != ?)
-              )
             """,
-            [.text(model.rawValue), .text(meetingID)]
+            [.text(model.rawValue)]
         ) { row in
             guard let centroid = row.vector(11) else { return }
             rows.append((self.identity(from: row), centroid, row.int(12), row.int(13), row.double(14)))
@@ -781,49 +816,29 @@ public actor SpeakerStore {
         }
     }
 
-    public func searchableProfiles(
-        model: EmbeddingModelIdentifier, excludingSeededIn meetingID: String? = nil
-    ) throws -> [SpeakerProfile] {
-        var rows: [(Identity, [Float], Int, Int, Double)] = []
-        var sql = """
-            SELECT \(Self.identityColumns), p.centroid, p.sample_count, p.recording_count, p.speech_seconds
-            FROM identity
-            JOIN derived_profile p ON p.identity_id = identity.id
-            WHERE identity.merged_into IS NULL AND p.model_identifier = ?
+    /// Whether an identity's merged family holds a vector from any meeting but
+    /// this one.
+    ///
+    /// Filtered here rather than in SQL because the family is transitive: A
+    /// merged into B merged into C. A correlated subquery walked one level, so
+    /// C's own material from a third meeting was invisible, and a recurring
+    /// voice with real history elsewhere was dropped from the gallery while
+    /// simultaneously being offered as seeded-only. recomputeProfiles builds C's
+    /// centroid over the whole chain, and this has to agree with it.
+    private func hasEmbeddingOutside(meetingID: String, identityID: IdentityID) throws -> Bool {
+        let family = try identityFamily(identityID)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        var found = false
+        try database.query(
             """
-        var bindings: [SQLValue] = [.text(model.rawValue)]
-        if let meetingID {
-            // An unnamed identity whose every vector came from this meeting is
-            // not evidence about this meeting. The family is walked because a
-            // merged-in identity's vectors are equally this identity's, and
-            // checking only its own rows dropped profiles that legitimately
-            // carry material from elsewhere.
-            sql += """
-
-                AND NOT (
-                  identity.kind = 'anonymous'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM voice_embedding e
-                    WHERE (e.identity_id = identity.id
-                           OR e.identity_id IN (
-                             SELECT id FROM identity m WHERE m.merged_into = identity.id
-                           ))
-                      AND (e.source_meeting IS NULL OR e.source_meeting != ?)
-                  )
-                )
-                """
-            bindings.append(.text(meetingID))
-        }
-        try database.query(sql, bindings) { row in
-            guard let centroid = row.vector(11) else { return }
-            rows.append((self.identity(from: row), centroid, row.int(12), row.int(13), row.double(14)))
-        }
-        return rows.map {
-            SpeakerProfile(
-                identity: $0.0, centroid: $0.1, sampleCount: $0.2,
-                recordingCount: $0.3, speechSeconds: $0.4
-            )
-        }
+            SELECT 1 FROM voice_embedding
+            WHERE identity_id IN (\(placeholders))
+              AND (source_meeting IS NULL OR source_meeting != ?)
+            LIMIT 1
+            """,
+            family.map { SQLValue.int64($0) } + [.text(meetingID)]
+        ) { _ in found = true }
+        return found
     }
 
     // MARK: - occurrences

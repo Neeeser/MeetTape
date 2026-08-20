@@ -14,10 +14,13 @@ struct StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var isLocal = true
     var limits = BackendAudioLimits.none
     var producesWordTimestamps = true
+    /// Holds the job slot, so a second meeting has to queue for it.
+    var delayNanoseconds: UInt64 = 0
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
+        if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
         progress(1)
         return TranscriptionOutput(
             segments: segments, text: segments.map(\.text).joined(separator: " "),
@@ -504,6 +507,55 @@ enum LocalPipelineTests {
                 // The labels it was asked for are still used.
                 let runs = try meeting.store.readRawDiarization()
                 expect.isFalse(runs.runs.isEmpty, "the cloud labels still produce a run")
+            },
+
+            test("renaming reaches a meeting that saw the merged identity") { expect in
+                // Through refreshCachedNames itself. The store's family walk and
+                // SpeakerMap.refreshName are covered elsewhere; what is only in
+                // this function is that it applies the second to the whole of
+                // the first, which is what a rename after a merge needs.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let ann = try await store.createPerson(name: "Ann")
+                let bob = try await store.createPerson(name: "Bob")
+                try await store.recordOccurrence(
+                    meetingID: meeting.metadata.id, clusterID: "remote-001_speaker_00",
+                    track: .remote, speechSeconds: 120, embedding: nil, model: nil,
+                    resolution: nil, identityID: ann.id, source: .human,
+                    humanVerified: true, wasExpectedParticipant: false
+                )
+                // The meeting keeps the link it was written with.
+                var map = SpeakerMap()
+                map.assign("Ann", to: "remote-001_speaker_00", identityID: ann.id)
+                try meeting.store.writeSpeakerMap(map)
+
+                try await store.merge(ann.id, into: bob.id)
+                _ = try await store.rename(bob.id, to: "Bob Tran")
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                try await pipeline.refreshCachedNames(for: bob.id)
+
+                expect.equal(
+                    try meeting.store.readSpeakerMap().displayName(for: "remote-001_speaker_00"),
+                    "Bob Tran",
+                    "the entry written under the merged identifier is refreshed too"
+                )
+                expect.equal(
+                    try meeting.store.readSpeakerMap().entries["remote-001_speaker_00"]?.identityID,
+                    ann.id,
+                    "and the link is left alone, so separating the merge can find it"
+                )
             },
 
             test("re-analysing speakers keeps the previous result and the words") { expect in

@@ -113,18 +113,49 @@ public struct AlwaysAllowed: ProcessingGate {
 /// apart, and a two-second granularity on a job measured in minutes costs
 /// nothing.
 public struct RecordingAwareGate: ProcessingGate {
-    private let isRecording: @Sendable () -> Bool
-    private let pollSeconds: Double
-
-    public init(pollSeconds: Double = 2, isRecording: @escaping @Sendable () -> Bool) {
-        self.isRecording = isRecording
-        self.pollSeconds = pollSeconds
+    /// What capture is doing, as far as processing needs to care.
+    public enum CaptureState: Sendable, Equatable {
+        case idle
+        /// The microphone is open into the memory ring and nothing is on disk.
+        /// Slack opens it about twelve seconds before the user joins.
+        case candidate(since: Date)
+        case recording
     }
 
-    public var isBlocked: Bool { isRecording() }
+    /// How long a candidate holds processing off.
+    ///
+    /// A prejoin or a waiting room is a candidate, and one left open all
+    /// afternoon is not a meeting. Blocking on it without a bound meant a
+    /// forgotten Meet tab could hold every job for hours in exchange for a
+    /// recording that never happened. Long enough to cover the twelve seconds
+    /// between the microphone opening and a real join, with room to spare.
+    public static let candidateBlockSeconds: TimeInterval = 120
+
+    private let capture: @Sendable () -> CaptureState
+    private let pollSeconds: Double
+    private let now: @Sendable () -> Date
+
+    public init(
+        pollSeconds: Double = 2,
+        now: @escaping @Sendable () -> Date = { Date() },
+        capture: @escaping @Sendable () -> CaptureState
+    ) {
+        self.capture = capture
+        self.pollSeconds = pollSeconds
+        self.now = now
+    }
+
+    public var isBlocked: Bool {
+        switch capture() {
+        case .idle: false
+        case .recording: true
+        case .candidate(let since):
+            now().timeIntervalSince(since) < Self.candidateBlockSeconds
+        }
+    }
 
     public func waitUntilAllowed() async {
-        while isRecording() {
+        while isBlocked {
             try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
             if Task.isCancelled { return }
         }

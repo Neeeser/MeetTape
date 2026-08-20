@@ -142,8 +142,8 @@ enum BackendSelectionTests {
     static var gateSuite: Suite {
         Suite("ProcessingGate", [
             test("nothing heavy starts while a recording is live") { expect in
-                let recording = LockedFlag(true)
-                let gate = RecordingAwareGate(pollSeconds: 0.05) { recording.value }
+                let recording = LockedBox(RecordingAwareGate.CaptureState.recording)
+                let gate = RecordingAwareGate(pollSeconds: 0.05) { recording.withLock { $0 } }
                 expect.isTrue(gate.isBlocked)
 
                 let waiting = Task { await gate.waitUntilAllowed() }
@@ -151,13 +151,46 @@ enum BackendSelectionTests {
                 expect.isFalse(waiting.isCancelled)
                 expect.isTrue(gate.isBlocked, "still held while the meeting runs")
 
-                recording.value = false
+                recording.withLock { $0 = .idle }
                 await waiting.value
                 expect.isFalse(gate.isBlocked)
             },
 
+            test("a prejoin holds processing, but not all afternoon") { expect in
+                // A candidate is real capture: the microphone is open into the
+                // ring about twelve seconds before a Slack huddle is joined. A
+                // waiting room left open is also a candidate, and blocking on
+                // that without a bound held every job for hours in exchange for
+                // a recording that never happened.
+                let now = LockedBox(Date(timeIntervalSince1970: 1_000))
+                let opened = now.withLock { $0 }
+                let gate = RecordingAwareGate(
+                    pollSeconds: 0.01,
+                    now: { now.withLock { $0 } },
+                    capture: { .candidate(since: opened) }
+                )
+                expect.isTrue(gate.isBlocked, "the microphone is open, so capture wins")
+
+                now.withLock { $0 = opened.addingTimeInterval(30) }
+                expect.isTrue(gate.isBlocked, "still inside the window a real join needs")
+
+                now.withLock {
+                    $0 = opened.addingTimeInterval(RecordingAwareGate.candidateBlockSeconds + 1)
+                }
+                expect.isFalse(gate.isBlocked, "a candidate this old is not a meeting")
+                await gate.waitUntilAllowed()
+
+                // A live recording is never released on a timer.
+                let live = RecordingAwareGate(
+                    pollSeconds: 0.01,
+                    now: { Date().addingTimeInterval(86_400) },
+                    capture: { .recording }
+                )
+                expect.isTrue(live.isBlocked)
+            },
+
             test("with no recording a job starts immediately") { expect in
-                let gate = RecordingAwareGate(pollSeconds: 10) { false }
+                let gate = RecordingAwareGate(pollSeconds: 10) { .idle }
                 expect.isFalse(gate.isBlocked)
                 let start = Date()
                 await gate.waitUntilAllowed()
@@ -232,52 +265,72 @@ enum BackendSelectionTests {
                 )
             },
 
-            test("a job re-checks the gate after every wait, not once") { expect in
-                // Acquiring the slot can take the length of another meeting's
-                // transcription. A recording that starts inside that window
-                // made the earlier gate reading stale, and the job resumed
-                // straight into running the Neural Engine alongside a live call.
-                final class Flag: ProcessingGate, @unchecked Sendable {
-                    private let box = LockedBox(true)
-                    var isBlocked: Bool { box.withLock { $0 } }
-                    func allow() { box.withLock { $0 = false } }
-                    func block() { box.withLock { $0 = true } }
-                    func waitUntilAllowed() async {
-                        while isBlocked { await Task.yield() }
-                    }
-                }
+            test("a job started before a recording waits for it, through the pipeline") { expect in
+                // Drives ProcessingPipeline.process with a real gate rather than
+                // reimplementing its loop: the defect this pins is the gate
+                // being consulted once per iteration, and only the pipeline has
+                // that loop.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
 
-                let gate = Flag()
-                let lock = ProcessingJobLock()
-                await lock.acquire()
+                let capture = LockedBox(RecordingAwareGate.CaptureState.recording)
+                let gate = RecordingAwareGate(pollSeconds: 0.01) { capture.withLock { $0 } }
 
-                // The job parks at the gate, is let through, and then queues
-                // for the slot while a new recording starts.
-                let started = LockedBox(false)
-                let job = Task {
-                    while true {
-                        await gate.waitUntilAllowed()
-                        await lock.acquire()
-                        if !gate.isBlocked { break }
-                        lock.release()
-                    }
-                    started.withLock { $0 = true }
-                    lock.release()
-                }
-
-                gate.allow()
-                try await Task.sleep(nanoseconds: 30_000_000)
-                gate.block()
-                lock.release()
-                try await Task.sleep(nanoseconds: 30_000_000)
-                expect.isFalse(
-                    started.withLock { $0 },
-                    "the slot came free but a recording had started meanwhile"
+                let settings: AppSettings = {
+                    var value = AppSettings()
+                    value.enrichment = EnrichmentSettings(
+                        generateTitle: false, generateDescription: false, generateNotes: false,
+                        generateSummary: false, suggestSpeakers: false
+                    )
+                    return value
+                }()
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    backends: ProcessingBackends(
+                        transcription: { _, _ in
+                            StubLocalTranscriber(segments: [
+                                RawTranscriptSegment(
+                                    start: 0, end: 5, text: "hello", speaker: nil,
+                                    words: [RawTranscriptWord(start: 0, end: 1, text: " hello")]
+                                ),
+                            ])
+                        },
+                        diarization: { _, _ in
+                            StubLocalDiarizer(
+                                intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                                chunkEmbeddings: []
+                            )
+                        }
+                    ),
+                    gate: gate,
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { settings },
+                    wait: { _ in }
                 )
 
-                gate.allow()
+                let job = Task { await pipeline.process(meetingID: meeting.metadata.id) }
+                try await Task.sleep(nanoseconds: 120_000_000)
+                expect.notEqual(
+                    try meeting.store.readMetadata().processing.state, .complete,
+                    "nothing heavy runs while the microphone is open"
+                )
+
+                capture.withLock { $0 = .idle }
                 await job.value
-                expect.isTrue(started.withLock { $0 }, "and it runs once the call ends")
+                expect.equal(
+                    try meeting.store.readMetadata().processing.state, .complete,
+                    "and it finishes once the meeting ends"
+                )
+
+                // The re-check loop this sits next to, which catches a
+                // recording that starts while a parked job is queueing for the
+                // slot, is not pinned here: reproducing it needs control over
+                // when each job is scheduled that the pipeline does not expose,
+                // and every construction that fitted in a test passed with the
+                // loop removed. Argued in the comment at the loop, not tested.
             },
 
             test("a typed speaker count has to be one a clusterer can use") { expect in

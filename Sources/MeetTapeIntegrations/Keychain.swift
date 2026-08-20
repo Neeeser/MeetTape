@@ -23,6 +23,30 @@ public struct KeychainAPIKeyStore: APIKeyProviding, Sendable {
 
     public var hasKey: Bool { read()?.isEmpty == false }
 
+    /// Whether the keychain positively says there is no key.
+    ///
+    /// A read can fail for reasons that are not absence: a locked login
+    /// keychain, or a denied prompt after an ad-hoc rebuild invalidates the
+    /// item's ACL. Treating those as absence made the optional cloud stages skip
+    /// silently and the meeting complete with no title and no summary and
+    /// nothing on screen saying why. Only errSecItemNotFound is absence.
+    public var isKnownAbsent: Bool {
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query(returningData: false) as CFDictionary, &result)
+            == errSecItemNotFound
+    }
+
+    private func query(returningData: Bool) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        if returningData { query[kSecReturnData as String] = true }
+        return query
+    }
+
     public func read() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

@@ -113,7 +113,7 @@ public final class MeetTapeRuntime {
     /// The same trick for the recording state, which is what the processing
     /// gate consults. Read on a timer from the processing actor, written here
     /// on every lifecycle transition.
-    @ObservationIgnored private let recordingSnapshot: LockedBox<Bool>
+    @ObservationIgnored private let recordingSnapshot: LockedBox<RecordingAwareGate.CaptureState>
     /// Main-actor work is chained so state updates arrive in the order they were
     /// produced; independent tasks give no ordering guarantee.
     @ObservationIgnored private var workChain: Task<Void, Never>?
@@ -137,7 +137,7 @@ public final class MeetTapeRuntime {
         self.settings = loaded
         let snapshot = LockedBox(loaded)
         self.settingsSnapshot = snapshot
-        let recording = LockedBox(false)
+        let recording = LockedBox(RecordingAwareGate.CaptureState.idle)
         self.recordingSnapshot = recording
         // Reads the current setting on every use, so a folder chosen in Settings
         // applies straight away.
@@ -222,7 +222,7 @@ public final class MeetTapeRuntime {
                     )
                 }
             ),
-            gate: RecordingAwareGate(isRecording: { recording.withLock { $0 } }),
+            gate: RecordingAwareGate(capture: { recording.withLock { $0 } }),
             calendar: CalendarService(),
             clock: clock,
             settingsProvider: { [snapshot = settingsSnapshot] in snapshot.withLock { $0 } },
@@ -871,7 +871,14 @@ public final class MeetTapeRuntime {
         // what the list holds: only a stage boundary does. Rescanning on every
         // tick queued that work ahead of the capture action for the meeting
         // that had just started, which is the one moment a job is running.
-        if previous != progress.state { refreshRecentMeetings() }
+        // Both are gated on the stage boundary. The panel's own progress line
+        // reads the observable dictionary above, so a fraction changing needs no
+        // reload; what a reload picks up, the transcript and the speaker rows,
+        // only changes when a stage finishes. Reloading per tick queued
+        // hundreds of archive scans and transcript decodes on the actor that
+        // also arms the next recording.
+        guard previous != progress.state else { return }
+        refreshRecentMeetings()
         onProcessingUpdate?(progress.meetingID)
     }
 
@@ -896,7 +903,18 @@ public final class MeetTapeRuntime {
         // Read by the processing gate from another executor, so a job started
         // before a meeting parks between stages instead of competing with the
         // capture that is running now.
-        recordingSnapshot.withLock { $0 = status.isCapturing }
+        // Candidate carries when it started, so a prejoin left open all
+        // afternoon stops holding processing after a couple of minutes: it is
+        // real capture, but it is not a meeting.
+        recordingSnapshot.withLock { existing in
+            if status.hasActiveSession || status.sessionState == .ending {
+                existing = .recording
+            } else if status.sessionState == .candidate {
+                if case .candidate = existing {} else { existing = .candidate(since: clock.now) }
+            } else {
+                existing = .idle
+            }
+        }
         onStatusChange?()
     }
 }

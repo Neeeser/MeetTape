@@ -140,7 +140,13 @@ public struct UtteranceOverride: Codable, Sendable, Equatable {
         let spanEnd = max(finish, start + 0.001)
         let overlap = min(end, spanEnd) - max(utterance.start, start)
         guard overlap > 0 else { return false }
-        return overlap / (end - utterance.start) >= 0.5
+        // Measured against whichever of the two is shorter, so the rule holds in
+        // both directions that re-assembly moves a turn. A line split in half is
+        // wholly inside the span; a line merged with a long neighbour wholly
+        // contains it, and dividing by the new line's length dropped the
+        // correction exactly when re-analysing at a lower speaker count merged
+        // the corrected interjection into the monologue around it.
+        return overlap / min(end - utterance.start, spanEnd - start) >= 0.5
     }
 }
 

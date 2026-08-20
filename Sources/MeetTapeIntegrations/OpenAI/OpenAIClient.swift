@@ -4,6 +4,14 @@ import MeetTapeCore
 /// Supplies the API key without holding it in memory longer than a request needs.
 public protocol APIKeyProviding: Sendable {
     func apiKey() throws -> String
+    /// Whether the store positively says there is no key, as opposed to being
+    /// unable to answer. Defaults to "cannot say", so a provider that does not
+    /// know keeps the stages attempting and failing visibly.
+    var isKnownAbsent: Bool { get }
+}
+
+extension APIKeyProviding {
+    public var isKnownAbsent: Bool { false }
 }
 
 public struct OpenAIClient: AIBackend {
@@ -41,10 +49,15 @@ public struct OpenAIClient: AIBackend {
 
     // MARK: - credentials
 
-    /// A key exists. Not that it works: proving that costs a request, and the
-    /// callers of this are deciding whether to attempt an optional stage at all.
+    /// Whether an optional cloud stage is worth attempting.
+    ///
+    /// False only when the store positively says no key was ever stored. A read
+    /// that merely failed leaves this true, so the stage runs, fails visibly and
+    /// offers a retry rather than completing the meeting with no title and no
+    /// explanation. Proving the key works costs a request; this does not.
     public func isConfigured() async -> Bool {
-        (try? keyProvider.apiKey())?.isEmpty == false
+        if (try? keyProvider.apiKey())?.isEmpty == false { return true }
+        return !keyProvider.isKnownAbsent
     }
 
     /// Fetching one model description proves both the key and access to that

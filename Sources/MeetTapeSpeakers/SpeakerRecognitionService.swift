@@ -11,16 +11,35 @@ public struct SpeakerClusterInput: Sendable, Equatable {
     /// percentile of genuine scores is 0.28, and over two minutes it is 0.82.
     public var centroid: [Float]
     public var quality: Double
+    /// The audio the centroid was built over, on the meeting timeline. Carried
+    /// so that confirming this cluster records what it covers rather than only
+    /// which label the diarizer gave it, and so two clusters can be asked
+    /// whether they overlap in time.
+    public var spans: [AudioSpan]
+    /// The diarization run the cluster belongs to. Context, kept out of every
+    /// retraction decision because a re-analysis replaces it.
+    public var analysisID: String?
 
     public init(
         clusterID: String, track: CaptureTrack, speechSeconds: Double,
-        centroid: [Float], quality: Double = 1
+        centroid: [Float], quality: Double = 1,
+        spans: [AudioSpan] = [], analysisID: String? = nil
     ) {
         self.clusterID = clusterID
         self.track = track
         self.speechSeconds = speechSeconds
         self.centroid = centroid
         self.quality = quality
+        self.spans = AudioSpan.union(spans)
+        self.analysisID = analysisID
+    }
+
+    /// What a vector derived from this cluster was derived from.
+    public func evidence(meetingID: String, confirmation: VoiceEnrollmentSource) -> VoiceEvidence {
+        VoiceEvidence(
+            meetingID: meetingID, track: track, spans: spans,
+            confirmation: confirmation, analysisID: analysisID, clusterID: clusterID
+        )
     }
 }
 
@@ -188,8 +207,9 @@ public actor SpeakerRecognitionService {
                         speechSeconds: cluster.speechSeconds,
                         qualityScore: cluster.quality,
                         source: .anonymousSeed,
-                        meetingID: meetingID,
-                        clusterID: cluster.clusterID
+                        evidence: [cluster.evidence(
+                            meetingID: meetingID, confirmation: .anonymousSeed
+                        )]
                     ),
                     now: now
                 )
@@ -293,16 +313,15 @@ public actor SpeakerRecognitionService {
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
         let vector = VoiceVector.l2Normalized(cluster.centroid)
+        let evidence = cluster.evidence(meetingID: meetingID, confirmation: .humanConfirmedCluster)
+        let retraction = VoiceEvidenceRetraction.claiming(evidence, for: identityID)
         // Before the learning guard, and only for other identities: the user has
-        // said this cluster is someone else, so whoever held its vector is
-        // holding audio that is not theirs, and refusing to remove it because
-        // learning is switched off leaves them auto-named from it forever. This
-        // identity's own row is dealt with below, where it can be replaced.
-        for stale in try await store.removeClusterEnrolments(
-            meetingID: meetingID, clusterID: cluster.clusterID, excluding: identityID
-        ) {
-            try await store.recomputeProfiles(for: stale, now: now)
-        }
+        // said this audio is someone else's, so whoever holds a vector derived
+        // from it is holding a voice that is not theirs, and refusing to remove
+        // it because learning is switched off leaves them auto-named from it
+        // forever. This identity's own row is dealt with below, where it can be
+        // replaced rather than only removed.
+        _ = try await store.retractEvidence(retraction, keepingClaimant: true, now: now)
         try await store.recordOccurrence(
             meetingID: meetingID,
             clusterID: cluster.clusterID,
@@ -328,11 +347,7 @@ public actor SpeakerRecognitionService {
         // fresh one replaces it rather than joining it and doubling that one
         // recording's weight.
         //
-        for stale in try await store.removeClusterEnrolments(
-            meetingID: meetingID, clusterID: cluster.clusterID
-        ) {
-            try await store.recomputeProfiles(for: stale, now: now)
-        }
+        _ = try await store.retractEvidence(retraction, keepingClaimant: false, now: now)
         _ = try await store.enrol(
             VoiceEnrollmentCandidate(
                 identityID: identityID,
@@ -341,8 +356,7 @@ public actor SpeakerRecognitionService {
                 speechSeconds: cluster.speechSeconds,
                 qualityScore: cluster.quality,
                 source: .humanConfirmedCluster,
-                meetingID: meetingID,
-                clusterID: cluster.clusterID
+                evidence: [evidence]
             ),
             now: now
         )
@@ -358,11 +372,13 @@ public actor SpeakerRecognitionService {
         meetingID: String,
         identityID: IdentityID,
         vectors: [DiarizationChunkEmbedding],
+        track: CaptureTrack,
+        spans: [AudioSpan],
         settings: SpeakerRecognitionSettings,
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
-        guard settings.learnFromCorrections, !vectors.isEmpty else {
+        guard settings.learnFromCorrections, !vectors.isEmpty, !spans.isEmpty else {
             return try await store.profileStatus(of: identityID, model: model)
         }
         let seconds = vectors.reduce(0) { $0 + $1.duration }
@@ -379,7 +395,10 @@ public actor SpeakerRecognitionService {
                 speechSeconds: seconds,
                 qualityScore: quality,
                 source: .humanConfirmedUtterances,
-                meetingID: meetingID
+                evidence: [VoiceEvidence(
+                    meetingID: meetingID, track: track, spans: spans,
+                    confirmation: .humanConfirmedUtterances
+                )]
             ),
             now: now
         )
@@ -400,9 +419,11 @@ public actor SpeakerRecognitionService {
         vector: [Float],
         speechSeconds: Double,
         quality: Double,
+        spans: [AudioSpan],
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
     ) async throws -> VoiceProfileStatus? {
+        guard !spans.isEmpty else { return nil }
         // The microphone track is the local user only when it holds the local
         // user. Echo cancellation is disabled on some device pairings and falls
         // back to plain capture, so on speakers the far end reaches the
@@ -430,7 +451,10 @@ public actor SpeakerRecognitionService {
                 speechSeconds: speechSeconds,
                 qualityScore: quality,
                 source: .micTrackDeterministic,
-                meetingID: meetingID
+                evidence: [VoiceEvidence(
+                    meetingID: meetingID, track: .mic, spans: spans,
+                    confirmation: .micTrackDeterministic
+                )]
             ),
             now: now
         )

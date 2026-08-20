@@ -71,6 +71,26 @@ public struct DiarizationChunkEmbedding: Sendable, Equatable {
     public var duration: Double { max(0, end - start) }
 }
 
+/// One track embedded as though it held a single speaker.
+///
+/// Used for the microphone track of a remote call, where the local user's
+/// identity is true by construction. The spans are the dominant voice's own
+/// intervals, relative to the audio that was submitted, and they are what makes
+/// the resulting vector retractable later.
+public struct SingleSpeakerSample: Sendable, Equatable {
+    public var vector: [Float]
+    public var speechSeconds: Double
+    public var quality: Double
+    public var spans: [AudioSpan]
+
+    public init(vector: [Float], speechSeconds: Double, quality: Double, spans: [AudioSpan]) {
+        self.vector = vector
+        self.speechSeconds = speechSeconds
+        self.quality = quality
+        self.spans = AudioSpan.union(spans)
+    }
+}
+
 /// What a diarization backend returns for one request. Times are relative to the
 /// audio that was submitted; the pipeline puts them on the meeting timeline.
 public struct DiarizationOutput: Sendable, Equatable {

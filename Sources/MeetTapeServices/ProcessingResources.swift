@@ -28,7 +28,7 @@ public struct ProcessingBackends: Sendable {
     public var requireLocalModels: (@Sendable () async throws -> Void)?
     /// Extracts one vector for a track known to hold a single speaker, used for
     /// the microphone track where the speaker is the local user by construction.
-    public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)?)?
+    public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)?
     /// Re-clusters one meeting, reusing the prepared state from its first pass
     /// where that is still in memory. Absent when local diarization is not
     /// available, which is what makes the re-analysis control unavailable too.
@@ -41,7 +41,7 @@ public struct ProcessingBackends: Sendable {
         speakers: SpeakerRecognitionService? = nil,
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
-        singleSpeakerEmbedding: (@Sendable (URL) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)?)? = nil,
+        singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         reanalyzeDiarization: (@Sendable (String, URL, Int?) async throws -> DiarizationOutput)? = nil
     ) {
         self.transcription = transcription

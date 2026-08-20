@@ -668,6 +668,17 @@ enum LocalPipelineTests {
                 defer { try? FileManager.default.removeItem(at: storeRoot) }
 
                 let key = "remote-001_speaker_00"
+                // The run is what says which audio the cluster covers, and a
+                // confirmation records that rather than the label, so without it
+                // there is nothing to learn from and nothing to take back.
+                try meeting.store.writeRawDiarization(RawDiarization(runs: [
+                    DiarizationRun(
+                        id: "remote-001", track: .remote, backend: "test",
+                        producedAt: Date(), timelineOffset: 0,
+                        clusters: [DiarizationCluster(id: "speaker_00", speechSeconds: 200)],
+                        intervals: [DiarizationInterval(start: 0, end: 200, clusterID: "speaker_00")]
+                    ),
+                ]))
                 try await store.recordOccurrence(
                     meetingID: meeting.metadata.id, clusterID: key, track: .remote,
                     speechSeconds: 200, embedding: SpeakerIdentityTests.vector(seed: 84),
@@ -716,15 +727,22 @@ enum LocalPipelineTests {
 
                 let alice = try await store.createPerson(name: "Alice")
                 let bob = try await store.createPerson(name: "Bob")
-                for person in [alice, bob] {
+                // Different halves of the same meeting, which is what two people
+                // talking in it looks like.
+                let halves = [(alice, 0.0), (bob, 600.0)]
+                for (person, offset) in halves {
                     _ = try await store.enrol(VoiceEnrollmentCandidate(
                         identityID: person.id,
-                        vector: SpeakerIdentityTests.vector(seed: person.id.rawValue == alice.id.rawValue ? 91 : 92),
+                        vector: SpeakerIdentityTests.vector(seed: offset == 0 ? 91 : 92),
                         model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 1,
-                        source: .humanConfirmedUtterances, meetingID: "m1"
+                        source: .humanConfirmedUtterances,
+                        evidence: VoiceEvidenceFixture.evidence(
+                            meeting: "m1", seconds: 60,
+                            source: .humanConfirmedUtterances, start: offset
+                        )
                     ))
                 }
-                for person in [alice, bob] {
+                for (person, _) in halves {
                     expect.equal(
                         try await store.profileStatus(
                             of: person.id, model: .fluidAudioOffline
@@ -733,9 +751,15 @@ enum LocalPipelineTests {
                     )
                 }
 
-                // Re-deriving one of them touches only their own rows.
-                let removed = try await store.removeUtteranceEnrolments(
-                    meetingID: "m1", of: alice.id
+                // Giving Alice's audio to somebody else touches Alice's row and
+                // nothing else, because Bob's vector was derived from different
+                // audio and the store knows which.
+                let removed = try await store.retractEvidence(
+                    VoiceEvidenceRetraction(
+                        meetingID: "m1", track: .remote,
+                        spans: [AudioSpan(start: 0, end: 60)]
+                    ),
+                    keepingClaimant: false
                 )
                 expect.equal(removed.map(\.rawValue), [alice.id.rawValue])
                 expect.equal(
@@ -762,7 +786,8 @@ enum LocalPipelineTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: alice.id, vector: SpeakerIdentityTests.vector(seed: 95),
                     model: .fluidAudioOffline, speechSeconds: 90, qualityScore: 1,
-                    source: .humanConfirmedUtterances, meetingID: meeting.metadata.id
+                    source: .humanConfirmedUtterances,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: meeting.metadata.id, seconds: 90, source: .humanConfirmedUtterances)
                 ))
 
                 let key = "remote-001_speaker_00"

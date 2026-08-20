@@ -240,7 +240,7 @@ extension LocalModelManager {
     /// Returns nil when the track's dominant voice does not clearly dominate.
     public func embedSingleSpeaker(
         audio: URL, minimumDominantShare: Double = 0.75
-    ) async throws -> (vector: [Float], speechSeconds: Double, quality: Double)? {
+    ) async throws -> SingleSpeakerSample? {
         let models = try await loadedDiarizerModels()
         var config = Self.diarizerConfiguration(speakerCount: nil)
         config.exposeChunkEmbeddings = true
@@ -271,7 +271,14 @@ extension LocalModelManager {
         let quality = ownSegments.isEmpty
             ? 1.0
             : ownSegments.reduce(0.0) { $0 + Double($1.qualityScore) } / Double(ownSegments.count)
-        return (VoiceVector.centroid(vectors), dominant.value, quality)
+        return SingleSpeakerSample(
+            vector: VoiceVector.centroid(vectors),
+            speechSeconds: dominant.value,
+            quality: quality,
+            spans: ownSegments.map {
+                AudioSpan(start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds))
+            }
+        )
     }
 
     /// Vectors for intervals another backend decided.

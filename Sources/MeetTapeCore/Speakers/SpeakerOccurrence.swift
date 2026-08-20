@@ -115,8 +115,13 @@ public struct VoiceEnrollmentCandidate: Sendable, Equatable {
     public var speechSeconds: Double
     public var qualityScore: Double
     public var source: VoiceEnrollmentSource
-    public var meetingID: String?
-    public var clusterID: String?
+    /// The audio this vector was derived from. Required, because a vector whose
+    /// audio cannot be named again is a vector nothing can retract when the
+    /// person it belongs to turns out to be somebody else.
+    ///
+    /// More than one row when the material spans both tracks, which a set of
+    /// line-level corrections can. All of them are from one recording.
+    public var evidence: [VoiceEvidence]
 
     public init(
         identityID: IdentityID,
@@ -125,8 +130,7 @@ public struct VoiceEnrollmentCandidate: Sendable, Equatable {
         speechSeconds: Double,
         qualityScore: Double,
         source: VoiceEnrollmentSource,
-        meetingID: String? = nil,
-        clusterID: String? = nil
+        evidence: [VoiceEvidence]
     ) {
         self.identityID = identityID
         self.vector = vector
@@ -134,9 +138,22 @@ public struct VoiceEnrollmentCandidate: Sendable, Equatable {
         self.speechSeconds = speechSeconds
         self.qualityScore = qualityScore
         self.source = source
-        self.meetingID = meetingID
-        self.clusterID = clusterID
+        self.evidence = evidence
     }
+
+    /// The recording behind the vector. Nil only when there is no evidence at
+    /// all, which `enrol` refuses.
+    public var meetingID: String? { evidence.first?.meetingID }
+
+    /// The cluster label recorded alongside the audio, when every piece of
+    /// evidence names the same one. Context for a reader; nothing decides what a
+    /// vector covers from it.
+    public var clusterID: String? {
+        let labels = Set(evidence.compactMap(\.clusterID))
+        return labels.count == 1 ? labels.first : nil
+    }
+
+    public var tracks: Set<CaptureTrack> { Set(evidence.map(\.track)) }
 }
 
 /// Why a candidate embedding was refused. Reported rather than swallowed, so a
@@ -146,6 +163,8 @@ public enum VoiceEnrollmentRejection: Error, Sendable, Equatable, CustomStringCo
     case wrongDimension(got: Int, expected: Int)
     case emptyVector
     case identityMissing
+    /// No audio was named, or the rows named more than one recording.
+    case unusableEvidence
 
     public var description: String {
         switch self {
@@ -155,6 +174,7 @@ public enum VoiceEnrollmentRejection: Error, Sendable, Equatable, CustomStringCo
             "embedding has \(got) dimensions, expected \(expected)"
         case .emptyVector: "empty embedding"
         case .identityMissing: "no such identity"
+        case .unusableEvidence: "the audio behind the vector was not identified"
         }
     }
 }

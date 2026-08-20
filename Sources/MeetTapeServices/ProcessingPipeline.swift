@@ -799,6 +799,37 @@ public actor ProcessingPipeline {
         try await suggestSpeakerNames(store: store, metadata: &metadata, settings: settings)
     }
 
+    /// The audio one cluster covers, on the meeting timeline.
+    ///
+    /// Read straight off the diarization run, which is immutable once written,
+    /// so this answer is the same every time it is asked for as long as that run
+    /// exists. It is what a vector derived from the cluster records, and what
+    /// stays true after a re-analysis renumbers everything.
+    private func clusterSpans(_ clusterID: String, in run: DiarizationRun) -> [AudioSpan] {
+        AudioSpan.union(
+            run.intervals
+                .filter { $0.clusterID == clusterID }
+                .map { AudioSpan(start: $0.start, end: $0.end) }
+        )
+    }
+
+    /// The run and spans behind a namespaced cluster key.
+    ///
+    /// Every run is searched, not only the active one: a person can confirm a
+    /// name against a cluster the previous analysis produced, and the audio it
+    /// covered is still the audio it covered.
+    private func clusterAudio(
+        _ key: String, in diarization: RawDiarization
+    ) -> (run: DiarizationRun, spans: [AudioSpan])? {
+        for run in diarization.runs {
+            for cluster in run.clusters
+            where SpeakerLabel.namespaced(chunkID: run.id, rawLabel: cluster.id) == key {
+                return (run, clusterSpans(cluster.id, in: run))
+            }
+        }
+        return nil
+    }
+
     /// Matches every cluster against the local voice memory.
     ///
     /// A read, in every case. Nothing here writes a vector into a profile at any
@@ -828,7 +859,8 @@ public actor ProcessingPipeline {
                 clusters.append(SpeakerClusterInput(
                     clusterID: key, track: run.track,
                     speechSeconds: cluster.speechSeconds, centroid: vector,
-                    quality: cluster.quality
+                    quality: cluster.quality,
+                    spans: clusterSpans(cluster.id, in: run), analysisID: run.id
                 ))
             }
         }
@@ -982,12 +1014,20 @@ public actor ProcessingPipeline {
         ) else { return }
 
         guard let sample = try await embed(audio) else { return }
+        // The sample's spans are relative to the audio submitted, which starts at
+        // the track's lead-in. Everything stored is on the meeting timeline, so
+        // that a span means the same thing whichever track recorded it.
+        let leadIn = timeline.leadIn(track: .mic)
+        let spans = sample.spans.map {
+            AudioSpan(start: $0.start + leadIn, end: $0.end + leadIn)
+        }
         // Declined when the microphone track's dominant voice is somebody else
         // on this call. Not a failure: the meeting is fine, the profile simply
         // learns nothing from it.
         guard let status = try await service.learnLocalUserVoice(
             meetingID: metadata.id, identityID: identityID, vector: sample.vector,
-            speechSeconds: sample.speechSeconds, quality: sample.quality, now: clock.now
+            speechSeconds: sample.speechSeconds, quality: sample.quality,
+            spans: spans, now: clock.now
         ) else { return }
         Log.processing.info(
             "local voice profile: \(status.recordingCount, privacy: .public) recordings, \(status.sampleCount, privacy: .public) samples"
@@ -1276,10 +1316,20 @@ public actor ProcessingPipeline {
     private func retractCluster(meetingID: String, clusterID: String) async throws {
         guard let service = backends.speakers else { return }
         let store = await service.speakerStore
-        for stale in try await store.removeClusterEnrolments(
-            meetingID: meetingID, clusterID: clusterID
-        ) {
-            try await store.recomputeProfiles(for: stale, now: clock.now)
+        if let found = repository.findMeeting(id: meetingID, includingMerged: true),
+           let audio = clusterAudio(clusterID, in: try found.store.readRawDiarization()) {
+            // Nobody is claiming the audio, so nothing is exempt: every vector
+            // that stood on it loses it. Leaving it behind used to mean the
+            // person the name was taken away from kept the voice, and because
+            // their profile then matched this very cluster at close to 1.0, the
+            // next resolution pass wrote the cleared name straight back at High
+            // confidence.
+            _ = try await store.retractEvidence(
+                VoiceEvidenceRetraction(
+                    meetingID: meetingID, track: audio.run.track, spans: audio.spans
+                ),
+                keepingClaimant: false, now: clock.now
+            )
         }
         try await store.clearOccurrenceIdentity(meetingID: meetingID, clusterID: clusterID)
     }
@@ -1293,121 +1343,9 @@ public actor ProcessingPipeline {
     public func applyUtteranceSpeaker(
         _ name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
     ) async throws -> IdentityID? {
-        try await applyUtteranceSpeaker(
-            name, utteranceID: utteranceID, meetingID: meetingID,
-            identityID: identityID, learning: true
+        try await correctUtterances(
+            name, utteranceIDs: [utteranceID], meetingID: meetingID, identityID: identityID
         )
-    }
-
-    @discardableResult
-    private func applyUtteranceSpeaker(
-        _ name: String, utteranceID: String, meetingID: String,
-        identityID: IdentityID?, learning: Bool,
-        displaced: ((IdentityID) -> Void)? = nil
-    ) async throws -> IdentityID? {
-        guard let found = repository.findMeeting(id: meetingID) else {
-            throw StorageError.meetingNotFound(id: meetingID)
-        }
-        guard let transcript = try found.store.readCanonicalTranscript(),
-              let utterance = transcript.utterances.first(where: { $0.id == utteranceID })
-        else {
-            // The transcript moved under the correction, which happens when a
-            // re-analysis lands between the click and this call. Saying so is
-            // the point: returning nil silently left the user watching a name
-            // appear and then vanish.
-            throw ProcessingError.utteranceNotFound(id: utteranceID)
-        }
-
-        let settings = settingsProvider()
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            var speakers = try found.store.readSpeakerMap()
-            // Clearing takes the line away from whoever held it just as naming
-            // somebody else does, and their enrolment was built from a set that
-            // included it. Only when it actually moves, though: the menu offers
-            // this on every line, and reading the rendered assignment reported
-            // the cluster's owner as displaced by a click on a line that has no
-            // correction, which changes nothing and destroyed their enrolment.
-            let override = speakers.override(for: utterance)?.assignment
-            let remaining = speakers.entries[utterance.speakerKey]
-            let cleared: IdentityID? = {
-                guard let override, override.origin == .human,
-                      let identity = override.identityID,
-                      identity != remaining?.identityID
-                else { return nil }
-                return identity
-            }()
-            speakers.clearOverride(for: utterance)
-            try found.store.writeSpeakerMap(speakers)
-            try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
-            if let cleared {
-                if let displaced {
-                    displaced(cleared)
-                } else {
-                    try await rederiveConfirmedSpeech(
-                        store: found.store, metadata: found.metadata, speakers: speakers,
-                        identityID: cleared, settings: settings
-                    )
-                }
-            }
-            return nil
-        }
-
-        // Resolved before the map is read. This actor is re-entrant at that
-        // suspension, so a map read before it is a snapshot another correction
-        // can write over: two lines named in quick succession both read an
-        // empty map, and the second write dropped the first line's name. It
-        // also reverted the cluster names recognition wrote while the user was
-        // typing. Read, modify and write with nothing awaited between them.
-        let resolved = try await identity(named: trimmed, existing: identityID)
-        var speakers = try found.store.readSpeakerMap()
-        // Whoever this line was confirmed as before it moved. Their enrolment
-        // for this meeting was built from lines that include this one, so it now
-        // contains somebody else's voice and has to be derived again from what
-        // is still theirs.
-        let previousOwner = speakers.assignment(for: utterance)
-            .flatMap { $0.origin == .human ? $0.identityID : nil }
-        speakers.overrideUtterance(
-            utterance,
-            with: SpeakerAssignment(
-                displayName: trimmed, origin: .human, identityID: resolved,
-                provenance: .human()
-            ),
-            at: clock.now
-        )
-        try found.store.writeSpeakerMap(speakers)
-        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
-
-        if let previous = previousOwner, previous != resolved {
-            if let displaced {
-                // The batch collects them and re-derives once. Doing it here
-                // meant a thirty-line correction ran thirty whole-track exports
-                // and thirty embedding passes for the person losing the lines,
-                // twenty-nine of whose results the next line deleted.
-                displaced(previous)
-            } else {
-                try await rederiveConfirmedSpeech(
-                    store: found.store, metadata: found.metadata, speakers: speakers,
-                    identityID: previous, settings: settings
-                )
-            }
-        }
-
-        if let resolved {
-            if learning {
-                try await accumulateConfirmedSpeech(
-                    store: found.store, metadata: found.metadata, speakers: speakers,
-                    identityID: resolved, settings: settings
-                )
-            }
-            // Only when this call owns the batch. refreshCachedNames walks every
-            // meeting the identity appears in and re-renders each one's
-            // markdown, so running it per line made a thirty-line correction on
-            // someone seen in fifty meetings fifteen hundred transcript decodes.
-            // The batch path calls it once at the end.
-            if learning { try await refreshCachedNames(for: resolved) }
-        }
-        return resolved
     }
 
     /// Applies one identity to several lines at once.
@@ -1418,34 +1356,138 @@ public actor ProcessingPipeline {
     public func applyUtteranceSpeaker(
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) async throws {
-        var linked = identityID
-        var displaced: Set<IdentityID> = []
-        // Every override is written first and the profiles are considered once
-        // at the end. Learning per line would re-embed the whole growing set on
-        // each one, so a single thirty-line correction became thirty full-track
-        // passes and thirty near-identical vectors.
-        for id in utteranceIDs {
-            linked = try await applyUtteranceSpeaker(
-                name, utteranceID: id, meetingID: meetingID, identityID: linked,
-                learning: false, displaced: { displaced.insert($0) }
-            )
-        }
-        guard let found = repository.findMeeting(id: meetingID) else { return }
-        let settings = settingsProvider()
-        for previous in displaced where previous != linked {
-            try await rederiveConfirmedSpeech(
-                store: found.store, metadata: found.metadata,
-                speakers: try found.store.readSpeakerMap(),
-                identityID: previous, settings: settings
-            )
-        }
-        guard let linked else { return }
-        try await accumulateConfirmedSpeech(
-            store: found.store, metadata: found.metadata,
-            speakers: try found.store.readSpeakerMap(),
-            identityID: linked, settings: settingsProvider()
+        _ = try await correctUtterances(
+            name, utteranceIDs: utteranceIDs, meetingID: meetingID, identityID: identityID
         )
-        try await refreshCachedNames(for: linked)
+    }
+
+    /// Moves a set of lines to one speaker, all of them or none.
+    ///
+    /// The selection is one decision, so it is resolved, applied in memory and
+    /// written once. Applying line by line meant a failure part way through left
+    /// the map half rewritten with no error shown: seventeen of thirty lines
+    /// renamed, the person who lost them still holding a vector built from their
+    /// audio, and nothing left to say a rebuild was owed.
+    @discardableResult
+    private func correctUtterances(
+        _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID?
+    ) async throws -> IdentityID? {
+        guard let found = repository.findMeeting(id: meetingID) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        guard let transcript = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: utteranceIDs.first ?? "")
+        }
+        // Every line is looked up before anything is written. The transcript
+        // moves under a correction when a re-analysis lands between the click and
+        // this call, and saying so is the point: returning nil silently left the
+        // user watching a name appear and then vanish.
+        var lines: [Utterance] = []
+        for id in utteranceIDs {
+            guard let utterance = transcript.utterances.first(where: { $0.id == id }) else {
+                throw ProcessingError.utteranceNotFound(id: id)
+            }
+            lines.append(utterance)
+        }
+        guard !lines.isEmpty else { return nil }
+
+        let settings = settingsProvider()
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Resolved before the map is read, and once for the whole selection. This
+        // actor is re-entrant at that suspension, so a map read before it is a
+        // snapshot another correction can write over: two lines named in quick
+        // succession both read an empty map, and the second write dropped the
+        // first line's name. It also reverted the cluster names recognition wrote
+        // while the user was typing.
+        let resolved = trimmed.isEmpty
+            ? nil
+            : try await identity(named: trimmed, existing: identityID)
+
+        var speakers = try found.store.readSpeakerMap()
+        // The audio that actually changes hands. A line already reading as the
+        // person being named moves nothing, and the menu offers this on every
+        // line: treating those as moves cost the cluster's owner a voice profile
+        // for a click that changed nothing on screen.
+        var moved: [CaptureTrack: [AudioSpan]] = [:]
+        for utterance in lines {
+            let override = speakers.override(for: utterance)?.assignment
+            let fallback = speakers.entries[utterance.speakerKey]
+            let before = (override?.origin == .human ? override : nil) ?? fallback
+            let after: IdentityID?
+            if trimmed.isEmpty {
+                speakers.clearOverride(for: utterance)
+                // Clearing hands the line back to whatever the cluster says.
+                after = speakers.entries[utterance.speakerKey]?.identityID
+            } else {
+                speakers.overrideUtterance(
+                    utterance,
+                    with: SpeakerAssignment(
+                        displayName: trimmed, origin: .human, identityID: resolved,
+                        provenance: .human()
+                    ),
+                    at: clock.now
+                )
+                after = resolved
+            }
+            guard before?.identityID != after else { continue }
+            moved[utterance.track, default: []]
+                .append(AudioSpan(start: utterance.start, end: utterance.end))
+        }
+        try found.store.writeSpeakerMap(speakers)
+        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+
+        try await settleVoiceMemory(
+            found: found, moved: moved, claimant: resolved, speakers: speakers, settings: settings
+        )
+        return resolved
+    }
+
+    /// Brings voice memory back in line with a correction that has landed.
+    ///
+    /// Whoever held a vector built on the audio that just changed hands is found
+    /// by asking which stored vectors cover those spans, rather than by reasoning
+    /// about who used to own which cluster. That is the whole reason spans are
+    /// recorded: the question has one answer, and it does not change when a
+    /// re-analysis renumbers the clustering underneath it.
+    private func settleVoiceMemory(
+        found: (metadata: MeetingMetadata, store: MeetingStore),
+        moved: [CaptureTrack: [AudioSpan]],
+        claimant: IdentityID?, speakers: SpeakerMap, settings: AppSettings
+    ) async throws {
+        guard !moved.isEmpty, let service = backends.speakers else { return }
+        let store = await service.speakerStore
+        var displaced: [IdentityID] = []
+        for (track, spans) in moved.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+            // Ungated by the learning setting, like the cluster path. The user
+            // has said this audio is not theirs, and refusing to remove it
+            // because learning is switched off leaves them auto-named from
+            // somebody else's voice forever. The rebuild below carries the gate,
+            // so with the setting off the vector goes and nothing replaces it,
+            // which is what the setting asks for.
+            for stale in try await store.retractEvidence(
+                VoiceEvidenceRetraction(
+                    meetingID: found.metadata.id, track: track, spans: spans, claimedBy: claimant
+                ),
+                keepingClaimant: true, now: clock.now
+            ) where !displaced.contains(stale) {
+                displaced.append(stale)
+            }
+        }
+        // Each of them derives a replacement from the lines that are still
+        // theirs. If too little of their speech remains they correctly end with
+        // none.
+        for identity in displaced where identity != claimant {
+            try await accumulateConfirmedSpeech(
+                store: found.store, metadata: found.metadata, speakers: speakers,
+                identityID: identity, settings: settings
+            )
+        }
+        guard let claimant else { return }
+        try await accumulateConfirmedSpeech(
+            store: found.store, metadata: found.metadata, speakers: speakers,
+            identityID: claimant, settings: settings
+        )
+        try await refreshCachedNames(for: claimant)
     }
 
     /// Re-clusters a meeting, optionally at a speaker count the user chose.
@@ -1621,52 +1663,24 @@ public actor ProcessingPipeline {
         guard let vector = try await store.occurrenceEmbedding(
             meetingID: meetingID, clusterID: clusterID
         ) else { return }
+        // Without the audio the cluster covers there is nothing to record and
+        // nothing to retract later, so the confirmation writes the name and
+        // learns no voice from it.
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
+              let audio = clusterAudio(
+                  clusterID, in: try found.store.readRawDiarization()
+              ), !audio.spans.isEmpty
+        else { return }
         _ = try await service.confirmCluster(
             meetingID: meetingID,
             cluster: SpeakerClusterInput(
                 clusterID: clusterID, track: occurrence.track,
-                speechSeconds: occurrence.speechSeconds, centroid: vector
+                speechSeconds: occurrence.speechSeconds, centroid: vector,
+                spans: audio.spans, analysisID: audio.run.id
             ),
             identityID: identityID,
             settings: settings.processing.speakers,
             now: clock.now
-        )
-    }
-
-    /// Rebuilds one person's enrolment for a meeting from the lines that are
-    /// still theirs.
-    ///
-    /// Called when a line moves away from them. The old vector was built from a
-    /// set that included that line, so it holds audio that is now attributed to
-    /// somebody else; dropping it and accumulating again is the only way to get
-    /// a vector that matches what the user actually said. If too little of their
-    /// speech remains they correctly end with none.
-    private func rederiveConfirmedSpeech(
-        store: MeetingStore, metadata: MeetingMetadata, speakers: SpeakerMap,
-        identityID: IdentityID, settings: AppSettings
-    ) async throws {
-        // Ungated, like the cluster path beside it. The user has said this audio
-        // is not theirs, and refusing to remove it because learning is switched
-        // off leaves them auto-named from somebody else's voice forever. The
-        // rebuild below carries the gate already, inside
-        // accumulateConfirmedSpeech, so with the setting off the vector goes and
-        // nothing replaces it, which is what the setting asks for.
-        guard let service = backends.speakers else { return }
-        let speakerStore = await service.speakerStore
-        let stale = try await speakerStore.removeUtteranceEnrolments(
-            meetingID: metadata.id, of: identityID
-        )
-        // Nothing was built from these lines, so nothing is contaminated and
-        // there is nothing to rebuild. Accumulating anyway would mint a fresh
-        // same-meeting vector for somebody who has just lost a line, and evict a
-        // genuinely different recording to make room for it.
-        guard !stale.isEmpty else { return }
-        for identity in stale {
-            try await speakerStore.recomputeProfiles(for: identity, now: clock.now)
-        }
-        try await accumulateConfirmedSpeech(
-            store: store, metadata: metadata, speakers: speakers,
-            identityID: identityID, settings: settings
         )
     }
 
@@ -1762,6 +1776,10 @@ public actor ProcessingPipeline {
         guard !vectors.isEmpty else { return }
         _ = try await service.confirmUtterances(
             meetingID: metadata.id, identityID: identityID, vectors: vectors,
+            track: track,
+            // The lines themselves, on the meeting timeline. The intervals above
+            // are track-relative because that is what the extractor reads.
+            spans: lines.map { AudioSpan(start: $0.start, end: $0.end) },
             settings: settings.processing.speakers, now: clock.now
         )
     }

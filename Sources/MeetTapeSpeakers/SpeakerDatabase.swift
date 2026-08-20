@@ -110,6 +110,29 @@ final class SpeakerDatabase {
             }
             version = next
         }
+        try adoptEvidenceTables()
+    }
+
+    /// Brings a database written by an earlier state of this branch up to the
+    /// current schema.
+    ///
+    /// MeetTape has not shipped, so there is no released schema to migrate from
+    /// and no migration ladder to maintain. What does exist is a development
+    /// machine holding a store whose vectors predate the evidence tables. Those
+    /// vectors record no audio, and a vector whose audio cannot be named again
+    /// is exactly what this schema exists to forbid: nothing can retract it when
+    /// the person it belongs to turns out to be somebody else. The identities,
+    /// their names and their history stay; the unretractable vectors go, and the
+    /// profiles rebuild from what is confirmed next.
+    private func adoptEvidenceTables() throws {
+        let present = try scalarInt(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'voice_evidence';"
+        ) ?? 0
+        guard present == 0 else { return }
+        try execute(Self.evidenceTables)
+        try execute("DELETE FROM voice_embedding;")
+        try execute("DELETE FROM pending_enrollment;")
+        try execute("DELETE FROM derived_profile;")
     }
 
     private func applyMigration(to version: Int32) throws {
@@ -125,7 +148,9 @@ final class SpeakerDatabase {
         }
     }
 
-    static let schemaV1 = """
+    static var schemaV1: String { schemaCore + evidenceTables }
+
+    static let schemaCore = """
         CREATE TABLE identity(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           kind TEXT NOT NULL CHECK (kind IN ('person','anonymous')),
@@ -157,7 +182,6 @@ final class SpeakerDatabase {
           speech_seconds REAL NOT NULL,
           source_type TEXT NOT NULL,
           source_meeting TEXT,
-          source_cluster TEXT,
           is_human_verified INTEGER NOT NULL DEFAULT 1,
           created_at REAL NOT NULL
         );
@@ -209,10 +233,53 @@ final class SpeakerDatabase {
           quality_score REAL NOT NULL,
           source_type TEXT NOT NULL,
           source_meeting TEXT,
-          source_cluster TEXT,
           created_at REAL NOT NULL
         );
         CREATE INDEX idx_pending_identity ON pending_enrollment(identity_id, model_identifier);
+        """
+
+    static let evidenceTables = """
+        -- The audio a vector was derived from: a recording, a track, and time
+        -- spans inside it. This is the provenance retraction reads, and it is
+        -- deliberately expressed in coordinates nothing rewrites. A cluster
+        -- label is renumbered by every re-analysis, ownership moves on every
+        -- merge, and a line-level correction produces material belonging to no
+        -- cluster at all, so any of those as the record of what a vector covers
+        -- is correct only until the user does something the application exists
+        -- to let them do.
+        CREATE TABLE voice_evidence(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          voice_embedding_id INTEGER REFERENCES voice_embedding(id) ON DELETE CASCADE,
+          pending_enrollment_id INTEGER REFERENCES pending_enrollment(id) ON DELETE CASCADE,
+          meeting_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          confirmation_source TEXT NOT NULL,
+          human_verified INTEGER NOT NULL DEFAULT 0,
+          -- Context for a reader, never read to decide what a vector covers.
+          analysis_id TEXT,
+          cluster_id TEXT,
+          created_at REAL NOT NULL,
+          CHECK ((voice_embedding_id IS NULL) <> (pending_enrollment_id IS NULL))
+        );
+        CREATE INDEX idx_evidence_embedding ON voice_evidence(voice_embedding_id);
+        CREATE INDEX idx_evidence_pending ON voice_evidence(pending_enrollment_id);
+        CREATE INDEX idx_evidence_meeting ON voice_evidence(meeting_id, track);
+
+        CREATE TABLE voice_evidence_span(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          evidence_id INTEGER NOT NULL REFERENCES voice_evidence(id) ON DELETE CASCADE,
+          start_time REAL NOT NULL,
+          end_time REAL NOT NULL,
+          -- Set when the user has since given this audio to somebody else. The
+          -- span stays, because it is the record of what the vector was computed
+          -- from and deleting it would make the row claim the vector is purer
+          -- than it is. What it stops counting towards is how much audio still
+          -- supports the vector, which is what decides whether the vector may
+          -- remain stored.
+          contradicted INTEGER NOT NULL DEFAULT 0,
+          CHECK (end_time >= start_time)
+        );
+        CREATE INDEX idx_span_evidence ON voice_evidence_span(evidence_id);
         """
 
     // MARK: - primitives

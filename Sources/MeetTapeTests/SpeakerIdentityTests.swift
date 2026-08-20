@@ -234,7 +234,7 @@ enum SpeakerIdentityTests {
                 let result = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 3), model: .fluidAudioOffline,
                     speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
-                    meetingID: "m1", clusterID: "c1"
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", cluster: "c1", seconds: 90, source: .humanConfirmedCluster)
                 ))
                 guard case .success = result else {
                     return expect.fail("enrolment refused: \(result)")
@@ -253,7 +253,8 @@ enum SpeakerIdentityTests {
                 let chris = try await store.createPerson(name: "Chris")
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 3), model: .fluidAudioOffline,
-                    speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster
+                    speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 90, source: .humanConfirmedCluster)
                 ))
                 let other = EmbeddingModelIdentifier(rawValue: "some-future-model-512", dimension: 512)
                 expect.isTrue(
@@ -269,7 +270,8 @@ enum SpeakerIdentityTests {
                 let chris = try await store.createPerson(name: "Chris")
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 5), model: .fluidAudioOffline,
-                    speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster
+                    speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 120, source: .humanConfirmedCluster)
                 ))
                 let before = try await store.profileStatus(of: chris.id, model: .fluidAudioOffline)
 
@@ -278,7 +280,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m2",
                     clusters: [SpeakerClusterInput(
                         clusterID: "run-001_speaker_00", track: .remote,
-                        speechSeconds: 300, centroid: vector(seed: 5)
+                        speechSeconds: 300, centroid: vector(seed: 5),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                            end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 300
+                        )]
                     )],
                     settings: SpeakerRecognitionSettings(),
                     now: Date()
@@ -299,7 +305,8 @@ enum SpeakerIdentityTests {
                 let chris = try await store.createPerson(name: "Chris")
                 let result = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 6), model: .fluidAudioOffline,
-                    speechSeconds: 300, qualityScore: 1, source: .anonymousSeed
+                    speechSeconds: 300, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 300, source: .anonymousSeed)
                 ))
                 guard case .failure = result else {
                     return expect.fail("a seed vector must not enter a named profile")
@@ -316,7 +323,8 @@ enum SpeakerIdentityTests {
                 let chris = try await store.createPerson(name: "Chris")
                 let result = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 7), model: .fluidAudioOffline,
-                    speechSeconds: 12, qualityScore: 1, source: .humanConfirmedCluster
+                    speechSeconds: 12, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 12, source: .humanConfirmedCluster)
                 ))
                 guard case .failure(let reason) = result else {
                     return expect.fail("12 seconds is below the enrolment bar")
@@ -335,8 +343,9 @@ enum SpeakerIdentityTests {
                     try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
                         identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
                         speechSeconds: seconds, qualityScore: 1,
-                        source: .humanConfirmedUtterances, meetingID: "m1"
-                    ))
+                        source: .humanConfirmedUtterances,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: seconds, source: .humanConfirmedUtterances)
+                ))
                 }
                 expect.close(
                     try await store.pendingSpeechSeconds(for: chris.id, model: .fluidAudioOffline),
@@ -351,7 +360,8 @@ enum SpeakerIdentityTests {
                 try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
                     speechSeconds: 50, qualityScore: 1,
-                    source: .humanConfirmedUtterances, meetingID: "m1"
+                    source: .humanConfirmedUtterances,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 50, source: .humanConfirmedUtterances)
                 ))
                 expect.isTrue(
                     try await store.flushPendingEnrollment(for: chris.id, model: .fluidAudioOffline),
@@ -381,7 +391,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     clusters: [SpeakerClusterInput(
                         clusterID: "remote-001_speaker_00", track: .remote,
-                        speechSeconds: 120, centroid: voice
+                        speechSeconds: 120, centroid: voice,
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("remote-001_speaker_00"),
+                            end: VoiceEvidenceFixture.lane("remote-001_speaker_00") + 120
+                        )]
                     )],
                     settings: settings
                 )
@@ -399,7 +413,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     clusters: [SpeakerClusterInput(
                         clusterID: "remote-002_speaker_00", track: .remote,
-                        speechSeconds: 120, centroid: voice
+                        speechSeconds: 120, centroid: voice,
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("remote-002_speaker_00"),
+                            end: VoiceEvidenceFixture.lane("remote-002_speaker_00") + 120
+                        )]
                     )],
                     settings: settings
                 )
@@ -432,7 +450,11 @@ enum SpeakerIdentityTests {
                 let dave = vector(seed: 61)
                 let cluster = SpeakerClusterInput(
                     clusterID: "remote-001_speaker_00", track: .remote,
-                    speechSeconds: 95, centroid: dave
+                    speechSeconds: 95, centroid: dave,
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("remote-001_speaker_00"),
+                        end: VoiceEvidenceFixture.lane("remote-001_speaker_00") + 95
+                    )]
                 )
 
                 // Named wrongly, then corrected.
@@ -490,7 +512,11 @@ enum SpeakerIdentityTests {
                 let alice = try await store.createPerson(name: "Alice")
                 let cluster = SpeakerClusterInput(
                     clusterID: "remote-001_speaker_00", track: .remote,
-                    speechSeconds: 95, centroid: vector(seed: 62)
+                    speechSeconds: 95, centroid: vector(seed: 62),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("remote-001_speaker_00"),
+                        end: VoiceEvidenceFixture.lane("remote-001_speaker_00") + 95
+                    )]
                 )
                 _ = try await service.confirmCluster(
                     meetingID: "m1", cluster: cluster, identityID: alice.id,
@@ -548,7 +574,8 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: duplicate.id, vector: vector(seed: 21),
                     model: .fluidAudioOffline, speechSeconds: 240, qualityScore: 1,
-                    source: .micTrackDeterministic, meetingID: "m1"
+                    source: .micTrackDeterministic,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 240, source: .micTrackDeterministic)
                 ))
 
                 let profiles = try await store.searchableProfiles(model: .fluidAudioOffline)
@@ -570,8 +597,9 @@ enum SpeakerIdentityTests {
                     try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
                         identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
                         speechSeconds: 30, qualityScore: 1,
-                        source: .humanConfirmedUtterances, meetingID: meeting
-                    ))
+                        source: .humanConfirmedUtterances,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: meeting, seconds: 30, source: .humanConfirmedUtterances)
+                ))
                 }
                 expect.isFalse(
                     try await store.flushPendingEnrollment(for: chris.id, model: .fluidAudioOffline),
@@ -597,7 +625,8 @@ enum SpeakerIdentityTests {
                 let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
                 let status = try await service.learnLocalUserVoice(
                     meetingID: "m1", identityID: me.id, vector: vector(seed: 11),
-                    speechSeconds: 240, quality: 1
+                    speechSeconds: 240, quality: 1,
+                    spans: [AudioSpan(start: 0, end: 240)]
                 )
                 expect.equal(status?.sampleCount, 1)
                 expect.equal(try await store.localUser()?.id, me.id)
@@ -622,7 +651,8 @@ enum SpeakerIdentityTests {
                 // so the presenter dominates the microphone track too.
                 let declined = try await service.learnLocalUserVoice(
                     meetingID: "m1", identityID: me.id, vector: presenter,
-                    speechSeconds: 1_800, quality: 1
+                    speechSeconds: 1_800, quality: 1,
+                    spans: [AudioSpan(start: 0, end: 1_800)]
                 )
                 expect.isNil(declined, "bleed is not the person holding the microphone")
                 expect.isTrue(
@@ -633,7 +663,8 @@ enum SpeakerIdentityTests {
                 // A different voice on the same call still enrols.
                 let mine = try await service.learnLocalUserVoice(
                     meetingID: "m1", identityID: me.id, vector: vector(seed: 12),
-                    speechSeconds: 240, quality: 1
+                    speechSeconds: 240, quality: 1,
+                    spans: [AudioSpan(start: 0, end: 240)]
                 )
                 expect.equal(mine?.sampleCount, 1)
             },
@@ -644,7 +675,8 @@ enum SpeakerIdentityTests {
                 let voice = try await store.createAnonymous(state: .persistent)
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: voice.id, vector: vector(seed: 12), model: .fluidAudioOffline,
-                    speechSeconds: 120, qualityScore: 1, source: .anonymousSeed, meetingID: "m1"
+                    speechSeconds: 120, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 120, source: .anonymousSeed)
                 ))
                 try await store.recordOccurrence(
                     meetingID: "m1", clusterID: "run-001_speaker_00", track: .remote,
@@ -680,8 +712,8 @@ enum SpeakerIdentityTests {
                     _ = try await store.enrol(VoiceEnrollmentCandidate(
                         identityID: identity.id, vector: vector(seed: 13), model: .fluidAudioOffline,
                         speechSeconds: 90, qualityScore: 1, source: .anonymousSeed,
-                        meetingID: "m\(identity.id.rawValue)"
-                    ))
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m\(identity.id.rawValue)", seconds: 90, source: .anonymousSeed)
+                ))
                     try await store.recordOccurrence(
                         meetingID: "m\(identity.id.rawValue)", clusterID: "c", track: .remote,
                         speechSeconds: 90, embedding: vector(seed: 13), model: .fluidAudioOffline,
@@ -720,7 +752,7 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 14), model: .fluidAudioOffline,
                     speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster,
-                    meetingID: "m1", clusterID: "c1"
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", cluster: "c1", seconds: 120, source: .humanConfirmedCluster)
                 ))
                 try await store.recordOccurrence(
                     meetingID: "m1", clusterID: "c1", track: .remote, speechSeconds: 120,
@@ -744,7 +776,8 @@ enum SpeakerIdentityTests {
                 let chris = try await store.createPerson(name: "Chris")
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 15), model: .fluidAudioOffline,
-                    speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster
+                    speechSeconds: 120, qualityScore: 1, source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 120, source: .humanConfirmedCluster)
                 ))
                 try await store.delete(chris.id)
                 expect.isNil(try await store.current(chris.id))
@@ -761,8 +794,9 @@ enum SpeakerIdentityTests {
                     _ = try await store.enrol(VoiceEnrollmentCandidate(
                         identityID: chris.id, vector: vector(seed: 200 + index),
                         model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 1,
-                        source: .humanConfirmedCluster, meetingID: "m\(index)"
-                    ))
+                        source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m\(index)", seconds: 60, source: .humanConfirmedCluster)
+                ))
                 }
                 expect.equal(
                     try await store.profileStatus(of: chris.id, model: .fluidAudioOffline).sampleCount,
@@ -785,7 +819,8 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: heardOnce.id, vector: vector(seed: 61),
                     model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 0.9,
-                    source: .anonymousSeed, meetingID: "m1"
+                    source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 60, source: .anonymousSeed)
                 ), now: old)
 
                 let removed = try await store.expireEphemeralIdentities(now: Date())
@@ -802,7 +837,8 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: confirmed.id, vector: vector(seed: 62),
                     model: .fluidAudioOffline, speechSeconds: 90, qualityScore: 1,
-                    source: .humanConfirmedCluster, meetingID: "m1"
+                    source: .humanConfirmedCluster,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 90, source: .humanConfirmedCluster)
                 ), now: old)
 
                 expect.equal(try await store.expireEphemeralIdentities(now: Date()), 0)
@@ -846,13 +882,14 @@ enum SpeakerIdentityTests {
                 let voice = try await store.createAnonymous(state: .persistent)
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: voice.id, vector: vector(seed: 64), model: .fluidAudioOffline,
-                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m1"
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 90, source: .anonymousSeed)
                 ))
                 let chris = try await store.createPerson(name: "Chris")
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 64), model: .fluidAudioOffline,
                     speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
-                    meetingID: "m2"
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m2", seconds: 90, source: .humanConfirmedCluster)
                 ))
                 try await store.merge(voice.id, into: chris.id)
 
@@ -905,7 +942,8 @@ enum SpeakerIdentityTests {
                 let voice = try await store.createAnonymous(state: .persistent)
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: voice.id, vector: vector(seed: 65), model: .fluidAudioOffline,
-                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m1"
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 90, source: .anonymousSeed)
                 ))
                 let chris = try await store.createPerson(name: "Chris")
                 try await store.merge(voice.id, into: chris.id)
@@ -926,12 +964,13 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 66), model: .fluidAudioOffline,
                     speechSeconds: 90, qualityScore: 1, source: .humanConfirmedCluster,
-                    meetingID: "m1"
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 90, source: .humanConfirmedCluster)
                 ))
                 let voice = try await store.createAnonymous(state: .persistent)
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: voice.id, vector: vector(seed: 900), model: .fluidAudioOffline,
-                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed, meetingID: "m2"
+                    speechSeconds: 90, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m2", seconds: 90, source: .anonymousSeed)
                 ))
 
                 try await store.merge(voice.id, into: chris.id)
@@ -962,7 +1001,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     clusters: [SpeakerClusterInput(
                         clusterID: "run-001_speaker_00", track: .remote,
-                        speechSeconds: 120, centroid: vector(seed: 21)
+                        speechSeconds: 120, centroid: vector(seed: 21),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                            end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
+                        )]
                     )],
                     settings: SpeakerRecognitionSettings(), now: Date()
                 )
@@ -979,7 +1022,11 @@ enum SpeakerIdentityTests {
                 let service = SpeakerRecognitionService(store: store)
                 let cluster = SpeakerClusterInput(
                     clusterID: "run-001_speaker_00", track: .remote,
-                    speechSeconds: 120, centroid: vector(seed: 22)
+                    speechSeconds: 120, centroid: vector(seed: 22),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                        end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
+                    )]
                 )
                 _ = try await service.resolve(
                     meetingID: "m1", clusters: [cluster],
@@ -1005,7 +1052,11 @@ enum SpeakerIdentityTests {
                 let service = SpeakerRecognitionService(store: store)
                 let cluster = SpeakerClusterInput(
                     clusterID: "run-001_speaker_00", track: .remote,
-                    speechSeconds: 120, centroid: vector(seed: 51)
+                    speechSeconds: 120, centroid: vector(seed: 51),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                        end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
+                    )]
                 )
                 _ = try await service.resolve(
                     meetingID: "m1", clusters: [cluster],
@@ -1037,11 +1088,19 @@ enum SpeakerIdentityTests {
                     clusters: [
                         SpeakerClusterInput(
                             clusterID: "run-001_speaker_00", track: .remote,
-                            speechSeconds: 120, centroid: vector(seed: 52)
+                            speechSeconds: 120, centroid: vector(seed: 52),
+                            spans: [AudioSpan(
+                                start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                                end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
+                            )]
                         ),
                         SpeakerClusterInput(
                             clusterID: "run-001_speaker_01", track: .remote,
-                            speechSeconds: 120, centroid: vector(seed: 52)
+                            speechSeconds: 120, centroid: vector(seed: 52),
+                            spans: [AudioSpan(
+                                start: VoiceEvidenceFixture.lane("run-001_speaker_01"),
+                                end: VoiceEvidenceFixture.lane("run-001_speaker_01") + 120
+                            )]
                         ),
                     ],
                     settings: SpeakerRecognitionSettings(), now: Date()
@@ -1060,7 +1119,11 @@ enum SpeakerIdentityTests {
                 let service = SpeakerRecognitionService(store: store)
                 let cluster = SpeakerClusterInput(
                     clusterID: "run-001_speaker_00", track: .remote,
-                    speechSeconds: 120, centroid: vector(seed: 53)
+                    speechSeconds: 120, centroid: vector(seed: 53),
+                    spans: [AudioSpan(
+                        start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                        end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 120
+                    )]
                 )
                 _ = try await service.resolve(
                     meetingID: "m1", clusters: [cluster],
@@ -1082,7 +1145,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     clusters: [SpeakerClusterInput(
                         clusterID: "run-001_speaker_04", track: .remote,
-                        speechSeconds: 6, centroid: vector(seed: 23)
+                        speechSeconds: 6, centroid: vector(seed: 23),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("run-001_speaker_04"),
+                            end: VoiceEvidenceFixture.lane("run-001_speaker_04") + 6
+                        )]
                     )],
                     settings: SpeakerRecognitionSettings(), now: Date()
                 )
@@ -1100,7 +1167,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     clusters: [SpeakerClusterInput(
                         clusterID: "run-001_speaker_00", track: .remote,
-                        speechSeconds: 300, centroid: vector(seed: 24)
+                        speechSeconds: 300, centroid: vector(seed: 24),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("run-001_speaker_00"),
+                            end: VoiceEvidenceFixture.lane("run-001_speaker_00") + 300
+                        )]
                     )],
                     settings: SpeakerRecognitionSettings(rememberRecurringVoices: false),
                     now: Date()
@@ -1117,7 +1188,11 @@ enum SpeakerIdentityTests {
                     meetingID: "m1",
                     cluster: SpeakerClusterInput(
                         clusterID: "run-001_speaker_01", track: .remote,
-                        speechSeconds: 95, centroid: vector(seed: 25)
+                        speechSeconds: 95, centroid: vector(seed: 25),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("run-001_speaker_01"),
+                            end: VoiceEvidenceFixture.lane("run-001_speaker_01") + 95
+                        )]
                     ),
                     identityID: chris.id,
                     settings: SpeakerRecognitionSettings()
@@ -1142,7 +1217,8 @@ enum SpeakerIdentityTests {
                 _ = try await store.enrol(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 72), model: model,
                     speechSeconds: 60, qualityScore: 0.5,
-                    source: .humanConfirmedUtterances, meetingID: "m1"
+                    source: .humanConfirmedUtterances,
+                    evidence: VoiceEvidenceFixture.evidence(meeting: "m1", seconds: 60, source: .humanConfirmedUtterances)
                 ))
                 expect.isTrue(try await store.hasEnrolment(
                     identityID: chris.id, meetingID: "m1",
@@ -1165,7 +1241,11 @@ enum SpeakerIdentityTests {
                 let status = try await service.confirmCluster(
                     meetingID: "m1",
                     cluster: SpeakerClusterInput(
-                        clusterID: "c", track: .remote, speechSeconds: 300, centroid: vector(seed: 26)
+                        clusterID: "c", track: .remote, speechSeconds: 300, centroid: vector(seed: 26),
+                        spans: [AudioSpan(
+                            start: VoiceEvidenceFixture.lane("c"),
+                            end: VoiceEvidenceFixture.lane("c") + 300
+                        )]
                     ),
                     identityID: chris.id,
                     settings: SpeakerRecognitionSettings(learnFromCorrections: false)

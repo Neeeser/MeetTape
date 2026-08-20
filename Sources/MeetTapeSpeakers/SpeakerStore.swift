@@ -445,14 +445,21 @@ public actor SpeakerStore {
                 seconds: candidate.speechSeconds, required: policy.enrolmentSpeechSeconds
             ))
         }
+        // A vector whose audio cannot be named again can never be retracted, and
+        // a vector that cannot be retracted is what turns one wrong answer into a
+        // permanent one. One recording per row, because the centroid stands for
+        // one session and `recording_count` counts sessions.
+        guard let meetingID = candidate.meetingID,
+              candidate.evidence.allSatisfy({ $0.meetingID == meetingID })
+        else { return .failure(.unusableEvidence) }
 
         try database.transaction {
             try database.run(
                 """
                 INSERT INTO voice_embedding(identity_id, model_identifier, embedding_dim, embedding,
-                    quality_score, speech_seconds, source_type, source_meeting, source_cluster,
+                    quality_score, speech_seconds, source_type, source_meeting,
                     is_human_verified, created_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     .int64(identity.id.rawValue),
@@ -463,10 +470,12 @@ public actor SpeakerStore {
                     .double(candidate.speechSeconds),
                     .text(candidate.source.rawValue),
                     .optionalText(candidate.meetingID),
-                    .optionalText(candidate.clusterID),
                     .bool(candidate.source.isHumanVerified),
                     .date(now),
                 ]
+            )
+            try writeEvidence(
+                candidate.evidence, embeddingID: database.lastInsertedID, pendingID: nil, now: now
             )
             try pruneEmbeddings(of: identity.id, model: candidate.model)
         }
@@ -474,35 +483,304 @@ public actor SpeakerStore {
         return .success(try profileStatus(of: identity.id, model: candidate.model))
     }
 
-    /// Drops any enrolment that came from one cluster of one meeting.
+    /// Drops every stored vector that no longer stands on enough audio of its
+    /// own, after some of the audio behind it was reassigned to somebody else.
     ///
-    /// A cluster's audio belongs to exactly one person. Naming it wrote a vector
-    /// and naming it again wrote another without removing the first, so a
-    /// mis-click left that voice permanently inside the wrong person's profile,
-    /// human-verified and passing the purity filter: the next meeting auto-named
-    /// them as the person who had been corrected away. Re-committing the same
-    /// name also stacked duplicates against the retention cap.
+    /// This is the whole retraction path, and it asks one question: which
+    /// vectors were derived from audio overlapping the spans the user has just
+    /// claimed for somebody. Overlapping audio cannot belong to two people, so
+    /// every vector holding any of it is holding a voice that is not entirely
+    /// theirs.
     ///
-    /// Returns the identities that lost a vector, so their centroids can be
-    /// rebuilt.
+    /// Deliberately not a question about clusters. A re-analysis renumbers them,
+    /// a merge moves their owner, and a line-level correction produces material
+    /// belonging to no cluster at all, so a cluster-keyed answer is right only
+    /// until the user does one of the things the application exists to let them
+    /// do. Source audio does not move.
+    ///
+    /// What happens to a partially contradicted vector is decided by the bar
+    /// that decided it could exist: a vector may be stored when 45 seconds of
+    /// confirmed speech stands behind it, so it may remain stored while 45
+    /// seconds still does. The contradicted spans stop counting either way, so a
+    /// second correction is measured against what is left rather than against
+    /// the original, and a vector cannot be kept alive by being corrected a
+    /// little at a time. Below the bar the vector goes and the caller derives a
+    /// replacement from the spans that are still theirs, which is deterministic
+    /// because the spans are recorded.
+    ///
+    /// The alternative, dropping a vector on any overlap at all, was worse in
+    /// the common case: correcting one three-second line inside a confirmed
+    /// twenty-minute cluster would delete twenty minutes of good material over
+    /// audio that moves the centroid by about a thousandth.
     @discardableResult
-    public func removeClusterEnrolments(
-        meetingID: String, clusterID: String, excluding identityID: IdentityID? = nil
+    public func retractEvidence(
+        _ retraction: VoiceEvidenceRetraction, keepingClaimant: Bool, now: Date = Date()
     ) throws -> [IdentityID] {
-        guard let identityID else {
-            return try removeEnrolments(
-                meetingID: meetingID,
-                predicate: "source_cluster = ?",
-                bindings: [.text(clusterID)]
+        guard !retraction.spans.isEmpty else { return [] }
+        var exempt: Set<Int64> = []
+        if keepingClaimant, let claimant = retraction.claimedBy {
+            exempt = Set(try identityFamily(try currentID(claimant)))
+        }
+        let contradicted = try contradictedRows(retraction, exempt: exempt)
+        guard !contradicted.isEmpty else { return [] }
+
+        try database.transaction {
+            for row in contradicted {
+                // Marked whether or not the vector survives, so that correcting
+                // a little at a time is measured against what is left.
+                try markContradicted(evidenceID: row.evidenceID, spans: retraction.spans)
+                guard row.retract else { continue }
+                if let embeddingID = row.embeddingID {
+                    try database.run(
+                        "DELETE FROM voice_embedding WHERE id = ?", [.int64(embeddingID)]
+                    )
+                }
+                if let pendingID = row.pendingID {
+                    // The parked accumulation too, or the next flush re-enrols
+                    // speech that has just moved to somebody else.
+                    try database.run(
+                        "DELETE FROM pending_enrollment WHERE id = ?", [.int64(pendingID)]
+                    )
+                }
+            }
+        }
+        // Resolved, because a row's owner may since have been merged and the
+        // survivor is the one whose centroid was built over it.
+        var affected: [IdentityID] = []
+        for row in contradicted where row.retract {
+            let current = try currentID(IdentityID(row.owner))
+            if !affected.contains(current) { affected.append(current) }
+        }
+        // Rebuilt here rather than left to the caller. A centroid still built
+        // over a vector that has just been deleted is the same wrong answer as
+        // never having deleted it, and it only takes one call site forgetting.
+        for identity in affected { try recomputeProfiles(for: identity, now: now) }
+        return affected
+    }
+
+    private struct ContradictedRow {
+        var evidenceID: Int64
+        var embeddingID: Int64?
+        var pendingID: Int64?
+        var owner: Int64
+        var retract: Bool
+    }
+
+    /// Every stored row whose evidence overlaps the retraction, and whether what
+    /// is left of it is still enough.
+    ///
+    /// Span arithmetic happens here rather than in SQL because the spans are a
+    /// set: two rows overlap when any of their intervals do, which SQL can
+    /// express only as a join quadratic in turn count. The candidate set is one
+    /// recording's rows on one track.
+    private func contradictedRows(
+        _ retraction: VoiceEvidenceRetraction, exempt: Set<Int64>
+    ) throws -> [ContradictedRow] {
+        struct Candidate {
+            var evidenceID: Int64
+            var embeddingID: Int64?
+            var pendingID: Int64?
+            var owner: Int64
+        }
+        var candidates: [Candidate] = []
+        try database.query(
+            """
+            SELECT e.id, e.voice_embedding_id, e.pending_enrollment_id,
+                   COALESCE(v.identity_id, p.identity_id)
+            FROM voice_evidence e
+            LEFT JOIN voice_embedding v ON v.id = e.voice_embedding_id
+            LEFT JOIN pending_enrollment p ON p.id = e.pending_enrollment_id
+            WHERE e.meeting_id = ? AND e.track = ?
+            """,
+            [.text(retraction.meetingID), .text(retraction.track.rawValue)]
+        ) { row in
+            guard let owner = row.optionalInt64(3) else { return }
+            candidates.append(Candidate(
+                evidenceID: row.int64(0),
+                embeddingID: row.optionalInt64(1),
+                pendingID: row.optionalInt64(2),
+                owner: owner
+            ))
+        }
+        let wanted = candidates.filter { !exempt.contains($0.owner) }
+        guard !wanted.isEmpty else { return [] }
+
+        // Only the audio still standing behind each vector. A span already given
+        // away counts for nothing, which is what makes a run of small
+        // corrections add up instead of each being weighed against the whole.
+        var standing: [Int64: [AudioSpan]] = [:]
+        let placeholders = wanted.map { _ in "?" }.joined(separator: ",")
+        try database.query(
+            "SELECT evidence_id, start_time, end_time FROM voice_evidence_span"
+                + " WHERE evidence_id IN (\(placeholders)) AND contradicted = 0",
+            wanted.map { SQLValue.int64($0.evidenceID) }
+        ) { row in
+            standing[row.int64(0), default: []]
+                .append(AudioSpan(start: row.double(1), end: row.double(2)))
+        }
+
+        var out: [ContradictedRow] = []
+        for candidate in wanted {
+            let spans = standing[candidate.evidenceID] ?? []
+            guard AudioSpan.intersect(spans, retraction.spans) > 0 else { continue }
+            let remaining = AudioSpan.subtracting(retraction.spans, from: spans)
+            out.append(ContradictedRow(
+                evidenceID: candidate.evidenceID,
+                embeddingID: candidate.embeddingID,
+                pendingID: candidate.pendingID,
+                owner: candidate.owner,
+                retract: AudioSpan.totalDuration(remaining) < policy.enrolmentSpeechSeconds
+            ))
+        }
+        return out
+    }
+
+    /// Splits an evidence row's spans around the reassigned audio and marks the
+    /// overlapping part as no longer supporting the vector.
+    private func markContradicted(evidenceID: Int64, spans removed: [AudioSpan]) throws {
+        var existing: [(id: Int64, span: AudioSpan)] = []
+        try database.query(
+            "SELECT id, start_time, end_time FROM voice_evidence_span"
+                + " WHERE evidence_id = ? AND contradicted = 0",
+            [.int64(evidenceID)]
+        ) { row in
+            existing.append((row.int64(0), AudioSpan(start: row.double(1), end: row.double(2))))
+        }
+        for entry in existing {
+            guard AudioSpan.intersect([entry.span], removed) > 0 else { continue }
+            try database.run("DELETE FROM voice_evidence_span WHERE id = ?", [.int64(entry.id)])
+            for kept in AudioSpan.subtracting(removed, from: [entry.span]) {
+                try insertSpan(evidenceID: evidenceID, span: kept, contradicted: false)
+            }
+            for gone in AudioSpan.union(removed).compactMap({ cut -> AudioSpan? in
+                let start = max(entry.span.start, cut.start)
+                let end = min(entry.span.end, cut.end)
+                return end > start ? AudioSpan(start: start, end: end) : nil
+            }) {
+                try insertSpan(evidenceID: evidenceID, span: gone, contradicted: true)
+            }
+        }
+    }
+
+    private func insertSpan(evidenceID: Int64, span: AudioSpan, contradicted: Bool) throws {
+        try database.run(
+            "INSERT INTO voice_evidence_span(evidence_id, start_time, end_time, contradicted)"
+                + " VALUES(?, ?, ?, ?)",
+            [.int64(evidenceID), .double(span.start), .double(span.end), .bool(contradicted)]
+        )
+    }
+
+    /// Writes the audio behind one vector.
+    private func writeEvidence(
+        _ evidence: [VoiceEvidence], embeddingID: Int64?, pendingID: Int64?, now: Date
+    ) throws {
+        for item in evidence {
+            try database.run(
+                """
+                INSERT INTO voice_evidence(voice_embedding_id, pending_enrollment_id, meeting_id,
+                    track, confirmation_source, human_verified, analysis_id, cluster_id,
+                    created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .optionalInt64(embeddingID), .optionalInt64(pendingID),
+                    .text(item.meetingID), .text(item.track.rawValue),
+                    .text(item.confirmation.rawValue), .bool(item.isHumanVerified),
+                    .optionalText(item.analysisID), .optionalText(item.clusterID),
+                    .date(now),
+                ]
+            )
+            let evidenceID = database.lastInsertedID
+            for span in item.spans {
+                try insertSpan(evidenceID: evidenceID, span: span, contradicted: false)
+            }
+        }
+    }
+
+    /// The audio behind a set of rows, keyed by the row it belongs to.
+    private func loadEvidence(column: String, ids: [Int64]) throws -> [Int64: [VoiceEvidence]] {
+        guard !ids.isEmpty else { return [:] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        var rows: [(owner: Int64, evidenceID: Int64, evidence: VoiceEvidence)] = []
+        try database.query(
+            """
+            SELECT \(column), id, meeting_id, track, confirmation_source, human_verified,
+                   analysis_id, cluster_id
+            FROM voice_evidence WHERE \(column) IN (\(placeholders))
+            """,
+            ids.map { SQLValue.int64($0) }
+        ) { row in
+            guard let owner = row.optionalInt64(0),
+                  let track = CaptureTrack(rawValue: row.text(3)),
+                  let source = VoiceEnrollmentSource(rawValue: row.text(4))
+            else { return }
+            rows.append((owner, row.int64(1), VoiceEvidence(
+                meetingID: row.text(2), track: track, spans: [],
+                confirmation: source, isHumanVerified: row.bool(5),
+                analysisID: row.optionalText(6), clusterID: row.optionalText(7)
+            )))
+        }
+        guard !rows.isEmpty else { return [:] }
+        var spans: [Int64: [AudioSpan]] = [:]
+        var standing: [Int64: [AudioSpan]] = [:]
+        let spanPlaceholders = rows.map { _ in "?" }.joined(separator: ",")
+        try database.query(
+            "SELECT evidence_id, start_time, end_time, contradicted FROM voice_evidence_span"
+                + " WHERE evidence_id IN (\(spanPlaceholders))",
+            rows.map { SQLValue.int64($0.evidenceID) }
+        ) { row in
+            let span = AudioSpan(start: row.double(1), end: row.double(2))
+            spans[row.int64(0), default: []].append(span)
+            if !row.bool(3) { standing[row.int64(0), default: []].append(span) }
+        }
+        var out: [Int64: [VoiceEvidence]] = [:]
+        for row in rows {
+            var evidence = row.evidence
+            evidence.spans = AudioSpan.union(spans[row.evidenceID] ?? [])
+            evidence.standingSpans = AudioSpan.union(standing[row.evidenceID] ?? [])
+            out[row.owner, default: []].append(evidence)
+        }
+        return out
+    }
+
+    /// Every stored vector for an identity's merged family, with the audio each
+    /// was derived from. Read by the tests that pin retraction, and by the
+    /// developer tool.
+    public func storedEmbeddings(
+        of id: IdentityID, model: EmbeddingModelIdentifier? = nil
+    ) throws -> [StoredVoiceEmbedding] {
+        let family = try identityFamily(try currentID(id))
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        var filter = ""
+        var bindings = family.map { SQLValue.int64($0) }
+        if let model {
+            filter = " AND model_identifier = ?"
+            bindings.append(.text(model.rawValue))
+        }
+        var rows: [(Int64, IdentityID, EmbeddingModelIdentifier, Double, Double, Bool, Date)] = []
+        try database.query(
+            """
+            SELECT id, identity_id, model_identifier, speech_seconds, quality_score,
+                   is_human_verified, created_at, embedding_dim
+            FROM voice_embedding WHERE identity_id IN (\(placeholders))\(filter)
+            ORDER BY created_at, id
+            """,
+            bindings
+        ) { row in
+            rows.append((
+                row.int64(0), IdentityID(row.int64(1)),
+                EmbeddingModelIdentifier(rawValue: row.text(2), dimension: row.int(7)),
+                row.double(3), row.double(4), row.bool(5), row.date(6)
+            ))
+        }
+        let evidence = try loadEvidence(column: "voice_embedding_id", ids: rows.map(\.0))
+        return rows.map {
+            StoredVoiceEmbedding(
+                id: $0.0, identityID: $0.1, model: $0.2, speechSeconds: $0.3,
+                qualityScore: $0.4, isHumanVerified: $0.5, createdAt: $0.6,
+                evidence: evidence[$0.0] ?? []
             )
         }
-        let family = try identityFamily(try currentID(identityID))
-        let placeholders = family.map { _ in "?" }.joined(separator: ",")
-        return try removeEnrolments(
-            meetingID: meetingID,
-            predicate: "source_cluster = ? AND identity_id NOT IN (\(placeholders))",
-            bindings: [.text(clusterID)] + family.map { SQLValue.int64($0) }
-        )
     }
 
     /// Forgets who a cluster was said to be.
@@ -525,60 +803,6 @@ public actor SpeakerStore {
                 .text(meetingID), .text(clusterID),
             ]
         )
-    }
-
-    /// Drops what a meeting's line-level corrections enrolled for one identity,
-    /// so it can be derived again from the lines that are still theirs.
-    ///
-    /// Reassigning lines from one person to another left the first holding a
-    /// human-verified vector built from the second's audio, and nothing could
-    /// reach it: the cluster-scoped removal matches on `source_cluster`, which
-    /// these rows do not carry. Scoped to the one identity whose lines moved,
-    /// because two people can each hold a legitimate enrolment from one meeting
-    /// and removing everyone else's destroyed the first whenever a second was
-    /// corrected.
-    @discardableResult
-    public func removeUtteranceEnrolments(
-        meetingID: String, of identityID: IdentityID
-    ) throws -> [IdentityID] {
-        let family = try identityFamily(try currentID(identityID))
-        let placeholders = family.map { _ in "?" }.joined(separator: ",")
-        let removed = try removeEnrolments(
-            meetingID: meetingID,
-            predicate: "source_type = ? AND identity_id IN (\(placeholders))",
-            bindings: [.text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue)]
-                + family.map { SQLValue.int64($0) }
-        )
-        // The parked accumulation too, or the next flush re-enrols the speech
-        // that has just moved to somebody else.
-        try database.run(
-            """
-            DELETE FROM pending_enrollment
-            WHERE source_meeting = ? AND source_type = ? AND identity_id IN (\(placeholders))
-            """,
-            [.text(meetingID), .text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue)]
-                + family.map { SQLValue.int64($0) }
-        )
-        return removed
-    }
-
-    private func removeEnrolments(
-        meetingID: String, predicate: String, bindings extra: [SQLValue]
-    ) throws -> [IdentityID] {
-        var affected: [Int64] = []
-        let bindings: [SQLValue] = [.text(meetingID)] + extra
-        try database.query(
-            "SELECT DISTINCT identity_id FROM voice_embedding"
-                + " WHERE source_meeting = ? AND \(predicate)",
-            bindings
-        ) { affected.append($0.int64(0)) }
-        guard !affected.isEmpty else { return [] }
-        try database.run(
-            "DELETE FROM voice_embedding WHERE source_meeting = ? AND \(predicate)", bindings
-        )
-        // Resolved, because the row's owner may since have been merged and the
-        // survivor is the one whose centroid was built over it.
-        return try affected.map { try currentID(IdentityID($0)) }
     }
 
     /// Keeps the newest, highest-quality vectors and drops the rest.
@@ -610,6 +834,9 @@ public actor SpeakerStore {
         // can never flush, so without this it sticks in the queue forever and
         // every later correction pays for a re-embed that cannot land.
         guard candidate.vector.count == candidate.model.dimension else { return }
+        guard let meetingID = candidate.meetingID,
+              candidate.evidence.allSatisfy({ $0.meetingID == meetingID })
+        else { return }
         guard let identity = try current(candidate.identityID) else { return }
         // One row per meeting. The caller re-embeds the whole confirmed set each
         // time, so a second round of corrections on the same meeting supersedes
@@ -625,25 +852,33 @@ public actor SpeakerStore {
                 .optionalText(candidate.meetingID),
             ]
         )
-        try database.run(
-            """
-            INSERT INTO pending_enrollment(identity_id, model_identifier, embedding, embedding_dim,
-                speech_seconds, quality_score, source_type, source_meeting, source_cluster, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                .int64(identity.id.rawValue),
-                .text(candidate.model.rawValue),
-                .blob(VoiceVector.encode(VoiceVector.l2Normalized(candidate.vector))),
-                .int(candidate.vector.count),
-                .double(candidate.speechSeconds),
-                .double(candidate.qualityScore),
-                .text(candidate.source.rawValue),
-                .optionalText(candidate.meetingID),
-                .optionalText(candidate.clusterID),
-                .date(now),
-            ]
-        )
+        try database.transaction {
+            try database.run(
+                """
+                INSERT INTO pending_enrollment(identity_id, model_identifier, embedding, embedding_dim,
+                    speech_seconds, quality_score, source_type, source_meeting, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .int64(identity.id.rawValue),
+                    .text(candidate.model.rawValue),
+                    .blob(VoiceVector.encode(VoiceVector.l2Normalized(candidate.vector))),
+                    .int(candidate.vector.count),
+                    .double(candidate.speechSeconds),
+                    .double(candidate.qualityScore),
+                    .text(candidate.source.rawValue),
+                    .optionalText(candidate.meetingID),
+                    .date(now),
+                ]
+            )
+            // Parked material is retractable on the same terms as stored
+            // material. Without evidence here, reassigning a line whose speech is
+            // still accumulating left it in the queue and the next flush enrolled
+            // audio the user had already given to somebody else.
+            try writeEvidence(
+                candidate.evidence, embeddingID: nil, pendingID: database.lastInsertedID, now: now
+            )
+        }
     }
 
     /// Turns accumulated confirmed speech into one enrolment once it reaches the
@@ -653,6 +888,7 @@ public actor SpeakerStore {
         for id: IdentityID, model: EmbeddingModelIdentifier, now: Date = Date()
     ) throws -> Bool {
         struct Group {
+            var ids: [Int64] = []
             var vectors: [[Float]] = []
             var seconds = 0.0
             var quality = 0.0
@@ -670,7 +906,7 @@ public actor SpeakerStore {
         var groups: [String: Group] = [:]
         try database.query(
             """
-            SELECT embedding, speech_seconds, quality_score, source_meeting
+            SELECT embedding, speech_seconds, quality_score, source_meeting, id
             FROM pending_enrollment
             WHERE identity_id IN (\(placeholders)) AND model_identifier = ?
             ORDER BY created_at
@@ -682,14 +918,23 @@ public actor SpeakerStore {
             if let vector = row.vector(0) { group.vectors.append(vector) }
             group.seconds += row.double(1)
             group.quality = max(group.quality, row.double(2))
+            group.ids.append(row.int64(4))
             groups[key] = group
         }
+        // The audio behind the parked rows travels with them into the vector
+        // they become. Losing it here would make a flushed enrolment the one
+        // kind nothing could retract.
+        let parkedEvidence = try loadEvidence(
+            column: "pending_enrollment_id", ids: groups.values.flatMap(\.ids)
+        )
 
         var enrolled = false
         for (key, group) in groups.sorted(by: { $0.key < $1.key }) {
             guard !group.vectors.isEmpty, group.seconds >= policy.enrolmentSpeechSeconds else {
                 continue
             }
+            let evidence = mergedEvidence(group.ids.flatMap { parkedEvidence[$0] ?? [] })
+            guard !evidence.isEmpty else { continue }
             let candidate = VoiceEnrollmentCandidate(
                 identityID: id,
                 vector: VoiceVector.centroid(group.vectors),
@@ -697,7 +942,7 @@ public actor SpeakerStore {
                 speechSeconds: group.seconds,
                 qualityScore: group.quality,
                 source: .humanConfirmedUtterances,
-                meetingID: key.isEmpty ? nil : key
+                evidence: evidence
             )
             guard case .success = try enrol(candidate, now: now) else { continue }
             enrolled = true
@@ -715,6 +960,33 @@ public actor SpeakerStore {
             )
         }
         return enrolled
+    }
+
+    /// One row per recording and track, spans unioned.
+    ///
+    /// Several parked rows describe the same session, so a flush that kept them
+    /// separate would store the same interval many times and make the row count
+    /// grow with how often the user corrected rather than with what was said.
+    private func mergedEvidence(_ evidence: [VoiceEvidence]) -> [VoiceEvidence] {
+        struct Key: Hashable {
+            var meetingID: String
+            var track: CaptureTrack
+        }
+        var order: [Key] = []
+        var byKey: [Key: VoiceEvidence] = [:]
+        for item in evidence {
+            let key = Key(meetingID: item.meetingID, track: item.track)
+            if var existing = byKey[key] {
+                existing.spans = AudioSpan.union(existing.spans + item.spans)
+                existing.standingSpans = AudioSpan.union(existing.standingSpans + item.standingSpans)
+                existing.isHumanVerified = existing.isHumanVerified || item.isHumanVerified
+                byKey[key] = existing
+            } else {
+                order.append(key)
+                byKey[key] = item
+            }
+        }
+        return order.compactMap { byKey[$0] }
     }
 
     /// Whether one meeting has already contributed an enrolment of this kind.

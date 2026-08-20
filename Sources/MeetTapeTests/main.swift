@@ -14,6 +14,7 @@ suites += HardeningTests.all
 suites.append(UITests.suite)
 suites += LocalConfigurationTests.all
 suites += SpeakerIdentityTests.all
+suites.append(VoiceEvidenceTests.suite)
 suites += SpeakerCorrectionTests.all
 suites += BackendSelectionTests.all
 suites += ProcessingTests.all

@@ -59,10 +59,26 @@ public actor LocalModelManager {
             guard manager.fileExists(atPath: compiled.path) || manager.fileExists(atPath: package.path)
             else { return false }
         }
-        return manager.fileExists(atPath: locations.diarizerDirectory.path)
+        guard manager.fileExists(atPath: locations.diarizerDirectory.path) else { return false }
+        // The tokenizer lives beside the weights and is fetched separately.
+        // Without it, `download: false` still reaches the network on the first
+        // transcription, which is the one thing an installed machine must not
+        // do. Its absence means the install is incomplete, not usable.
+        let tokenizers = locations.whisperBase
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("openai", isDirectory: true)
+        guard let contents = try? manager.contentsOfDirectory(atPath: tokenizers.path),
+              !contents.isEmpty
+        else { return false }
+        return true
     }
 
     private func publish(_ newState: LocalModelState) {
+        // Progress arrives on its own tasks with no ordering against the
+        // install's own transitions. One landing after the install completed
+        // would put the manager back into `downloading`, where every load
+        // throws "not installed" and the next call re-downloads everything.
+        if newState.isBusy, !state.isBusy, state.isUsable { return }
         state = newState
         onStateChange(newState)
     }
@@ -74,6 +90,12 @@ public actor LocalModelManager {
     @discardableResult
     public func install() async throws -> LocalModelReceipt {
         if case .installed(let receipt) = state { return receipt }
+        // Files pinned by an older build still work. Re-fetching 650 MB from
+        // inside a processing stage is the Re-download button's decision, not
+        // this one's.
+        if case .outdated(let receipt) = state, Self.filesPresent(locations, receipt) {
+            return receipt
+        }
         if let installTask { return try await installTask.value }
 
         // `self` is captured strongly on purpose: the install must finish and
@@ -127,6 +149,7 @@ public actor LocalModelManager {
                 whisperPackage: LocalSpeechStack.whisperPackage,
                 diarizerPackage: LocalSpeechStack.diarizerPackage
             )
+            try Task.checkCancellation()
             try receipts.write(receipt)
             publish(.installed(receipt))
             Log.processing.info(
@@ -147,6 +170,11 @@ public actor LocalModelManager {
     /// Removes both model sets. Everything here is re-downloadable, and nothing
     /// a user recorded lives in these directories.
     public func removeInstalledModels() throws {
+        // Cancel first. An install left running would finish writing the files
+        // the user just asked to delete, rewrite the receipt and flip the panel
+        // back to installed.
+        installTask?.cancel()
+        installTask = nil
         whisper = nil
         diarizerModels = nil
         try? FileManager.default.removeItem(at: locations.whisperBase)

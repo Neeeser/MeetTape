@@ -569,6 +569,36 @@ enum SpeakerIdentityTests {
                 expect.equal(try await store.statistics().embeddings, 0)
             },
 
+            test("a merged identity still resolves to itself after separating") { expect in
+                // The meeting files keep the identity they were written with, so
+                // separating a merge can find them again. Rewriting the link on
+                // merge left the meeting attributed to the wrong person with no
+                // way back.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let ann = try await store.createPerson(name: "Ann")
+                let bob = try await store.createPerson(name: "Bob")
+                try await store.recordOccurrence(
+                    meetingID: "m1", clusterID: "c1", track: .remote, speechSeconds: 90,
+                    embedding: vector(seed: 71), model: .fluidAudioOffline, resolution: nil,
+                    identityID: ann.id, source: .human, humanVerified: true,
+                    wasExpectedParticipant: false
+                )
+
+                try await store.merge(ann.id, into: bob.id)
+                expect.equal(try await store.current(ann.id)?.resolvedName, "Bob")
+                expect.equal(
+                    try await store.occurrences(meetingID: "m1").first?.resolvedIdentityID, ann.id,
+                    "the occurrence keeps the identity it was written with"
+                )
+
+                try await store.unmerge(ann.id)
+                expect.equal(
+                    try await store.current(ann.id)?.resolvedName, "Ann",
+                    "separating restores who the meeting was about"
+                )
+            },
+
             test("forgetting a voice covers what was merged into it") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -797,6 +827,34 @@ enum SpeakerIdentityTests {
                 let occurrence = try expect.unwrap(recorded)
                 expect.isTrue(occurrence.humanVerified)
                 expect.equal(occurrence.source, .human)
+            },
+
+            test("one meeting contributes one enrolment, however many lines are corrected") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                let model = EmbeddingModelIdentifier.fluidAudioOffline
+                expect.isFalse(try await store.hasEnrolment(
+                    identityID: chris.id, meetingID: "m1",
+                    source: .humanConfirmedUtterances, model: model
+                ))
+
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: chris.id, vector: vector(seed: 72), model: model,
+                    speechSeconds: 60, qualityScore: 0.5,
+                    source: .humanConfirmedUtterances, meetingID: "m1"
+                ))
+                expect.isTrue(try await store.hasEnrolment(
+                    identityID: chris.id, meetingID: "m1",
+                    source: .humanConfirmedUtterances, model: model
+                ))
+                expect.isFalse(
+                    try await store.hasEnrolment(
+                        identityID: chris.id, meetingID: "m2",
+                        source: .humanConfirmedUtterances, model: model
+                    ),
+                    "a different meeting is still fresh material"
+                )
             },
 
             test("learning from corrections can be switched off entirely") { expect in

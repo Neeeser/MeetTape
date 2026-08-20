@@ -251,6 +251,42 @@ enum SpeakerCorrectionTests {
                 expect.equal(map.resolvedName(for: after), "Chris")
             },
 
+            test("a correction survives the corrected line being split in two") { expect in
+                // Re-analysing at a higher speaker count splits turns. Anchored
+                // to the midpoint alone, the correction landed on whichever half
+                // happened to contain that instant and vanished from the other.
+                var map = SpeakerMap()
+                let before = Utterance(
+                    id: "u1", start: 10, end: 14, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: "remote-001_speaker_00", text: "and then we shipped it on friday",
+                    chunkID: "remote_full", model: "whisperkit"
+                )
+                map.overrideUtterance(
+                    before, with: SpeakerAssignment(displayName: "Chris", origin: .human), at: Date()
+                )
+
+                let firstHalf = Utterance(
+                    id: "u9", start: 10, end: 12, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: "remote-002_speaker_03", text: "and then we",
+                    chunkID: "remote_full", model: "whisperkit"
+                )
+                let secondHalf = Utterance(
+                    id: "u10", start: 12, end: 14, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: "remote-002_speaker_04", text: "shipped it on friday",
+                    chunkID: "remote_full", model: "whisperkit"
+                )
+                expect.equal(map.resolvedName(for: firstHalf), "Chris")
+                expect.equal(map.resolvedName(for: secondHalf), "Chris")
+
+                // And a line the correction never covered is untouched.
+                let elsewhere = Utterance(
+                    id: "u11", start: 30, end: 34, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: "remote-002_speaker_05", text: "different turn",
+                    chunkID: "remote_full", model: "whisperkit"
+                )
+                expect.equal(map.resolvedName(for: elsewhere), "Speaker 6")
+            },
+
             test("correcting the same line twice leaves one correction") { expect in
                 var map = SpeakerMap()
                 let line = Utterance(

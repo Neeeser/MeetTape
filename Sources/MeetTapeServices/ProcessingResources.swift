@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeIntegrations
@@ -107,28 +108,50 @@ public struct RecordingAwareGate: ProcessingGate {
 /// Neural Engine, so running two meetings at once contends for one unit and
 /// wins nothing. Diarization costs 16 seconds against transcription's 249 on a
 /// 65-minute file; there is no second job worth starting.
-public actor ProcessingJobLock {
-    private var busy = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+public final class ProcessingJobLock: Sendable {
+    private struct State {
+        var busy = false
+        var waiting: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state = Mutex(State())
 
     public init() {}
 
     public func acquire() async {
-        guard busy else {
-            busy = true
-            return
+        let taken = state.withLock { state -> Bool in
+            guard !state.busy else { return false }
+            state.busy = true
+            return true
         }
+        if taken { return }
         await withCheckedContinuation { continuation in
-            waiting.append(continuation)
+            // The slot can be released between the check above and here, so the
+            // decision is made once more under the lock rather than assumed.
+            let free = state.withLock { state -> Bool in
+                guard !state.busy else {
+                    state.waiting.append(continuation)
+                    return false
+                }
+                state.busy = true
+                return true
+            }
+            if free { continuation.resume() }
         }
     }
 
+    /// Synchronous on purpose, so a caller can hand the slot back in a `defer`
+    /// without leaving a task to do it later, and so the next holder starts
+    /// immediately rather than at the next scheduling point.
     public func release() {
-        if waiting.isEmpty {
-            busy = false
-        } else {
-            waiting.removeFirst().resume()
+        let next = state.withLock { state -> CheckedContinuation<Void, Never>? in
+            guard !state.waiting.isEmpty else {
+                state.busy = false
+                return nil
+            }
+            return state.waiting.removeFirst()
         }
+        next?.resume()
     }
 }
 

@@ -295,13 +295,18 @@ public actor SpeakerRecognitionService {
             return try await store.profileStatus(of: identityID, model: model)
         }
         let seconds = vectors.reduce(0) { $0 + $1.duration }
+        // Quality is how much confirmed speech stands behind the vector, not a
+        // flat 1. A literal 1 sorted every correction ahead of the measured
+        // quality on mic-track and cluster enrolments, so one session's
+        // corrections evicted a profile's genuinely diverse recordings.
+        let quality = min(1, seconds / (policy.enrolmentSpeechSeconds * 2))
         try await store.addPendingEnrollment(
             VoiceEnrollmentCandidate(
                 identityID: identityID,
                 vector: VoiceVector.centroid(vectors.map(\.vector)),
                 model: model,
                 speechSeconds: seconds,
-                qualityScore: 1,
+                qualityScore: quality,
                 source: .humanConfirmedUtterances,
                 meetingID: meetingID
             ),

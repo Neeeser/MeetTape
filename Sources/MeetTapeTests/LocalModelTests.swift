@@ -58,6 +58,10 @@ enum LocalModelTests {
                 _ = try await manager.install()
                 let backend = WhisperTranscriptionBackend(models: manager)
 
+                // Warm the pipeline first. On a 38-second clip the one-off
+                // model load dominates, and timing it would pin the load rather
+                // than the transcription.
+                _ = try await backend.transcribe(audio: audio) { _ in }
                 let started = Date()
                 let output = try await backend.transcribe(audio: audio) { _ in }
                 let seconds = Date().timeIntervalSince(started)
@@ -88,7 +92,10 @@ enum LocalModelTests {
                 Log.processing.info(
                     "local ASR: \(audioSeconds, privacy: .public)s in \(seconds, privacy: .public)s"
                 )
-                expect.isTrue(seconds < audioSeconds * 2, "slower than half real time")
+                expect.isTrue(
+                    seconds < audioSeconds,
+                    "warm transcription ran slower than real time: \(seconds)s for \(audioSeconds)s"
+                )
             },
 
             test("diarization separates the fixture's voices and returns their vectors") { expect in

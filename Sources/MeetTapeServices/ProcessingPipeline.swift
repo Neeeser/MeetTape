@@ -106,9 +106,10 @@ public actor ProcessingPipeline {
         guard let found = repository.findMeeting(id: meetingID) else { return }
         running.insert(meetingID)
         await jobLock.acquire()
+        var holdsSlot = true
         defer {
             running.remove(meetingID)
-            Task { await jobLock.release() }
+            if holdsSlot { jobLock.release() }
         }
 
         var metadata = found.metadata
@@ -120,9 +121,21 @@ public actor ProcessingPipeline {
                 // Capture always wins. A job started before a meeting parks here
                 // between stages rather than competing for the microphone, the
                 // disk and the Neural Engine with a live recording.
+                //
+                // The slot is handed back while waiting: one heavy job at a time
+                // should mean one job doing work, not one job holding the queue
+                // shut for the length of somebody's call.
                 if gate.isBlocked {
                     report(metadata, chunks: nil, detail: "Waiting until recording finishes")
+                    if holdsSlot {
+                        jobLock.release()
+                        holdsSlot = false
+                    }
                     await gate.waitUntilAllowed()
+                }
+                if !holdsSlot {
+                    await jobLock.acquire()
+                    holdsSlot = true
                 }
                 metadata.processing.recordAttempt(for: stage)
                 try persist(metadata, to: store)
@@ -184,6 +197,8 @@ public actor ProcessingPipeline {
                     continue
                 }
                 onFailure(metadata.id, failure)
+                // Nothing else will read the decoded working copies now.
+                scratch.discard(meetingID: metadata.id)
                 return
             }
         }
@@ -1104,12 +1119,29 @@ public actor ProcessingPipeline {
     public func applyUtteranceSpeaker(
         _ name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
     ) async throws -> IdentityID? {
+        try await applyUtteranceSpeaker(
+            name, utteranceID: utteranceID, meetingID: meetingID,
+            identityID: identityID, learning: true
+        )
+    }
+
+    @discardableResult
+    private func applyUtteranceSpeaker(
+        _ name: String, utteranceID: String, meetingID: String,
+        identityID: IdentityID?, learning: Bool
+    ) async throws -> IdentityID? {
         guard let found = repository.findMeeting(id: meetingID) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let transcript = try found.store.readCanonicalTranscript(),
               let utterance = transcript.utterances.first(where: { $0.id == utteranceID })
-        else { return nil }
+        else {
+            // The transcript moved under the correction, which happens when a
+            // re-analysis lands between the click and this call. Saying so is
+            // the point: returning nil silently left the user watching a name
+            // appear and then vanish.
+            throw ProcessingError.utteranceNotFound(id: utteranceID)
+        }
 
         let settings = settingsProvider()
         var speakers = try found.store.readSpeakerMap()
@@ -1134,10 +1166,12 @@ public actor ProcessingPipeline {
         try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
 
         if let resolved {
-            try await accumulateConfirmedSpeech(
-                store: found.store, metadata: found.metadata, speakers: speakers,
-                identityID: resolved, settings: settings
-            )
+            if learning {
+                try await accumulateConfirmedSpeech(
+                    store: found.store, metadata: found.metadata, speakers: speakers,
+                    identityID: resolved, settings: settings
+                )
+            }
             try await refreshCachedNames(for: resolved)
         }
         return resolved
@@ -1152,11 +1186,22 @@ public actor ProcessingPipeline {
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) async throws {
         var linked = identityID
+        // Every override is written first and the profile is considered once at
+        // the end. Learning per line would re-embed the whole growing set on
+        // each one, so a single thirty-line correction became thirty full-track
+        // passes and thirty near-identical vectors.
         for id in utteranceIDs {
             linked = try await applyUtteranceSpeaker(
-                name, utteranceID: id, meetingID: meetingID, identityID: linked
+                name, utteranceID: id, meetingID: meetingID, identityID: linked, learning: false
             )
         }
+        guard let linked, let found = repository.findMeeting(id: meetingID) else { return }
+        try await accumulateConfirmedSpeech(
+            store: found.store, metadata: found.metadata,
+            speakers: try found.store.readSpeakerMap(),
+            identityID: linked, settings: settingsProvider()
+        )
+        try await refreshCachedNames(for: linked)
     }
 
     /// Re-clusters a meeting, optionally at a speaker count the user chose.
@@ -1170,9 +1215,10 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
-        await jobLock.acquire()
-        defer { Task { await jobLock.release() } }
         await gate.waitUntilAllowed()
+        await jobLock.acquire()
+        defer { jobLock.release() }
+        defer { scratch.discard(meetingID: meetingID) }
 
         let metadata = found.metadata
         let store = found.store
@@ -1233,6 +1279,7 @@ public actor ProcessingPipeline {
         guard let found = repository.findMeeting(id: meetingID) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
+        defer { scratch.discard(meetingID: meetingID) }
         var metadata = found.metadata
         try await recognizeVoices(
             store: found.store, metadata: &metadata, settings: settingsProvider()
@@ -1304,23 +1351,60 @@ public actor ProcessingPipeline {
               let transcript = try store.readCanonicalTranscript()
         else { return }
 
-        // Only the lines this person was confirmed on, and only where no other
-        // line overlaps them, so a vector never mixes two voices.
+        // One meeting contributes one enrolment. Without this, correcting more
+        // lines later re-embeds the whole growing set again and stacks several
+        // near-identical vectors from one session into a profile that is meant
+        // to be diverse.
+        let speakerStore = await service.speakerStore
+        guard try await !speakerStore.hasEnrolment(
+            identityID: identityID, meetingID: metadata.id,
+            source: .humanConfirmedUtterances, model: extractor.model
+        ) else { return }
+
+        // The lines this person was confirmed on, minus any that another line
+        // overlaps: the assembler folds words spoken over a speaker into the
+        // surrounding turn, and a vector must never mix two voices.
         var confirmed: [Utterance] = []
         for utterance in transcript.utterances {
             guard let assignment = speakers.assignment(for: utterance),
                   assignment.origin == .human, assignment.identityID == identityID
             else { continue }
+            let overlapped = transcript.utterances.contains {
+                $0.id != utterance.id && $0.track == utterance.track
+                    && $0.start < utterance.end && utterance.start < $0.end
+            }
+            if overlapped { continue }
             confirmed.append(utterance)
         }
-        let seconds = confirmed.reduce(0) { $0 + max(0, $1.end - $1.start) }
+        guard !confirmed.isEmpty else { return }
+
+        // Grouped by track, and the enrolment is built from one track only. A
+        // remote meeting's microphone track holds a different person, so summing
+        // both and then embedding whichever came first would enrol the wrong
+        // voice under this name.
+        var byTrack: [CaptureTrack: [Utterance]] = [:]
+        for utterance in confirmed { byTrack[utterance.track, default: []].append(utterance) }
+        let best = byTrack.max { left, right in
+            left.value.reduce(0) { $0 + ($1.end - $1.start) }
+                < right.value.reduce(0) { $0 + ($1.end - $1.start) }
+        }
+        guard let (track, lines) = best.map({ ($0.key, $0.value) }) else { return }
+        let seconds = lines.reduce(0) { $0 + max(0, $1.end - $1.start) }
         let policy = await service.resolutionPolicy
         guard seconds >= policy.enrolmentSpeechSeconds else { return }
 
         let timeline = try store.readTimeline()
-        guard let track = confirmed.first?.track else { return }
         let segments = timeline.segments(track: track)
         guard !segments.isEmpty else { return }
+
+        // Reading a whole meeting off disk and running the embedding model is
+        // the same class of work a processing stage does, so it waits for the
+        // same things.
+        await gate.waitUntilAllowed()
+        await jobLock.acquire()
+        defer { jobLock.release() }
+        defer { scratch.discard(meetingID: metadata.id) }
+
         try await prepareLocalModels(metadata: metadata)
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: track, segments: segments,
@@ -1328,7 +1412,7 @@ public actor ProcessingPipeline {
         ) else { return }
 
         let leadIn = timeline.leadIn(track: track)
-        let intervals = confirmed.filter { $0.track == track }.map {
+        let intervals = lines.map {
             DiarizationInterval(
                 start: max(0, $0.start - leadIn), end: max(0, $0.end - leadIn),
                 clusterID: "confirmed"
@@ -1355,10 +1439,12 @@ public actor ProcessingPipeline {
         for meetingID in try await store.meetingsReferencing(identityID) {
             guard let found = repository.findMeeting(id: meetingID) else { continue }
             var speakers = try found.store.readSpeakerMap()
-            let changed = speakers.refreshName(
-                of: identityID, to: identity.resolvedName,
-                replacingWith: identity.id == identityID ? nil : identity.id
-            )
+            // Only the cached name is rewritten. The identity link stays as it
+            // was written, because reads resolve through the merge tombstone
+            // and rewriting it would make separating the merge unable to find
+            // these entries again: the meeting would stay attributed to the
+            // wrong person forever.
+            let changed = speakers.refreshName(of: identityID, to: identity.resolvedName)
             guard changed else { continue }
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)

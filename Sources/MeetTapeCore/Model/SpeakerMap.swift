@@ -80,22 +80,43 @@ public struct SpeakerAssignment: Codable, Sendable, Equatable {
 /// line covers it.
 public struct UtteranceOverride: Codable, Sendable, Equatable {
     public var track: CaptureTrack
+    /// The middle of the corrected line, kept so a file written before spans
+    /// existed still resolves.
     public var anchorSeconds: Double
+    /// The span the correction covers. Matching is by intersection, so a line
+    /// that is later split keeps the correction on both halves and a line that
+    /// is merged with its neighbour keeps it too. Anchoring to the midpoint
+    /// alone dropped the correction from whichever half missed the instant.
+    public var startSeconds: Double?
+    public var endSeconds: Double?
     public var assignment: SpeakerAssignment
     public var createdAt: Date
     /// The identifier of the line as it stood when the correction was made.
-    /// Diagnostic only; matching goes through `anchorSeconds`.
+    /// Diagnostic only; matching goes through the span.
     public var utteranceID: String?
 
     public init(
-        track: CaptureTrack, anchorSeconds: Double, assignment: SpeakerAssignment,
-        createdAt: Date, utteranceID: String? = nil
+        track: CaptureTrack, anchorSeconds: Double,
+        startSeconds: Double? = nil, endSeconds: Double? = nil,
+        assignment: SpeakerAssignment, createdAt: Date, utteranceID: String? = nil
     ) {
         self.track = track
         self.anchorSeconds = anchorSeconds
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
         self.assignment = assignment
         self.createdAt = createdAt
         self.utteranceID = utteranceID
+    }
+
+    /// Whether this correction covers any part of a line.
+    func covers(_ utterance: Utterance) -> Bool {
+        guard track == utterance.track else { return false }
+        let end = max(utterance.end, utterance.start + 0.001)
+        guard let start = startSeconds, let finish = endSeconds else {
+            return anchorSeconds >= utterance.start && anchorSeconds < end
+        }
+        return start < end && utterance.start < max(finish, start + 0.001)
     }
 }
 
@@ -180,32 +201,27 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public mutating func overrideUtterance(
         _ utterance: Utterance, with assignment: SpeakerAssignment, at date: Date
     ) {
-        let anchor = (utterance.start + utterance.end) / 2
-        utteranceOverrides.removeAll {
-            $0.track == utterance.track && $0.anchorSeconds >= utterance.start
-                && $0.anchorSeconds < max(utterance.end, utterance.start + 0.001)
-        }
+        utteranceOverrides.removeAll { $0.covers(utterance) }
         utteranceOverrides.append(UtteranceOverride(
-            track: utterance.track, anchorSeconds: anchor, assignment: assignment,
-            createdAt: date, utteranceID: utterance.id
+            track: utterance.track,
+            anchorSeconds: (utterance.start + utterance.end) / 2,
+            startSeconds: utterance.start,
+            endSeconds: max(utterance.end, utterance.start + 0.001),
+            assignment: assignment,
+            createdAt: date,
+            utteranceID: utterance.id
         ))
     }
 
     public mutating func clearOverride(for utterance: Utterance) {
-        utteranceOverrides.removeAll {
-            $0.track == utterance.track && $0.anchorSeconds >= utterance.start
-                && $0.anchorSeconds < max(utterance.end, utterance.start + 0.001)
-        }
+        utteranceOverrides.removeAll { $0.covers(utterance) }
     }
 
     /// The correction covering one line, if any. The most recent wins when a
     /// re-assembly has merged two corrected lines into one.
     public func override(for utterance: Utterance) -> UtteranceOverride? {
         utteranceOverrides
-            .filter {
-                $0.track == utterance.track && $0.anchorSeconds >= utterance.start
-                    && $0.anchorSeconds < max(utterance.end, utterance.start + 0.001)
-            }
+            .filter { $0.covers(utterance) }
             .max { $0.createdAt < $1.createdAt }
     }
 

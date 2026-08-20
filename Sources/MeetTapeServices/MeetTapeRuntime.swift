@@ -271,12 +271,26 @@ public final class MeetTapeRuntime {
     }
 
     /// Chains main-actor work so updates apply in the order they were produced.
+    ///
+    /// For short state updates only. Quitting waits on this chain, and a
+    /// capture action queued behind a multi-minute processing job would mean the
+    /// meeting that just started is never armed. Long work goes through
+    /// `runProcessing`.
     func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) {
         let previous = workChain
         workChain = Task { @MainActor in
             await previous?.value
             await body()
         }
+    }
+
+    /// Runs pipeline work that can take minutes, off the ordered chain.
+    ///
+    /// The pipeline is an actor, so its own calls still serialise against each
+    /// other; what this avoids is holding capture lifecycle actions and quit
+    /// behind a job that is waiting out a live recording.
+    func runProcessing(_ body: @escaping @MainActor @Sendable () async -> Void) {
+        Task { @MainActor in await body() }
     }
 
     /// Adopts anything a crash left behind, before detection can see it.
@@ -491,7 +505,7 @@ public final class MeetTapeRuntime {
     }
 
     public func retryProcessing(meetingID: String) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             await pipeline.retry(meetingID: meetingID)
             refreshRecentMeetings()
@@ -500,7 +514,7 @@ public final class MeetTapeRuntime {
 
     /// Re-assembles the transcript from the raw chunks already on disk.
     public func rebuildTranscript(meetingID: String, completion: @escaping @Sendable @MainActor () -> Void = {}) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             do {
                 try await pipeline.rebuildTranscript(meetingID: meetingID)
@@ -519,7 +533,7 @@ public final class MeetTapeRuntime {
     public func assignSpeaker(
         name: String, key: String, meetingID: String, identityID: IdentityID? = nil
     ) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             do {
                 _ = try await pipeline.applySpeakerName(

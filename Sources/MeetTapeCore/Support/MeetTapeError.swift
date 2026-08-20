@@ -64,13 +64,16 @@ public enum ProcessingError: LogSafeError, Equatable {
     case malformedResponse(reason: String)
     case transport(reason: String)
     case audioUnreadable(path: String)
+    /// A correction arrived for a transcript line that no longer exists,
+    /// which happens when a re-analysis lands between the click and the write.
+    case utteranceNotFound(id: String)
     case cancelled
 
     public var isRetryable: Bool {
         switch self {
         case .rateLimited, .serverError, .transport: true
         case .missingAPIKey, .authenticationFailed, .requestTooLarge, .durationTooLong,
-             .malformedResponse, .audioUnreadable, .cancelled: false
+             .malformedResponse, .audioUnreadable, .utteranceNotFound, .cancelled: false
         }
     }
 
@@ -85,6 +88,7 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .malformedResponse(let reason): "malformedResponse(\(reason))"
         case .transport(let reason): "transport(\(reason))"
         case .audioUnreadable(let path): "audioUnreadable(\(path))"
+        case .utteranceNotFound: "utteranceNotFound"
         case .cancelled: "cancelled"
         }
     }
@@ -102,6 +106,8 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .malformedResponse: "OpenAI returned an unexpected response. Your recording is safe."
         case .transport: "MeetTape could not reach OpenAI. It will retry. Your recording is safe."
         case .audioUnreadable: "MeetTape could not read the recorded audio for this stage."
+        case .utteranceNotFound:
+            "That line has moved since the transcript was last analysed. Reopen the meeting and try again."
         case .cancelled: "Processing was cancelled. Your recording is safe."
         }
     }

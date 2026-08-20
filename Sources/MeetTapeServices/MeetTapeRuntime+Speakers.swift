@@ -277,7 +277,7 @@ extension MeetTapeRuntime {
     public func assignUtteranceSpeaker(
         name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
     ) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             do {
                 _ = try await pipeline.applyUtteranceSpeaker(
@@ -294,7 +294,7 @@ extension MeetTapeRuntime {
     public func assignUtteranceSpeakers(
         name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             do {
                 try await pipeline.applyUtteranceSpeaker(
@@ -311,9 +311,12 @@ extension MeetTapeRuntime {
     ///
     /// Words are untouched. Where the meeting's prepared state is still in
     /// memory this costs about a second rather than a full pass.
-    public func reanalyzeSpeakers(meetingID: String, speakerCount: Int?) {
-        enqueue { [weak self] in
-            guard let self else { return }
+    public func reanalyzeSpeakers(
+        meetingID: String, speakerCount: Int?,
+        completion: @escaping @Sendable @MainActor () -> Void = {}
+    ) {
+        runProcessing { [weak self] in
+            guard let self else { return completion() }
             do {
                 try await pipeline.reanalyzeSpeakers(
                     meetingID: meetingID, speakerCount: speakerCount
@@ -323,13 +326,14 @@ extension MeetTapeRuntime {
             }
             onProcessingUpdate?(meetingID)
             refreshRecentMeetings()
+            completion()
         }
     }
 
     /// Re-runs identity resolution after the expected-participant list changed.
     /// No audio is read and nothing is transcribed.
     public func refreshSpeakerIdentities(meetingID: String) {
-        enqueue { [weak self] in
+        runProcessing { [weak self] in
             guard let self else { return }
             do {
                 try await pipeline.refreshSpeakerIdentities(meetingID: meetingID)

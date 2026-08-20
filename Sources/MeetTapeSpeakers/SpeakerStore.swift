@@ -540,6 +540,30 @@ public actor SpeakerStore {
         return true
     }
 
+    /// Whether one meeting has already contributed an enrolment of this kind.
+    ///
+    /// A meeting is one source of material. Correcting more lines in it later
+    /// should refine nothing rather than stack another near-identical vector
+    /// from the same session into a profile meant to be diverse.
+    public func hasEnrolment(
+        identityID: IdentityID, meetingID: String, source: VoiceEnrollmentSource,
+        model: EmbeddingModelIdentifier
+    ) throws -> Bool {
+        var found = false
+        try database.query(
+            """
+            SELECT 1 FROM voice_embedding
+            WHERE identity_id = ? AND source_meeting = ? AND source_type = ? AND model_identifier = ?
+            LIMIT 1
+            """,
+            [
+                .int64(identityID.rawValue), .text(meetingID), .text(source.rawValue),
+                .text(model.rawValue),
+            ]
+        ) { _ in found = true }
+        return found
+    }
+
     public func pendingSpeechSeconds(
         for id: IdentityID, model: EmbeddingModelIdentifier
     ) throws -> Double {

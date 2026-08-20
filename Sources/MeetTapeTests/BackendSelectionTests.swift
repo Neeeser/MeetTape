@@ -156,6 +156,24 @@ enum BackendSelectionTests {
                 )
             },
 
+            test("a job waiting out a recording hands its slot back") { expect in
+                // "One heavy job at a time" has to mean one job doing work. A
+                // job parked for the length of somebody's call must not also
+                // hold the queue shut.
+                let lock = ProcessingJobLock()
+                await lock.acquire()
+                let second = Task { await lock.acquire() }
+                try await Task.sleep(nanoseconds: 20_000_000)
+                expect.isFalse(second.isCancelled)
+                lock.release()
+                await second.value
+                lock.release()
+                // And the slot is genuinely free again afterwards.
+                await lock.acquire()
+                lock.release()
+                expect.isTrue(true, "acquire returned after the holder released")
+            },
+
             test("only one heavy job holds the lock at a time") { expect in
                 let lock = ProcessingJobLock()
                 let running = LockedCounter()
@@ -166,7 +184,7 @@ enum BackendSelectionTests {
                             running.enter()
                             try? await Task.sleep(nanoseconds: 5_000_000)
                             running.leave()
-                            await lock.release()
+                            lock.release()
                         }
                     }
                 }

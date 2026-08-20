@@ -446,8 +446,11 @@ public final class MeetingReviewModel {
     public func reanalyzeSpeakers() {
         isReanalyzing = true
         runtime.reanalyzeSpeakers(
-            meetingID: meetingID, speakerCount: Int(reanalyzeCount.trimmingCharacters(in: .whitespaces))
-        )
+            meetingID: meetingID,
+            speakerCount: Int(reanalyzeCount.trimmingCharacters(in: .whitespaces))
+        ) { [weak self] in
+            self?.isReanalyzing = false
+        }
     }
 
     /// Saved straight away, even while transcription is still running.

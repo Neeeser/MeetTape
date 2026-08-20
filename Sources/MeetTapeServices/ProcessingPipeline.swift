@@ -898,6 +898,12 @@ public actor ProcessingPipeline {
         guard settings.enrichment.suggestSpeakers else { return }
         // An empty identifier means the user is mid-edit in Settings.
         guard !settings.models.metadata.isEmpty else { return }
+        // This setting defaults on, and both speech backends default to local,
+        // so on a fresh install with no key this stage would throw a failure
+        // that is not retryable and stop the meeting before the markdown and
+        // the mixdown are written. Nothing here was asked for by a user who
+        // never configured the cloud.
+        guard await backend.isConfigured() else { return }
         guard let transcript = try store.readCanonicalTranscript() else { return }
         let speakers = try store.readSpeakerMap()
         let labels = transcript.speakerKeys.filter {
@@ -959,6 +965,10 @@ public actor ProcessingPipeline {
     ) async throws {
         guard settings.enrichment.wantsAnything else { return }
         guard !settings.models.metadata.isEmpty else { return }
+        // Same reason as the speaker suggestion above: titles and summaries are
+        // the one part of MeetTape that needs the cloud, and wanting them by
+        // default must not fail a meeting for someone who runs everything here.
+        guard await backend.isConfigured() else { return }
         guard let transcript = try store.readCanonicalTranscript(), !transcript.utterances.isEmpty else {
             return
         }

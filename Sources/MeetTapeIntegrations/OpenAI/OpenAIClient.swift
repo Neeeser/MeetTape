@@ -41,6 +41,12 @@ public struct OpenAIClient: AIBackend {
 
     // MARK: - credentials
 
+    /// A key exists. Not that it works: proving that costs a request, and the
+    /// callers of this are deciding whether to attempt an optional stage at all.
+    public func isConfigured() async -> Bool {
+        (try? keyProvider.apiKey())?.isEmpty == false
+    }
+
     /// Fetching one model description proves both the key and access to that
     /// model, costs nothing, and is what Settings uses for Test Connection.
     public func verifyCredentials(model: String) async throws {

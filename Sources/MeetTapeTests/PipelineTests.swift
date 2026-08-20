@@ -428,6 +428,8 @@ final class ConcurrencyProbeBackend: AIBackend, @unchecked Sendable {
     private(set) var peakInFlight = 0
     private(set) var requestCount = 0
 
+    func isConfigured() async -> Bool { true }
+
     func verifyCredentials(model: String) async throws {}
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {

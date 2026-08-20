@@ -385,6 +385,55 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("the default configuration finishes a meeting with no API key") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // Stock settings: both speech backends local, and every
+                // enrichment switch on, which is what a fresh install has.
+                let settings = AppSettings()
+                expect.isTrue(settings.processing.usesLocalTranscription)
+                expect.isTrue(settings.enrichment.suggestSpeakers)
+
+                let backend = FakeAIBackend()
+                backend.configured = false
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 51, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(
+                    try meeting.store.readMetadata().processing.state, .complete,
+                    "a meeting that needs nothing from the cloud must not stop at a cloud stage"
+                )
+                // The stages after speaker resolution are where these are
+                // written, so reaching them is the thing being checked.
+                expect.isTrue(
+                    FileManager.default.fileExists(
+                        atPath: meeting.store.layout.transcriptMarkdown.path
+                    ),
+                    "the readable transcript is written"
+                )
+                expect.isFalse(
+                    backend.calls.contains { $0.kind == "resolve" || $0.kind == "enrich" },
+                    "and no cloud request was attempted"
+                )
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

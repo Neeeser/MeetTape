@@ -25,6 +25,10 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     var alwaysFailTranscription: ProcessingError?
     /// Returns a different segment set per chunk index, for overlap tests.
     var diarizationByChunk: [[RawTranscriptSegment]] = []
+    /// False models a user who never entered a key.
+    var configured = true
+
+    func isConfigured() async -> Bool { configured }
 
     func record(_ call: Call) {
         lock.lock()
@@ -74,11 +78,15 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
         _ request: SpeakerResolutionRequest, model: String
     ) async throws -> [SpeakerSuggestion] {
         record(Call(kind: "resolve", model: model, file: ""))
+        // What the real client does with no key, and the reason these stages
+        // have to ask before calling: the error is not retryable.
+        if !configured { throw ProcessingError.missingAPIKey }
         return suggestions
     }
 
     func enrich(_ request: EnrichmentRequest, model: String) async throws -> MeetingEnrichment {
         record(Call(kind: "enrich", model: model, file: ""))
+        if !configured { throw ProcessingError.missingAPIKey }
         return enrichment
     }
 }

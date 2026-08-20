@@ -150,6 +150,16 @@ public struct SpeakerResolutionRequest: Sendable {
 /// The AI backend, behind a protocol so the pipeline can be tested without the
 /// network and so a different provider can be substituted later.
 public protocol AIBackend: Sendable {
+    /// Whether this backend has what it needs to make a request.
+    ///
+    /// The optional cloud stages ask before calling, because the local pipeline
+    /// is the default and a user who never entered a key has not opted into
+    /// anything that can fail. Without this the meeting stops at the first cloud
+    /// stage and never reaches the step that writes the markdown and the mixdown.
+    /// Deliberately not defaulted: a new backend that forgets to answer should
+    /// fail to compile rather than claim it is ready.
+    func isConfigured() async -> Bool
+
     func verifyCredentials(model: String) async throws
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse
     func diarize(_ request: DiarizationRequest) async throws -> TranscriptionResponse

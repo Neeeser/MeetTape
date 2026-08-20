@@ -1178,6 +1178,60 @@ enum SpeakerIdentityTests {
                     try await store.identities(kind: .anonymous).count, 1,
                     "and the two halves leave one voice behind, not two that cancel out"
                 )
+                let owners = try await store.occurrences(meetingID: "m1")
+                    .compactMap(\.resolvedIdentityID)
+                expect.equal(owners.count, 2, "both halves are recorded")
+                expect.equal(
+                    Set(owners.map(\.rawValue)).count, 1,
+                    "and both point at the same voice, which is what makes naming one name both"
+                )
+            },
+
+            test("a voice heard before is linked to one of two overlapping clusters") { expect in
+                // The concurrency guard on the anonymous branch: two clusters
+                // that talk over each other cannot both be the person voice
+                // memory recognises, however alike they score.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let voice = vector(seed: 54)
+                let remembered = try await store.createAnonymous(state: .persistent)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: remembered.id, vector: voice, model: .fluidAudioOffline,
+                    speechSeconds: 120, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(
+                        meeting: "m0", seconds: 120, source: .anonymousSeed
+                    )
+                ))
+                let other = try await store.createAnonymous(state: .persistent)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: other.id, vector: vector(seed: 201), model: .fluidAudioOffline,
+                    speechSeconds: 120, qualityScore: 1, source: .anonymousSeed,
+                    evidence: VoiceEvidenceFixture.evidence(
+                        meeting: "m0b", seconds: 120, source: .anonymousSeed
+                    )
+                ))
+
+                let resolved = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_00", track: .remote,
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 0, end: 120)]
+                        ),
+                        SpeakerClusterInput(
+                            clusterID: "run-001_speaker_01", track: .remote,
+                            speechSeconds: 120, centroid: voice,
+                            spans: [AudioSpan(start: 60, end: 180)]
+                        ),
+                    ],
+                    settings: SpeakerRecognitionSettings(), now: Date()
+                )
+                expect.equal(
+                    resolved.filter { $0.source == .anonymousVoice }.count, 1,
+                    "the first cluster is that voice; the second is somebody talking over them"
+                )
             },
 
             test("two clusters talking over each other stay two voices") { expect in

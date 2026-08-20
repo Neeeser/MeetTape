@@ -186,6 +186,12 @@ cd MeetTape
 open dist/MeetTape.app
 ```
 
+Always build through the scripts. They source `scripts/spm-env.sh`, which
+repairs two Command Line Tools defects that otherwise stop the speech
+dependencies linking, and exports flags a bare `swift build` would miss.
+`scripts/eval.sh` is a developer tool for checking the local stack's measured
+numbers against real audio; see [CLAUDE.md](CLAUDE.md).
+
 Tests run as a plain executable (`meettape-test`) instead of through `swift
 test`, because XCTest and swift-testing ship with Xcode and this project is built
 to work without it.

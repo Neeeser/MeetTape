@@ -73,6 +73,20 @@ decoder settings in `LocalDiarizationTuning` and `LocalTranscriptionTuning`, and
 `LocalConfigurationTests` and `SpeakerIdentityTests` assert them. A change to any
 of these numbers should fail a test before it reaches a user.
 
+Four rules that an adversarial review found were easy to break by accident, each
+now with a test:
+
+- A meeting's own voices are not candidates for it. Without that guard a cluster
+  matches the profile seeded from its own vector on a second pass, scores 1.0,
+  and a voice heard once is announced as one heard before.
+- An automatic pass never overwrites a speaker a person named. The occurrence
+  upsert and `SpeakerMap.applySuggestion` both enforce it, from opposite ends.
+- Work that happens because voice memory is on, rather than because the user
+  chose a local backend, may wait for a model install but must never start one.
+- Long pipeline calls go through `MeetTapeRuntime.runProcessing`, not `enqueue`.
+  The `enqueue` chain carries capture lifecycle actions and is what quit waits
+  on, so a multi-minute job on it stops the next meeting being recorded.
+
 ## Capture invariants
 
 These values were derived from measurements against real hardware, and changing

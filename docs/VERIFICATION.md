@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` runs 212 tests, all passing, in about 5 seconds.
+`./scripts/test.sh` runs 227 tests, all passing, in about 6 seconds.
 Fifteen further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` runs 10 tests, all passing.
@@ -240,7 +240,62 @@ the locally synthesised three-voice fixture. Measured on this machine:
 
 The install time matches the 244.9 s the probe measured for the same cold path,
 almost all of it Core ML specializing the model for the Neural Engine rather than
-downloading.
+downloading. That cost returns whenever the binary's identity changes, which
+under ad-hoc signing means every rebuild: the first transcription after one took
+184 s, and two consecutive runs of the same binary in fresh processes took 8.6 s
+between them. A signed build pays it once, not per launch.
+
+**Speaker separation on real calls.** `scripts/eval.sh diarize --audio FILE`
+runs the same file at the library default and at the shipping value. Against the
+eleven authorized recordings from the local-processing probe, and against the
+synthetic files built from seven identified voices where the true count is known:
+
+| Recording | True speakers | Fa=0.07 | Fa=0.20 | Agreement |
+|---|---:|---:|---:|---:|
+| Slack huddle, 15 min | 2 | 2 | 2 | 100% |
+| Remote call, 21 min | 2 | 2 | 2 | 100% |
+| Remote call, 12 min | 2 | 2 | 2 | 100% |
+| Remote call, 17 min | unknown | 2 | 3 | 99.8% |
+| In-person, 28 min | 2 | 2 | 2 | 100% |
+| Room recording, 41 min | unknown | 3 | 4 | 99.9% |
+| Synthetic | 4 | 3 | 5 | 76% |
+| Synthetic | 5 | 3 | **5** | 71% |
+| Synthetic | 6 | 4 | **6** | 75% |
+| Synthetic | 7 | 6 | **7** | 92% |
+
+On the two-speaker calls that make up most real use, the two values produce
+byte-identical output, so the change costs nothing there. Where the counts differ
+the agreement column shows the change is additive: an extra cluster appears and
+the existing ones keep their frames. On the files with known ground truth the
+mean absolute count error falls from 1.5 to 0.25, and the tuned value hits the
+exact count at five, six and seven speakers where the default under-counted by
+two, two and one. The one over-count is at four speakers, which is the
+recoverable direction: a split is one merge, a merge is not undoable without
+re-analysis.
+
+This is the acceptance test the implementation brief asked for, and it agrees
+with the probe. It is still one machine and one corpus.
+
+**Offline.** The release binary was run under `sandbox-exec` with
+`(deny network*)`, after verifying the sandbox blocks the network at all:
+`curl https://huggingface.co` returns 000 inside it and 200 outside. With the
+network denied, transcription produced 109 words with word timings from the
+38.5-second fixture and speaker embedding produced 256-dimension vectors that
+separated the two tracks at 0.445. Nothing in the local path reaches the network
+once the models are installed.
+
+**Adversarial review.** Seven reviewers, one per failure class, were run against
+the implementation: voice-profile poisoning, threshold mistakes, raw-data
+mutation, store correctness, concurrency, privacy and model handling, and
+compatibility with existing meetings and settings. They produced 41 findings, of
+which 22 were distinct and real after checking each against the code. All 22 are
+fixed, and the ones with a reachable failure carry a regression test. The most
+serious were: rebuilding a transcript dropped the diarization and collapsed every
+speaker; the expiry predicate for unnamed voices was inverted, so nothing ever
+expired; re-running recognition overwrote a speaker a person had named; and
+capture lifecycle actions shared an ordered queue with processing jobs, so a job
+waiting out a recording could hold the arm and commit for the meeting that had
+just started.
 
 ## Not verified
 
@@ -277,6 +332,27 @@ be assumed to work.
   or manual walkthrough of the panels has been done.
 - **FaceTime.** Not implemented as a provider. A FaceTime call would be detected
   only through the generic path, if at all.
+- **Voice recognition across real meetings over time.** The thresholds come from
+  public corpora and the local corpus of eleven authorized recordings. Nobody has
+  yet been recognized by MeetTape in a meeting weeks after being named in another
+  one, which is the feature working end to end. The measured pieces are there;
+  the passage of time is not.
+- **The recurring unnamed voice lifecycle in the product.** Creating a candidate,
+  promoting it on a second meeting, naming it, and seeing every earlier meeting
+  update are covered by tests against the store and the service. No user has
+  walked that path through the panels.
+- **Merging and separating identities from the UI.** The data model, the
+  tombstone and the name restoration have tests. The People tab exposes rename
+  and forget-voice, and merging is available only through the runtime API.
+- **The participant soft prior on real meetings.** Relaxing the margin from 0.10
+  to 0.05 for a listed participant is reasoned from open-set results, not
+  measured. It is deliberately one value in one place.
+- **A real meeting with ten or more people.** The speaker-count behaviour above
+  eight comes from VoxConverse and from synthetic files. No such call exists in
+  the local corpus.
+- **Processing during a live recording.** The gate and the single job slot have
+  tests, and the queue parks between stages. Whether a full local pipeline
+  running alongside a live capture drops audio has not been measured on hardware.
 - **Calendar matching.** `CalendarService` reads EventKit and scores events
   against a recording's time window, and it has no tests and has not been run
   against a real calendar. A wrong match shows the wrong title and attendees on a

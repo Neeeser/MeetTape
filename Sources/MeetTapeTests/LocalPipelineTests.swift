@@ -771,8 +771,8 @@ enum LocalPipelineTests {
                     scratchRoot: root.appendingPathComponent("scratch")
                 )
 
-                let chris = try await expect.unwrap(
-                    try await pipeline.applySpeakerName("Chris", to: key, meetingID: meeting.metadata.id)
+                let chris = try expect.unwrap(
+                    await pipeline.applySpeakerName("Chris", to: key, meetingID: meeting.metadata.id)
                 )
                 expect.equal(
                     try await store.profileStatus(of: chris, model: .fluidAudioOffline).sampleCount,

@@ -1404,11 +1404,15 @@ public actor ProcessingPipeline {
             : try await identity(named: trimmed, existing: identityID)
 
         var speakers = try found.store.readSpeakerMap()
-        // The audio that actually changes hands. A line already reading as the
-        // person being named moves nothing, and the menu offers this on every
-        // line: treating those as moves cost the cluster's owner a voice profile
-        // for a click that changed nothing on screen.
-        var moved: [CaptureTrack: [AudioSpan]] = [:]
+        // The audio that actually changes hands, and who it changes hands to.
+        //
+        // A line already reading as the person being named moves nothing, and
+        // the menu offers this on every line: treating those as moves cost the
+        // cluster's owner a voice profile for a click that changed nothing on
+        // screen. Grouped by the new owner rather than by the correction,
+        // because clearing a line hands it back to whoever the cluster says, and
+        // claiming it for nobody took those seconds off that person too.
+        var moved: [Claim: [AudioSpan]] = [:]
         for utterance in lines {
             let override = speakers.override(for: utterance)?.assignment
             let fallback = speakers.entries[utterance.speakerKey]
@@ -1430,7 +1434,7 @@ public actor ProcessingPipeline {
                 after = resolved
             }
             guard before?.identityID != after else { continue }
-            moved[utterance.track, default: []]
+            moved[Claim(track: utterance.track, owner: after), default: []]
                 .append(AudioSpan(start: utterance.start, end: utterance.end))
         }
         try found.store.writeSpeakerMap(speakers)
@@ -1442,6 +1446,16 @@ public actor ProcessingPipeline {
         return resolved
     }
 
+    /// One track's audio and whoever it now belongs to.
+    private struct Claim: Hashable {
+        var track: CaptureTrack
+        /// Nil only when the line ends up belonging to a cluster nobody has
+        /// named, in which case no vector may keep it.
+        var owner: IdentityID?
+
+        var sortKey: String { "\(track.rawValue)/\(owner?.rawValue ?? -1)" }
+    }
+
     /// Brings voice memory back in line with a correction that has landed.
     ///
     /// Whoever held a vector built on the audio that just changed hands is found
@@ -1451,13 +1465,14 @@ public actor ProcessingPipeline {
     /// re-analysis renumbers the clustering underneath it.
     private func settleVoiceMemory(
         found: (metadata: MeetingMetadata, store: MeetingStore),
-        moved: [CaptureTrack: [AudioSpan]],
+        moved: [Claim: [AudioSpan]],
         claimant: IdentityID?, speakers: SpeakerMap, settings: AppSettings
     ) async throws {
         guard !moved.isEmpty, let service = backends.speakers else { return }
         let store = await service.speakerStore
         var displaced: [IdentityID] = []
-        for (track, spans) in moved.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+        for (claim, spans) in moved.sorted(by: { $0.key.sortKey < $1.key.sortKey }) {
+            let track = claim.track
             // Ungated by the learning setting, like the cluster path. The user
             // has said this audio is not theirs, and refusing to remove it
             // because learning is switched off leaves them auto-named from
@@ -1466,7 +1481,8 @@ public actor ProcessingPipeline {
             // which is what the setting asks for.
             for stale in try await store.retractEvidence(
                 VoiceEvidenceRetraction(
-                    meetingID: found.metadata.id, track: track, spans: spans, claimedBy: claimant
+                    meetingID: found.metadata.id, track: track, spans: spans,
+                    claimedBy: claim.owner
                 ),
                 keepingClaimant: true, now: clock.now
             ) where !displaced.contains(stale) {

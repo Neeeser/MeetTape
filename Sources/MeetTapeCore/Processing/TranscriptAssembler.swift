@@ -273,12 +273,27 @@ public struct TranscriptAssembler: Sendable {
             let speakerKey = treatAsLocalUser
                 ? SpeakerLabel.localUser
                 : (rawLabel ?? SpeakerLabel.unattributed(track: chunk.track))
-            result.append(Utterance(
-                id: Utterance.identifier(
+            // Two turns of one chunk that round to the same millisecond would
+            // otherwise share an identifier, and a correction aimed at one would
+            // land on the other. Rare enough that the suffix never appears in
+            // practice, cheap enough to keep uniqueness a property rather than a
+            // hope.
+            var identifier = Utterance.identifier(
+                chunkID: chunk.id, track: chunk.track,
+                start: chunk.timelineOffset + group.start,
+                end: chunk.timelineOffset + group.end
+            )
+            var collisions = 0
+            while result.contains(where: { $0.id == identifier }) {
+                collisions += 1
+                identifier = Utterance.identifier(
                     chunkID: chunk.id, track: chunk.track,
                     start: chunk.timelineOffset + group.start,
                     end: chunk.timelineOffset + group.end
-                ),
+                ) + "-\(collisions)"
+            }
+            result.append(Utterance(
+                id: identifier,
                 start: chunk.timelineOffset + group.start,
                 end: chunk.timelineOffset + group.end,
                 track: chunk.track,

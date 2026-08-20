@@ -319,22 +319,34 @@ public actor SpeakerStore {
 
     /// Points `source` at `target`.
     ///
-    /// Nothing is deleted and nothing is rewritten. The source keeps its rows and
-    /// its embeddings, reads follow the tombstone, and the target's profile is
-    /// recomputed over both sets of vectors, so undoing the merge is clearing one
-    /// column.
+    /// Nothing is rewritten. The source keeps its rows and its embeddings, reads
+    /// follow the tombstone, and undoing the merge is clearing one column.
+    ///
+    /// The target's profile is recomputed over both sets, minus anything seeded
+    /// automatically: a provisional vector nobody stood behind must not reach a
+    /// named centroid by being merged into one. Only the source's now-unreachable
+    /// derived profile is deleted.
     public func merge(_ source: IdentityID, into target: IdentityID, now: Date = Date()) throws {
         guard source != target else { return }
-        // A merge that would form a cycle is refused rather than corrected, so a
-        // wrong direction is a visible failure instead of a silent no-op.
-        if let resolvedTarget = try current(target), resolvedTarget.id == source { return }
+        // A merge that would form a cycle does nothing. Correcting the
+        // direction would merge two people the caller did not ask to merge.
+        // Point at the survivor, not at another tombstone: merging into an
+        // identity that is itself merged left the source pointing at a dead row
+        // and recomputed a profile nothing reads.
+        guard let resolved = try current(target) else { return }
+        if resolved.id == source { return }
         try database.transaction {
             try database.run(
                 "UPDATE identity SET merged_into = ?, updated_at = ? WHERE id = ?",
-                [.int64(target.rawValue), .date(now), .int64(source.rawValue)]
+                [.int64(resolved.id.rawValue), .date(now), .int64(source.rawValue)]
+            )
+            // The source's own centroid is now unreachable and would otherwise
+            // keep answering profileStatus for it.
+            try database.run(
+                "DELETE FROM derived_profile WHERE identity_id = ?", [.int64(source.rawValue)]
             )
         }
-        try recomputeProfiles(for: target, now: now)
+        try recomputeProfiles(for: resolved.id, now: now)
     }
 
     public func unmerge(_ source: IdentityID, now: Date = Date()) throws {
@@ -411,7 +423,11 @@ public actor SpeakerStore {
         guard candidate.vector.count == candidate.model.dimension else {
             return .failure(.wrongDimension(got: candidate.vector.count, expected: candidate.model.dimension))
         }
-        guard let identity = try loadIdentity(candidate.identityID) else {
+        // Resolved through the merge tombstone. loadIdentity returns the
+        // tombstone itself, and searchableProfiles skips tombstones, so every
+        // vector written to a merged-away identity was stored and then never
+        // used: the profile stopped improving with nothing to show for it.
+        guard let identity = try current(candidate.identityID) else {
             return .failure(.identityMissing)
         }
         // A named profile only ever holds material a person stood behind.
@@ -433,7 +449,7 @@ public actor SpeakerStore {
                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    .int64(candidate.identityID.rawValue),
+                    .int64(identity.id.rawValue),
                     .text(candidate.model.rawValue),
                     .int(candidate.model.dimension),
                     .blob(VoiceVector.encode(VoiceVector.l2Normalized(candidate.vector))),
@@ -446,10 +462,10 @@ public actor SpeakerStore {
                     .date(now),
                 ]
             )
-            try pruneEmbeddings(of: candidate.identityID, model: candidate.model)
+            try pruneEmbeddings(of: identity.id, model: candidate.model)
         }
-        try recomputeProfiles(for: candidate.identityID, now: now)
-        return .success(try profileStatus(of: candidate.identityID, model: candidate.model))
+        try recomputeProfiles(for: identity.id, now: now)
+        return .success(try profileStatus(of: identity.id, model: candidate.model))
     }
 
     /// Keeps the newest, highest-quality vectors and drops the rest.
@@ -477,6 +493,25 @@ public actor SpeakerStore {
         _ candidate: VoiceEnrollmentCandidate, now: Date = Date()
     ) throws {
         guard !candidate.vector.isEmpty else { return }
+        // Validated here rather than only in enrol. A row of the wrong length
+        // can never flush, so without this it sticks in the queue forever and
+        // every later correction pays for a re-embed that cannot land.
+        guard candidate.vector.count == candidate.model.dimension else { return }
+        guard let identity = try current(candidate.identityID) else { return }
+        // One row per meeting. The caller re-embeds the whole confirmed set each
+        // time, so a second round of corrections on the same meeting supersedes
+        // the first rather than counting the same speech twice.
+        try database.run(
+            """
+            DELETE FROM pending_enrollment
+            WHERE identity_id = ? AND model_identifier = ?
+              AND source_meeting IS ?
+            """,
+            [
+                .int64(identity.id.rawValue), .text(candidate.model.rawValue),
+                .optionalText(candidate.meetingID),
+            ]
+        )
         try database.run(
             """
             INSERT INTO pending_enrollment(identity_id, model_identifier, embedding, embedding_dim,
@@ -484,10 +519,10 @@ public actor SpeakerStore {
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                .int64(candidate.identityID.rawValue),
+                .int64(identity.id.rawValue),
                 .text(candidate.model.rawValue),
                 .blob(VoiceVector.encode(VoiceVector.l2Normalized(candidate.vector))),
-                .int(candidate.model.dimension),
+                .int(candidate.vector.count),
                 .double(candidate.speechSeconds),
                 .double(candidate.qualityScore),
                 .text(candidate.source.rawValue),
@@ -504,10 +539,16 @@ public actor SpeakerStore {
     public func flushPendingEnrollment(
         for id: IdentityID, model: EmbeddingModelIdentifier, now: Date = Date()
     ) throws -> Bool {
-        var vectors: [[Float]] = []
-        var totalSeconds = 0.0
-        var quality = 0.0
-        var meeting: String?
+        struct Group {
+            var vectors: [[Float]] = []
+            var seconds = 0.0
+            var quality = 0.0
+        }
+        // Grouped by meeting. One vector must stand for one session: mixing two
+        // meetings' audio into a single centroid is the thing recording_count
+        // exists to measure, and the row can only name one of them, so the
+        // other's hasEnrolment stayed false and it re-embedded forever.
+        var groups: [String: Group] = [:]
         try database.query(
             """
             SELECT embedding, speech_seconds, quality_score, source_meeting
@@ -516,28 +557,44 @@ public actor SpeakerStore {
             """,
             [.int64(id.rawValue), .text(model.rawValue)]
         ) { row in
-            if let vector = row.vector(0) { vectors.append(vector) }
-            totalSeconds += row.double(1)
-            quality = max(quality, row.double(2))
-            meeting = meeting ?? row.optionalText(3)
+            let key = row.optionalText(3) ?? ""
+            var group = groups[key] ?? Group()
+            if let vector = row.vector(0) { group.vectors.append(vector) }
+            group.seconds += row.double(1)
+            group.quality = max(group.quality, row.double(2))
+            groups[key] = group
         }
-        guard !vectors.isEmpty, totalSeconds >= policy.enrolmentSpeechSeconds else { return false }
 
-        let candidate = VoiceEnrollmentCandidate(
-            identityID: id,
-            vector: VoiceVector.centroid(vectors),
-            model: model,
-            speechSeconds: totalSeconds,
-            qualityScore: quality,
-            source: .humanConfirmedUtterances,
-            meetingID: meeting
-        )
-        guard case .success = try enrol(candidate, now: now) else { return false }
-        try database.run(
-            "DELETE FROM pending_enrollment WHERE identity_id = ? AND model_identifier = ?",
-            [.int64(id.rawValue), .text(model.rawValue)]
-        )
-        return true
+        var enrolled = false
+        for (key, group) in groups.sorted(by: { $0.key < $1.key }) {
+            guard !group.vectors.isEmpty, group.seconds >= policy.enrolmentSpeechSeconds else {
+                continue
+            }
+            let candidate = VoiceEnrollmentCandidate(
+                identityID: id,
+                vector: VoiceVector.centroid(group.vectors),
+                model: model,
+                speechSeconds: group.seconds,
+                qualityScore: group.quality,
+                source: .humanConfirmedUtterances,
+                meetingID: key.isEmpty ? nil : key
+            )
+            guard case .success = try enrol(candidate, now: now) else { continue }
+            enrolled = true
+            // Only what was consumed. A meeting still short of the bar keeps
+            // accumulating.
+            try database.run(
+                """
+                DELETE FROM pending_enrollment
+                WHERE identity_id = ? AND model_identifier = ? AND source_meeting IS ?
+                """,
+                [
+                    .int64(id.rawValue), .text(model.rawValue),
+                    .optionalText(key.isEmpty ? nil : key),
+                ]
+            )
+        }
+        return enrolled
     }
 
     /// Whether one meeting has already contributed an enrolment of this kind.

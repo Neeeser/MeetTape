@@ -88,6 +88,17 @@ final class SpeakerDatabase {
             let next = version + 1
             do {
                 try execute("BEGIN IMMEDIATE;")
+                // Re-read under the write lock. The version above was read
+                // without one, so two processes opening a new database together
+                // both saw 0; the loser then ran the schema against a populated
+                // file and threw out of init, leaving that launch with no voice
+                // memory. meettape-eval opens the same file as the app.
+                let current = try scalarInt("PRAGMA user_version;").map(Int32.init) ?? 0
+                if current >= next {
+                    try execute("COMMIT;")
+                    version = current
+                    continue
+                }
                 try applyMigration(to: next)
                 try execute("PRAGMA user_version = \(next);")
                 try execute("COMMIT;")

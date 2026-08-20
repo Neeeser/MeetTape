@@ -292,23 +292,34 @@ enum SpeakerIdentityTests {
                 expect.equal(reason, .tooLittleSpeech(seconds: 12, required: 45))
             },
 
-            test("corrected lines accumulate and enrol once, not one at a time") { expect in
+            test("correcting more lines in one meeting refines it, and enrols once") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let chris = try await store.createPerson(name: "Chris")
-                for _ in 0..<2 {
+
+                // Each round re-embeds the whole confirmed set, so a later round
+                // supersedes the earlier one rather than counting it again.
+                for seconds in [15.0, 30.0] {
                     try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
                         identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
-                        speechSeconds: 15, qualityScore: 1, source: .humanConfirmedUtterances
+                        speechSeconds: seconds, qualityScore: 1,
+                        source: .humanConfirmedUtterances, meetingID: "m1"
                     ))
                 }
+                expect.close(
+                    try await store.pendingSpeechSeconds(for: chris.id, model: .fluidAudioOffline),
+                    30, tolerance: 0.001,
+                    "the second round replaces the first, it does not add to it"
+                )
                 expect.isFalse(
                     try await store.flushPendingEnrollment(for: chris.id, model: .fluidAudioOffline),
                     "30 seconds is not enough"
                 )
+
                 try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
                     identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
-                    speechSeconds: 20, qualityScore: 1, source: .humanConfirmedUtterances
+                    speechSeconds: 50, qualityScore: 1,
+                    source: .humanConfirmedUtterances, meetingID: "m1"
                 ))
                 expect.isTrue(
                     try await store.flushPendingEnrollment(for: chris.id, model: .fluidAudioOffline),
@@ -316,12 +327,68 @@ enum SpeakerIdentityTests {
                 )
                 expect.equal(
                     try await store.profileStatus(of: chris.id, model: .fluidAudioOffline).sampleCount,
-                    1,
-                    "one embedding from the whole accumulation, not three"
+                    1, "one embedding for the meeting, not one per round"
                 )
+                expect.isTrue(
+                    try await store.hasEnrolment(
+                        identityID: chris.id, meetingID: "m1",
+                        source: .humanConfirmedUtterances, model: .fluidAudioOffline
+                    ),
+                    "and the meeting it came from is recorded, so it is not redone"
+                )
+            },
+
+            test("enrolling a merged identity reaches the person it reads as") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let duplicate = try await store.createPerson(name: "Andrew")
+                let survivor = try await store.createPerson(name: "Andrew Neeser")
+                try await store.merge(duplicate.id, into: survivor.id)
+
+                // A caller holding the old identifier, which is what a stored
+                // localUserIdentityID is after a merge.
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: duplicate.id, vector: vector(seed: 21),
+                    model: .fluidAudioOffline, speechSeconds: 240, qualityScore: 1,
+                    source: .micTrackDeterministic, meetingID: "m1"
+                ))
+
+                let profiles = try await store.searchableProfiles(model: .fluidAudioOffline)
+                expect.equal(profiles.count, 1, "the vector is searchable, not stranded")
+                expect.equal(profiles.first?.identity.id, survivor.id)
+                expect.equal(
+                    try await store.profileStatus(
+                        of: survivor.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1
+                )
+            },
+
+            test("two meetings below the bar are not merged into one vector") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                for meeting in ["m1", "m2"] {
+                    try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
+                        identityID: chris.id, vector: vector(seed: 8), model: .fluidAudioOffline,
+                        speechSeconds: 30, qualityScore: 1,
+                        source: .humanConfirmedUtterances, meetingID: meeting
+                    ))
+                }
+                expect.isFalse(
+                    try await store.flushPendingEnrollment(for: chris.id, model: .fluidAudioOffline),
+                    "60 seconds across two sessions is not 60 seconds of one"
+                )
+                // Neither meeting is marked, so both keep accumulating.
+                for meeting in ["m1", "m2"] {
+                    expect.isFalse(try await store.hasEnrolment(
+                        identityID: chris.id, meetingID: meeting,
+                        source: .humanConfirmedUtterances, model: .fluidAudioOffline
+                    ))
+                }
                 expect.close(
                     try await store.pendingSpeechSeconds(for: chris.id, model: .fluidAudioOffline),
-                    0, tolerance: 0.001
+                    60, tolerance: 0.001
                 )
             },
 

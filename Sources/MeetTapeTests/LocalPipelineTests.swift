@@ -4,20 +4,27 @@ import MeetTapeIntegrations
 import MeetTapeLocalAI
 import MeetTapeServices
 import MeetTapeSpeakers
+import Synchronization
 import TestKit
 
 /// A transcription backend with no model behind it, so the local path can be
 /// exercised end to end without 650 MB of CoreML.
-struct StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
+final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var segments: [RawTranscriptSegment]
     var identifier = "stub-whisper"
     var isLocal = true
     var limits = BackendAudioLimits.none
     var producesWordTimestamps = true
+    /// The audio handed to this backend, so a test can say which one read it.
+    private let state = Mutex<[String]>([])
+    var received: [String] { state.withLock { $0 } }
+
+    init(segments: [RawTranscriptSegment]) { self.segments = segments }
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
+        state.withLock { $0.append(audio.lastPathComponent) }
         progress(1)
         return TranscriptionOutput(
             segments: segments, text: segments.map(\.text).joined(separator: " "),
@@ -504,6 +511,75 @@ enum LocalPipelineTests {
                 // The labels it was asked for are still used.
                 let runs = try meeting.store.readRawDiarization()
                 expect.isFalse(runs.runs.isEmpty, "the cloud labels still produce a run")
+
+                // Which backend was handed the audio, rather than only what came
+                // back. Choosing Local for transcription is a statement about
+                // where the audio goes, not only about which words are kept.
+                expect.isFalse(
+                    local.received.isEmpty,
+                    "the local transcriber read this meeting's audio"
+                )
+                expect.isTrue(
+                    cloud.calls.filter { $0.kind == "transcribe" }.isEmpty,
+                    "and no audio was uploaded for transcription"
+                )
+                expect.isFalse(
+                    cloud.calls.filter { $0.kind == "diarize" }.isEmpty,
+                    "the one upload is the diarization the user asked for"
+                )
+            },
+
+            test("a batch correction is applied to every line or to none") { expect in
+                // Thirty lines selected together are one decision. Applying them
+                // one at a time meant a failure at line eighteen left seventeen
+                // renamed with no error shown, the person who lost them still
+                // holding a vector built from their audio, and nothing left to
+                // say a rebuild was owed.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let key = "remote-001_speaker_00"
+                let lines = (0..<4).map { index in
+                    Utterance(
+                        id: "u\(index)", start: Double(index) * 10, end: Double(index) * 10 + 5,
+                        track: .remote, rawSpeakerLabel: nil, speakerKey: key,
+                        text: "line \(index)", chunkID: "c", model: "m"
+                    )
+                }
+                try meeting.store.writeCanonicalTranscript(
+                    CanonicalTranscript(generatedAt: Date(), utterances: lines)
+                )
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+
+                // The third identifier is one a re-analysis has taken away,
+                // which is how this fails in practice.
+                var threw = false
+                do {
+                    try await pipeline.applyUtteranceSpeaker(
+                        "Priya", utteranceIDs: ["u0", "u1", "gone", "u3"],
+                        meetingID: meeting.metadata.id
+                    )
+                } catch {
+                    threw = true
+                }
+                expect.isTrue(threw, "the caller is told, rather than left with a partial result")
+
+                let map = try meeting.store.readSpeakerMap()
+                expect.isTrue(
+                    map.utteranceOverrides.isEmpty,
+                    "and no line moved, so there is no half-applied correction to reconcile"
+                )
             },
 
             test("renaming reaches a meeting that saw the merged identity") { expect in

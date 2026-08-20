@@ -799,24 +799,64 @@ public final class MeetTapeRuntime {
         return nil
     }
 
-    /// Folds one meeting into another. Both directories stay exactly as they are.
+    /// Links one recording to the conversation an earlier one started.
+    ///
+    /// Both directories stay exactly as they are: two files gain a pointer at
+    /// each other and nothing else changes. The second recording is the only
+    /// copy of the second half of the call, so it keeps its own segments,
+    /// manifest, raw transcription, raw diarization and speaker map, and stays
+    /// reachable under its own identifier.
+    ///
+    /// The earlier recording's own duration and runs are not touched. Adding the
+    /// later half into them made the combined figure a stored total, so undoing
+    /// the link became a subtraction; a subtraction that goes wrong reports a
+    /// duration no file on disk supports. The combined figure is derived when it
+    /// is read.
     public func combine(meetingID: String, into earlierID: String, reason: String) {
         guard let later = repository.findMeeting(id: meetingID),
-              let earlier = repository.findMeeting(id: earlierID)
+              repository.findMeeting(id: earlierID) != nil
+        else { return }
+        // A chain would make the earlier recording both a continuation and the
+        // start of one, and `logicalMeeting` would resolve past it.
+        guard let target = repository.logicalMeeting(id: earlierID),
+              target.id != meetingID
         else { return }
         _ = try? later.store.updateMetadata { metadata in
-            metadata.mergedIntoMeetingID = earlierID
+            metadata.mergedIntoMeetingID = target.id
             metadata.possibleContinuationOf = nil
+            metadata.possibleContinuationReason = nil
         }
-        _ = try? earlier.store.updateMetadata { metadata in
+        _ = try? target.primary.store.updateMetadata { metadata in
             if !metadata.absorbedMeetingIDs.contains(meetingID) {
                 metadata.absorbedMeetingIDs.append(meetingID)
             }
-            metadata.runs.append(contentsOf: later.metadata.runs)
-            metadata.durationSeconds += later.metadata.durationSeconds
         }
         Log.app.info("combined a meeting into an earlier one: \(reason, privacy: .public)")
         refreshRecentMeetings()
+        onProcessingUpdate?(target.id)
+    }
+
+    /// Separates a recording from the conversation it was linked to.
+    ///
+    /// The association is the only thing undone: both recordings keep every file
+    /// they had, and each is its own row again. Offered because the match that
+    /// linked them is a heuristic over provider identifiers and timing, and being
+    /// wrong about it must not be permanent.
+    public func detachContinuation(meetingID: String) {
+        guard let later = repository.findMeeting(id: meetingID, includingMerged: true),
+              let parentID = later.metadata.mergedIntoMeetingID
+        else { return }
+        _ = try? later.store.updateMetadata { metadata in
+            metadata.mergedIntoMeetingID = nil
+        }
+        if let parent = repository.findMeeting(id: parentID, includingMerged: true) {
+            _ = try? parent.store.updateMetadata { metadata in
+                metadata.absorbedMeetingIDs.removeAll { $0 == meetingID }
+            }
+        }
+        Log.app.info("separated a continuation from the meeting it was linked to")
+        refreshRecentMeetings()
+        onProcessingUpdate?(parentID)
     }
 
     /// Declines a suggested continuation, so it is not offered again.

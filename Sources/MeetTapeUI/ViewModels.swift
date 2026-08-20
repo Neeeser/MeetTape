@@ -336,6 +336,8 @@ public final class MeetingReviewModel {
     public var participantDraft = ""
     /// The line waiting for a name that is not in the list yet.
     public var namingUtterance: Utterance?
+    /// The line waiting for a name, with the recording it belongs to.
+    public var namingLine: CombinedLine?
     public var namingCluster: String?
     public var newPersonDraft = ""
     public var reanalyzeCount = ""
@@ -363,6 +365,21 @@ public final class MeetingReviewModel {
     /// doing the walking is the one arming the next recording.
     public private(set) var directory: URL?
 
+    /// Every recording of this conversation, earliest first, and their lines in
+    /// one sequence.
+    ///
+    /// A call that dropped and was rejoined is two recordings on disk. It was one
+    /// meeting, so it reads as one: the panel opens on the recording it started
+    /// with and shows both halves in order. Corrections still go to the recording
+    /// the line came from, because each keeps its own diarization and speaker
+    /// map.
+    public private(set) var recordings: [MeetingMetadata] = []
+    public private(set) var combinedLines: [CombinedLine] = []
+    /// Line identifiers the user has set the speaker on, for the pencil marker.
+    public private(set) var correctedLines: Set<String> = []
+
+    public var isSplitRecording: Bool { recordings.count > 1 }
+
     public var speakerKeys: [String] { transcript?.speakerKeys ?? [] }
 
     /// Reloads the files and then the parts that need the identity store.
@@ -377,10 +394,25 @@ public final class MeetingReviewModel {
     }
 
     public func reload() {
-        guard let found = runtime.repository.findMeeting(id: meetingID) else {
+        // Resolved through the whole conversation, so opening a continuation by
+        // its own identifier lands on the recording the meeting started with
+        // rather than on "no longer on disk". A notification posted before two
+        // recordings were linked still carries that identifier.
+        guard let logical = runtime.repository.logicalMeeting(id: meetingID) else {
             errorMessage = "This meeting is no longer on disk."
             return
         }
+        let found = (metadata: logical.primary.metadata, store: logical.primary.store)
+        recordings = logical.recordings.map(\.metadata)
+        combinedLines = logical.combinedTranscript()
+        correctedLines = Set(
+            logical.recordings.flatMap { recording -> [String] in
+                let map = (try? recording.store.readSpeakerMap()) ?? SpeakerMap()
+                let lines = ((try? recording.store.readCanonicalTranscript()) ?? nil)?.utterances ?? []
+                return lines.filter { map.hasOverride(for: $0) }
+                    .map { "\(recording.metadata.id)/\($0.id)" }
+            }
+        )
         metadata = found.metadata
         directory = found.store.layout.root
         continuationSuggestion = found.metadata.possibleContinuationOf
@@ -433,26 +465,40 @@ public final class MeetingReviewModel {
 
     /// Changes the speaker on one line only. Every other line in the same
     /// cluster keeps its name.
-    public func assignUtterance(_ utterance: Utterance, to entry: SpeakerDirectoryEntry) {
+    public func assignUtterance(_ line: CombinedLine, to entry: SpeakerDirectoryEntry) {
         runtime.assignUtteranceSpeaker(
-            name: entry.identity.resolvedName, utteranceID: utterance.id,
-            meetingID: meetingID, identityID: entry.id
+            name: entry.identity.resolvedName, utteranceID: line.utterance.id,
+            meetingID: line.recordingID, identityID: entry.id
         )
-        applyLocalOverride(utterance, name: entry.identity.resolvedName, identityID: entry.id)
+        applyLocalOverride(line, name: entry.identity.resolvedName, identityID: entry.id)
     }
 
-    public func assignUtterance(_ utterance: Utterance, toNewPerson name: String) {
+    public func assignUtterance(_ line: CombinedLine, toNewPerson name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         runtime.assignUtteranceSpeaker(
-            name: trimmed, utteranceID: utterance.id, meetingID: meetingID
+            name: trimmed, utteranceID: line.utterance.id, meetingID: line.recordingID
         )
-        applyLocalOverride(utterance, name: trimmed, identityID: nil)
+        applyLocalOverride(line, name: trimmed, identityID: nil)
     }
 
-    public func clearUtterance(_ utterance: Utterance) {
-        runtime.assignUtteranceSpeaker(name: "", utteranceID: utterance.id, meetingID: meetingID)
-        speakers.clearOverride(for: utterance)
+    public func clearUtterance(_ line: CombinedLine) {
+        runtime.assignUtteranceSpeaker(
+            name: "", utteranceID: line.utterance.id, meetingID: line.recordingID
+        )
+        if line.recordingID == meetingID { speakers.clearOverride(for: line.utterance) }
+        correctedLines.remove(line.id)
+        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
+            combinedLines[index].speakerName = SpeakerMap.fallbackName(
+                for: line.utterance.speakerKey
+            )
+        }
+    }
+
+    /// Separates a recording from the conversation it was linked to.
+    public func detach(_ recordingID: String) {
+        runtime.detachContinuation(meetingID: recordingID)
+        reload()
     }
 
     /// Shows the correction straight away.
@@ -460,7 +506,13 @@ public final class MeetingReviewModel {
     /// The write goes through the pipeline actor so it cannot race a resolution
     /// stage, and re-reading every file for one line would make editing a long
     /// transcript unusable.
-    private func applyLocalOverride(_ utterance: Utterance, name: String, identityID: IdentityID?) {
+    private func applyLocalOverride(_ line: CombinedLine, name: String, identityID: IdentityID?) {
+        correctedLines.insert(line.id)
+        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
+            combinedLines[index].speakerName = name
+        }
+        guard line.recordingID == meetingID else { return }
+        let utterance = line.utterance
         speakers.overrideUtterance(
             utterance,
             with: SpeakerAssignment(
@@ -471,27 +523,30 @@ public final class MeetingReviewModel {
         )
     }
 
-    public func beginNamingUtterance(_ utterance: Utterance) {
-        namingUtterance = utterance
+    public func beginNamingUtterance(_ line: CombinedLine) {
+        namingLine = line
+        namingUtterance = line.utterance
         namingCluster = nil
         newPersonDraft = ""
     }
 
     public func beginNamingCluster(_ clusterID: String) {
         namingCluster = clusterID
+        namingLine = nil
         namingUtterance = nil
         newPersonDraft = ""
     }
 
     public func cancelNaming() {
+        namingLine = nil
         namingUtterance = nil
         namingCluster = nil
         newPersonDraft = ""
     }
 
     public func commitNaming() {
-        if let utterance = namingUtterance {
-            assignUtterance(utterance, toNewPerson: newPersonDraft)
+        if let line = namingLine {
+            assignUtterance(line, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
             assignCluster(cluster, toNewPerson: newPersonDraft)
         }

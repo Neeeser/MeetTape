@@ -270,15 +270,16 @@ public struct MeetingReviewView: View {
                 ? "Not available yet."
                 : "Click a name to correct that line alone."
         ) {
-            if let transcript = model.transcript, !transcript.utterances.isEmpty {
+            if !model.combinedLines.isEmpty {
+                if model.isSplitRecording { continuationNotice }
                 // Lazy because a long meeting is thousands of lines and each one
                 // carries a menu.
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(transcript.utterances) { utterance in
-                        utteranceRow(utterance)
+                    ForEach(model.combinedLines) { line in
+                        utteranceRow(line)
                     }
                 }
-                if model.namingUtterance != nil { namingField }
+                if model.namingLine != nil { namingField }
             } else {
                 HStack(spacing: 8) {
                     if model.metadata?.processing.state != .failed {
@@ -292,33 +293,61 @@ public struct MeetingReviewView: View {
         }
     }
 
-    private func utteranceRow(_ utterance: Utterance) -> some View {
+    /// What the panel says when the conversation is held in more than one
+    /// recording.
+    private var continuationNotice: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
+            Text(
+                "Recorded in \(model.recordings.count) parts, shown in order. "
+                    + "The call dropped and was rejoined."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer()
+            ForEach(model.recordings.dropFirst(), id: \.id) { recording in
+                Button("Separate part \(index(of: recording) + 1)") {
+                    model.detach(recording.id)
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("Keeps both recordings and undoes the link between them")
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private func index(of recording: MeetingMetadata) -> Int {
+        model.recordings.firstIndex { $0.id == recording.id } ?? 0
+    }
+
+    private func utteranceRow(_ line: CombinedLine) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Menu(model.speakers.resolvedName(for: utterance)) {
+                Menu(line.speakerName) {
                     ForEach(model.knownPeople) { person in
                         Button(person.identity.resolvedName) {
-                            model.assignUtterance(utterance, to: person)
+                            model.assignUtterance(line, to: person)
                         }
                     }
                     if !model.knownPeople.isEmpty { Divider() }
-                    Button("New person…") { model.beginNamingUtterance(utterance) }
-                    Button("Use this speaker's name") { model.clearUtterance(utterance) }
+                    Button("New person…") { model.beginNamingUtterance(line) }
+                    Button("Use this speaker's name") { model.clearUtterance(line) }
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .font(.callout.weight(.semibold))
-                Text(TranscriptRenderer().timecode(utterance.start))
+                Text(TranscriptRenderer().timecode(line.timelineStart))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                if model.speakers.override(for: utterance) != nil {
+                if model.correctedLines.contains(line.id) {
                     Image(systemName: "pencil.circle.fill")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .help("You set the speaker on this line")
                 }
             }
-            Text(utterance.text).font(.callout).textSelection(.enabled)
+            Text(line.utterance.text).font(.callout).textSelection(.enabled)
         }
     }
 

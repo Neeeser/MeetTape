@@ -161,11 +161,14 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
     public let processingState: ProcessingState
     public let wasInterrupted: Bool
     public let hasTranscript: Bool
+    /// How many recordings the conversation is held in. More than one when a
+    /// call dropped and was rejoined.
+    public let recordingCount: Int
 
     public init(
         id: String, directory: URL, title: String, startedAt: Date, durationSeconds: Double,
         source: MeetingSource, provider: MeetingProvider, processingState: ProcessingState,
-        wasInterrupted: Bool, hasTranscript: Bool
+        wasInterrupted: Bool, hasTranscript: Bool, recordingCount: Int = 1
     ) {
         self.id = id
         self.directory = directory
@@ -177,6 +180,7 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
         self.processingState = processingState
         self.wasInterrupted = wasInterrupted
         self.hasTranscript = hasTranscript
+        self.recordingCount = recordingCount
     }
 }
 
@@ -339,18 +343,49 @@ public struct MeetingRepository: Sendable {
               )
         else { return nil }
         guard metadata.mergedIntoMeetingID == nil else { return nil }
+        // A conversation recorded in two halves is one row, reporting the audio
+        // both halves hold. Derived here rather than added into the first
+        // recording's own metadata when the two were linked: that made undoing
+        // the link a subtraction, and a subtraction that goes wrong reports a
+        // duration no file supports.
+        let continuations = metadata.absorbedMeetingIDs.compactMap {
+            findMeeting(id: $0, includingMerged: true)
+        }
         return MeetingSummary(
             id: metadata.id,
             directory: directory,
             title: metadata.displayTitle,
             startedAt: metadata.startedAt,
-            durationSeconds: metadata.durationSeconds,
+            durationSeconds: metadata.durationSeconds
+                + continuations.reduce(0) { $0 + $1.metadata.durationSeconds },
             source: metadata.source,
             provider: metadata.provider,
             processingState: metadata.processing.state,
-            wasInterrupted: metadata.runs.contains(where: \.wasInterrupted),
-            hasTranscript: FileManager.default.fileExists(atPath: layout.canonicalTranscript.path)
+            wasInterrupted: metadata.runs.contains(where: \.wasInterrupted)
+                || !continuations.isEmpty,
+            hasTranscript: FileManager.default.fileExists(atPath: layout.canonicalTranscript.path),
+            recordingCount: 1 + continuations.count
         )
+    }
+
+    /// The whole conversation an identifier belongs to.
+    ///
+    /// Answers for either half: given a continuation's identifier it resolves up
+    /// to the recording the conversation started with, so nothing recorded is
+    /// unreachable through an identifier a notification or a link still carries.
+    public func logicalMeeting(id: String) -> LogicalMeeting? {
+        guard var found = findMeeting(id: id, includingMerged: true) else { return nil }
+        var hops = 0
+        while let parentID = found.metadata.mergedIntoMeetingID, hops < 16 {
+            hops += 1
+            guard let parent = findMeeting(id: parentID, includingMerged: true) else { break }
+            found = parent
+        }
+        let primary = RecordedMeeting(metadata: found.metadata, store: found.store)
+        let continuations = found.metadata.absorbedMeetingIDs
+            .compactMap { findMeeting(id: $0, includingMerged: true) }
+            .map { RecordedMeeting(metadata: $0.metadata, store: $0.store) }
+        return LogicalMeeting(primary: primary, continuations: continuations)
     }
 
     /// Finds one meeting by its identifier.

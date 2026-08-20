@@ -71,6 +71,18 @@ extension MeetTapeRuntime {
         await refreshLocalModelState()
     }
 
+    /// Fetches the models again even though a usable copy is on disk. What the
+    /// Re-download button calls, for an install pinned by an older build.
+    public func reinstallLocalModels() async {
+        guard let models else { return }
+        do {
+            try await models.reinstall()
+        } catch {
+            Log.app.error("model reinstall failed: \(logSafeDescription(error), privacy: .public)")
+        }
+        await refreshLocalModelState()
+    }
+
     public func removeLocalModels() async {
         guard let models else { return }
         do {

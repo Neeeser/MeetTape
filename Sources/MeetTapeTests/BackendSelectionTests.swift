@@ -200,6 +200,35 @@ enum BackendSelectionTests {
                 expect.equal(running.peak, 1, "two meetings must not transcribe at once")
                 expect.equal(running.total, 8, "and every one of them still runs")
             },
+
+            test("a local failure is not reported as an outage at OpenAI") { expect in
+                struct Refusal: LocalProcessingFailure {
+                    var userMessage = "MeetTape needs to download its speech models."
+                    var isRetryable = false
+                }
+
+                let local = ProcessingPipeline.processingError(from: Refusal())
+                expect.isFalse(
+                    local.userMessage.contains("OpenAI"),
+                    "a user with no key never configured a service to blame"
+                )
+                expect.isFalse(local.isRetryable, "downloading is the fix, not waiting")
+
+                // Anything genuinely unknown is still reported as local rather
+                // than as a transport failure, which named OpenAI and retried.
+                struct Unknown: Error {}
+                let unknown = ProcessingPipeline.processingError(from: Unknown())
+                expect.isFalse(unknown.userMessage.contains("OpenAI"))
+
+                // The cloud client's own errors keep their wording.
+                expect.equal(
+                    ProcessingPipeline.processingError(from: ProcessingError.rateLimited(retryAfter: 1)),
+                    .rateLimited(retryAfter: 1)
+                )
+                expect.equal(
+                    ProcessingPipeline.processingError(from: CancellationError()), .cancelled
+                )
+            },
         ])
     }
 

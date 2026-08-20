@@ -78,7 +78,12 @@ public actor LocalModelManager {
         // install's own transitions. One landing after the install completed
         // would put the manager back into `downloading`, where every load
         // throws "not installed" and the next call re-downloads everything.
-        if newState.isBusy, !state.isBusy, state.isUsable { return }
+        // A progress tick that lands after the install settled must not put the
+        // manager back into `downloading`. It applies to every settled state,
+        // not just a usable one: landing after a failure or a delete replaced
+        // the Try Again button, or the Download button, with a progress bar
+        // that never moves again.
+        if newState.isBusy, !state.isBusy, installTask == nil { return }
         state = newState
         onStateChange(newState)
     }
@@ -88,12 +93,19 @@ public actor LocalModelManager {
     /// Downloads and loads both model sets once. Safe to call again while it is
     /// running: the second caller joins the first.
     @discardableResult
-    public func install() async throws -> LocalModelReceipt {
-        if case .installed(let receipt) = state { return receipt }
+    public func install(force: Bool = false) async throws -> LocalModelReceipt {
+        // Re-checked on disk rather than trusted from the state decided at
+        // launch. A folder deleted while the app runs otherwise stayed
+        // "installed" until quit, and the failure surfaced mid-meeting.
+        if case .installed(let receipt) = state {
+            if !force, Self.filesPresent(locations, receipt) { return receipt }
+            publish(.notInstalled)
+        }
+        if force, case .outdated = state { publish(.notInstalled) }
         // Files pinned by an older build still work. Re-fetching 650 MB from
         // inside a processing stage is the Re-download button's decision, not
         // this one's.
-        if case .outdated(let receipt) = state, Self.filesPresent(locations, receipt) {
+        if !force, case .outdated(let receipt) = state, Self.filesPresent(locations, receipt) {
             return receipt
         }
         if let installTask { return try await installTask.value }
@@ -198,9 +210,14 @@ public actor LocalModelManager {
         throw LocalModelError.notInstalled
     }
 
-    public func retry() async throws {
-        publish(.notInstalled)
-        _ = try await install()
+    /// Fetches the models again whatever the current state.
+    ///
+    /// What the Re-download button calls. Plain `install()` returns the receipt
+    /// it already has for an outdated install, which is right for a processing
+    /// stage and wrong for a user asking for the versions this build was
+    /// measured against: without the force there was no way out of `outdated`.
+    public func reinstall() async throws {
+        _ = try await install(force: true)
     }
 
     // MARK: - loading
@@ -247,14 +264,6 @@ public actor LocalModelManager {
         return models
     }
 
-    /// Frees the loaded models. Called when local processing is switched off, so
-    /// a cloud-only user does not carry 600 MB of resident CoreML.
-    public func unload() {
-        whisper = nil
-        diarizerModels = nil
-        clearPreparedDiarization()
-    }
-
     // MARK: - prepared diarization cache
 
     func preparedDiarization(for key: String) -> PreparedDiarization? {
@@ -290,7 +299,7 @@ public actor LocalModelManager {
     }
 }
 
-public enum LocalModelError: Error, CustomStringConvertible, Sendable {
+public enum LocalModelError: LocalProcessingFailure, CustomStringConvertible, Sendable {
     case notInstalled
     case audioUnreadable(String)
 
@@ -309,4 +318,8 @@ public enum LocalModelError: Error, CustomStringConvertible, Sendable {
             "The recording could not be read for processing."
         }
     }
+
+    /// Neither clears by waiting: one needs a download, the other a readable
+    /// recording. Retrying the stage would only repeat the failure.
+    public var isRetryable: Bool { false }
 }

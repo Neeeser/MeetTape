@@ -54,6 +54,16 @@ public enum StorageError: LogSafeError, Equatable {
 /// Failures from the AI backend. `retryable` drives the processing state machine:
 /// a retryable failure keeps the job alive, a permanent one stops the retry loop
 /// but never touches the source audio.
+/// A failure raised by something running on this Mac.
+///
+/// Declared here so the pipeline can categorise one without importing the
+/// concrete local backend: the error knows what to tell the user and whether
+/// waiting could help, and nothing else has to know which module raised it.
+public protocol LocalProcessingFailure: Error {
+    var userMessage: String { get }
+    var isRetryable: Bool { get }
+}
+
 public enum ProcessingError: LogSafeError, Equatable {
     case missingAPIKey
     case authenticationFailed
@@ -68,10 +78,14 @@ public enum ProcessingError: LogSafeError, Equatable {
     /// which happens when a re-analysis lands between the click and the write.
     case utteranceNotFound(id: String)
     case cancelled
+    /// A stage that runs on this Mac failed. Carries its own message because
+    /// the cloud wording is wrong for it and often wrong about the cause.
+    case localProcessingFailed(reason: String, retryable: Bool)
 
     public var isRetryable: Bool {
         switch self {
         case .rateLimited, .serverError, .transport: true
+        case .localProcessingFailed(_, let retryable): retryable
         case .missingAPIKey, .authenticationFailed, .requestTooLarge, .durationTooLong,
              .malformedResponse, .audioUnreadable, .utteranceNotFound, .cancelled: false
         }
@@ -87,6 +101,7 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .durationTooLong(let seconds, let limit): "durationTooLong(\(Int(seconds))/\(Int(limit)))"
         case .malformedResponse(let reason): "malformedResponse(\(reason))"
         case .transport(let reason): "transport(\(reason))"
+        case .localProcessingFailed(let reason, _): "local(\(reason))"
         case .audioUnreadable(let path): "audioUnreadable(\(path))"
         case .utteranceNotFound: "utteranceNotFound"
         case .cancelled: "cancelled"
@@ -109,6 +124,7 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .utteranceNotFound:
             "That line has moved since the transcript was last analysed. Reopen the meeting and try again."
         case .cancelled: "Processing was cancelled. Your recording is safe."
+        case .localProcessingFailed(let reason, _): "\(reason) Your recording is safe."
         }
     }
 }

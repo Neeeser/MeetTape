@@ -126,7 +126,8 @@ struct LocalModelsSettingsTab: View {
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                     .font(.caption).foregroundStyle(.secondary)
-                    Button("Re-download") { Task { await runtime.installLocalModels() } }
+                    Button("Re-download") { Task { await runtime.reinstallLocalModels() } }
+                    Button("Delete Models") { Task { await runtime.removeLocalModels() } }
                 case .installed:
                     Button("Delete Models") { Task { await runtime.removeLocalModels() } }
                 }

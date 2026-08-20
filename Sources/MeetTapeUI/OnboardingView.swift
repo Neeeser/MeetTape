@@ -70,9 +70,12 @@ public struct OnboardingView: View {
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 switch model.runtime.localModelState {
-                case .installed, .outdated:
+                case .installed:
                     Label("Installed", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).font(.callout)
+                case .outdated:
+                    Label("Installed, pinned by an older build", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary).font(.callout)
                 case .downloading(let fraction, let detail):
                     ProgressView(value: fraction)
                     Text(detail).font(.caption).foregroundStyle(.secondary)

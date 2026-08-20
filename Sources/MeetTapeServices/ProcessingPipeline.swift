@@ -171,7 +171,7 @@ public actor ProcessingPipeline {
                 try persist(metadata, to: store)
                 report(metadata, chunks: nil)
             } catch {
-                let failure = (error as? ProcessingError) ?? .transport(reason: "unknown")
+                let failure = Self.processingError(from: error)
                 metadata.processing.recordFailure(
                     ProcessingFailure(
                         stage: stage,
@@ -1521,6 +1521,32 @@ public actor ProcessingPipeline {
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
         }
+    }
+
+    /// Categorises a stage failure.
+    ///
+    /// Anything unrecognised used to become `.transport`, whose message names
+    /// OpenAI and whose retryable flag is true. A fully local user with no key
+    /// was told MeetTape could not reach a service they never configured, and a
+    /// deterministic local failure was retried three times with backoff.
+    public static func processingError(from error: any Error) -> ProcessingError {
+        if let processing = error as? ProcessingError { return processing }
+        if error is CancellationError { return .cancelled }
+        if let local = error as? any LocalProcessingFailure {
+            return .localProcessingFailed(
+                reason: local.userMessage, retryable: local.isRetryable
+            )
+        }
+        if error is VoiceEnrollmentRejection {
+            return .localProcessingFailed(
+                reason: "Voice memory could not use this meeting's audio.", retryable: false
+            )
+        }
+        // Still unknown, and not from the cloud client, which raises
+        // ProcessingError for everything it can categorise.
+        return .localProcessingFailed(
+            reason: "Processing this meeting on this Mac failed.", retryable: true
+        )
     }
 
     private func rerenderMarkdown(

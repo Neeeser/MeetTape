@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` runs 227 tests, all passing, in about 6 seconds.
+`./scripts/test.sh` runs 250 tests, all passing, in about 9 seconds.
 Fifteen further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` runs 10 tests, all passing.
@@ -284,18 +284,47 @@ network denied, transcription produced 109 words with word timings from the
 separated the two tracks at 0.445. Nothing in the local path reaches the network
 once the models are installed.
 
-**Adversarial review.** Seven reviewers, one per failure class, were run against
-the implementation: voice-profile poisoning, threshold mistakes, raw-data
-mutation, store correctness, concurrency, privacy and model handling, and
-compatibility with existing meetings and settings. They produced 41 findings, of
-which 22 were distinct and real after checking each against the code. All 22 are
-fixed, and the ones with a reachable failure carry a regression test. The most
-serious were: rebuilding a transcript dropped the diarization and collapsed every
-speaker; the expiry predicate for unnamed voices was inverted, so nothing ever
-expired; re-running recognition overwrote a speaker a person had named; and
-capture lifecycle actions shared an ordered queue with processing jobs, so a job
-waiting out a recording could hold the arm and commit for the meeting that had
-just started.
+**Adversarial review.** Reviewers were run against the implementation in four
+rounds, one per failure class each round: voice-profile poisoning, threshold
+mistakes, raw-data mutation, store correctness, concurrency, privacy, model
+handling, compatibility with existing meetings and settings, and test quality.
+Each round reviewed the previous round's fixes, and each round found that some
+of them had introduced new defects.
+
+| Round | Real defects | Of which introduced by the previous round's fixes |
+|---|---:|---:|
+| 1 | 22 | — |
+| 2 | 12 | 4 |
+| 3 | 7 | 2 |
+| 4 | 8 | 5 |
+
+Every fix carries a regression test, watched red for the defect's own reason
+before the fix and green after. The most serious found across the four rounds:
+
+- The default configuration could not finish a meeting without an API key. Both
+  speech backends default to local and the speaker-suggestion setting defaults
+  on, so every meeting failed at a cloud stage that ran before the step which
+  writes the markdown and the mixdown.
+- The microphone track enrolled whoever dominated it. On a device pairing where
+  echo cancellation falls back to plain capture, a presenter talking through a
+  long call was written into the local user's profile, human-verified.
+- A cluster's vector stayed in the first name's profile forever. Correcting a
+  mis-click left that voice inside the wrong person, and the next meeting
+  auto-named them as the person who had been corrected away.
+- Choosing the cloud diarizer uploaded the meeting even with transcription set
+  to Local, and on an imported recording nothing was transcribed locally at all.
+- Rebuilding a transcript dropped the diarization and collapsed every speaker.
+- The expiry predicate for unnamed voices was inverted, so nothing expired, and
+  it selected human-confirmed rows for deletion.
+- Capture lifecycle actions shared an ordered queue with processing jobs, and
+  later, progress ticks rescanned the whole archive on the same actor.
+- A reconnected meeting was folded into the earlier one, which moves no audio,
+  and then never transcribed.
+- An enrichment failure took the readable transcript and the mixdown with it.
+
+The review cost about as much as the implementation. That ratio is the finding:
+this subsystem has many quiet failure modes, and a fix in it is as likely to
+need review as the code it repairs.
 
 ## Not verified
 
@@ -353,6 +382,21 @@ be assumed to work.
 - **Processing during a live recording.** The gate and the single job slot have
   tests, and the queue parks between stages. Whether a full local pipeline
   running alongside a live capture drops audio has not been measured on hardware.
+  Note the shape of the guarantee: a stage does not *start* during capture, but a
+  stage already running does not stop, so a meeting beginning part-way through a
+  four-minute transcription shares the Neural Engine until that stage ends.
+- **A reconnected meeting is transcribed but not reachable.** When a call drops
+  and the user rejoins, the second recording is folded into the first: the link
+  is metadata only, `combine` moves no audio, and the archive listing hides the
+  folded meeting. Its own audio is now transcribed into its own folder, so
+  nothing is lost on disk, but the app offers no way to open it and the earlier
+  meeting's transcript still covers only the first half. Presenting a
+  continuation as one meeting is a product decision that has not been made.
+- **The bound on how long a prejoin holds processing.** Capture arms on entering
+  the candidate state, and processing stands back from it for two minutes. That
+  covers the measured twelve seconds between Slack opening the microphone and a
+  join, but the value itself is reasoned, not measured, and a longer prejoin
+  releases processing while the microphone is still open.
 - **Calendar matching.** `CalendarService` reads EventKit and scores events
   against a recording's time window, and it has no tests and has not been run
   against a real calendar. A wrong match shows the wrong title and attendees on a

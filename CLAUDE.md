@@ -67,6 +67,14 @@ bump.
 | Only the mic track and a human confirmation may write a profile | A match that widens the profile it matched against turns one wrong answer into a permanent one |
 | No vectors in a meeting folder | The folder is what a user copies, syncs and shares, and an embedding matches the same person across devices, rooms and years |
 | One heavy job at a time, paused while recording | Transcription is 92% of the work and both models target the Neural Engine, so a second meeting takes time from the first rather than adding any |
+| An optional cloud stage asks `isConfigured()` first | Both speech backends default to local and the enrichment switches default on, so without it every meeting on a fresh install failed before the step that writes the markdown and the mixdown |
+| A key store answers `isKnownAbsent` for itself | Taking the protocol default meant "a read that failed" read as "no key", which is the same failure by another route |
+| The microphone track enrols only when the far end has its own track, and only a voice unlike its clusters | Dominance is not identity: on a pairing where echo cancellation falls back, the presenter dominates the user's own track |
+| A cluster's audio belongs to one identity, enforced by deleting its earlier enrolment | Naming twice left the first name holding that voice, human-verified, and the next meeting named them as the person corrected away |
+| Re-analysis drops that meeting's cluster enrolments | It renumbers the runs, so a wrong name confirmed beforehand is unreachable: the key that would remove it no longer appears |
+| Chunk purpose is decided by which backend owns the words, once per track | Deciding it from what is on disk flipped mid-meeting on a resume and the assembler dropped the far end permanently |
+| Display and confirmation are separate predicates | A correction must survive its line being merged, and must not then enrol the rest of that line's voice |
+| Processing reaches a meeting folded into another | `combine` links metadata and moves no audio, so the folded folder is the only copy of the second half of a dropped call |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
 decoder settings in `LocalDiarizationTuning` and `LocalTranscriptionTuning`, and

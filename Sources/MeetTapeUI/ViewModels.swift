@@ -182,7 +182,12 @@ public final class SettingsModel {
         hostStatus = NativeMessagingInstaller().status()
         inputDescription = CoreAudioSystem.describeDefaultInput()
         sensorStatus = runtime.sensorStatus
-        hasStoredKey = KeychainAPIKeyStore().hasKey
+        // Off the main actor: this call blocks until the person answers the
+        // login-keychain prompt macOS raises when the item's ACL does not
+        // trust the binary, which every unsigned rebuild produces. Run inline
+        // it froze the whole window, and the panel behind the prompt was the
+        // one that would have explained it.
+        hasStoredKey = await Task.detached { KeychainAPIKeyStore().hasKey }.value
     }
 
     public func request(_ kind: PermissionKind) async {

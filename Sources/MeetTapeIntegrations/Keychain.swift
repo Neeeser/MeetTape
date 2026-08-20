@@ -23,11 +23,11 @@ public struct KeychainAPIKeyStore: APIKeyProviding, Sendable {
 
     /// Whether an item is stored, asked without requesting its value.
     ///
-    /// Reading the value prompts for the login keychain password whenever the
-    /// binary's signature has changed, and the settings panel asks this on
-    /// every refresh: a local-only user who has never configured a key was
-    /// stopped by a password prompt with the whole window behind it. Existence
-    /// is a metadata query, which does not prompt.
+    /// The secret is never brought into the process to answer a yes/no. This
+    /// still blocks on the authorisation prompt when the item's ACL does not
+    /// trust the caller: a login-keychain item enforces its ACL on the search
+    /// as well as on the read, so no query answers this without possibly
+    /// waiting for a person. Callers must not be holding the main actor.
     public var hasKey: Bool {
         var result: CFTypeRef?
         return SecItemCopyMatching(query(returningData: false) as CFDictionary, &result)

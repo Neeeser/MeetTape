@@ -108,6 +108,13 @@ public struct AlwaysAllowed: ProcessingGate {
 
 /// Holds processing while a meeting is being recorded.
 ///
+/// The guarantee is that a stage does not *start* during capture, not that one
+/// already running stops: stages are atomic and a local transcription runs for
+/// minutes. A meeting that begins mid-stage therefore shares the Neural Engine
+/// until that stage ends. Bounding the candidate wait below makes this more
+/// likely than blocking forever would, and that is the trade: an unbounded wait
+/// let a forgotten prejoin tab hold every job indefinitely.
+///
 /// Polls rather than signals because the recording state lives on the main
 /// actor and the pipeline does not: a shared box read on a timer keeps the two
 /// apart, and a two-second granularity on a job measured in minutes costs

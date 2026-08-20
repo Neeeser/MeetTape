@@ -303,6 +303,33 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         return changed
     }
 
+    /// Whether any line-level correction applies to this line.
+    public func hasOverride(for utterance: Utterance) -> Bool {
+        utteranceOverrides.contains { $0.covers(utterance) }
+    }
+
+    /// Whether a person's correction covers enough of a line to stand as
+    /// confirmation that they spoke it.
+    ///
+    /// Stricter than `covers`, which decides what to display. A correction made
+    /// on a three-second interjection keeps its name after re-analysis merges
+    /// that interjection into a thirty-second turn, which is what `covers` is
+    /// for. Treating the whole merged turn as confirmed speech is a different
+    /// claim: enrolment would embed twenty-seven seconds of whoever the rest of
+    /// the turn belongs to into the corrected person's voice profile.
+    public func confirms(_ utterance: Utterance) -> Bool {
+        guard let override = utteranceOverrides.first(where: { $0.covers(utterance) }),
+              override.assignment.origin == .human
+        else { return false }
+        guard let start = override.startSeconds, let finish = override.endSeconds else {
+            return true
+        }
+        let end = max(utterance.end, utterance.start + 0.001)
+        let overlap = min(end, max(finish, start + 0.001)) - max(utterance.start, start)
+        guard overlap > 0 else { return false }
+        return overlap / (end - utterance.start) >= 0.5
+    }
+
     /// A readable fallback for a label nobody has named yet.
     ///
     /// The chunk is part of the name because a cloud model's labels are stable

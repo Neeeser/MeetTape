@@ -146,13 +146,21 @@ enum BackendSelectionTests {
                 let gate = RecordingAwareGate(pollSeconds: 0.05) { recording.withLock { $0 } }
                 expect.isTrue(gate.isBlocked)
 
-                let waiting = Task { await gate.waitUntilAllowed() }
+                let returned = LockedBox(false)
+                let waiting = Task {
+                    await gate.waitUntilAllowed()
+                    returned.withLock { $0 = true }
+                }
                 try await Task.sleep(nanoseconds: 150_000_000)
-                expect.isFalse(waiting.isCancelled)
+                expect.isFalse(
+                    returned.withLock { $0 },
+                    "waitUntilAllowed must not return while the meeting runs"
+                )
                 expect.isTrue(gate.isBlocked, "still held while the meeting runs")
 
                 recording.withLock { $0 = .idle }
                 await waiting.value
+                expect.isTrue(returned.withLock { $0 })
                 expect.isFalse(gate.isBlocked)
             },
 
@@ -178,7 +186,10 @@ enum BackendSelectionTests {
                     $0 = opened.addingTimeInterval(RecordingAwareGate.candidateBlockSeconds + 1)
                 }
                 expect.isFalse(gate.isBlocked, "a candidate this old is not a meeting")
-                await gate.waitUntilAllowed()
+                // Guarded: without the bound, waitUntilAllowed spins forever
+                // against a frozen clock and the whole suite hangs instead of
+                // reporting the failure above.
+                if !gate.isBlocked { await gate.waitUntilAllowed() }
 
                 // A live recording is never released on a timer.
                 let live = RecordingAwareGate(
@@ -313,9 +324,12 @@ enum BackendSelectionTests {
 
                 let job = Task { await pipeline.process(meetingID: meeting.metadata.id) }
                 try await Task.sleep(nanoseconds: 120_000_000)
-                expect.notEqual(
-                    try meeting.store.readMetadata().processing.state, .complete,
-                    "nothing heavy runs while the microphone is open"
+                // The stage the meeting is parked at, not merely "not finished":
+                // an ungated run is still unfinished at this point too, so the
+                // weaker assertion held with the gate deleted entirely.
+                expect.equal(
+                    try meeting.store.readMetadata().processing.state, .audioSafe,
+                    "nothing past the gate has run while the microphone is open"
                 )
 
                 capture.withLock { $0 = .idle }
@@ -405,6 +419,30 @@ enum BackendSelectionTests {
                     )
                 }
             },
+
+            test("a keychain that cannot answer is not read as having no key") { expect in
+                struct Failing: APIKeyProviding {
+                    func apiKey() throws -> String { throw ProcessingError.missingAPIKey }
+                    // A locked keychain, or a denied prompt after an ad-hoc
+                    // rebuild invalidates the item's ACL. Not absence.
+                    var isKnownAbsent: Bool { false }
+                }
+                struct Absent: APIKeyProviding {
+                    func apiKey() throws -> String { throw ProcessingError.missingAPIKey }
+                    var isKnownAbsent: Bool { true }
+                }
+
+                let unreadable = OpenAIClient(keyProvider: Failing())
+                expect.isTrue(
+                    await unreadable.isConfigured(),
+                    "attempt it, so the failure is visible and retryable"
+                )
+                let none = OpenAIClient(keyProvider: Absent())
+                expect.isFalse(
+                    await none.isConfigured(),
+                    "a user who never entered a key opted into nothing"
+                )
+            },
         ])
     }
 
@@ -413,17 +451,6 @@ enum BackendSelectionTests {
 
 /// A flag two tasks can share without an actor hop, matching how the runtime
 /// hands the recording state to the processing gate.
-final class LockedFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: Bool
-
-    init(_ value: Bool) { storage = value }
-
-    var value: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return storage }
-        set { lock.lock(); storage = newValue; lock.unlock() }
-    }
-}
 
 final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()

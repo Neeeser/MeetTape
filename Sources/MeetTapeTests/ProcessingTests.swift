@@ -20,6 +20,8 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     var suggestions: [SpeakerSuggestion] = []
     var enrichment = MeetingEnrichment(title: "Retrieval logic", summary: "Discussed retrieval.")
     var failNextTranscription: ProcessingError?
+    /// Fails every enrichment request, for the lost-connection path.
+    var failEnrichment: ProcessingError?
     var failNextDiarization: ProcessingError?
     /// Fails every request, for the bounded-retry path.
     var alwaysFailTranscription: ProcessingError?
@@ -87,6 +89,7 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     func enrich(_ request: EnrichmentRequest, model: String) async throws -> MeetingEnrichment {
         record(Call(kind: "enrich", model: model, file: ""))
         if !configured { throw ProcessingError.missingAPIKey }
+        if let failEnrichment { throw failEnrichment }
         return enrichment
     }
 }

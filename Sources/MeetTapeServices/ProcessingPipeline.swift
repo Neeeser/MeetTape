@@ -166,8 +166,21 @@ public actor ProcessingPipeline {
                     try await runSpeakerResolution(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .enriching, at: clock.now)
                 case .enriching:
-                    try await runEnrichment(store: store, metadata: &metadata, settings: settings)
+                    // Enrichment is the one part that needs the cloud, and it is
+                    // not what makes a meeting readable. Failing it used to take
+                    // finish() with it, so a lost connection at the end of a call
+                    // left no transcript.md and no mixdown, recoverable only
+                    // through Rebuild Transcript for the first and not at all for
+                    // the second. The words are already on disk; the archive gets
+                    // written either way and the failure is still reported.
+                    var enrichmentFailure: (any Error)?
+                    do {
+                        try await runEnrichment(store: store, metadata: &metadata, settings: settings)
+                    } catch {
+                        enrichmentFailure = error
+                    }
                     try await finish(store: store, metadata: &metadata, settings: settings)
+                    if let enrichmentFailure { throw enrichmentFailure }
                     metadata.processing.advance(to: .complete, at: clock.now)
                     // The decoded working copies are derived from audio that is
                     // never modified, so they are thrown away as soon as the
@@ -443,7 +456,16 @@ public actor ProcessingPipeline {
         // its own earlier chunks, and wrote the rest as labels only, so the
         // assembler dropped the whole far end of the meeting after the
         // interruption and never recovered.
-        let purpose: RawChunkPurpose = transcriberOwnsWords(settings) ? .speakers : .words
+        // Whatever this diarizer already wrote for this track, so a run resumed
+        // or retried after the transcription setting changed cannot leave half
+        // the chunks holding words and half holding labels: the assembler takes
+        // one kind, so the other half of the far end would vanish permanently.
+        // Only the first pass decides.
+        let existing = try store.readRawTranscript()
+            .chunks(track: track)
+            .first { $0.model == backend.identifier }
+        let purpose = existing?.purpose
+            ?? (transcriberOwnsWords(settings) ? .speakers : .words)
 
         try await runChunks(
             store: store, metadata: &metadata, track: track, segments: segments,
@@ -1531,6 +1553,12 @@ public actor ProcessingPipeline {
             guard let assignment = speakers.assignment(for: utterance),
                   assignment.origin == .human, assignment.identityID == identityID
             else { continue }
+            // A line-level correction only counts as this person's speech when
+            // it covers most of the line. After a re-analysis merges a short
+            // corrected interjection into a long turn, the correction rightly
+            // keeps its name on the merged line, but the rest of that turn is
+            // somebody else's voice and must not reach a profile.
+            if speakers.hasOverride(for: utterance), !speakers.confirms(utterance) { continue }
             let overlapped = transcript.utterances.contains {
                 $0.id != utterance.id && $0.track == utterance.track
                     && $0.start < utterance.end && utterance.start < $0.end

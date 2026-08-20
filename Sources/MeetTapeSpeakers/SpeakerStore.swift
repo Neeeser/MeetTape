@@ -474,6 +474,38 @@ public actor SpeakerStore {
         return .success(try profileStatus(of: identity.id, model: candidate.model))
     }
 
+    /// Drops any enrolment that came from one cluster of one meeting.
+    ///
+    /// A cluster's audio belongs to exactly one person. Naming it wrote a vector
+    /// and naming it again wrote another without removing the first, so a
+    /// mis-click left that voice permanently inside the wrong person's profile,
+    /// human-verified and passing the purity filter: the next meeting auto-named
+    /// them as the person who had been corrected away. Re-committing the same
+    /// name also stacked duplicates against the retention cap.
+    ///
+    /// Returns the identities that lost a vector, so their centroids can be
+    /// rebuilt.
+    @discardableResult
+    public func removeClusterEnrolments(
+        meetingID: String, clusterID: String, keeping identityID: IdentityID?
+    ) throws -> [IdentityID] {
+        var affected: [Int64] = []
+        var sql = "SELECT DISTINCT identity_id FROM voice_embedding"
+            + " WHERE source_meeting = ? AND source_cluster = ?"
+        var bindings: [SQLValue] = [.text(meetingID), .text(clusterID)]
+        if let identityID {
+            sql += " AND identity_id != ?"
+            bindings.append(.int64(identityID.rawValue))
+        }
+        try database.query(sql, bindings) { affected.append($0.int64(0)) }
+        guard !affected.isEmpty else { return [] }
+        var delete = "DELETE FROM voice_embedding"
+            + " WHERE source_meeting = ? AND source_cluster = ?"
+        if identityID != nil { delete += " AND identity_id != ?" }
+        try database.run(delete, bindings)
+        return affected.map(IdentityID.init)
+    }
+
     /// Keeps the newest, highest-quality vectors and drops the rest.
     ///
     /// Separation stops improving past about five confirmed recordings, so the

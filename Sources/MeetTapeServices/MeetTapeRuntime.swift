@@ -724,7 +724,9 @@ public final class MeetTapeRuntime {
                 metadata.processing.advance(to: .finalizing, at: self.clock.now)
                 metadata.processing.advance(to: .audioSafe, at: self.clock.now)
             }
-            linkContinuation(of: updated, store: meeting.store)
+            // Returns the meeting that now owns this recording, which is a
+            // different one when this was a reconnection.
+            let owner = linkContinuation(of: updated, store: meeting.store)
             if settings.showNotifications {
                 notifications.meetingSaved(
                     title: updated.displayTitle,
@@ -733,7 +735,12 @@ public final class MeetTapeRuntime {
                 )
             }
             refreshRecentMeetings()
-            let meetingID = updated.id
+            // The meeting that is still visible. Folding this one into an
+            // earlier one hides it from findMeeting, so handing its own
+            // identifier to the pipeline meant process returned immediately and
+            // the recording was never transcribed: a dropped call that the user
+            // rejoined lost its second half, with no path to recover it.
+            let meetingID = owner ?? updated.id
             Task { await pipeline.process(meetingID: meetingID) }
         } catch {
             Log.app.error("finalise failed: \(logSafeDescription(error), privacy: .public)")
@@ -745,7 +752,10 @@ public final class MeetTapeRuntime {
     /// Strong evidence merges on its own; anything weaker is recorded as a
     /// suggestion for the review panel. Neither path moves or rewrites a source
     /// segment: combining is a link, not a copy.
-    private func linkContinuation(of metadata: MeetingMetadata, store: MeetingStore) {
+    @discardableResult
+    private func linkContinuation(
+        of metadata: MeetingMetadata, store: MeetingStore
+    ) -> String? {
         let matcher = ReconnectMatcher()
         let later = ReconnectMatcher.Candidate(
             meetingID: metadata.id, provider: metadata.provider,
@@ -773,15 +783,17 @@ public final class MeetTapeRuntime {
                 continue
             case .sameMeeting(_, let reason):
                 combine(meetingID: metadata.id, into: earlier.id, reason: reason)
-                return
+                return earlier.id
             case .possible(_, let reason):
                 _ = try? store.updateMetadata { updated in
                     updated.possibleContinuationOf = earlier.id
                     updated.possibleContinuationReason = reason
                 }
-                return
+                // A suggestion only. This meeting stays its own.
+                return nil
             }
         }
+        return nil
     }
 
     /// Folds one meeting into another. Both directories stay exactly as they are.

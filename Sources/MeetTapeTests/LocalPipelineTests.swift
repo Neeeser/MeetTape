@@ -14,13 +14,10 @@ struct StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var isLocal = true
     var limits = BackendAudioLimits.none
     var producesWordTimestamps = true
-    /// Holds the job slot, so a second meeting has to queue for it.
-    var delayNanoseconds: UInt64 = 0
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
-        if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
         progress(1)
         return TranscriptionOutput(
             segments: segments, text: segments.map(\.text).joined(separator: " "),
@@ -555,6 +552,54 @@ enum LocalPipelineTests {
                     try meeting.store.readSpeakerMap().entries["remote-001_speaker_00"]?.identityID,
                     ann.id,
                     "and the link is left alone, so separating the merge can find it"
+                )
+            },
+
+            test("losing the network at the end still leaves a readable meeting") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // A key is configured, so enrichment is attempted, and the
+                // request fails the way a closed lid or lost wifi fails.
+                let backend = FakeAIBackend()
+                backend.failEnrichment = .transport(reason: "offline")
+
+                let settings: AppSettings = {
+                    var value = AppSettings()
+                    value.enrichment = EnrichmentSettings(
+                        generateTitle: true, generateDescription: false, generateNotes: false,
+                        generateSummary: true, suggestSpeakers: false
+                    )
+                    return value
+                }()
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: []
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                // The stage still fails and still says so.
+                expect.equal(try meeting.store.readMetadata().processing.state, .failed)
+                // But the words were already on this machine, so the archive is
+                // written: the markdown had no recovery but Rebuild Transcript,
+                // and the mixdown had none at all.
+                expect.isTrue(
+                    FileManager.default.fileExists(
+                        atPath: meeting.store.layout.transcriptMarkdown.path
+                    ),
+                    "the readable transcript survives a failed enrichment"
                 )
             },
 

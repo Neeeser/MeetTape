@@ -293,6 +293,14 @@ public actor SpeakerRecognitionService {
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
         let vector = VoiceVector.l2Normalized(cluster.centroid)
+        // This cluster's audio belongs to whoever is being confirmed now, and to
+        // nobody else. Correcting a name that was applied a moment ago left the
+        // vector in the first person's profile with nothing able to remove it.
+        for stale in try await store.removeClusterEnrolments(
+            meetingID: meetingID, clusterID: cluster.clusterID, keeping: identityID
+        ) {
+            try await store.recomputeProfiles(for: stale, now: now)
+        }
         try await store.recordOccurrence(
             meetingID: meetingID,
             clusterID: cluster.clusterID,

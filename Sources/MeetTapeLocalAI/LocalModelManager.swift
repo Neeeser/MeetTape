@@ -181,7 +181,10 @@ public actor LocalModelManager {
             // A forced re-download published notInstalled before it started, so
             // failing here discarded an install that is still on disk and left
             // the panel offering nothing but another 650 MB.
-            if let fallback {
+            // Re-checked, because the reason the install failed may be that the
+            // folder went away underneath it: reporting "Installed, 624 MB" over
+            // nothing would be a worse answer than the failure.
+            if let fallback, Self.filesPresent(locations, fallback) {
                 publish(fallback.matchesCurrentBuild ? .installed(fallback) : .outdated(fallback))
             } else {
                 publish(.failed(Self.message(for: error)))

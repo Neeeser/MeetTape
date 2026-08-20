@@ -192,16 +192,50 @@ public struct ProcessingScratch: Sendable {
         guard !segments.isEmpty else { return nil }
         let directory = directory(for: meetingID)
         let destination = directory.appendingPathComponent("\(track.rawValue).wav")
+        // Only a file a previous run finished. The export writes incrementally,
+        // so a quit or a crash partway through leaves a short but perfectly
+        // valid wav; reusing it transcribed the minutes that had been written
+        // and completed the meeting, with the rest of the audio sitting
+        // untouched in the source segments and nothing reporting a problem.
+        // A whole file is renamed into place, so its presence means finished.
         if FileManager.default.fileExists(atPath: destination.path) { return destination }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let frames = try TrackFileExporter().export(
-            segments: segments, segmentsDirectory: segmentsDirectory, to: destination
-        )
+        let partial = directory.appendingPathComponent("\(track.rawValue).partial.wav")
+        try? FileManager.default.removeItem(at: partial)
+        let frames: Int64
+        do {
+            frames = try TrackFileExporter().export(
+                segments: segments, segmentsDirectory: segmentsDirectory, to: partial
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
         guard frames > 0 else {
-            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.removeItem(at: partial)
             return nil
         }
+        try FileManager.default.moveItem(at: partial, to: destination)
         return destination
+    }
+
+    /// Removes anything left behind by a run that did not finish.
+    ///
+    /// Nothing swept the scratch root, so a job killed mid-export left a whole
+    /// meeting's 16 kHz audio in Caches, once per meeting.
+    public func pruneIncomplete() {
+        let manager = FileManager.default
+        guard let meetings = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return }
+        for meeting in meetings where meeting.hasDirectoryPath {
+            guard let files = try? manager.contentsOfDirectory(
+                at: meeting, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            for file in files where file.lastPathComponent.hasSuffix(".partial.wav") {
+                try? manager.removeItem(at: file)
+            }
+        }
     }
 
     public func discard(meetingID: String) {

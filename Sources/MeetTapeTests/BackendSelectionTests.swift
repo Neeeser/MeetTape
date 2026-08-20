@@ -1,4 +1,5 @@
 import Foundation
+import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeIntegrations
 import MeetTapeServices
@@ -228,6 +229,54 @@ enum BackendSelectionTests {
                 expect.equal(
                     ProcessingPipeline.processingError(from: CancellationError()), .cancelled
                 )
+            },
+
+            test("a job re-checks the gate after every wait, not once") { expect in
+                // Acquiring the slot can take the length of another meeting's
+                // transcription. A recording that starts inside that window
+                // made the earlier gate reading stale, and the job resumed
+                // straight into running the Neural Engine alongside a live call.
+                final class Flag: ProcessingGate, @unchecked Sendable {
+                    private let box = LockedBox(true)
+                    var isBlocked: Bool { box.withLock { $0 } }
+                    func allow() { box.withLock { $0 = false } }
+                    func block() { box.withLock { $0 = true } }
+                    func waitUntilAllowed() async {
+                        while isBlocked { await Task.yield() }
+                    }
+                }
+
+                let gate = Flag()
+                let lock = ProcessingJobLock()
+                await lock.acquire()
+
+                // The job parks at the gate, is let through, and then queues
+                // for the slot while a new recording starts.
+                let started = LockedBox(false)
+                let job = Task {
+                    while true {
+                        await gate.waitUntilAllowed()
+                        await lock.acquire()
+                        if !gate.isBlocked { break }
+                        lock.release()
+                    }
+                    started.withLock { $0 = true }
+                    lock.release()
+                }
+
+                gate.allow()
+                try await Task.sleep(nanoseconds: 30_000_000)
+                gate.block()
+                lock.release()
+                try await Task.sleep(nanoseconds: 30_000_000)
+                expect.isFalse(
+                    started.withLock { $0 },
+                    "the slot came free but a recording had started meanwhile"
+                )
+
+                gate.allow()
+                await job.value
+                expect.isTrue(started.withLock { $0 }, "and it runs once the call ends")
             },
         ])
     }

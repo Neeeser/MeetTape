@@ -125,17 +125,25 @@ public actor ProcessingPipeline {
                 // The slot is handed back while waiting: one heavy job at a time
                 // should mean one job doing work, not one job holding the queue
                 // shut for the length of somebody's call.
-                if gate.isBlocked {
-                    report(metadata, chunks: nil, detail: "Waiting until recording finishes")
-                    if holdsSlot {
-                        jobLock.release()
-                        holdsSlot = false
+                // Looped, not two sequential checks. Acquiring the slot can wait
+                // out another meeting's transcription, and a recording started
+                // in that time made the gate reading stale: the job resumed and
+                // ran a Whisper pass on the Neural Engine alongside a live call.
+                // Re-check after every wait, both of which can be long.
+                while true {
+                    if gate.isBlocked {
+                        report(metadata, chunks: nil, detail: "Waiting until recording finishes")
+                        if holdsSlot {
+                            jobLock.release()
+                            holdsSlot = false
+                        }
+                        await gate.waitUntilAllowed()
                     }
-                    await gate.waitUntilAllowed()
-                }
-                if !holdsSlot {
-                    await jobLock.acquire()
-                    holdsSlot = true
+                    if !holdsSlot {
+                        await jobLock.acquire()
+                        holdsSlot = true
+                    }
+                    if !gate.isBlocked { break }
                 }
                 metadata.processing.recordAttempt(for: stage)
                 try persist(metadata, to: store)
@@ -1283,8 +1291,7 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
-        await gate.waitUntilAllowed()
-        await jobLock.acquire()
+        await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
 
@@ -1350,8 +1357,7 @@ public actor ProcessingPipeline {
         // Where a cloud diarizer left no vectors this reads a whole track and
         // runs the embedding model, which is a processing stage in everything
         // but name and waits for the same things.
-        await gate.waitUntilAllowed()
-        await jobLock.acquire()
+        await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
         var metadata = found.metadata
@@ -1487,8 +1493,7 @@ public actor ProcessingPipeline {
         // Reading a whole meeting off disk and running the embedding model is
         // the same class of work a processing stage does, so it waits for the
         // same things.
-        await gate.waitUntilAllowed()
-        await jobLock.acquire()
+        await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: metadata.id) }
 
@@ -1545,6 +1550,21 @@ public actor ProcessingPipeline {
             guard changed else { continue }
             try found.store.writeSpeakerMap(speakers)
             try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+        }
+    }
+
+    /// Waits until heavy work may start, and holds the slot on return.
+    ///
+    /// The two waits happen in the wrong order to check once: acquiring the
+    /// slot can take the length of another meeting's transcription, and a
+    /// recording that starts in that window makes the gate reading stale. The
+    /// caller pairs this with a `defer { jobLock.release() }`.
+    private func waitForSlot() async {
+        while true {
+            await gate.waitUntilAllowed()
+            await jobLock.acquire()
+            if !gate.isBlocked { return }
+            jobLock.release()
         }
     }
 

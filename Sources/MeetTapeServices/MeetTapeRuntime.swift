@@ -32,6 +32,18 @@ public struct RuntimeStatus: Sendable, Equatable {
     /// A meeting is open, whether writing or waiting to reconnect.
     public var hasActiveSession: Bool { isRecording || isInReconnectWindow }
 
+    /// Whether the microphone is open, which starts before anything is written.
+    ///
+    /// Capture is armed on entering `candidate` and runs into the memory ring:
+    /// Slack opens the microphone about twelve seconds before the user joins,
+    /// and a Meet prejoin screen is invisible to native detection for longer.
+    /// That is real capture, so heavy processing has to stand back from it, and
+    /// gating on `hasActiveSession` alone let a job take the Neural Engine and
+    /// the disk during exactly that window.
+    public var isCapturing: Bool {
+        hasActiveSession || sessionState == .candidate || sessionState == .ending
+    }
+
     /// Never show a healthy recording while a required source is known to be
     /// failing.
     public var displayHealth: CaptureHealthState {
@@ -233,6 +245,9 @@ public final class MeetTapeRuntime {
     public func start() {
         notifications.registerCategories()
         installNativeMessagingHost()
+        // A job killed mid-export leaves a partial track behind. Nothing ever
+        // swept it, so it accumulated once per interrupted meeting.
+        ProcessingScratch(root: ProcessingScratch.defaultRoot()).pruneIncomplete()
         powerObserver = PowerEventObserver(
             onWake: { [weak self] in
                 Task { @MainActor in self?.captureEngine.noteSystemWake() }
@@ -879,7 +894,7 @@ public final class MeetTapeRuntime {
         // Read by the processing gate from another executor, so a job started
         // before a meeting parks between stages instead of competing with the
         // capture that is running now.
-        recordingSnapshot.withLock { $0 = status.hasActiveSession }
+        recordingSnapshot.withLock { $0 = status.isCapturing }
         onStatusChange?()
     }
 }

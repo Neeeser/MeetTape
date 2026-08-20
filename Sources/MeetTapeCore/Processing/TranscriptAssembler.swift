@@ -119,7 +119,10 @@ public struct TranscriptAssembler: Sendable {
             !(lhs == .mic && micTrackIsLocalUser)
         }
         for track in orderedTracks {
-            let chunks = raw.chunks(track: track)
+            // Label-only chunks exist when the cloud diarizer ran alongside a
+            // local transcription. Their words are a byproduct of asking who
+            // spoke; taking them here would render the track twice.
+            let chunks = raw.chunks(track: track, purpose: .words)
             guard !chunks.isEmpty else { continue }
             let treatAsLocalUser = track == .mic && micTrackIsLocalUser
             // Sorted so the echo scan can stop at the first utterance past its

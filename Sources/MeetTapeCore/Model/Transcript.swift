@@ -4,6 +4,17 @@ import Foundation
 ///
 /// Raw diarization is immutable. Renaming a speaker edits `speakers.map.json`, and
 /// never this file, so a name change costs nothing and loses nothing.
+/// Why a chunk was requested.
+///
+/// A cloud diarizer returns words as well as labels, and when it is also the
+/// transcription backend those words are the transcript. When transcription
+/// runs on this Mac they are a byproduct: the labels are wanted, the words are
+/// already better locally, and assembling both would say everything twice.
+public enum RawChunkPurpose: String, Codable, Sendable, Equatable {
+    case words
+    case speakers
+}
+
 public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var track: CaptureTrack
@@ -15,20 +26,40 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public var segments: [RawTranscriptSegment]
     /// The raw response body, kept so a future build can re-derive more from it.
     public var rawResponseFile: String?
+    /// Defaulted, so a meeting written before this existed reads as what it was:
+    /// every chunk on disk then held the transcript.
+    public var purpose: RawChunkPurpose
 
     public init(
         id: String, track: CaptureTrack, timelineOffset: Double, durationSeconds: Double,
         model: String, responseFormat: String, segments: [RawTranscriptSegment],
-        rawResponseFile: String? = nil
+        rawResponseFile: String? = nil, purpose: RawChunkPurpose = .words
     ) {
         self.id = id
         self.track = track
         self.timelineOffset = timelineOffset
+        self.purpose = purpose
         self.durationSeconds = durationSeconds
         self.model = model
         self.responseFormat = responseFormat
         self.segments = segments
         self.rawResponseFile = rawResponseFile
+    }
+
+    /// Hand-written so a chunk stored before `purpose` existed still decodes.
+    /// Those files predate any diarizer that was not also the transcriber, so
+    /// every one of their chunks held words.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        track = try container.decode(CaptureTrack.self, forKey: .track)
+        timelineOffset = try container.decode(Double.self, forKey: .timelineOffset)
+        durationSeconds = try container.decode(Double.self, forKey: .durationSeconds)
+        model = try container.decode(String.self, forKey: .model)
+        responseFormat = try container.decode(String.self, forKey: .responseFormat)
+        segments = try container.decode([RawTranscriptSegment].self, forKey: .segments)
+        rawResponseFile = try container.decodeIfPresent(String.self, forKey: .rawResponseFile)
+        purpose = try container.decodeIfPresent(RawChunkPurpose.self, forKey: .purpose) ?? .words
     }
 }
 
@@ -92,6 +123,10 @@ public struct RawTranscript: Codable, Sendable, Equatable {
 
     public func chunks(track: CaptureTrack) -> [RawTranscriptChunk] {
         chunks.filter { $0.track == track }.sorted { $0.timelineOffset < $1.timelineOffset }
+    }
+
+    public func chunks(track: CaptureTrack, purpose: RawChunkPurpose) -> [RawTranscriptChunk] {
+        chunks(track: track).filter { $0.purpose == purpose }
     }
 }
 

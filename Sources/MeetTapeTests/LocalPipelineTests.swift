@@ -434,6 +434,68 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("local transcription keeps the words local when the cloud diarizes") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let settings: AppSettings = {
+                    var value = AppSettings()
+                    value.processing = ProcessingSettings(
+                        transcription: .local, diarization: .openAI
+                    )
+                    value.enrichment = EnrichmentSettings(
+                        generateTitle: false, generateDescription: false, generateNotes: false,
+                        generateSummary: false, suggestSpeakers: false
+                    )
+                    return value
+                }()
+
+                // The cloud diarizer returns words as well as labels.
+                let cloud = FakeAIBackend()
+                cloud.diarizationSegments = [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "CLOUD WORDS", speaker: "A", words: nil
+                    ),
+                ]
+                let local = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "local words", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 2, text: " local words")]
+                    ),
+                ])
+
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: cloud,
+                    backends: ProcessingBackends(
+                        transcription: { _, _ in local },
+                        diarization: { _, model in
+                            OpenAIDiarizationBackend(backend: cloud, model: model)
+                        }
+                    ),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { settings },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let transcript = try meeting.store.readCanonicalTranscript()
+                let text = (transcript?.utterances ?? []).map(\.text).joined(separator: " ")
+                expect.isTrue(
+                    text.contains("local words"),
+                    "the words come from the transcription backend the user chose"
+                )
+                expect.isFalse(
+                    text.contains("CLOUD WORDS"),
+                    "and the diarizer's copy of them is not assembled a second time"
+                )
+                // The labels it was asked for are still used.
+                let runs = try meeting.store.readRawDiarization()
+                expect.isFalse(runs.runs.isEmpty, "the cloud labels still produce a run")
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

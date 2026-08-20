@@ -292,7 +292,13 @@ public actor ProcessingPipeline {
 
         var tracks: [CaptureTrack] = []
         if metadata.source.micTrackIsLocalUser { tracks.append(.mic) }
-        if !diarizer.producesTranscript {
+        // The cloud diarizer transcribes as it diarizes, so its words serve when
+        // it is also the transcription backend. They must not serve when the
+        // user chose to transcribe on this Mac: taking them would mean the far
+        // end's audio is transcribed in the cloud regardless of that choice, and
+        // an imported recording, whose only track is the diarized one, would not
+        // be transcribed locally at all.
+        if !diarizer.producesTranscript || transcriber.isLocal {
             let track = diarizedTrack(metadata)
             if !tracks.contains(track) { tracks.append(track) }
         }
@@ -404,9 +410,16 @@ public actor ProcessingPipeline {
         segments: [RecordedSegment],
         backend: any DiarizationBackend
     ) async throws {
+        // Words already on this track came from the transcription backend, so
+        // these chunks are here for the labels alone and must not be assembled
+        // as a second copy of the transcript.
+        let existing = try store.readRawTranscript()
+        let purpose: RawChunkPurpose =
+            existing.chunks(track: track, purpose: .words).isEmpty ? .words : .speakers
+
         try await runChunks(
             store: store, metadata: &metadata, track: track, segments: segments,
-            model: backend.identifier
+            model: backend.identifier, purpose: purpose
         ) { url, _ in
             let output = try await backend.diarize(audio: url, progress: { _ in })
             return TranscriptionOutput(
@@ -417,7 +430,7 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscript()
         var intervals: [DiarizationInterval] = []
         var speech: [String: Double] = [:]
-        for chunk in raw.chunks(track: track) {
+        for chunk in raw.chunks(track: track, purpose: purpose) {
             for segment in chunk.segments {
                 guard let speaker = segment.speaker else { continue }
                 // Namespaced the same way the transcript's own keys are, so the
@@ -572,6 +585,7 @@ public actor ProcessingPipeline {
         track: CaptureTrack,
         segments: [RecordedSegment],
         model: String,
+        purpose: RawChunkPurpose = .words,
         send: @Sendable @escaping (URL, String) async throws -> TranscriptionOutput
     ) async throws {
         let exporter = ChunkExporter()
@@ -654,7 +668,8 @@ public actor ProcessingPipeline {
                     responseFormat: response.segments.contains { $0.speaker != nil }
                         ? "diarized_json" : "verbose_json",
                     segments: response.segments,
-                    rawResponseFile: response.rawBody == nil ? nil : "api/\(chunk.chunkID).json"
+                    rawResponseFile: response.rawBody == nil ? nil : "api/\(chunk.chunkID).json",
+                    purpose: purpose
                 ))
                 try store.writeRawTranscript(raw)
                 report(metadata, chunks: (raw.chunks(track: track).count, plans.count))

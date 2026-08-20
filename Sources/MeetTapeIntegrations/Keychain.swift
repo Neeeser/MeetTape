@@ -21,7 +21,18 @@ public struct KeychainAPIKeyStore: APIKeyProviding, Sendable {
         return key
     }
 
-    public var hasKey: Bool { read()?.isEmpty == false }
+    /// Whether an item is stored, asked without requesting its value.
+    ///
+    /// Reading the value prompts for the login keychain password whenever the
+    /// binary's signature has changed, and the settings panel asks this on
+    /// every refresh: a local-only user who has never configured a key was
+    /// stopped by a password prompt with the whole window behind it. Existence
+    /// is a metadata query, which does not prompt.
+    public var hasKey: Bool {
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query(returningData: false) as CFDictionary, &result)
+            == errSecSuccess
+    }
 
     /// Whether the keychain positively says there is no key.
     ///

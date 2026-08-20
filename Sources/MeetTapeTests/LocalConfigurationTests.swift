@@ -1,4 +1,5 @@
 import Foundation
+import FluidAudio
 import MeetTapeCore
 import MeetTapeLocalAI
 import MeetTapeSpeakers
@@ -12,6 +13,30 @@ import TestKit
 enum LocalConfigurationTests {
     static var configurationSuite: Suite {
         Suite("LocalConfiguration", [
+            test("a meeting where nobody spoke is empty, not failed") { expect in
+                // FluidAudio raises noSpeechDetected rather than returning zero
+                // turns. Passed on as an error it failed the meeting, so a
+                // recording that captured exactly what happened was filed as
+                // needing attention with no transcript, markdown or mixdown.
+                let empty = LocalModelManager.silentMeeting(
+                    OfflineDiarizationError.noSpeechDetected, speakerCount: nil
+                )
+                let output = try expect.unwrap(empty)
+                expect.isTrue(output.intervals.isEmpty)
+                expect.isTrue(output.clusters.isEmpty)
+                expect.isTrue(
+                    output.configuration["warmStartFa"] != nil,
+                    "and still records how it was diarized"
+                )
+
+                // Everything else is still a failure.
+                expect.isTrue(
+                    LocalModelManager.silentMeeting(
+                        OfflineDiarizationError.modelNotLoaded("segmentation"), speakerCount: nil
+                    ) == nil
+                )
+            },
+
             test("the diarizer runs with the tuned acoustic scaling, not the library default") { expect in
                 // 0.07 finds 8 speakers where there are 17 and leaves 35.4% of
                 // reference speakers without a cluster. 0.20 improves DER, JER,

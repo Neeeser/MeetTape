@@ -101,7 +101,14 @@ extension LocalModelManager {
         let result: DiarizationResult
         if let cacheKey, let cached = preparedDiarization(for: cacheKey) {
             progress(0.9)
-            result = try manager.cluster(cached)
+            do {
+                result = try manager.cluster(cached)
+            } catch {
+                guard let empty = Self.silentMeeting(error, speakerCount: speakerCount)
+                else { throw error }
+                progress(1)
+                return empty
+            }
         } else {
             let factory = AudioSourceFactory()
             let (source, loadSeconds) = try factory.makeDiskBackedSource(
@@ -115,7 +122,17 @@ extension LocalModelManager {
                     progress(min(0.9, Double(done) / Double(total) * 0.9))
                 }
             )
-            result = try manager.cluster(prepared)
+            do {
+                result = try manager.cluster(prepared)
+            } catch {
+                guard let empty = Self.silentMeeting(error, speakerCount: speakerCount) else {
+                    if cacheKey == nil { source.cleanup() }
+                    throw error
+                }
+                if cacheKey == nil { source.cleanup() }
+                progress(1)
+                return empty
+            }
             if let cacheKey {
                 cachePreparedDiarization(prepared, source: source, for: cacheKey)
             } else {
@@ -124,6 +141,20 @@ extension LocalModelManager {
         }
         progress(1)
         return Self.output(from: result, configuration: Self.diarizerProvenance(speakerCount: speakerCount))
+    }
+
+    /// A diarizer that found no speech has not failed.
+    ///
+    /// A recording where nobody spoke holds no speaker turns, which is an
+    /// answer. Raised as an error it failed the meeting: the transcript,
+    /// the markdown and the mixdown were never written, and a recording that
+    /// captured exactly what happened was filed as needing attention.
+    public static func silentMeeting(_ error: any Error, speakerCount: Int?) -> DiarizationOutput? {
+        guard case OfflineDiarizationError.noSpeechDetected = error else { return nil }
+        return DiarizationOutput(
+            intervals: [], clusters: [],
+            configuration: diarizerProvenance(speakerCount: speakerCount)
+        )
     }
 
     /// Re-clusters a meeting already prepared in this session.
@@ -137,7 +168,14 @@ extension LocalModelManager {
         let models = try await loadedDiarizerModels()
         let manager = OfflineDiarizerManager(config: Self.diarizerConfiguration(speakerCount: speakerCount))
         manager.initialize(models: models)
-        let result = try manager.cluster(cached)
+        let result: DiarizationResult
+        do {
+            result = try manager.cluster(cached)
+        } catch {
+            guard let empty = Self.silentMeeting(error, speakerCount: speakerCount)
+            else { throw error }
+            return empty
+        }
         return Self.output(
             from: result, configuration: Self.diarizerProvenance(speakerCount: speakerCount)
         )

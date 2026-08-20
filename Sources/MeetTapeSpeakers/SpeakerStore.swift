@@ -565,6 +565,56 @@ public actor SpeakerStore {
         return affected
     }
 
+    /// Takes back everything one track of one meeting taught.
+    ///
+    /// For the case where the claim a whole track rests on is withdrawn rather
+    /// than a stretch of it reassigned: the microphone track of a remote call is
+    /// enrolled as the local user by construction, and a person saying it was
+    /// somebody else withdraws that construction for that recording. There are
+    /// no spans to name, because the unit is the track.
+    @discardableResult
+    public func retractTrack(
+        meetingID: String, track: CaptureTrack, now: Date = Date()
+    ) throws -> [IdentityID] {
+        var embeddings: [Int64] = []
+        var pending: [Int64] = []
+        var owners: [Int64] = []
+        try database.query(
+            """
+            SELECT e.voice_embedding_id, e.pending_enrollment_id,
+                   COALESCE(v.identity_id, p.identity_id)
+            FROM voice_evidence e
+            LEFT JOIN voice_embedding v ON v.id = e.voice_embedding_id
+            LEFT JOIN pending_enrollment p ON p.id = e.pending_enrollment_id
+            WHERE e.meeting_id = ? AND e.track = ?
+            """,
+            [.text(meetingID), .text(track.rawValue)]
+        ) { row in
+            guard let owner = row.optionalInt64(2) else { return }
+            if let id = row.optionalInt64(0) { embeddings.append(id) }
+            if let id = row.optionalInt64(1) { pending.append(id) }
+            owners.append(owner)
+        }
+        guard !embeddings.isEmpty || !pending.isEmpty else { return [] }
+        try database.transaction {
+            for (table, ids) in [("voice_embedding", embeddings), ("pending_enrollment", pending)]
+            where !ids.isEmpty {
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                try database.run(
+                    "DELETE FROM \(table) WHERE id IN (\(placeholders))",
+                    ids.map { SQLValue.int64($0) }
+                )
+            }
+        }
+        var affected: [IdentityID] = []
+        for owner in owners {
+            let current = try currentID(IdentityID(owner))
+            if !affected.contains(current) { affected.append(current) }
+        }
+        for identity in affected { try recomputeProfiles(for: identity, now: now) }
+        return affected
+    }
+
     private struct ContradictedRow {
         var evidenceID: Int64
         var embeddingID: Int64?

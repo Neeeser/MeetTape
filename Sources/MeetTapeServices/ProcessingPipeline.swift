@@ -1312,6 +1312,13 @@ public actor ProcessingPipeline {
         try found.store.writeSpeakerMap(speakers)
         try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
 
+        // The microphone track has no diarization cluster, because its speaker is
+        // true by construction. Saying it is somebody else withdraws that
+        // construction for this meeting, and the vector it produced claims to be
+        // the local user's own voice: the one profile no person ever reviews.
+        if key == SpeakerLabel.localUser, resolved != settings.processing.localUserIdentityID {
+            try await retractMicrophoneTrack(meetingID: meetingID)
+        }
         if let resolved {
             try await confirmCluster(
                 meetingID: meetingID, clusterID: key, identityID: resolved, settings: settings
@@ -1326,6 +1333,17 @@ public actor ProcessingPipeline {
             try await retractCluster(meetingID: meetingID, clusterID: key)
         }
         return resolved
+    }
+
+    /// Takes back everything the microphone track taught, for one meeting.
+    ///
+    /// The whole track, because that is the unit the deterministic enrolment
+    /// covers: it is stored on the claim that this track is the local user, and
+    /// the user has just said it is not.
+    private func retractMicrophoneTrack(meetingID: String) async throws {
+        guard let service = backends.speakers else { return }
+        let store = await service.speakerStore
+        _ = try await store.retractTrack(meetingID: meetingID, track: .mic, now: clock.now)
     }
 
     /// Undoes a confirmation: the vector it produced, and the link it wrote.

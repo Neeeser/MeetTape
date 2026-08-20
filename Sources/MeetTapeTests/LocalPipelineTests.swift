@@ -900,6 +900,54 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("saying the microphone was somebody else takes back what it taught") { expect in
+                // The microphone track has no diarization cluster, so nothing
+                // reached the vector it produced. That vector claims to be the
+                // local user's own voice, which is the one profile no person ever
+                // reviews, and it was learned on a claim the user has just
+                // withdrawn.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: me.id, vector: SpeakerIdentityTests.vector(seed: 99),
+                    model: .fluidAudioOffline, speechSeconds: 200, qualityScore: 1,
+                    source: .micTrackDeterministic,
+                    evidence: [VoiceEvidence(
+                        meetingID: meeting.metadata.id, track: .mic,
+                        spans: [AudioSpan(start: 0, end: 200)],
+                        confirmation: .micTrackDeterministic
+                    )]
+                ))
+                expect.equal(
+                    try await store.profileStatus(of: me.id, model: .fluidAudioOffline).sampleCount,
+                    1
+                )
+
+                var settings = AppSettings()
+                settings.processing.localUserIdentityID = me.id
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                _ = try await pipeline.applySpeakerName(
+                    "Priya", to: SpeakerLabel.localUser, meetingID: meeting.metadata.id
+                )
+                expect.equal(
+                    try await store.profileStatus(of: me.id, model: .fluidAudioOffline).sampleCount,
+                    0,
+                    "the microphone was not you, so it taught your profile nothing"
+                )
+            },
+
             test("switching backend and retrying does not transcribe the track twice") { expect in
                 // A cloud run failed after writing its chunks. The user switches
                 // transcription to Local and retries, which resumes at this

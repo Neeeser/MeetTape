@@ -334,8 +334,43 @@ enum SpeakerIdentityTests {
                     meetingID: "m1", identityID: me.id, vector: vector(seed: 11),
                     speechSeconds: 240, quality: 1
                 )
-                expect.equal(status.sampleCount, 1)
+                expect.equal(status?.sampleCount, 1)
                 expect.equal(try await store.localUser()?.id, me.id)
+            },
+
+            test("the microphone track refuses a voice heard on this call's other track") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                // The far end, already diarized on the remote track.
+                let presenter = vector(seed: 77)
+                try await store.recordOccurrence(
+                    meetingID: "m1", clusterID: "remote-001_speaker_00", track: .remote,
+                    speechSeconds: 1_800, embedding: presenter, model: .fluidAudioOffline,
+                    resolution: nil, identityID: nil, source: .ai,
+                    humanVerified: false, wasExpectedParticipant: false
+                )
+
+                // Echo cancellation was unavailable and the user was listening,
+                // so the presenter dominates the microphone track too.
+                let declined = try await service.learnLocalUserVoice(
+                    meetingID: "m1", identityID: me.id, vector: presenter,
+                    speechSeconds: 1_800, quality: 1
+                )
+                expect.isNil(declined, "bleed is not the person holding the microphone")
+                expect.isTrue(
+                    try await store.searchableProfiles(model: .fluidAudioOffline).isEmpty,
+                    "and nothing reached the one profile no person ever confirms"
+                )
+
+                // A different voice on the same call still enrols.
+                let mine = try await service.learnLocalUserVoice(
+                    meetingID: "m1", identityID: me.id, vector: vector(seed: 12),
+                    speechSeconds: 240, quality: 1
+                )
+                expect.equal(mine?.sampleCount, 1)
             },
 
             test("naming a recurring voice keeps its history and its profile") { expect in

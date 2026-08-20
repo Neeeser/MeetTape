@@ -331,7 +331,26 @@ public actor SpeakerRecognitionService {
         quality: Double,
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
-    ) async throws -> VoiceProfileStatus {
+    ) async throws -> VoiceProfileStatus? {
+        // The microphone track is the local user only when it holds the local
+        // user. Echo cancellation is disabled on some device pairings and falls
+        // back to plain capture, so on speakers the far end reaches the
+        // microphone too, and a listener in a long presentation is not the
+        // dominant voice on their own track. Dominance alone would then enrol
+        // the presenter here, human-verified, into the one profile no person
+        // ever confirms.
+        //
+        // Anything on this meeting's other track is by construction not the
+        // local user, so a strong match against one is bleed.
+        if let bleed = try await matchesAnotherTrack(
+            meetingID: meetingID, vector: vector, model: model
+        ) {
+            Log.processing.notice(
+                "mic track not enrolled: matches this meeting's \(bleed.track.rawValue, privacy: .public) cluster at \(String(format: "%.2f", bleed.score), privacy: .public)"
+            )
+            return nil
+        }
+
         _ = try await store.enrol(
             VoiceEnrollmentCandidate(
                 identityID: identityID,
@@ -345,6 +364,29 @@ public actor SpeakerRecognitionService {
             now: now
         )
         return try await store.profileStatus(of: identityID, model: model)
+    }
+
+    /// The closest cluster on a track other than the microphone, when it is
+    /// close enough to be the same voice.
+    ///
+    /// Scored at the same bar that links a voice to one already remembered: the
+    /// question is identical, and answering it more loosely here would let bleed
+    /// through into a profile nothing later corrects.
+    private func matchesAnotherTrack(
+        meetingID: String, vector: [Float], model: EmbeddingModelIdentifier
+    ) async throws -> (track: CaptureTrack, score: Double)? {
+        let probe = VoiceVector.l2Normalized(vector)
+        var closest: (track: CaptureTrack, score: Double)?
+        for occurrence in try await store.occurrences(meetingID: meetingID) where occurrence.track != .mic {
+            guard let other = try await store.occurrenceEmbedding(
+                meetingID: meetingID, clusterID: occurrence.clusterID, model: model
+            ) else { continue }
+            let score = VoiceVector.cosine(probe, other)
+            if score >= policy.anonymousLinkScore, score > (closest?.score ?? 0) {
+                closest = (occurrence.track, score)
+            }
+        }
+        return closest
     }
 
     /// Whether the local user's profile still wants material from this meeting.

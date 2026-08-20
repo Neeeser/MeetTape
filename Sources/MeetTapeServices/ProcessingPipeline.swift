@@ -880,10 +880,13 @@ public actor ProcessingPipeline {
         ) else { return }
 
         guard let sample = try await embed(audio) else { return }
-        let status = try await service.learnLocalUserVoice(
+        // Declined when the microphone track's dominant voice is somebody else
+        // on this call. Not a failure: the meeting is fine, the profile simply
+        // learns nothing from it.
+        guard let status = try await service.learnLocalUserVoice(
             meetingID: metadata.id, identityID: identityID, vector: sample.vector,
             speechSeconds: sample.speechSeconds, quality: sample.quality, now: clock.now
-        )
+        ) else { return }
         Log.processing.info(
             "local voice profile: \(status.recordingCount, privacy: .public) recordings, \(status.sampleCount, privacy: .public) samples"
         )

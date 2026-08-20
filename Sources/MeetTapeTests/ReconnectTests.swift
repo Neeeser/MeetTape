@@ -1,6 +1,7 @@
 import Foundation
 import MeetTapeCore
 import MeetTapeServices
+import MeetTapeSpeakers
 import MeetTapeUI
 import TestKit
 
@@ -171,6 +172,58 @@ enum ReconnectTests {
                 expect.isTrue(
                     ((try? reopened.store.readCanonicalTranscript()) ?? nil)?.utterances
                         .contains { $0.text == "after the rejoin" } ?? false
+                )
+            },
+
+            test("a correction on the second half reaches the second half") { expect in
+                // The panel shows both halves as one transcript, so a correction
+                // on a line from the continuation is routed to that recording.
+                // Every lookup by identifier hid folded recordings, so the write
+                // threw and the panel showed a change nothing had stored.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let (repository, first, second) = try makeSplitMeeting(root: root)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let pipeline = ProcessingPipeline(
+                    repository: repository,
+                    backend: FakeAIBackend(),
+                    backends: ProcessingBackends(
+                        transcription: { _, _ in StubLocalTranscriber(segments: []) },
+                        diarization: { _, _ in
+                            StubLocalDiarizer(intervals: [], chunkEmbeddings: [])
+                        },
+                        speakers: SpeakerRecognitionService(store: store)
+                    ),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { AppSettings() },
+                    wait: { _ in }
+                )
+
+                _ = try await pipeline.applyUtteranceSpeaker(
+                    "Dana", utteranceID: "b1", meetingID: second
+                )
+
+                let continuation = try expect.unwrap(
+                    repository.findMeeting(id: second, includingMerged: true)
+                )
+                let map = try continuation.store.readSpeakerMap()
+                expect.equal(
+                    map.utteranceOverrides.first?.assignment.displayName, "Dana",
+                    "the correction is stored on the recording the line came from"
+                )
+                let earlier = try expect.unwrap(repository.findMeeting(id: first))
+                expect.isTrue(
+                    try earlier.store.readSpeakerMap().utteranceOverrides.isEmpty,
+                    "and not on the other half, which holds different audio"
+                )
+
+                // And it is what the combined view now shows.
+                let logical = try expect.unwrap(repository.logicalMeeting(id: second))
+                expect.equal(
+                    logical.combinedTranscript().last?.speakerName, "Dana"
                 )
             },
 

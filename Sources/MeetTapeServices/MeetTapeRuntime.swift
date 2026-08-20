@@ -566,7 +566,7 @@ public final class MeetTapeRuntime {
 
     /// A human title always wins over every other candidate.
     public func saveTitle(_ title: String, meetingID: String) {
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         do {
             _ = try found.store.updateMetadata { $0.titles.human = title.isEmpty ? nil : title }
         } catch {
@@ -576,12 +576,12 @@ public final class MeetTapeRuntime {
     }
 
     public func saveNotes(_ notes: String, meetingID: String) {
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         try? found.store.writeNotes(notes)
     }
 
     public func revealInFinder(meetingID: String) {
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([found.store.layout.root])
     }
 

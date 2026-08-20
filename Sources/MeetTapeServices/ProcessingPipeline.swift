@@ -1226,7 +1226,7 @@ public actor ProcessingPipeline {
     /// re-renders the Markdown. Makes no API call. Used after an assembly
     /// improvement, so a meeting processed under the old rules picks them up.
     public func rebuildTranscript(meetingID: String) throws {
-        guard let found = repository.findMeeting(id: meetingID) else {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         let raw = try found.store.readRawTranscript()
@@ -1268,7 +1268,7 @@ public actor ProcessingPipeline {
     public func applySpeakerName(
         _ name: String, to key: String, meetingID: String, identityID: IdentityID? = nil
     ) async throws -> IdentityID? {
-        guard let found = repository.findMeeting(id: meetingID) else {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         let settings = settingsProvider()
@@ -1372,7 +1372,7 @@ public actor ProcessingPipeline {
     private func correctUtterances(
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID?
     ) async throws -> IdentityID? {
-        guard let found = repository.findMeeting(id: meetingID) else {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let transcript = try found.store.readCanonicalTranscript() else {
@@ -1519,7 +1519,7 @@ public actor ProcessingPipeline {
     /// 60-minute meeting instead of about fifteen. The previous result stays on
     /// disk, marked inactive, so the change can be undone.
     public func reanalyzeSpeakers(meetingID: String, speakerCount: Int?) async throws {
-        guard let found = repository.findMeeting(id: meetingID) else {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
@@ -1597,7 +1597,7 @@ public actor ProcessingPipeline {
     /// Re-runs identity resolution alone, after the expected-participant list
     /// changed. Cheap: no audio is read and nothing is transcribed.
     public func refreshSpeakerIdentities(meetingID: String) async throws {
-        guard let found = repository.findMeeting(id: meetingID) else {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         // Where a cloud diarizer left no vectors this reads a whole track and
@@ -1823,7 +1823,12 @@ public actor ProcessingPipeline {
         // meetings were visited and then skipped for not matching.
         let family = try await store.family(of: identityID)
         for meetingID in try await store.meetingsReferencing(identityID) {
-            guard let found = repository.findMeeting(id: meetingID) else { continue }
+                // Including a folded continuation. It is a real recording holding
+            // real lines, so a rename that skipped it left the second half of a
+            // dropped call showing a name nobody uses any more.
+            guard let found = repository.findMeeting(
+                id: meetingID, includingMerged: true
+            ) else { continue }
             var speakers = try found.store.readSpeakerMap()
             // Only the cached name is rewritten. The identity link stays as it
             // was written, because reads resolve through the merge tombstone

@@ -283,7 +283,7 @@ extension MeetTapeRuntime {
 
     /// Every speaker in one meeting, with how it was decided.
     public func speakers(inMeeting meetingID: String) async -> [MeetingSpeakerRow] {
-        guard let found = repository.findMeeting(id: meetingID),
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
               let transcript = try? found.store.readCanonicalTranscript(),
               let map = try? found.store.readSpeakerMap()
         else { return [] }
@@ -403,7 +403,7 @@ extension MeetTapeRuntime {
     public func setExpectedParticipants(
         _ names: [String], meetingID: String
     ) async {
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         var linked: [Participant] = []
         for name in names {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

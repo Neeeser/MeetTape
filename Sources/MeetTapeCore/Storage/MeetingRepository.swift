@@ -348,9 +348,7 @@ public struct MeetingRepository: Sendable {
         // recording's own metadata when the two were linked: that made undoing
         // the link a subtraction, and a subtraction that goes wrong reports a
         // duration no file supports.
-        let continuations = metadata.absorbedMeetingIDs.compactMap {
-            findMeeting(id: $0, includingMerged: true)
-        }
+        let continuations = logicalMeeting(id: metadata.id)?.continuations ?? []
         return MeetingSummary(
             id: metadata.id,
             directory: directory,
@@ -382,9 +380,22 @@ public struct MeetingRepository: Sendable {
             found = parent
         }
         let primary = RecordedMeeting(metadata: found.metadata, store: found.store)
-        let continuations = found.metadata.absorbedMeetingIDs
-            .compactMap { findMeeting(id: $0, includingMerged: true) }
-            .map { RecordedMeeting(metadata: $0.metadata, store: $0.store) }
+        // Collected transitively. `combine` resolves its target through this
+        // function, so a chain cannot form now, but reading only one level meant
+        // any chain that already existed hid its last recording completely,
+        // which is the failure this whole path exists to prevent.
+        var continuations: [RecordedMeeting] = []
+        var seen: Set<String> = [found.metadata.id]
+        var frontier = found.metadata.absorbedMeetingIDs
+        while let next = frontier.popLast(), seen.count < 64 {
+            guard seen.insert(next).inserted,
+                  let child = findMeeting(id: next, includingMerged: true)
+            else { continue }
+            continuations.append(
+                RecordedMeeting(metadata: child.metadata, store: child.store)
+            )
+            frontier.append(contentsOf: child.metadata.absorbedMeetingIDs)
+        }
         return LogicalMeeting(primary: primary, continuations: continuations)
     }
 

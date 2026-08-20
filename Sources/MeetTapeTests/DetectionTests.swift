@@ -133,6 +133,36 @@ enum DetectionTests {
                 let preview = try expect.unwrap(SlackWindowTitle.parse("Slack - Huddle Preview"))
                 expect.isTrue(preview.isHuddlePreview)
             },
+
+            test("a title with no conversation in it names nothing") { expect in
+                // Slack publishes "- Hindsight - Slack" while a conversation is
+                // loading. Read as a name it became the meeting's title, and a
+                // huddle was filed and announced as "- Hindsight".
+                expect.isTrue(
+                    SlackWindowTitle.parse("- Hindsight - Slack") == nil,
+                    "a leading separator is not a conversation name"
+                )
+                expect.isTrue(SlackWindowTitle.parse(" (DM) - Hindsight - Slack") == nil)
+                expect.isTrue(SlackWindowTitle.parse("Hindsight - Slack")?.conversation == "Hindsight")
+
+                // And the last real name survives the moment the title is empty.
+                var detector = SlackHuddleDetector()
+                _ = detector.update(
+                    observation: SlackAccessibilityObservation(
+                        hasLeaveHuddleControl: true, subtreeWasEmpty: false, isMuted: false,
+                        windowTitle: "andrew.neeser595 (DM) - Hindsight - Slack"
+                    ),
+                    helperHoldsMicrophone: true, helperProducingOutput: false, at: 100
+                )
+                _ = detector.update(
+                    observation: SlackAccessibilityObservation(
+                        hasLeaveHuddleControl: true, subtreeWasEmpty: false, isMuted: false,
+                        windowTitle: "- Hindsight - Slack"
+                    ),
+                    helperHoldsMicrophone: true, helperProducingOutput: false, at: 101
+                )
+                expect.equal(detector.conversationTitle, "andrew.neeser595")
+            },
         ])
     }
 

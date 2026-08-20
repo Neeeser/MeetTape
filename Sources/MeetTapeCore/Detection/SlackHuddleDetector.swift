@@ -263,6 +263,8 @@ public enum SlackWindowTitle {
         }
     }
 
+    private static let separators = CharacterSet(charactersIn: " -\u{2013}\u{2014}|\u{00B7}")
+
     public static func parse(_ title: String) -> Parsed? {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
@@ -290,6 +292,14 @@ public enum SlackWindowTitle {
             conversation = String(conversationPart[conversationPart.startIndex..<open])
                 .trimmingCharacters(in: .whitespaces)
         }
+        // Slack publishes "- Hindsight - Slack" while a conversation loads, and
+        // " (DM) - ..." between conversations. Both parse to a name made only of
+        // separators, which was then filed and announced as the meeting's title.
+        // Naming nothing lets the last real conversation stand.
+        let name = conversation.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty,
+              let first = name.unicodeScalars.first, !Self.separators.contains(first)
+        else { return nil }
         return Parsed(
             conversation: conversation, kind: kind, workspace: workspace, isHuddlePreview: false
         )

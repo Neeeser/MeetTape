@@ -1946,7 +1946,13 @@ public actor ProcessingPipeline {
             )
         }
         // Still unknown, and not from the cloud client, which raises
-        // ProcessingError for everything it can categorise.
+        // ProcessingError for everything it can categorise. The message that
+        // reaches the user cannot name a cause, so the one thing that can is
+        // written to the log: without it a failed meeting says only that it
+        // failed, and there is nothing to work from.
+        Log.processing.error(
+            "unrecognised processing failure: \(logSafeDescription(error), privacy: .public)"
+        )
         return .localProcessingFailed(
             reason: "Processing this meeting on this Mac failed.", retryable: true
         )

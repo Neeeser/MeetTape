@@ -204,6 +204,43 @@ enum CaptureRecoveryTests {
                 )
             },
 
+            test("a voice unit that delivers nothing falls back to plain capture") { expect in
+                // Measured on a Mac whose default output was an 8-channel virtual
+                // device: the voice-processing unit built without error, reported a
+                // one-channel format, delivered 0.09 s of audio and then nothing,
+                // and each rebuild produced another configuration change. 119
+                // rebuilds in four minutes, a microphone track holding 0.09 s, and
+                // a meeting that failed in diarization.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+
+                for _ in 0..<40 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    // Only plain capture produces buffers on this pairing.
+                    if engine.isVoiceProcessingSuppressed {
+                        coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                    }
+                }
+
+                expect.isTrue(
+                    engine.isVoiceProcessingSuppressed,
+                    "echo cancellation must be given up on when it records nothing"
+                )
+                expect.equal(
+                    coordinator.health, .healthy,
+                    "and the microphone recovers instead of reconnecting forever"
+                )
+                expect.isTrue(
+                    coordinator.restartCount <= 5,
+                    "rebuilding into the same broken unit is the storm: got \(coordinator.restartCount)"
+                )
+            },
+
             test("wake rebuilds proactively after the settle delay") { expect in
                 let engine = FakeMicrophoneEngine()
                 let clock = ManualClock()

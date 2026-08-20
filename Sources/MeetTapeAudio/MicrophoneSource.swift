@@ -13,6 +13,8 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     private struct State {
         var engine: AVAudioEngine?
         var observer: NSObjectProtocol?
+        /// Set when the coordinator gives up on the voice unit for this session.
+        var voiceProcessingSuppressed = false
     }
 
     private let state = LockedBox(State())
@@ -89,7 +91,7 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         // some input/output pairings (a virtual output device, AirPods input
         // with built-in output), so a failed attempt falls back to plain
         // capture rather than costing the meeting.
-        if voiceProcessingWanted() {
+        if voiceProcessingWanted(), !state.withLock({ $0.voiceProcessingSuppressed }) {
             do {
                 return try build(voiceProcessing: true)
             } catch {
@@ -146,6 +148,21 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         return AudioFormatDescriptor(
             sampleRate: tapFormat.sampleRate, channelCount: Int(tapFormat.channelCount)
         )
+    }
+
+    /// Gives up on echo cancellation, or asks for it again.
+    ///
+    /// The voice unit builds successfully on pairings where it then delivers no
+    /// buffers at all, so refusing to build is not the only way it fails and a
+    /// build-time check cannot see this one.
+    public func setVoiceProcessingSuppressed(_ suppressed: Bool) {
+        let changed = state.withLock { state -> Bool in
+            guard state.voiceProcessingSuppressed != suppressed else { return false }
+            state.voiceProcessingSuppressed = suppressed
+            return true
+        }
+        guard changed, suppressed else { return }
+        Log.capture.notice("giving up on echo cancellation: the voice unit recorded nothing")
     }
 
     /// The format the engine is actually running at, which is what segments are

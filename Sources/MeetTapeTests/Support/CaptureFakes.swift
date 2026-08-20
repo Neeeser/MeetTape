@@ -20,6 +20,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var formatReads = 0
         var installedFormat: AudioFormatDescriptor?
         var failEveryBuild: CaptureError?
+        var voiceProcessingSuppressed = false
     }
 
     private let state = Mutex(State())
@@ -29,6 +30,11 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     var teardownCount: Int { state.withLock { $0.teardowns } }
     var isRunning: Bool { state.withLock { $0.running } }
     var formatReads: Int { state.withLock { $0.formatReads } }
+    var isVoiceProcessingSuppressed: Bool { state.withLock { $0.voiceProcessingSuppressed } }
+
+    func setVoiceProcessingSuppressed(_ suppressed: Bool) {
+        state.withLock { $0.voiceProcessingSuppressed = suppressed }
+    }
 
     /// Sets the device reading returned once capture settles.
     func setSteadyFormat(_ format: AudioFormatDescriptor?) {

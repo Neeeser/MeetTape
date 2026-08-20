@@ -49,9 +49,16 @@ extension LocalModelManager {
         var options = DecodingOptions()
         options.skipSpecialTokens = LocalTranscriptionTuning.skipSpecialTokens
         options.wordTimestamps = LocalTranscriptionTuning.wordTimestamps
-        options.chunkingStrategy = nil
+        // Read from the tuning rather than written as literals, so the tests
+        // that assert these values fail when the decoder stops honouring them.
+        // VAD chunking was 15% faster over 65 minutes and dropped 231 of 9278
+        // words, one segment starting before the one before it. Prompting
+        // improves punctuation and collapses word timings: 198 distinct word
+        // starts became 153, 43 of them zero-length, and attribution consumes
+        // those timings.
+        options.chunkingStrategy = LocalTranscriptionTuning.usesVADChunking ? .vad : nil
         options.promptTokens = nil
-        options.usePrefillPrompt = false
+        options.usePrefillPrompt = LocalTranscriptionTuning.usesPromptConditioning
         options.detectLanguage = true
         options.verbose = false
 

@@ -253,8 +253,13 @@ public struct MeetingReviewView: View {
             Button("Run") { model.reanalyzeSpeakers() }
                 .disabled(!model.canReanalyze)
             if model.isReanalyzing { ProgressView().controlSize(.small) }
-            Text("Leave the count empty to let MeetTape decide. The words are not re-transcribed.")
-                .font(.caption2).foregroundStyle(.secondary)
+            Text(
+                model.localModelsReady
+                    ? "Leave the count empty to let MeetTape decide. The words are not "
+                        + "re-transcribed."
+                    : "Runs on this Mac. Download the speech models in Settings to use it."
+            )
+            .font(.caption2).foregroundStyle(.secondary)
         }
     }
 

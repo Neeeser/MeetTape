@@ -196,16 +196,18 @@ public final class MeetTapeRuntime {
             backend: cloud,
             backends: ProcessingBackends(
                 transcription: { settings, model in
-                    if settings.processing.usesLocalTranscription {
-                        return WhisperTranscriptionBackend(models: modelManager)
-                    }
-                    return OpenAITranscriptionBackend(backend: cloud, model: model)
+                    ProcessingBackends.transcriptionBackend(
+                        settings: settings, model: model,
+                        local: { WhisperTranscriptionBackend(models: modelManager) },
+                        cloud: { OpenAITranscriptionBackend(backend: cloud, model: $0) }
+                    )
                 },
                 diarization: { settings, model in
-                    if settings.processing.usesLocalDiarization {
-                        return FluidAudioDiarizationBackend(models: modelManager)
-                    }
-                    return OpenAIDiarizationBackend(backend: cloud, model: model)
+                    ProcessingBackends.diarizationBackend(
+                        settings: settings, model: model,
+                        local: { FluidAudioDiarizationBackend(models: modelManager) },
+                        cloud: { OpenAIDiarizationBackend(backend: cloud, model: $0) }
+                    )
                 },
                 embeddings: FluidAudioEmbeddingExtractor(models: modelManager),
                 speakers: recognition,

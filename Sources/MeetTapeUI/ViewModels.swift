@@ -521,12 +521,22 @@ public final class MeetingReviewModel {
         return Int(trimmed)
     }
 
-    public var canReanalyze: Bool {
-        if isReanalyzing { return false }
+    /// Re-analysis runs the on-device diarizer whatever the meeting was
+    /// processed with, so it needs the models. Without this the Run button
+    /// started a 650 MB download from a control that says nothing about one.
+    public var localModelsReady: Bool { runtime.localModelState.isUsable }
+
+    /// Whether the typed count is one a clusterer can act on. Empty is valid
+    /// and means decide automatically.
+    public var hasValidReanalyzeCount: Bool {
         let trimmed = reanalyzeCount.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return true }
         guard let count = Int(trimmed) else { return false }
         return (1...50).contains(count)
+    }
+
+    public var canReanalyze: Bool {
+        !isReanalyzing && localModelsReady && hasValidReanalyzeCount
     }
 
     public func reanalyzeSpeakers() {

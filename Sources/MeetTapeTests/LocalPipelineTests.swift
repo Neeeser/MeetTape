@@ -269,14 +269,24 @@ enum LocalPipelineTests {
                 let files = try FileManager.default.subpathsOfDirectory(
                     atPath: meeting.store.layout.root.path
                 )
-                for file in files where file.hasSuffix(".json") {
+                // Every text file in the folder, not only *.json: manifest.jsonl
+                // is not caught by that suffix. And "vector" is the key
+                // DiarizationChunkEmbedding actually encodes, which is what the
+                // rule is about; searching only for "embedding" and "centroid"
+                // meant this test would not have caught a vector being written.
+                for file in files {
                     let url = meeting.store.layout.root.appendingPathComponent(file)
-                    let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-                    expect.isFalse(
-                        text.contains("\"embedding\""),
-                        "\(file) carries a speaker embedding into the archive"
-                    )
-                    expect.isFalse(text.contains("\"centroid\""), "\(file) carries a centroid")
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(
+                        atPath: url.path, isDirectory: &isDirectory
+                    ), !isDirectory.boolValue else { continue }
+                    guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                    for key in ["\"vector\"", "\"embedding\"", "\"centroid\"", "\"embedding256\""] {
+                        expect.isFalse(
+                            text.contains(key),
+                            "\(file) carries \(key) into the folder a user copies and shares"
+                        )
+                    }
                 }
             },
 

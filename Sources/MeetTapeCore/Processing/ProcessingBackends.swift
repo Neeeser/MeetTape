@@ -51,7 +51,11 @@ public struct TranscriptionOutput: Sendable, Equatable {
 /// is built from: a cluster's centroid over its own chunks scores far better
 /// than any single chunk, and correcting individual transcript lines needs
 /// vectors at a finer grain than the whole cluster.
-public struct DiarizationChunkEmbedding: Sendable, Equatable, Codable {
+/// Deliberately not Codable. The convention in this archive is that a Codable
+/// struct becomes a file in the meeting folder, and a meeting folder is what a
+/// user copies, syncs and shares. Nothing encoded one; withholding the
+/// conformance means nothing can without saying so.
+public struct DiarizationChunkEmbedding: Sendable, Equatable {
     public var clusterID: String
     public var start: Double
     public var end: Double

@@ -291,16 +291,64 @@ enum BackendSelectionTests {
                     )
                     for bad in ["0", "-3", "abc", "999"] {
                         model.reanalyzeCount = bad
-                        expect.isFalse(model.canReanalyze, "\(bad) is not a speaker count")
+                        expect.isFalse(model.hasValidReanalyzeCount, "\(bad) is not a speaker count")
                     }
                     for good in ["", "2", "7", "50"] {
                         model.reanalyzeCount = good
-                        expect.isTrue(model.canReanalyze, "\(good) is usable")
+                        expect.isTrue(model.hasValidReanalyzeCount, "\(good) is usable")
                     }
+                    // And the control needs the on-device models whatever the
+                    // count says, because it runs the local diarizer.
+                    model.reanalyzeCount = "3"
+                    expect.isFalse(
+                        model.canReanalyze,
+                        "Run must not start a 650 MB download from a button that says nothing about one"
+                    )
+
                     model.reanalyzeCount = ""
                     expect.isNil(
                         model.reanalyzeSpeakerCount,
                         "blank means decide automatically, which beat the true count"
+                    )
+                }
+            },
+
+            test("each setting selects its own backend, and neither the other's") { expect in
+                let cloudBackend = FakeAIBackend()
+                func transcriber(_ settings: AppSettings) -> any TranscriptionBackend {
+                    ProcessingBackends.transcriptionBackend(
+                        settings: settings, model: "gpt-4o-transcribe",
+                        local: { StubLocalTranscriber(segments: []) },
+                        cloud: { OpenAITranscriptionBackend(backend: cloudBackend, model: $0) }
+                    )
+                }
+                func diarizer(_ settings: AppSettings) -> any DiarizationBackend {
+                    ProcessingBackends.diarizationBackend(
+                        settings: settings, model: "gpt-4o-transcribe-diarize",
+                        local: {
+                            StubLocalDiarizer(intervals: [], chunkEmbeddings: [])
+                        },
+                        cloud: { OpenAIDiarizationBackend(backend: cloudBackend, model: $0) }
+                    )
+                }
+
+                // All four combinations, because the failure that matters is one
+                // setting deciding the other's backend.
+                for (transcription, diarization) in [
+                    (ProcessingBackendChoice.local, ProcessingBackendChoice.local),
+                    (.local, .openAI), (.openAI, .local), (.openAI, .openAI),
+                ] {
+                    var settings = AppSettings()
+                    settings.processing = ProcessingSettings(
+                        transcription: transcription, diarization: diarization
+                    )
+                    expect.equal(
+                        transcriber(settings).isLocal, transcription == .local,
+                        "transcription \(transcription) with diarization \(diarization)"
+                    )
+                    expect.equal(
+                        diarizer(settings).isLocal, diarization == .local,
+                        "diarization \(diarization) with transcription \(transcription)"
                     )
                 }
             },

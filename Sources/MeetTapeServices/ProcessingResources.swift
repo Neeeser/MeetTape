@@ -56,6 +56,28 @@ public struct ProcessingBackends: Sendable {
 
     /// Cloud only, which is what the pipeline did before local processing
     /// existed. Used by tests that have no interest in speakers.
+    /// Picks a transcription backend for one meeting's settings.
+    ///
+    /// Named rather than written inline at the one call site so a test can ask
+    /// it the question directly: nothing exercised the mapping, and swapping
+    /// these two branches sent every local user's audio to OpenAI with the
+    /// whole suite still green.
+    public static func transcriptionBackend(
+        settings: AppSettings, model: String,
+        local: @Sendable () -> any TranscriptionBackend,
+        cloud: @Sendable (String) -> any TranscriptionBackend
+    ) -> any TranscriptionBackend {
+        settings.processing.usesLocalTranscription ? local() : cloud(model)
+    }
+
+    public static func diarizationBackend(
+        settings: AppSettings, model: String,
+        local: @Sendable () -> any DiarizationBackend,
+        cloud: @Sendable (String) -> any DiarizationBackend
+    ) -> any DiarizationBackend {
+        settings.processing.usesLocalDiarization ? local() : cloud(model)
+    }
+
     public static func openAIOnly(_ backend: any AIBackend) -> ProcessingBackends {
         ProcessingBackends(
             transcription: { _, model in OpenAITranscriptionBackend(backend: backend, model: model) },

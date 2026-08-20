@@ -322,11 +322,36 @@ public struct MeetingRepository: Sendable {
         )
     }
 
+    /// Finds one meeting by its identifier.
+    ///
+    /// A meeting's directory is named for its identifier, so this matches on
+    /// names and decodes exactly one metadata file. It used to build the whole
+    /// summary list and filter it, which read and decoded every metadata.json in
+    /// the archive; finishing a meeting does this several times on the actor
+    /// that also arms the next recording, and applying one name to thirty
+    /// corrected lines did it thirty-one times.
     public func findMeeting(id: String) -> (metadata: MeetingMetadata, store: MeetingStore)? {
-        for summary in listMeetings() where summary.id == id {
-            let store = MeetingStore(layout: MeetingLayout(root: summary.directory))
-            guard let metadata = try? store.readMetadata() else { return nil }
-            return (metadata, store)
+        let fileManager = FileManager.default
+        guard let years = try? fileManager.contentsOfDirectory(
+            at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        for year in years where year.hasDirectoryPath {
+            guard let months = try? fileManager.contentsOfDirectory(
+                at: year, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            for month in months where month.hasDirectoryPath {
+                let candidate = month.appendingPathComponent(id, isDirectory: true)
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+                      isDirectory.boolValue
+                else { continue }
+                let store = MeetingStore(layout: MeetingLayout(root: candidate))
+                guard let metadata = try? store.readMetadata(), metadata.id == id else { continue }
+                // Matches listMeetings, which hides a meeting folded into another.
+                guard metadata.mergedIntoMeetingID == nil else { return nil }
+                return (metadata, store)
+            }
         }
         return nil
     }

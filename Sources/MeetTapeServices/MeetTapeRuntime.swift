@@ -838,6 +838,7 @@ public final class MeetTapeRuntime {
     }
 
     func apply(_ progress: ProcessingPipeline.Progress) {
+        let previous = processing[progress.meetingID]?.state
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)
             if settings.showNotifications {
@@ -846,7 +847,14 @@ public final class MeetTapeRuntime {
         } else {
             processing[progress.meetingID] = progress
         }
-        refreshRecentMeetings()
+        // The archive scan reads and decodes every metadata.json on disk, and
+        // it runs on the actor that also carries arming and committing a
+        // recording. A local transcription reports about twice a second and the
+        // diarizer hundreds of times in a few seconds, none of which changes
+        // what the list holds: only a stage boundary does. Rescanning on every
+        // tick queued that work ahead of the capture action for the meeting
+        // that had just started, which is the one moment a job is running.
+        if previous != progress.state { refreshRecentMeetings() }
         onProcessingUpdate?(progress.meetingID)
     }
 

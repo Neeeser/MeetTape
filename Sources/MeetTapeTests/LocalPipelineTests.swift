@@ -647,6 +647,10 @@ enum LocalPipelineTests {
                     try later.store.readMetadata().processing.state, .complete,
                     "the audio that only this folder holds is transcribed"
                 )
+                expect.isTrue(
+                    later.repository.mergedMeetingIDs().contains(later.metadata.id),
+                    "and recovery can enumerate it, so an interrupted run resumes"
+                )
                 let transcript = try later.store.readCanonicalTranscript()
                 expect.isTrue(
                     (transcript?.utterances ?? []).contains { $0.text.contains("second half") }

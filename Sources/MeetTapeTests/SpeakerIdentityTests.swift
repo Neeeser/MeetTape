@@ -483,7 +483,7 @@ enum SpeakerIdentityTests {
                 )
             },
 
-            test("a correction made while learning is off destroys nothing") { expect in
+            test("learning off keeps your own vector and still drops the wrong one") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let service = SpeakerRecognitionService(store: store)
@@ -499,6 +499,23 @@ enum SpeakerIdentityTests {
 
                 var off = SpeakerRecognitionSettings()
                 off.learnFromCorrections = false
+
+                // Re-confirming the same person must not destroy what they have,
+                // because the setting forbids rebuilding it.
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: alice.id, settings: off
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "a setting that forbids learning must not delete what was learned"
+                )
+
+                // Correcting it to somebody else does drop it: the user has just
+                // said this audio is not Alice, and leaving it would auto-name
+                // Bob as Alice for as long as the profile lives.
                 let bob = try await store.createPerson(name: "Bob")
                 _ = try await service.confirmCluster(
                     meetingID: "m1", cluster: cluster, identityID: bob.id, settings: off
@@ -507,8 +524,64 @@ enum SpeakerIdentityTests {
                     try await store.profileStatus(
                         of: alice.id, model: .fluidAudioOffline
                     ).sampleCount,
-                    1,
-                    "a setting that forbids learning must not delete what was learned"
+                    0,
+                    "the person corrected away keeps none of this voice"
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: bob.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    0,
+                    "and nothing is learned for the new name, which is what the setting says"
+                )
+            },
+
+            test("leaving a cluster unknown takes back the voice it gave away") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let chris = try await store.createPerson(name: "Chris")
+                let cluster = SpeakerClusterInput(
+                    clusterID: "remote-001_speaker_00", track: .remote,
+                    speechSeconds: 200, centroid: vector(seed: 71)
+                )
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: chris.id,
+                    settings: SpeakerRecognitionSettings()
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: chris.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1
+                )
+
+                // What "Leave unknown" does. Retracting the name used to leave
+                // the vector, so Chris kept somebody else's voice and the next
+                // resolution pass scored this very cluster against it and wrote
+                // the cleared name back at High confidence.
+                for stale in try await store.removeClusterEnrolments(
+                    meetingID: "m1", clusterID: cluster.clusterID
+                ) {
+                    try await store.recomputeProfiles(for: stale, now: Date())
+                }
+                try await store.clearOccurrenceIdentity(
+                    meetingID: "m1", clusterID: cluster.clusterID
+                )
+
+                expect.equal(
+                    try await store.profileStatus(
+                        of: chris.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    0,
+                    "the vector goes with the name"
+                )
+                let occurrence = try await store.occurrences(meetingID: "m1")
+                    .first { $0.clusterID == cluster.clusterID }
+                expect.isNil(occurrence?.resolvedIdentityID, "and so does the link")
+                expect.isFalse(
+                    occurrence?.humanVerified ?? true,
+                    "a retracted answer is not a confirmed one"
                 )
             },
 

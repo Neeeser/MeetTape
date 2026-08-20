@@ -255,7 +255,12 @@ public actor ProcessingPipeline {
     /// would be overwritten by the run that is mid-request anyway.
     public func retry(meetingID: String) async {
         guard !running.contains(meetingID) else { return }
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        // Same reason as process: a meeting folded into an earlier one is hidden
+        // from the archive, and refusing it here made the Retry button on its own
+        // failure notification a silent no-op.
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            return
+        }
         var metadata = found.metadata
         guard metadata.processing.state == .failed, let stage = metadata.processing.resumeStage else {
             await process(meetingID: meetingID)
@@ -303,6 +308,13 @@ public actor ProcessingPipeline {
             guard summary.processingState != .complete else { continue }
             guard summary.processingState != .recording else { continue }
             await process(meetingID: summary.id)
+        }
+        // Meetings folded into an earlier one are hidden from the listing, and
+        // their own folder is the only copy of the audio a reconnection
+        // recorded: without this a quit or a crash part-way through left the
+        // second half of a dropped call untranscribed with nothing to resume it.
+        for meetingID in repository.mergedMeetingIDs() {
+            await process(meetingID: meetingID)
         }
     }
 
@@ -1249,8 +1261,27 @@ public actor ProcessingPipeline {
                 meetingID: meetingID, clusterID: key, identityID: resolved, settings: settings
             )
             try await refreshCachedNames(for: resolved)
+        } else {
+            // Leave unknown. Clearing the name used to leave the vector behind,
+            // so the person it had been given to kept somebody else's voice, and
+            // because their profile then matched this very cluster at close to
+            // 1.0, the next resolution pass wrote the cleared name straight back
+            // at High confidence.
+            try await retractCluster(meetingID: meetingID, clusterID: key)
         }
         return resolved
+    }
+
+    /// Undoes a confirmation: the vector it produced, and the link it wrote.
+    private func retractCluster(meetingID: String, clusterID: String) async throws {
+        guard let service = backends.speakers else { return }
+        let store = await service.speakerStore
+        for stale in try await store.removeClusterEnrolments(
+            meetingID: meetingID, clusterID: clusterID
+        ) {
+            try await store.recomputeProfiles(for: stale, now: clock.now)
+        }
+        try await store.clearOccurrenceIdentity(meetingID: meetingID, clusterID: clusterID)
     }
 
     /// Changes the speaker on one transcript line.
@@ -1409,17 +1440,18 @@ public actor ProcessingPipeline {
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
 
-        // Cluster-derived enrolments from this meeting are now stale: the
-        // clusters they came from no longer exist under those identifiers, so a
-        // wrong name confirmed before this re-analysis could never be removed
-        // and the transcript no longer shows the key that would remove it. The
-        // user re-confirms against the new clustering.
-        if let service = backends.speakers {
-            let speakerStore = await service.speakerStore
-            for stale in try await speakerStore.removeClusterEnrolments(meetingID: metadata.id) {
-                try await speakerStore.recomputeProfiles(for: stale, now: clock.now)
-            }
-        }
+        // Deliberately not deleting this meeting's confirmed enrolments here.
+        // The clusters they came from no longer exist under these identifiers,
+        // so a wrong name confirmed before a re-analysis cannot be retracted
+        // through the panel any more, which is a real gap. Deleting them was
+        // worse: it read no settings, so it destroyed human-verified material
+        // for a user who had switched learning from corrections off and could
+        // not re-confirm it, and it matched on source type alone, so it took the
+        // promoted seed that is a named person's only vector and left them with
+        // an empty profile that the next pass re-seeded as a stranger.
+        //
+        // Retracting a cluster's enrolment is exposed where the confirmation was
+        // made instead: naming the cluster again, or leaving it unknown.
 
         try await recordOccurrences(
             meetingID: metadata.id, run: run, chunkEmbeddings: output.chunkEmbeddings

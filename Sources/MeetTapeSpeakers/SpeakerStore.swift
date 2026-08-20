@@ -487,29 +487,66 @@ public actor SpeakerStore {
     /// rebuilt.
     @discardableResult
     public func removeClusterEnrolments(
-        meetingID: String, clusterID: String
+        meetingID: String, clusterID: String, excluding identityID: IdentityID? = nil
     ) throws -> [IdentityID] {
-        try removeEnrolments(
+        guard let identityID else {
+            return try removeEnrolments(
+                meetingID: meetingID,
+                predicate: "source_cluster = ?",
+                bindings: [.text(clusterID)]
+            )
+        }
+        let family = try identityFamily(try currentID(identityID))
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        return try removeEnrolments(
             meetingID: meetingID,
-            predicate: "source_cluster = ?",
-            bindings: [.text(clusterID)]
+            predicate: "source_cluster = ? AND identity_id NOT IN (\(placeholders))",
+            bindings: [.text(clusterID)] + family.map { SQLValue.int64($0) }
         )
     }
 
-    /// Drops every cluster-derived enrolment a meeting produced.
+    /// Forgets who a cluster was said to be.
     ///
-    /// Re-analysing renumbers the runs, so the cluster a vector came from stops
-    /// existing and the identifier it was filed under can never match again: a
-    /// wrong name applied before a re-analysis was unreachable afterwards, with
-    /// the transcript no longer showing the key that would remove it. The
-    /// vectors are re-derived from whatever the user confirms against the new
-    /// clustering.
+    /// The occurrence row stays, because the cluster was still heard; what goes
+    /// is the identity, the human-verified flag and the band, so nothing later
+    /// treats a retracted answer as a confirmed one.
+    public func clearOccurrenceIdentity(meetingID: String, clusterID: String) throws {
+        try database.run(
+            """
+            UPDATE speaker_occurrence
+            SET resolved_identity_id = NULL, resolution_source = ?, human_verified = 0,
+                threshold_band = ?, updated_at = ?
+            WHERE meeting_id = ? AND cluster_id = ?
+            """,
+            [
+                .text(SpeakerAssignmentOrigin.ai.rawValue),
+                .text(SpeakerConfidenceBand.unknown.rawValue),
+                .date(Date()),
+                .text(meetingID), .text(clusterID),
+            ]
+        )
+    }
+
+    /// Drops what a meeting's line-level corrections enrolled, for identities
+    /// other than the one being confirmed now.
+    ///
+    /// Reassigning a set of lines from one person to another left the first
+    /// holding a human-verified vector built from the second's audio, with no
+    /// path anywhere that could remove it: the cluster-scoped removal matches on
+    /// `source_cluster`, which these rows do not carry, and the meeting-scoped
+    /// one matches the cluster source type.
     @discardableResult
-    public func removeClusterEnrolments(meetingID: String) throws -> [IdentityID] {
-        try removeEnrolments(
+    public func removeUtteranceEnrolments(
+        meetingID: String, keeping identityID: IdentityID
+    ) throws -> [IdentityID] {
+        let keep = try currentID(identityID)
+        let family = try identityFamily(keep)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        return try removeEnrolments(
             meetingID: meetingID,
-            predicate: "source_type = ?",
-            bindings: [.text(VoiceEnrollmentSource.humanConfirmedCluster.rawValue)]
+            predicate: "source_type = ? AND identity_id NOT IN (\(placeholders))",
+            bindings: [.text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue)]
+                + family.map { SQLValue.int64($0) }
         )
     }
 

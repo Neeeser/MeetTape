@@ -293,6 +293,16 @@ public actor SpeakerRecognitionService {
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
         let vector = VoiceVector.l2Normalized(cluster.centroid)
+        // Before the learning guard, and only for other identities: the user has
+        // said this cluster is someone else, so whoever held its vector is
+        // holding audio that is not theirs, and refusing to remove it because
+        // learning is switched off leaves them auto-named from it forever. This
+        // identity's own row is dealt with below, where it can be replaced.
+        for stale in try await store.removeClusterEnrolments(
+            meetingID: meetingID, clusterID: cluster.clusterID, excluding: identityID
+        ) {
+            try await store.recomputeProfiles(for: stale, now: now)
+        }
         try await store.recordOccurrence(
             meetingID: meetingID,
             clusterID: cluster.clusterID,
@@ -318,8 +328,6 @@ public actor SpeakerRecognitionService {
         // fresh one replaces it rather than joining it and doubling that one
         // recording's weight.
         //
-        // Placed after the learning guard, so a correction made while learning
-        // from corrections is off cannot destroy a profile it may not rebuild.
         for stale in try await store.removeClusterEnrolments(
             meetingID: meetingID, clusterID: cluster.clusterID
         ) {
@@ -354,6 +362,15 @@ public actor SpeakerRecognitionService {
         model: EmbeddingModelIdentifier = .fluidAudioOffline,
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
+        // Anything this meeting's line corrections enrolled for somebody else
+        // goes whatever the learning setting says: the user has just told us
+        // those lines are this person, so the other profile is holding their
+        // audio and no other path can reach it.
+        for stale in try await store.removeUtteranceEnrolments(
+            meetingID: meetingID, keeping: identityID
+        ) {
+            try await store.recomputeProfiles(for: stale, now: now)
+        }
         guard settings.learnFromCorrections, !vectors.isEmpty else {
             return try await store.profileStatus(of: identityID, model: model)
         }

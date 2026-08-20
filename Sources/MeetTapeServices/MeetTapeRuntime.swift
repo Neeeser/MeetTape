@@ -873,7 +873,14 @@ public final class MeetTapeRuntime {
         let previous = processing[progress.meetingID]?.state
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)
-            if settings.showNotifications {
+            // Not for a meeting folded into an earlier one: the review window
+            // resolves through the archive listing, which hides it, so the
+            // notification opened an empty panel. The user already has one for
+            // the meeting this was folded into.
+            let isFolded = repository.findMeeting(
+                id: progress.meetingID, includingMerged: true
+            )?.metadata.mergedIntoMeetingID != nil
+            if settings.showNotifications, !isFolded {
                 notifications.readyToReview(title: progress.title, meetingID: progress.meetingID)
             }
         } else {

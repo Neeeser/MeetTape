@@ -271,6 +271,37 @@ public struct MeetingRepository: Sendable {
     }
 
     /// Every meeting directory under the archive root, newest first.
+    /// Identifiers of meetings folded into another one.
+    ///
+    /// Hidden from `listMeetings`, but their folders hold the only copy of the
+    /// audio a reconnection recorded, so processing and recovery have to be able
+    /// to enumerate them.
+    public func mergedMeetingIDs() -> [String] {
+        let fileManager = FileManager.default
+        guard let years = try? fileManager.contentsOfDirectory(
+            at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var out: [String] = []
+        for year in years where year.hasDirectoryPath {
+            guard let months = try? fileManager.contentsOfDirectory(
+                at: year, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            for month in months where month.hasDirectoryPath {
+                guard let meetings = try? fileManager.contentsOfDirectory(
+                    at: month, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+                ) else { continue }
+                for directory in meetings where directory.hasDirectoryPath {
+                    let store = MeetingStore(layout: MeetingLayout(root: directory))
+                    guard let metadata = try? store.readMetadata(),
+                          metadata.mergedIntoMeetingID != nil
+                    else { continue }
+                    out.append(metadata.id)
+                }
+            }
+        }
+        return out
+    }
+
     public func listMeetings(limit: Int? = nil) -> [MeetingSummary] {
         let fileManager = FileManager.default
         guard let years = try? fileManager.contentsOfDirectory(

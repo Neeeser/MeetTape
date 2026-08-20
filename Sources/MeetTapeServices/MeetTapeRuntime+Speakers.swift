@@ -107,10 +107,23 @@ extension MeetTapeRuntime {
                let existing = try await store.current(identifier) {
                 if existing.resolvedName != settings.localUserName, !settings.localUserName.isEmpty {
                     _ = try await store.rename(existing.id, to: settings.localUserName)
-                    // Past meetings cache the name beside the identity, and
-                    // every other rename path refreshes them. Renaming yourself
-                    // in General settings left ten meetings still saying "Me".
-                    try await pipeline.refreshCachedNames(for: existing.id)
+                    // Past meetings cache the name beside the identity, and every
+                    // other rename path refreshes them. Off the ordered chain:
+                    // this walks every meeting the local user appears in and
+                    // rewrites each one's markdown, and the chain is what carries
+                    // arming a recording and what quit waits on.
+                    let identityID = existing.id
+                    runProcessing { [weak self] in
+                        guard let self else { return }
+                        do {
+                            try await self.pipeline.refreshCachedNames(for: identityID)
+                            self.refreshRecentMeetings()
+                        } catch {
+                            Log.app.error(
+                                "name refresh failed: \(logSafeDescription(error), privacy: .public)"
+                            )
+                        }
+                    }
                 }
                 return
             }

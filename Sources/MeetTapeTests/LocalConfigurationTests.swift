@@ -146,6 +146,25 @@ enum LocalConfigurationTests {
                     "voice vectors must never live in a folder the user exports"
                 )
             },
+
+            test("the decoder is built with the settings the numbers came from") { expect in
+                // The options the transcriber actually passes, not the constants
+                // beside them: these were literals at the call site, so turning
+                // VAD chunking back on left every assertion here green while the
+                // measured regression shipped.
+                let options = LocalModelManager.decodingOptions()
+                expect.isTrue(options.skipSpecialTokens, "or <|startoftranscript|> leaks into text")
+                expect.isTrue(options.wordTimestamps, "speaker attribution consumes them")
+                expect.isNil(
+                    options.chunkingStrategy,
+                    "VAD chunking dropped 231 of 9278 words over 65 minutes"
+                )
+                expect.isNil(options.promptTokens)
+                expect.isFalse(
+                    options.usePrefillPrompt,
+                    "prompting took 198 distinct word starts to 153, 43 of them zero-length"
+                )
+            },
         ])
     }
 

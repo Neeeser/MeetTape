@@ -442,6 +442,20 @@ enum BackendSelectionTests {
                     await none.isConfigured(),
                     "a user who never entered a key opted into nothing"
                 )
+
+                // The shipping stores, not just the shape. The layered store is
+                // what DEBUG builds use, and taking the protocol default there
+                // reopened the bug this guard exists for.
+                let layered = LayeredAPIKeyStore(providers: [Absent(), Absent()])
+                expect.isTrue(layered.isKnownAbsent, "every layer says there is no key")
+                expect.isFalse(
+                    LayeredAPIKeyStore(providers: [Absent(), Failing()]).isKnownAbsent,
+                    "one layer that cannot answer is enough to attempt the request"
+                )
+                expect.isTrue(
+                    EnvironmentAPIKeyStore(variableName: "MEETTAPE_NO_SUCH_VARIABLE")
+                        .isKnownAbsent
+                )
             },
         ])
     }

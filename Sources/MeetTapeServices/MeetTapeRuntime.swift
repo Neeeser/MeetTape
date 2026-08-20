@@ -735,12 +735,15 @@ public final class MeetTapeRuntime {
                 )
             }
             refreshRecentMeetings()
-            // The meeting that is still visible. Folding this one into an
-            // earlier one hides it from findMeeting, so handing its own
-            // identifier to the pipeline meant process returned immediately and
-            // the recording was never transcribed: a dropped call that the user
-            // rejoined lost its second half, with no path to recover it.
-            let meetingID = owner ?? updated.id
+            // This meeting's own identifier, whatever it was folded into: the
+            // audio is in this folder and combine moves nothing. Routing to the
+            // survivor instead handed the pipeline a meeting that has none of
+            // the second half of the call, and it is usually already complete,
+            // so nothing was transcribed at all.
+            let meetingID = updated.id
+            if owner != nil {
+                Log.app.info("processing a folded meeting under its own identifier")
+            }
             Task { await pipeline.process(meetingID: meetingID) }
         } catch {
             Log.app.error("finalise failed: \(logSafeDescription(error), privacy: .public)")

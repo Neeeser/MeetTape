@@ -318,8 +318,11 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     /// claim: enrolment would embed twenty-seven seconds of whoever the rest of
     /// the turn belongs to into the corrected person's voice profile.
     public func confirms(_ utterance: Utterance) -> Bool {
-        guard let override = utteranceOverrides.first(where: { $0.covers(utterance) }),
-              override.assignment.origin == .human
+        // The one that decides the name, which is the newest covering
+        // correction, not the first in the array. Judging a different override
+        // than the one being applied let a merged line be confirmed for the
+        // person named on it using the span of somebody else's correction.
+        guard let override = override(for: utterance), override.assignment.origin == .human
         else { return false }
         guard let start = override.startSeconds, let finish = override.endSeconds else {
             return true

@@ -103,7 +103,13 @@ public actor ProcessingPipeline {
     /// flight is left alone.
     public func process(meetingID: String) async {
         guard !running.contains(meetingID) else { return }
-        guard let found = repository.findMeeting(id: meetingID) else { return }
+        // includingMerged, because a reconnected meeting is folded into the
+        // earlier one and hidden from the archive listing while its own segments
+        // are the only copy of the second half of the call. Refusing it here
+        // left that audio permanently untranscribed with nothing able to retry.
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            return
+        }
         running.insert(meetingID)
         await jobLock.acquire()
         var holdsSlot = true
@@ -274,7 +280,12 @@ public actor ProcessingPipeline {
         // rename landing between them would otherwise be overwritten.
         try store.updateMetadata { current in
             current.processing = metadata.processing
-            current.durationSeconds = metadata.durationSeconds
+            // Not the duration: it is read once at the start of the job, and
+            // folding a reconnected meeting into this one rewrites it on disk
+            // meanwhile. Writing the snapshot back reported twenty minutes for
+            // a meeting the app had recorded forty-five of. finish() derives it
+            // from the timeline at the end.
+
             current.titles.ai = metadata.titles.ai
             current.titles.calendar = metadata.titles.calendar ?? current.titles.calendar
             current.descriptionText = current.descriptionText ?? metadata.descriptionText
@@ -1397,6 +1408,19 @@ public actor ProcessingPipeline {
         )
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
+
+        // Cluster-derived enrolments from this meeting are now stale: the
+        // clusters they came from no longer exist under those identifiers, so a
+        // wrong name confirmed before this re-analysis could never be removed
+        // and the transcript no longer shows the key that would remove it. The
+        // user re-confirms against the new clustering.
+        if let service = backends.speakers {
+            let speakerStore = await service.speakerStore
+            for stale in try await speakerStore.removeClusterEnrolments(meetingID: metadata.id) {
+                try await speakerStore.recomputeProfiles(for: stale, now: clock.now)
+            }
+        }
+
         try await recordOccurrences(
             meetingID: metadata.id, run: run, chunkEmbeddings: output.chunkEmbeddings
         )

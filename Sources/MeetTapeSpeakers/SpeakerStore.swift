@@ -487,23 +487,49 @@ public actor SpeakerStore {
     /// rebuilt.
     @discardableResult
     public func removeClusterEnrolments(
-        meetingID: String, clusterID: String, keeping identityID: IdentityID?
+        meetingID: String, clusterID: String
+    ) throws -> [IdentityID] {
+        try removeEnrolments(
+            meetingID: meetingID,
+            predicate: "source_cluster = ?",
+            bindings: [.text(clusterID)]
+        )
+    }
+
+    /// Drops every cluster-derived enrolment a meeting produced.
+    ///
+    /// Re-analysing renumbers the runs, so the cluster a vector came from stops
+    /// existing and the identifier it was filed under can never match again: a
+    /// wrong name applied before a re-analysis was unreachable afterwards, with
+    /// the transcript no longer showing the key that would remove it. The
+    /// vectors are re-derived from whatever the user confirms against the new
+    /// clustering.
+    @discardableResult
+    public func removeClusterEnrolments(meetingID: String) throws -> [IdentityID] {
+        try removeEnrolments(
+            meetingID: meetingID,
+            predicate: "source_type = ?",
+            bindings: [.text(VoiceEnrollmentSource.humanConfirmedCluster.rawValue)]
+        )
+    }
+
+    private func removeEnrolments(
+        meetingID: String, predicate: String, bindings extra: [SQLValue]
     ) throws -> [IdentityID] {
         var affected: [Int64] = []
-        var sql = "SELECT DISTINCT identity_id FROM voice_embedding"
-            + " WHERE source_meeting = ? AND source_cluster = ?"
-        var bindings: [SQLValue] = [.text(meetingID), .text(clusterID)]
-        if let identityID {
-            sql += " AND identity_id != ?"
-            bindings.append(.int64(identityID.rawValue))
-        }
-        try database.query(sql, bindings) { affected.append($0.int64(0)) }
+        let bindings: [SQLValue] = [.text(meetingID)] + extra
+        try database.query(
+            "SELECT DISTINCT identity_id FROM voice_embedding"
+                + " WHERE source_meeting = ? AND \(predicate)",
+            bindings
+        ) { affected.append($0.int64(0)) }
         guard !affected.isEmpty else { return [] }
-        var delete = "DELETE FROM voice_embedding"
-            + " WHERE source_meeting = ? AND source_cluster = ?"
-        if identityID != nil { delete += " AND identity_id != ?" }
-        try database.run(delete, bindings)
-        return affected.map(IdentityID.init)
+        try database.run(
+            "DELETE FROM voice_embedding WHERE source_meeting = ? AND \(predicate)", bindings
+        )
+        // Resolved, because the row's owner may since have been merged and the
+        // survivor is the one whose centroid was built over it.
+        return try affected.map { try currentID(IdentityID($0)) }
     }
 
     /// Keeps the newest, highest-quality vectors and drops the rest.
@@ -586,17 +612,21 @@ public actor SpeakerStore {
         // meetings' audio into a single centroid is the thing recording_count
         // exists to measure, and the row can only name one of them, so the
         // other's hasEnrolment stayed false and it re-embedded forever.
-        // addPendingEnrollment resolves before writing, so reading by the
-        // literal identifier lost a merged-away identity's parked rows.
+        // The whole family. addPendingEnrollment resolves before writing, so
+        // rows parked under an identity that was later merged away sat under the
+        // old identifier: confirmed speech that no flush could ever reach.
         let id = try currentID(id)
+        let family = try identityFamily(id)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
         var groups: [String: Group] = [:]
         try database.query(
             """
             SELECT embedding, speech_seconds, quality_score, source_meeting
-            FROM pending_enrollment WHERE identity_id = ? AND model_identifier = ?
+            FROM pending_enrollment
+            WHERE identity_id IN (\(placeholders)) AND model_identifier = ?
             ORDER BY created_at
             """,
-            [.int64(id.rawValue), .text(model.rawValue)]
+            family.map { SQLValue.int64($0) } + [.text(model.rawValue)]
         ) { row in
             let key = row.optionalText(3) ?? ""
             var group = groups[key] ?? Group()
@@ -627,11 +657,11 @@ public actor SpeakerStore {
             try database.run(
                 """
                 DELETE FROM pending_enrollment
-                WHERE identity_id = ? AND model_identifier = ? AND source_meeting IS ?
+                WHERE identity_id IN (\(placeholders))
+                  AND model_identifier = ? AND source_meeting IS ?
                 """,
-                [
-                    .int64(id.rawValue), .text(model.rawValue),
-                    .optionalText(key.isEmpty ? nil : key),
+                family.map { SQLValue.int64($0) } + [
+                    .text(model.rawValue), .optionalText(key.isEmpty ? nil : key),
                 ]
             )
         }
@@ -672,11 +702,15 @@ public actor SpeakerStore {
     public func pendingSpeechSeconds(
         for id: IdentityID, model: EmbeddingModelIdentifier
     ) throws -> Double {
-        let id = try currentID(id)
+        let family = try identityFamily(try currentID(id))
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
         var total = 0.0
         try database.query(
-            "SELECT COALESCE(SUM(speech_seconds), 0) FROM pending_enrollment WHERE identity_id = ? AND model_identifier = ?",
-            [.int64(id.rawValue), .text(model.rawValue)]
+            """
+            SELECT COALESCE(SUM(speech_seconds), 0) FROM pending_enrollment
+            WHERE identity_id IN (\(placeholders)) AND model_identifier = ?
+            """,
+            family.map { SQLValue.int64($0) } + [.text(model.rawValue)]
         ) { total = $0.double(0) }
         return total
     }

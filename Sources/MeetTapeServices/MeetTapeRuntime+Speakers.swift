@@ -107,6 +107,10 @@ extension MeetTapeRuntime {
                let existing = try await store.current(identifier) {
                 if existing.resolvedName != settings.localUserName, !settings.localUserName.isEmpty {
                     _ = try await store.rename(existing.id, to: settings.localUserName)
+                    // Past meetings cache the name beside the identity, and
+                    // every other rename path refreshes them. Renaming yourself
+                    // in General settings left ten meetings still saying "Me".
+                    try await pipeline.refreshCachedNames(for: existing.id)
                 }
                 return
             }

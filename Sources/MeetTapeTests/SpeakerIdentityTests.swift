@@ -424,6 +424,94 @@ enum SpeakerIdentityTests {
                 )
             },
 
+            test("correcting a name takes the voice out of the first profile") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let settings = SpeakerRecognitionSettings()
+                let dave = vector(seed: 61)
+                let cluster = SpeakerClusterInput(
+                    clusterID: "remote-001_speaker_00", track: .remote,
+                    speechSeconds: 95, centroid: dave
+                )
+
+                // Named wrongly, then corrected.
+                let alice = try await store.createPerson(name: "Alice")
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: alice.id, settings: settings
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1
+                )
+
+                let bob = try await store.createPerson(name: "Bob")
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: bob.id, settings: settings
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    0,
+                    "the corrected-away person keeps none of this voice"
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: bob.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1
+                )
+                expect.isFalse(
+                    try await store.searchableProfiles(model: .fluidAudioOffline)
+                        .contains { $0.identity.id == alice.id },
+                    "and is not a candidate at all, rather than one with a stale centroid"
+                )
+
+                // Committing the same name again refines rather than stacking.
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: bob.id, settings: settings
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: bob.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "one recording contributes one vector, however often it is confirmed"
+                )
+            },
+
+            test("a correction made while learning is off destroys nothing") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let alice = try await store.createPerson(name: "Alice")
+                let cluster = SpeakerClusterInput(
+                    clusterID: "remote-001_speaker_00", track: .remote,
+                    speechSeconds: 95, centroid: vector(seed: 62)
+                )
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: alice.id,
+                    settings: SpeakerRecognitionSettings()
+                )
+
+                var off = SpeakerRecognitionSettings()
+                off.learnFromCorrections = false
+                let bob = try await store.createPerson(name: "Bob")
+                _ = try await service.confirmCluster(
+                    meetingID: "m1", cluster: cluster, identityID: bob.id, settings: off
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "a setting that forbids learning must not delete what was learned"
+                )
+            },
+
             test("enrolling a merged identity reaches the person it reads as") { expect in
                 let (store, root) = try makeStore()
                 defer { try? FileManager.default.removeItem(at: root) }

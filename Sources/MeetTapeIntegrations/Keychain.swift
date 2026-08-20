@@ -109,6 +109,11 @@ public struct EnvironmentAPIKeyStore: APIKeyProviding, Sendable {
         }
         return value
     }
+
+    /// An absent or empty variable is absence, not a failure to read.
+    public var isKnownAbsent: Bool {
+        (ProcessInfo.processInfo.environment[variableName] ?? "").isEmpty
+    }
 }
 
 /// Prefers the keychain and falls back to the environment, which is how the
@@ -126,4 +131,11 @@ public struct LayeredAPIKeyStore: APIKeyProviding, Sendable {
         }
         throw ProcessingError.missingAPIKey
     }
+
+    /// Only when every layer says so. Taking the protocol default here made
+    /// this store answer "cannot say" for a machine with no key at all, which
+    /// is the store DEBUG builds use: the optional cloud stages then attempted
+    /// a request, failed unretryably, and the meeting stopped before the step
+    /// that writes the markdown and the mixdown.
+    public var isKnownAbsent: Bool { providers.allSatisfy(\.isKnownAbsent) }
 }

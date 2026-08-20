@@ -603,6 +603,56 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("a reconnected meeting is still transcribed after it is folded in") { expect in
+                // combine links the metadata and moves no audio, so the second
+                // half of a dropped call lives only in its own folder. Hiding it
+                // from the archive listing must not hide it from processing.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let earlier = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let later = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                _ = try later.store.updateMetadata { $0.mergedIntoMeetingID = earlier.metadata.id }
+                expect.isNil(
+                    later.repository.findMeeting(id: later.metadata.id),
+                    "it is hidden from the archive, which is what the listing wants"
+                )
+
+                let settings: AppSettings = {
+                    var value = AppSettings()
+                    value.enrichment = EnrichmentSettings(
+                        generateTitle: false, generateDescription: false, generateNotes: false,
+                        generateSummary: false, suggestSpeakers: false
+                    )
+                    return value
+                }()
+                let pipeline = makePipeline(
+                    repository: later.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "second half", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " second half")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: []
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: later.metadata.id)
+
+                expect.equal(
+                    try later.store.readMetadata().processing.state, .complete,
+                    "the audio that only this folder holds is transcribed"
+                )
+                let transcript = try later.store.readCanonicalTranscript()
+                expect.isTrue(
+                    (transcript?.utterances ?? []).contains { $0.text.contains("second half") }
+                )
+            },
+
             test("re-analysing speakers keeps the previous result and the words") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

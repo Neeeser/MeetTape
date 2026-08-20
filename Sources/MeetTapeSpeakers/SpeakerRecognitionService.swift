@@ -293,14 +293,6 @@ public actor SpeakerRecognitionService {
         now: Date = Date()
     ) async throws -> VoiceProfileStatus {
         let vector = VoiceVector.l2Normalized(cluster.centroid)
-        // This cluster's audio belongs to whoever is being confirmed now, and to
-        // nobody else. Correcting a name that was applied a moment ago left the
-        // vector in the first person's profile with nothing able to remove it.
-        for stale in try await store.removeClusterEnrolments(
-            meetingID: meetingID, clusterID: cluster.clusterID, keeping: identityID
-        ) {
-            try await store.recomputeProfiles(for: stale, now: now)
-        }
         try await store.recordOccurrence(
             meetingID: meetingID,
             clusterID: cluster.clusterID,
@@ -317,6 +309,21 @@ public actor SpeakerRecognitionService {
         )
         guard settings.learnFromCorrections, !vector.isEmpty else {
             return try await store.profileStatus(of: identityID, model: model)
+        }
+        // This cluster's audio belongs to whoever is being confirmed now and to
+        // nobody else, so any earlier enrolment from it goes first: correcting a
+        // name applied a moment ago otherwise left the vector inside the first
+        // person's profile, human-verified, and the next meeting auto-named them
+        // as that person. This identity's own earlier row goes too, because the
+        // fresh one replaces it rather than joining it and doubling that one
+        // recording's weight.
+        //
+        // Placed after the learning guard, so a correction made while learning
+        // from corrections is off cannot destroy a profile it may not rebuild.
+        for stale in try await store.removeClusterEnrolments(
+            meetingID: meetingID, clusterID: cluster.clusterID
+        ) {
+            try await store.recomputeProfiles(for: stale, now: now)
         }
         _ = try await store.enrol(
             VoiceEnrollmentCandidate(
@@ -433,16 +440,30 @@ public actor SpeakerRecognitionService {
     ) async throws -> (track: CaptureTrack, score: Double)? {
         let probe = VoiceVector.l2Normalized(vector)
         var closest: (track: CaptureTrack, score: Double)?
-        for occurrence in try await store.occurrences(meetingID: meetingID) where occurrence.track != .mic {
+        var comparable = 0
+        let others = try await store.occurrences(meetingID: meetingID)
+            .filter { $0.track != .mic }
+        for occurrence in others {
             guard let other = try await store.occurrenceEmbedding(
                 meetingID: meetingID, clusterID: occurrence.clusterID, model: model
             ) else { continue }
+            comparable += 1
             let score = VoiceVector.cosine(probe, other)
             if score >= policy.anonymousLinkScore, score > (closest?.score ?? 0) {
                 closest = (occurrence.track, score)
             }
         }
-        return closest
+        if let closest { return closest }
+        // Fails closed. A cloud diarizer produces no vectors, and they are only
+        // filled in later by a pass that both recognition settings can switch
+        // off, so with the wrong combination there was nothing to compare
+        // against and the check silently passed everything. Refusing costs one
+        // meeting's worth of learning; allowing costs the one profile no person
+        // ever confirms or reviews.
+        guard others.isEmpty || comparable > 0 else {
+            return (others[0].track, 0)
+        }
+        return nil
     }
 
     /// Whether the local user's profile still wants material from this meeting.

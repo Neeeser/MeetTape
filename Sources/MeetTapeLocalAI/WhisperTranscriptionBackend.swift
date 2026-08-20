@@ -30,37 +30,33 @@ public struct WhisperTranscriptionBackend: TranscriptionBackend {
 }
 
 extension LocalModelManager {
-    /// Transcribes one file.
+    /// The decoder settings, in one place a test can read.
     ///
-    /// The decode options are the ones the local-processing probe settled on,
-    /// and two of them are load-bearing rather than preferences. Special tokens
-    /// are skipped because the library default leaks
-    /// `<|startoftranscript|><|en|>` into the text. Word timings are on because
-    /// speaker attribution consumes them. Prompt conditioning and VAD chunking
-    /// are both deliberately absent: the first improves punctuation and
-    /// destroys word timings, and the second was 15% faster over 65 minutes
-    /// while dropping 231 of 9278 words and producing a segment whose start
-    /// went backwards.
-    func transcribe(
-        audio: URL, progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> TranscriptionOutput {
-        let pipeline = try await loadedWhisper()
-
+    /// Every one of these is a measured rule, and each was written as a literal
+    /// at the call site where nothing could check it: VAD chunking was 15%
+    /// faster over 65 minutes and dropped 231 of 9278 words with one segment
+    /// starting before its predecessor; prompting improves punctuation and
+    /// collapses word timings, taking 198 distinct word starts to 153 with 43 of
+    /// them zero-length, which attribution consumes; and leaving special tokens
+    /// in leaks <|startoftranscript|> into the transcript text.
+    public static func decodingOptions() -> DecodingOptions {
         var options = DecodingOptions()
         options.skipSpecialTokens = LocalTranscriptionTuning.skipSpecialTokens
         options.wordTimestamps = LocalTranscriptionTuning.wordTimestamps
-        // Read from the tuning rather than written as literals, so the tests
-        // that assert these values fail when the decoder stops honouring them.
-        // VAD chunking was 15% faster over 65 minutes and dropped 231 of 9278
-        // words, one segment starting before the one before it. Prompting
-        // improves punctuation and collapses word timings: 198 distinct word
-        // starts became 153, 43 of them zero-length, and attribution consumes
-        // those timings.
         options.chunkingStrategy = LocalTranscriptionTuning.usesVADChunking ? .vad : nil
         options.promptTokens = nil
         options.usePrefillPrompt = LocalTranscriptionTuning.usesPromptConditioning
         options.detectLanguage = true
         options.verbose = false
+        return options
+    }
+
+    func transcribe(
+        audio: URL, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> TranscriptionOutput {
+        let pipeline = try await loadedWhisper()
+
+        let options = Self.decodingOptions()
 
         let duration = MonoAudioDecoder.durationSeconds(audio)
         let results = try await pipeline.transcribe(

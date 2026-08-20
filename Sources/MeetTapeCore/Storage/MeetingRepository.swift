@@ -330,7 +330,9 @@ public struct MeetingRepository: Sendable {
     /// the archive; finishing a meeting does this several times on the actor
     /// that also arms the next recording, and applying one name to thirty
     /// corrected lines did it thirty-one times.
-    public func findMeeting(id: String) -> (metadata: MeetingMetadata, store: MeetingStore)? {
+    public func findMeeting(
+        id: String, includingMerged: Bool = false
+    ) -> (metadata: MeetingMetadata, store: MeetingStore)? {
         let fileManager = FileManager.default
         guard let years = try? fileManager.contentsOfDirectory(
             at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
@@ -348,8 +350,10 @@ public struct MeetingRepository: Sendable {
                 else { continue }
                 let store = MeetingStore(layout: MeetingLayout(root: candidate))
                 guard let metadata = try? store.readMetadata(), metadata.id == id else { continue }
-                // Matches listMeetings, which hides a meeting folded into another.
-                guard metadata.mergedIntoMeetingID == nil else { return nil }
+                // Matches listMeetings, which hides a meeting folded into
+                // another. Processing asks for it anyway: the audio lives in
+                // this folder and nothing else can transcribe it.
+                guard includingMerged || metadata.mergedIntoMeetingID == nil else { return nil }
                 return (metadata, store)
             }
         }

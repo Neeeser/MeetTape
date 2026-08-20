@@ -405,14 +405,7 @@ public final class MeetingReviewModel {
         let found = (metadata: logical.primary.metadata, store: logical.primary.store)
         recordings = logical.recordings.map(\.metadata)
         combinedLines = logical.combinedTranscript()
-        correctedLines = Set(
-            logical.recordings.flatMap { recording -> [String] in
-                let map = (try? recording.store.readSpeakerMap()) ?? SpeakerMap()
-                let lines = ((try? recording.store.readCanonicalTranscript()) ?? nil)?.utterances ?? []
-                return lines.filter { map.hasOverride(for: $0) }
-                    .map { "\(recording.metadata.id)/\($0.id)" }
-            }
-        )
+        correctedLines = Set(combinedLines.filter(\.isCorrected).map(\.id))
         metadata = found.metadata
         directory = found.store.layout.root
         continuationSuggestion = found.metadata.possibleContinuationOf

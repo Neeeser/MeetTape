@@ -69,16 +69,20 @@ public struct CombinedLine: Sendable, Equatable, Identifiable {
     /// Seconds from the start of the first recording, so lines from both halves
     /// sort into one sequence.
     public var timelineStart: Double
+    /// Whether a person set the speaker on this line.
+    public var isCorrected: Bool
 
     public var id: String { "\(recordingID)/\(utterance.id)" }
 
     public init(
-        recordingID: String, utterance: Utterance, speakerName: String, timelineStart: Double
+        recordingID: String, utterance: Utterance, speakerName: String,
+        timelineStart: Double, isCorrected: Bool = false
     ) {
         self.recordingID = recordingID
         self.utterance = utterance
         self.speakerName = speakerName
         self.timelineStart = timelineStart
+        self.isCorrected = isCorrected
     }
 }
 
@@ -103,7 +107,8 @@ extension LogicalMeeting {
                     recordingID: recording.metadata.id,
                     utterance: utterance,
                     speakerName: speakers.resolvedName(for: utterance),
-                    timelineStart: offset + utterance.start
+                    timelineStart: offset + utterance.start,
+                    isCorrected: speakers.hasOverride(for: utterance)
                 ))
             }
         }

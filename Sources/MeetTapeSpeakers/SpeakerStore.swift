@@ -740,6 +740,47 @@ public actor SpeakerStore {
     /// resolution pass scores a cluster against the profile seeded from that
     /// same cluster, matches itself at 1.0, and reports a voice heard once as
     /// one heard before.
+    /// Unnamed profiles whose material came only from this meeting.
+    ///
+    /// The complement of `excludingSeededIn`. Re-analysing a meeting gives every
+    /// cluster a new key, so the reuse guard keyed on the key stopped firing and
+    /// the exclusion hid the identity the previous run had seeded: the same
+    /// voice produced a second profile, then a third, and their centroids being
+    /// near-identical meant the margin gate stopped that person ever being
+    /// recognised again.
+    public func profilesSeededOnlyIn(
+        meetingID: String, model: EmbeddingModelIdentifier
+    ) throws -> [SpeakerProfile] {
+        var rows: [(Identity, [Float], Int, Int, Double)] = []
+        try database.query(
+            """
+            SELECT \(Self.identityColumns), p.centroid, p.sample_count, p.recording_count, p.speech_seconds
+            FROM identity
+            JOIN derived_profile p ON p.identity_id = identity.id
+            WHERE identity.merged_into IS NULL AND p.model_identifier = ?
+              AND identity.kind = 'anonymous'
+              AND NOT EXISTS (
+                SELECT 1 FROM voice_embedding e
+                WHERE (e.identity_id = identity.id
+                       OR e.identity_id IN (
+                         SELECT id FROM identity m WHERE m.merged_into = identity.id
+                       ))
+                  AND (e.source_meeting IS NULL OR e.source_meeting != ?)
+              )
+            """,
+            [.text(model.rawValue), .text(meetingID)]
+        ) { row in
+            guard let centroid = row.vector(11) else { return }
+            rows.append((self.identity(from: row), centroid, row.int(12), row.int(13), row.double(14)))
+        }
+        return rows.map {
+            SpeakerProfile(
+                identity: $0.0, centroid: $0.1, sampleCount: $0.2,
+                recordingCount: $0.3, speechSeconds: $0.4
+            )
+        }
+    }
+
     public func searchableProfiles(
         model: EmbeddingModelIdentifier, excludingSeededIn meetingID: String? = nil
     ) throws -> [SpeakerProfile] {
@@ -752,13 +793,21 @@ public actor SpeakerStore {
             """
         var bindings: [SQLValue] = [.text(model.rawValue)]
         if let meetingID {
+            // An unnamed identity whose every vector came from this meeting is
+            // not evidence about this meeting. The family is walked because a
+            // merged-in identity's vectors are equally this identity's, and
+            // checking only its own rows dropped profiles that legitimately
+            // carry material from elsewhere.
             sql += """
 
                 AND NOT (
                   identity.kind = 'anonymous'
                   AND NOT EXISTS (
                     SELECT 1 FROM voice_embedding e
-                    WHERE e.identity_id = identity.id
+                    WHERE (e.identity_id = identity.id
+                           OR e.identity_id IN (
+                             SELECT id FROM identity m WHERE m.merged_into = identity.id
+                           ))
                       AND (e.source_meeting IS NULL OR e.source_meeting != ?)
                   )
                 )

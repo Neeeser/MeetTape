@@ -209,6 +209,21 @@ extension SpeakerResolutionPolicy {
         let runnerUp = ranked.dropFirst().first
         let margin = best.score - (runnerUp?.score ?? 0)
 
+        /// Whether the separation from the runner-up is enough.
+        ///
+        /// With one candidate there is no runner-up and so no margin, and
+        /// reporting the whole score as the margin made the gate free: any
+        /// score above 0.10 passed it, so a gallery holding one voice decided
+        /// on score alone. Over 326 verified-distinct speakers the worst
+        /// impostor scored 0.957 against the true speaker's own 0.951, which is
+        /// the measurement this gate exists because of. With nothing to compare
+        /// against, the absolute score has to reach what it would have needed
+        /// including the separation.
+        func clearsMargin(required: Double, score: Double) -> Bool {
+            guard runnerUp != nil else { return best.score >= score + required }
+            return margin >= required
+        }
+
         // Too little speech to trust any score. The best match is still carried
         // so the reason for the decision can be shown.
         guard speechSeconds >= hardUnknownSpeechSeconds else {
@@ -221,7 +236,8 @@ extension SpeakerResolutionPolicy {
         switch best.kind {
         case .person:
             let requiredMargin = best.isExpectedParticipant ? expectedParticipantMargin : namedHighMargin
-            if best.score >= namedHighScore, margin >= requiredMargin,
+            if best.score >= namedHighScore,
+               clearsMargin(required: requiredMargin, score: namedHighScore),
                speechSeconds >= namedHighSpeechSeconds {
                 return SpeakerResolution(
                     outcome: .assign(best.identityID), band: .high, best: best,
@@ -230,7 +246,8 @@ extension SpeakerResolutionPolicy {
                 )
             }
         case .anonymous:
-            if best.score >= anonymousLinkScore, margin >= anonymousLinkMargin,
+            if best.score >= anonymousLinkScore,
+               clearsMargin(required: anonymousLinkMargin, score: anonymousLinkScore),
                speechSeconds >= anonymousLinkSpeechSeconds {
                 return SpeakerResolution(
                     outcome: .seenBefore(best.identityID), band: .high, best: best,

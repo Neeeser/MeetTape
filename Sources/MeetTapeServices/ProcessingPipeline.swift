@@ -1143,7 +1143,17 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         let settings = settingsProvider()
-        let resolved = try await identity(named: name, existing: identityID)
+        // A cluster with no identity passed in may still have made or matched an
+        // unnamed one on an earlier pass. Promoting that identity is what keeps
+        // the person's history: creating a fresh one instead left two profiles
+        // holding the same voice, and because their centroids are then
+        // identical, every future meeting scored them equally and the margin
+        // gate meant that person was never recognised again.
+        var existing = identityID
+        if existing == nil {
+            existing = try await occurrenceIdentity(meetingID: meetingID, clusterID: key)
+        }
+        let resolved = try await identity(named: name, existing: existing)
 
         var speakers = try found.store.readSpeakerMap()
         speakers.assign(name, to: key, identityID: resolved)
@@ -1353,6 +1363,16 @@ public actor ProcessingPipeline {
     // MARK: - identity plumbing
 
     /// The identity a typed name refers to, creating one if it is new.
+    /// The identity a cluster is already linked to, named or not.
+    private func occurrenceIdentity(
+        meetingID: String, clusterID: String
+    ) async throws -> IdentityID? {
+        guard let service = backends.speakers else { return nil }
+        let store = await service.speakerStore
+        let occurrences = try await store.occurrences(meetingID: meetingID)
+        return occurrences.first { $0.clusterID == clusterID }?.resolvedIdentityID
+    }
+
     private func identity(named name: String, existing: IdentityID?) async throws -> IdentityID? {
         guard let service = backends.speakers else { return existing }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1366,7 +1386,10 @@ public actor ProcessingPipeline {
                 return try await store.promoteToPerson(identity.id, name: trimmed, now: clock.now)?.id
                     ?? identity.id
             }
-            return existing
+            // Resolved, because a caller can hold an identifier that has since
+            // been merged away and everything downstream would write to a row
+            // no read reaches.
+            return try await store.current(existing)?.id ?? existing
         }
         let people = try await store.identities(kind: .person)
         if let match = people.first(where: {

@@ -161,7 +161,7 @@ public actor SpeakerRecognitionService {
                 // pass over the same meeting. Reuse it: resolving twice must
                 // remember one voice, not two.
                 if let existing = try await existingCandidate(
-                    meetingID: meetingID, clusterID: cluster.clusterID
+                    meetingID: meetingID, clusterID: cluster.clusterID, probe: probe, model: model
                 ) {
                     identity = existing
                     created = true
@@ -221,15 +221,34 @@ public actor SpeakerRecognitionService {
     /// The unnamed candidate this cluster created on an earlier pass, if it is
     /// still an unnamed candidate.
     private func existingCandidate(
-        meetingID: String, clusterID: String
+        meetingID: String, clusterID: String, probe: [Float], model: EmbeddingModelIdentifier
     ) async throws -> Identity? {
         let occurrences = try await store.occurrences(meetingID: meetingID)
-        guard let occurrence = occurrences.first(where: { $0.clusterID == clusterID }),
-              let identityID = occurrence.resolvedIdentityID,
-              let identity = try await store.current(identityID),
-              identity.kind == .anonymous
-        else { return nil }
-        return identity
+        if let occurrence = occurrences.first(where: { $0.clusterID == clusterID }),
+           let identityID = occurrence.resolvedIdentityID,
+           let identity = try await store.current(identityID),
+           identity.kind == .anonymous {
+            return identity
+        }
+
+        // Re-analysis renumbers the runs, so the same voice arrives under a new
+        // key and the check above misses it. The candidates this meeting seeded
+        // are excluded from the gallery, correctly, so without this the voice
+        // creates a second unnamed identity holding the same vector, and a third
+        // on the next re-analysis. Their centroids are then near-identical, so
+        // the margin gate means that person is never recognised anywhere again.
+        //
+        // Reused rather than linked: this is still a voice heard once, so it
+        // does not become one heard before.
+        guard !probe.isEmpty else { return nil }
+        let seeded = try await store.profilesSeededOnlyIn(meetingID: meetingID, model: model)
+        var best: (identity: Identity, score: Double)?
+        for profile in seeded {
+            let score = VoiceVector.cosine(probe, profile.centroid)
+            guard score >= policy.anonymousLinkScore, score > (best?.score ?? 0) else { continue }
+            best = (profile.identity, score)
+        }
+        return best?.identity
     }
 
     // MARK: - human confirmation

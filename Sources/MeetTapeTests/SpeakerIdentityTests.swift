@@ -113,12 +113,44 @@ enum SpeakerIdentityTests {
                 // genuinely new voice grows with pool size where named matching
                 // does not, and a wrong anonymous merge corrupts a profile no
                 // human has ever looked at.
-                let borderline = policy.resolve(candidates: [anonymous(7, 0.72)], speechSeconds: 120)
+                let borderline = policy.resolve(
+                    candidates: [anonymous(7, 0.72), anonymous(8, 0.40)], speechSeconds: 120
+                )
                 expect.isFalse(borderline.outcome.isAutomatic)
 
-                let linked = policy.resolve(candidates: [anonymous(7, 0.80)], speechSeconds: 120)
+                let linked = policy.resolve(
+                    candidates: [anonymous(7, 0.80), anonymous(8, 0.40)], speechSeconds: 120
+                )
                 expect.equal(linked.outcome, .seenBefore(IdentityID(7)))
                 expect.equal(linked.band, .high)
+            },
+
+            test("one candidate has no runner-up, so it clears the whole bar alone") { expect in
+                // The margin gate exists because the worst impostor over 326
+                // verified-distinct speakers scored 0.957 against the true
+                // speaker's own 0.951. Treating an absent runner-up as scoring
+                // zero made the margin the whole score, so any score over 0.10
+                // passed and a gallery holding one voice decided on score alone.
+                let alone = policy.resolve(candidates: [person(1, 0.72)], speechSeconds: 300)
+                expect.isFalse(
+                    alone.outcome.isAutomatic,
+                    "0.72 clears the score but proves no separation from anyone"
+                )
+                let clear = policy.resolve(candidates: [person(1, 0.81)], speechSeconds: 300)
+                expect.equal(
+                    clear.outcome, .assign(IdentityID(1)),
+                    "0.70 plus the 0.10 it would have needed over a runner-up"
+                )
+
+                // The same for a remembered unnamed voice, at its own bar.
+                expect.isFalse(
+                    policy.resolve(candidates: [anonymous(7, 0.80)], speechSeconds: 120)
+                        .outcome.isAutomatic
+                )
+                expect.equal(
+                    policy.resolve(candidates: [anonymous(7, 0.86)], speechSeconds: 120).outcome,
+                    .seenBefore(IdentityID(7))
+                )
             },
 
             test("an ambiguous unnamed match stays two separate voices") { expect in
@@ -335,6 +367,60 @@ enum SpeakerIdentityTests {
                         source: .humanConfirmedUtterances, model: .fluidAudioOffline
                     ),
                     "and the meeting it came from is recorded, so it is not redone"
+                )
+            },
+
+            test("re-analysing a meeting reuses the voice it already remembered") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let settings = SpeakerRecognitionSettings()
+                let voice = vector(seed: 44)
+
+                let first = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [SpeakerClusterInput(
+                        clusterID: "remote-001_speaker_00", track: .remote,
+                        speechSeconds: 120, centroid: voice
+                    )],
+                    settings: settings
+                )
+                expect.isTrue(first.first?.createdIdentity == true)
+                // A first-time voice is remembered but not announced, so the
+                // identity comes back nil and the occurrence row carries it.
+                let occurrences = try await store.occurrences(meetingID: "m1")
+                let created = try expect.unwrap(
+                    occurrences.first { $0.clusterID == "remote-001_speaker_00" }?.resolvedIdentityID
+                )
+
+                // A re-analysis renumbers the run, so the same voice arrives
+                // under a key nothing has seen.
+                let second = try await service.resolve(
+                    meetingID: "m1",
+                    clusters: [SpeakerClusterInput(
+                        clusterID: "remote-002_speaker_00", track: .remote,
+                        speechSeconds: 120, centroid: voice
+                    )],
+                    settings: settings
+                )
+                _ = second
+                let after = try await store.occurrences(meetingID: "m1")
+                expect.equal(
+                    after.first { $0.clusterID == "remote-002_speaker_00" }?.resolvedIdentityID,
+                    created,
+                    "the same voice in the same meeting is the same unnamed person"
+                )
+                expect.equal(
+                    try await store.identities(kind: .anonymous).count, 1,
+                    "re-analysing must not leave a second profile holding one voice"
+                )
+                expect.isTrue(
+                    second.first?.createdIdentity == true,
+                    "and it is still a voice heard once, not one heard before"
+                )
+                expect.notEqual(
+                    second.first?.source, .anonymousVoice,
+                    "reuse is not the same claim as having heard this voice elsewhere"
                 )
             },
 

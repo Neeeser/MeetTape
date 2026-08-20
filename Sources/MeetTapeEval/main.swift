@@ -50,8 +50,9 @@ func note(_ message: String) {
     FileHandle.standardError.write(Data("\(message)\n".utf8))
 }
 
-/// Resident set size, so a run can report what it actually cost.
-func residentBytes() -> UInt64 {
+/// Peak resident set size, so a run reports the high-water mark rather than
+/// whatever happens to be resident when it finishes.
+func peakResidentBytes() -> UInt64 {
     var info = mach_task_basic_info()
     var count = mach_msg_type_number_t(
         MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size
@@ -61,7 +62,7 @@ func residentBytes() -> UInt64 {
             task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
         }
     }
-    return result == KERN_SUCCESS ? info.resident_size : 0
+    return result == KERN_SUCCESS ? info.resident_size_max : 0
 }
 
 func megabytes(_ bytes: UInt64) -> String { String(format: "%.0f MB", Double(bytes) / 1_048_576) }
@@ -97,7 +98,7 @@ case "asr":
     print("segments        \(output.segments.count)")
     print("words           \(output.wordCount)")
     print("word timings    \(output.hasWordTimings)")
-    print("peak resident   \(megabytes(residentBytes()))")
+    print("peak resident   \(megabytes(peakResidentBytes()))")
 
 case "diarize":
     guard let audio = arguments.audio.first else { usage() }
@@ -129,24 +130,37 @@ case "diarize":
     // large disagreement is the point of the comparison, not a fault.
     if scalings.count == 2,
        let first = byScaling[scalings[0]], let second = byScaling[scalings[1]] {
+        // Frames first, then the mapping that explains most of them. Choosing
+        // each cluster's counterpart on first sight credited that frame whatever
+        // it was, and never checked the mapping was one-to-one, so two clusters
+        // collapsing into one at the higher value counted as complete agreement:
+        // the metric was blind to a merge in exactly one direction.
         let step = 0.1
-        var agreed = 0.0
+        var frames: [String: [String: Double]] = [:]
         var compared = 0.0
-        var mapping: [String: String] = [:]
         var position = 0.0
         while position < seconds {
             let left = first.intervals.first { position >= $0.start && position < $0.end }?.clusterID
             let right = second.intervals.first { position >= $0.start && position < $0.end }?.clusterID
             if let left, let right {
                 compared += step
-                if let expected = mapping[left] {
-                    if expected == right { agreed += step }
-                } else {
-                    mapping[left] = right
-                    agreed += step
-                }
+                frames[left, default: [:]][right, default: 0] += step
             }
             position += step
+        }
+        // Each left cluster keeps its majority counterpart, and a right cluster
+        // may be claimed only once: whatever is left over is disagreement, which
+        // is what a split or a merge should read as.
+        var agreed = 0.0
+        var taken: Set<String> = []
+        let ranked = frames.sorted { ($0.value.values.max() ?? 0) > ($1.value.values.max() ?? 0) }
+        for (_, counterparts) in ranked {
+            let best = counterparts
+                .filter { !taken.contains($0.key) }
+                .max { $0.value < $1.value }
+            guard let best else { continue }
+            taken.insert(best.key)
+            agreed += best.value
         }
         print("")
         print(String(

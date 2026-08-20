@@ -264,9 +264,13 @@ synthetic files built from seven identified voices where the true count is known
 | Synthetic | 7 | 6 | **7** | 92% |
 
 On the two-speaker calls that make up most real use, the two values produce
-byte-identical output, so the change costs nothing there. Where the counts differ
-the agreement column shows the change is additive: an extra cluster appears and
-the existing ones keep their frames. On the files with known ground truth the
+byte-identical output, so the change costs nothing there. The agreement column is
+softer than it looks: it was computed by fixing each cluster's counterpart on
+first sight, which credits a merge as complete agreement, so it could not have
+shown a merge in one of the two directions. `scripts/eval.sh` now assigns each
+cluster its majority counterpart and lets each counterpart be claimed once, but
+the numbers in this table predate that and have not been recomputed. The speaker
+counts either side of them are direct and unaffected. On the files with known ground truth the
 mean absolute count error falls from 1.5 to 0.25, and the tuned value hits the
 exact count at five, six and seven speakers where the default under-counted by
 two, two and one. The one over-count is at four speakers, which is the

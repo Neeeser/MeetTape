@@ -181,7 +181,7 @@ public struct MeetingReviewView: View {
                 reanalyzeRow
             }
         }
-        .task { await model.reloadSpeakers() }
+        .task { await model.reloadAll() }
     }
 
     private func speakerRow(_ row: MeetingSpeakerRow) -> some View {
@@ -251,7 +251,7 @@ public struct MeetingReviewView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 64)
             Button("Run") { model.reanalyzeSpeakers() }
-                .disabled(model.isReanalyzing)
+                .disabled(!model.canReanalyze)
             if model.isReanalyzing { ProgressView().controlSize(.small) }
             Text("Leave the count empty to let MeetTape decide. The words are not re-transcribed.")
                 .font(.caption2).foregroundStyle(.secondary)

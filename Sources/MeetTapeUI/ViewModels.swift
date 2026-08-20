@@ -120,6 +120,44 @@ public final class SettingsModel {
     public var renaming: SpeakerDirectoryEntry?
     public var renameDraft = ""
     public var renameOrganization = ""
+    /// A destructive action waiting on the person who asked for it.
+    ///
+    /// Deleting a profile removes biometric material with no undo and no source
+    /// to re-derive it from, and the local user's own row sits in this list one
+    /// menu item away from Rename.
+    public var pendingDestructiveAction: DestructiveAction?
+
+    public struct DestructiveAction: Identifiable, Equatable {
+        public enum Kind: Equatable { case forgetVoice, delete }
+        public var id: IdentityID { entry.id }
+        public var entry: SpeakerDirectoryEntry
+        public var kind: Kind
+
+        public var title: String {
+            switch kind {
+            case .forgetVoice: "Forget \(entry.identity.resolvedName)'s voice?"
+            case .delete: "Delete \(entry.identity.resolvedName)?"
+            }
+        }
+
+        public var message: String {
+            switch kind {
+            case .forgetVoice:
+                "Past transcripts keep the name. MeetTape will not recognise this "
+                    + "voice again until someone confirms it on a new recording."
+            case .delete:
+                "The name and every recording of this voice are removed. "
+                    + "This cannot be undone."
+            }
+        }
+
+        public var confirmLabel: String {
+            switch kind {
+            case .forgetVoice: "Forget Voice"
+            case .delete: "Delete"
+            }
+        }
+    }
 
     public enum TestState: Equatable {
         case idle
@@ -238,14 +276,21 @@ public final class SettingsModel {
         await refreshPeople()
     }
 
-    /// Deletes the biometric material and keeps the name on past transcripts.
-    public func forgetVoice(_ entry: SpeakerDirectoryEntry) async {
-        await runtime.forgetVoice(of: entry.id)
-        await refreshPeople()
+    public func confirmForgetVoice(_ entry: SpeakerDirectoryEntry) {
+        pendingDestructiveAction = DestructiveAction(entry: entry, kind: .forgetVoice)
     }
 
-    public func deletePerson(_ entry: SpeakerDirectoryEntry) async {
-        await runtime.deletePerson(entry.id)
+    public func confirmDelete(_ entry: SpeakerDirectoryEntry) {
+        pendingDestructiveAction = DestructiveAction(entry: entry, kind: .delete)
+    }
+
+    public func performPendingDestructiveAction() async {
+        guard let action = pendingDestructiveAction else { return }
+        pendingDestructiveAction = nil
+        switch action.kind {
+        case .forgetVoice: await runtime.forgetVoice(of: action.entry.id)
+        case .delete: await runtime.deletePerson(action.entry.id)
+        }
         await refreshPeople()
     }
 
@@ -298,6 +343,9 @@ public final class MeetingReviewModel {
 
     @ObservationIgnored let runtime: MeetTapeRuntime
     @ObservationIgnored public let meetingID: String
+    /// What the last read put on screen, so an edit made since is recognisable.
+    @ObservationIgnored private var lastLoadedTitle = ""
+    @ObservationIgnored private var lastLoadedNotes = ""
 
     public init(runtime: MeetTapeRuntime, meetingID: String) {
         self.runtime = runtime
@@ -311,14 +359,32 @@ public final class MeetingReviewModel {
 
     public var speakerKeys: [String] { transcript?.speakerKeys ?? [] }
 
+    /// Reloads the files and then the parts that need the identity store.
+    ///
+    /// The panel opens as soon as the audio is safe, which is before there is a
+    /// transcript, so a one-shot load left the Speakers card reading "No
+    /// speakers identified yet" for the life of the window and every line's
+    /// menu offering nobody to pick.
+    public func reloadAll() async {
+        reload()
+        await reloadSpeakers()
+    }
+
     public func reload() {
         guard let found = runtime.repository.findMeeting(id: meetingID) else {
             errorMessage = "This meeting is no longer on disk."
             return
         }
         metadata = found.metadata
-        title = found.metadata.titles.human ?? found.metadata.displayTitle
-        notes = found.store.readNotes()
+        // Title and notes are only written to disk on save, so taking the
+        // file's copy while the user is typing throws away what they typed.
+        // Progress ticks and every speaker action come through here.
+        let storedTitle = found.metadata.titles.human ?? found.metadata.displayTitle
+        if title == lastLoadedTitle { title = storedTitle }
+        lastLoadedTitle = storedTitle
+        let storedNotes = found.store.readNotes()
+        if notes == lastLoadedNotes { notes = storedNotes }
+        lastLoadedNotes = storedNotes
         summary = found.store.readSummary()
         speakers = (try? found.store.readSpeakerMap()) ?? SpeakerMap()
         transcript = try? found.store.readCanonicalTranscript()
@@ -443,11 +509,32 @@ public final class MeetingReviewModel {
 
     /// Re-runs clustering, optionally at a speaker count the user chose. The
     /// words are untouched.
+    /// The typed speaker count, if it is one a clusterer can use.
+    ///
+    /// Blank means decide automatically, which is the tuned configuration and
+    /// beat the exact true count on word attribution. Anything else has to be a
+    /// real count: zero or a negative went straight into the clusterer, and the
+    /// result overwrote the good run with no undo in the panel.
+    public var reanalyzeSpeakerCount: Int? {
+        let trimmed = reanalyzeCount.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        return Int(trimmed)
+    }
+
+    public var canReanalyze: Bool {
+        if isReanalyzing { return false }
+        let trimmed = reanalyzeCount.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return true }
+        guard let count = Int(trimmed) else { return false }
+        return (1...50).contains(count)
+    }
+
     public func reanalyzeSpeakers() {
+        guard canReanalyze else { return }
         isReanalyzing = true
         runtime.reanalyzeSpeakers(
             meetingID: meetingID,
-            speakerCount: Int(reanalyzeCount.trimmingCharacters(in: .whitespaces))
+            speakerCount: reanalyzeSpeakerCount
         ) { [weak self] in
             self?.isReanalyzing = false
         }

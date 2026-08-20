@@ -190,6 +190,15 @@ extension MeetTapeRuntime {
             } else {
                 _ = try await store.rename(identityID, to: name, organization: .some(organization))
             }
+            // ensureLocalUserIdentity renames this identity back to
+            // settings.localUserName at every launch, so renaming yourself in
+            // the People tab reverted on the next start, and new meetings kept
+            // labelling the microphone track with the old name.
+            if current?.isLocalUser == true {
+                var updated = settings
+                updated.localUserName = name
+                update(settings: updated)
+            }
             try await pipeline.refreshCachedNames(for: identityID)
             refreshRecentMeetings()
         } catch {
@@ -239,7 +248,15 @@ extension MeetTapeRuntime {
     public func deletePerson(_ identityID: IdentityID) async {
         guard let store = speakerStore else { return }
         do {
+            let family = try await store.family(of: identityID)
             try await store.delete(identityID)
+            // Otherwise the stored identifier names a row that no longer
+            // exists, and every new meeting writes it into its speaker map.
+            if let stored = settings.processing.localUserIdentityID, family.contains(stored) {
+                var updated = settings
+                updated.processing.localUserIdentityID = nil
+                update(settings: updated)
+            }
         } catch {
             Log.app.error("delete person failed: \(logSafeDescription(error), privacy: .public)")
         }

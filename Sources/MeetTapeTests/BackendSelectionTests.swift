@@ -3,6 +3,7 @@ import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeIntegrations
 import MeetTapeServices
+import MeetTapeUI
 import TestKit
 
 /// Which backend runs where, how that survives an upgrade, and the rule that
@@ -277,6 +278,31 @@ enum BackendSelectionTests {
                 gate.allow()
                 await job.value
                 expect.isTrue(started.withLock { $0 }, "and it runs once the call ends")
+            },
+
+            test("a typed speaker count has to be one a clusterer can use") { expect in
+                // Zero and negatives went straight into the clusterer, and the
+                // run that came back replaced the good one with no undo.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                await MainActor.run {
+                    let model = MeetingReviewModel(
+                        runtime: MeetTapeRuntime(settingsDirectory: root), meetingID: "none"
+                    )
+                    for bad in ["0", "-3", "abc", "999"] {
+                        model.reanalyzeCount = bad
+                        expect.isFalse(model.canReanalyze, "\(bad) is not a speaker count")
+                    }
+                    for good in ["", "2", "7", "50"] {
+                        model.reanalyzeCount = good
+                        expect.isTrue(model.canReanalyze, "\(good) is usable")
+                    }
+                    model.reanalyzeCount = ""
+                    expect.isNil(
+                        model.reanalyzeSpeakerCount,
+                        "blank means decide automatically, which beat the true count"
+                    )
+                }
             },
         ])
     }

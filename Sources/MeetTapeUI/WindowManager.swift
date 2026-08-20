@@ -22,7 +22,11 @@ public final class WindowManager {
         // An open review window tracks processing on its own: when the
         // transcript lands, the window shows it without a manual refresh.
         runtime.onProcessingUpdate = { [weak self] meetingID in
-            self?.reviewModels[meetingID]?.reload()
+            guard let model = self?.reviewModels[meetingID] else { return }
+            // The speaker rows come from the identity store, not the files, so
+            // reloading only the files left the Speakers card empty for a
+            // window opened before the transcript existed.
+            Task { @MainActor in await model.reloadAll() }
         }
     }
 

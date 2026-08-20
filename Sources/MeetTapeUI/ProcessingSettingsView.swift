@@ -234,6 +234,22 @@ struct PeopleSettingsTab: View {
         }
         .formStyle(.grouped)
         .task { await model.refreshPeople() }
+        .alert(
+            model.pendingDestructiveAction?.title ?? "",
+            isPresented: Binding(
+                get: { model.pendingDestructiveAction != nil },
+                set: { if !$0 { model.pendingDestructiveAction = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { model.pendingDestructiveAction = nil }
+            Button(
+                model.pendingDestructiveAction?.confirmLabel ?? "Delete", role: .destructive
+            ) {
+                Task { await model.performPendingDestructiveAction() }
+            }
+        } message: {
+            Text(model.pendingDestructiveAction?.message ?? "")
+        }
     }
 
     private func row(_ entry: SpeakerDirectoryEntry) -> some View {
@@ -247,13 +263,9 @@ struct PeopleSettingsTab: View {
                 Button(entry.identity.kind == .anonymous ? "Name this person…" : "Rename…") {
                     model.beginRename(entry)
                 }
-                Button("Forget learned voice") {
-                    Task { await model.forgetVoice(entry) }
-                }
+                Button("Forget learned voice") { model.confirmForgetVoice(entry) }
                 Divider()
-                Button("Delete", role: .destructive) {
-                    Task { await model.deletePerson(entry) }
-                }
+                Button("Delete", role: .destructive) { model.confirmDelete(entry) }
             }
             .fixedSize()
         }

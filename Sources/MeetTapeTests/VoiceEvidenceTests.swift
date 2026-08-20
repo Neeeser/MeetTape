@@ -340,6 +340,43 @@ enum VoiceEvidenceTests {
                 )
             },
 
+            test("one meeting contributes one vector however often it is confirmed") { expect in
+                // Enforced where the vector is written rather than by a check the
+                // caller makes first. Reading a meeting's confirmed lines and
+                // embedding them takes seconds, so two corrections a moment apart
+                // both passed that check and both enrolled: one session then held
+                // two of the twenty retained samples and evicted a genuinely
+                // different recording.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                for round in 0..<3 {
+                    try await store.addPendingEnrollment(VoiceEnrollmentCandidate(
+                        identityID: chris.id, vector: vector(seed: 82 + round),
+                        model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 1,
+                        source: .humanConfirmedUtterances,
+                        evidence: [VoiceEvidence(
+                            meetingID: "m1", track: .remote,
+                            spans: [AudioSpan(start: 0, end: 60)],
+                            confirmation: .humanConfirmedUtterances
+                        )]
+                    ))
+                    expect.isTrue(
+                        try await store.flushPendingEnrollment(
+                            for: chris.id, model: .fluidAudioOffline
+                        ),
+                        "each round has enough speech to enrol"
+                    )
+                }
+                expect.equal(
+                    try await samples(store, chris.id), 1,
+                    "the later round replaces the earlier one rather than joining it"
+                )
+                expect.equal(
+                    try await store.storedEmbeddings(of: chris.id).count, 1
+                )
+            },
+
             test("a store written before evidence existed opens, keeping its people") { expect in
                 // MeetTape has not shipped, so this is not a released schema
                 // being migrated: it is a development store from an earlier

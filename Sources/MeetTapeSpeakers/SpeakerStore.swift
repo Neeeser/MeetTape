@@ -935,6 +935,24 @@ public actor SpeakerStore {
             }
             let evidence = mergedEvidence(group.ids.flatMap { parkedEvidence[$0] ?? [] })
             guard !evidence.isEmpty else { continue }
+            // One meeting contributes one vector of this kind, enforced where it
+            // is written rather than by a check the caller makes first. Reading
+            // the confirmed lines and embedding them takes seconds, so two
+            // corrections a moment apart both passed that check and both
+            // enrolled: one session's audio then occupied two of the twenty
+            // retained samples and evicted a genuinely different recording.
+            let meetingID = key.isEmpty ? nil : key
+            try database.run(
+                """
+                DELETE FROM voice_embedding
+                WHERE identity_id IN (\(placeholders)) AND model_identifier = ?
+                  AND source_type = ? AND source_meeting IS ?
+                """,
+                family.map { SQLValue.int64($0) } + [
+                    .text(model.rawValue), .text(VoiceEnrollmentSource.humanConfirmedUtterances.rawValue),
+                    .optionalText(meetingID),
+                ]
+            )
             let candidate = VoiceEnrollmentCandidate(
                 identityID: id,
                 vector: VoiceVector.centroid(group.vectors),

@@ -353,9 +353,15 @@ public final class MeetingReviewModel {
         reload()
     }
 
-    public var directory: URL? {
-        runtime.repository.findMeeting(id: meetingID)?.store.layout.root
-    }
+    /// Where the meeting lives, resolved when the files were last read.
+    ///
+    /// Stored rather than computed. `findMeeting` walks the archive root, then
+    /// every year and month directory, and decodes a metadata.json; the panel's
+    /// body reads this alongside the processing fraction, so a computed property
+    /// ran that walk on the main actor for every progress tick. Local
+    /// diarization reports hundreds of times in a few seconds, and the actor
+    /// doing the walking is the one arming the next recording.
+    public private(set) var directory: URL?
 
     public var speakerKeys: [String] { transcript?.speakerKeys ?? [] }
 
@@ -376,6 +382,13 @@ public final class MeetingReviewModel {
             return
         }
         metadata = found.metadata
+        directory = found.store.layout.root
+        continuationSuggestion = found.metadata.possibleContinuationOf
+            .flatMap { runtime.repository.findMeeting(id: $0) }
+            .flatMap { earlier in
+                found.metadata.possibleContinuationReason
+                    .map { (title: earlier.metadata.displayTitle, reason: $0) }
+            }
         // Title and notes are only written to disk on save, so taking the
         // file's copy while the user is typing throws away what they typed.
         // Progress ticks and every speaker action come through here.
@@ -515,6 +528,10 @@ public final class MeetingReviewModel {
     /// beat the exact true count on word attribution. Anything else has to be a
     /// real count: zero or a negative went straight into the clusterer, and the
     /// result overwrote the good run with no undo in the panel.
+    /// The typed count, or nil for "decide automatically".
+    ///
+    /// Whether the number is one a clusterer can act on is `hasValidReanalyzeCount`,
+    /// which is what the Run button and `reanalyze()` are gated on.
     public var reanalyzeSpeakerCount: Int? {
         let trimmed = reanalyzeCount.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
@@ -557,8 +574,16 @@ public final class MeetingReviewModel {
         reload()
     }
 
+    /// Writes the notes only when the user changed them.
+    ///
+    /// Called when the panel closes, and it writes the whole file. A quick note
+    /// added from the menu bar while the panel was open appends to that file
+    /// directly, so an unconditional write on close threw it away: the panel had
+    /// loaded the notes before the append and still held the older text.
     public func saveNotes() {
+        guard notes != lastLoadedNotes else { return }
         runtime.saveNotes(notes, meetingID: meetingID)
+        lastLoadedNotes = notes
     }
 
     /// Renaming edits a side file: raw diarization is untouched and no request is
@@ -591,13 +616,11 @@ public final class MeetingReviewModel {
     }
 
     /// The earlier meeting this one may continue, and why.
-    public var continuationSuggestion: (title: String, reason: String)? {
-        guard let earlierID = metadata?.possibleContinuationOf,
-              let reason = metadata?.possibleContinuationReason,
-              let earlier = runtime.repository.findMeeting(id: earlierID)
-        else { return nil }
-        return (earlier.metadata.displayTitle, reason)
-    }
+    ///
+    /// Resolved at reload for the same reason `directory` is: reading it needed
+    /// a second archive walk, in the panel body, in exactly the case where a new
+    /// recording is most likely to be starting.
+    public private(set) var continuationSuggestion: (title: String, reason: String)?
 
     public func combineWithEarlier() {
         guard let earlierID = metadata?.possibleContinuationOf else { return }

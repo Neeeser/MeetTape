@@ -490,7 +490,7 @@ public actor SpeakerRecognitionService {
             meetingID: meetingID, vector: vector, model: model
         ) {
             Log.processing.notice(
-                "mic track not enrolled: matches this meeting's \(bleed.track.rawValue, privacy: .public) cluster at \(String(format: "%.2f", bleed.score), privacy: .public)"
+                "mic track not enrolled: matches this meeting's \(bleed.track?.rawValue ?? "uncomparable", privacy: .public) audio at \(String(format: "%.2f", bleed.score), privacy: .public)"
             )
             return nil
         }
@@ -521,7 +521,7 @@ public actor SpeakerRecognitionService {
     /// through into a profile nothing later corrects.
     private func matchesAnotherTrack(
         meetingID: String, vector: [Float], model: EmbeddingModelIdentifier
-    ) async throws -> (track: CaptureTrack, score: Double)? {
+    ) async throws -> (track: CaptureTrack?, score: Double)? {
         let probe = VoiceVector.l2Normalized(vector)
         var closest: (track: CaptureTrack, score: Double)?
         var comparable = 0
@@ -541,12 +541,14 @@ public actor SpeakerRecognitionService {
         // Fails closed. A cloud diarizer produces no vectors, and they are only
         // filled in later by a pass that both recognition settings can switch
         // off, so with the wrong combination there was nothing to compare
-        // against and the check silently passed everything. Refusing costs one
-        // meeting's worth of learning; allowing costs the one profile no person
-        // ever confirms or reviews.
-        guard others.isEmpty || comparable > 0 else {
-            return (others[0].track, 0)
-        }
+        // against and the check silently passed everything. The same hole opens
+        // when the far end produced no clusters at all: an unreadable track or a
+        // tap that recorded silence leaves `others` empty, and treating "nothing
+        // to compare against" as "no bleed" is the failure this guard exists to
+        // stop. The caller has already established that the far end has audio.
+        // Refusing costs one meeting's worth of learning; allowing costs the one
+        // profile no person ever confirms or reviews.
+        guard comparable > 0 else { return (others.first?.track, 0) }
         return nil
     }
 

@@ -185,6 +185,17 @@ public enum SpeakerLabel {
 
 /// One line of the canonical transcript.
 public struct Utterance: Codable, Sendable, Equatable, Identifiable {
+    /// Derived from where the line sits rather than from how many came before
+    /// it.
+    ///
+    /// A positional identifier changes for every line after one that merges or
+    /// splits, so re-assembling a transcript renumbered most of it. Nothing
+    /// persisted is matched by this identifier, because corrections are anchored
+    /// to a span on the timeline, but the review panel holds one between reading
+    /// the transcript and the user clicking, and a renumbering in that window
+    /// silently moved the click to a different line. Derived from the chunk, the
+    /// track and the times, it either still names the same audio or does not
+    /// exist, and the caller is told which.
     public var id: String
     /// Seconds from the start of the meeting timeline.
     public var start: Double
@@ -199,6 +210,19 @@ public struct Utterance: Codable, Sendable, Equatable, Identifiable {
     public var text: String
     public var chunkID: String
     public var model: String
+
+    /// The identifier for a line covering this piece of a track.
+    ///
+    /// Milliseconds, because the timings a decoder reports are stable to far
+    /// better than that and a floating-point rendering of them is not.
+    public static func identifier(
+        chunkID: String, track: CaptureTrack, start: Double, end: Double
+    ) -> String {
+        String(
+            format: "%@-%@-%06d-%06d", chunkID, track.rawValue,
+            Int((start * 1_000).rounded()), Int((end * 1_000).rounded())
+        )
+    }
 
     public init(
         id: String, start: Double, end: Double, track: CaptureTrack,

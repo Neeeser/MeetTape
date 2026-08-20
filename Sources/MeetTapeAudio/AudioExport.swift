@@ -86,10 +86,21 @@ public struct AudioMixer: Sendable {
         self.sampleRate = sampleRate
     }
 
+    /// Folds both tracks into one file at `destination`.
+    ///
+    /// Written to a partial name and renamed at the end, for the same reason the
+    /// working copies are: `AVAudioFile` writes incrementally, so quitting part
+    /// way through left a short but structurally valid file at the final path,
+    /// and the caller skips the mix when that path exists. The result was a
+    /// playback file holding the first few minutes of a meeting, with nothing to
+    /// distinguish it from a complete one and nothing that would ever rebuild it.
     public func mix(timeline: RecordingTimeline, segmentsDirectory: URL, to destination: URL) throws {
         let micSegments = timeline.segments(track: .mic)
         let remoteSegments = timeline.segments(track: .remote)
         guard !micSegments.isEmpty || !remoteSegments.isEmpty else { return }
+        let partial = destination.deletingPathExtension()
+            .appendingPathExtension("partial")
+            .appendingPathExtension(destination.pathExtension)
 
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
             throw ProcessingError.audioUnreadable(path: destination.lastPathComponent)
@@ -103,8 +114,11 @@ public struct AudioMixer: Sendable {
             AVLinearPCMIsNonInterleaved: false,
             AVLinearPCMIsBigEndianKey: false,
         ]
-        try? FileManager.default.removeItem(at: destination)
-        let output = try AVAudioFile(forWriting: destination, settings: settings)
+        try? FileManager.default.removeItem(at: partial)
+        var output: AVAudioFile? = try AVAudioFile(forWriting: partial, settings: settings)
+        // A throw anywhere below leaves no file at the final path rather than a
+        // truncated one that reads as finished.
+        defer { if output != nil { try? FileManager.default.removeItem(at: partial) } }
 
         let micReader = micSegments.isEmpty ? nil : TrackAudioReader(
             segments: micSegments, segmentsDirectory: segmentsDirectory, targetFormat: format
@@ -128,6 +142,7 @@ public struct AudioMixer: Sendable {
         }
 
         let blockFrames = AVAudioFrameCount(sampleRate * 0.5)
+        var wroteFrames = false
         var sources: [MixSource] = []
         if let micReader {
             sources.append(MixSource(reader: micReader, silenceFrames: Int(micLeadIn * sampleRate)))
@@ -172,8 +187,20 @@ public struct AudioMixer: Sendable {
             for frame in 0..<producedFrames {
                 mixedData[0][frame] = max(-1, min(1, mixedData[0][frame] * 0.8))
             }
-            try output.write(from: mixed)
+            try output?.write(from: mixed)
+            wroteFrames = true
         }
+        // A mix that read nothing is not a mix. The manifest can name segments
+        // whose files a SIGKILL never finished writing, and promoting the empty
+        // result to the final name told the caller the mixdown was done, so it
+        // was never attempted again.
+        guard wroteFrames else { return }
+        // Closed before the rename: AVAudioFile flushes on deallocation, and
+        // renaming a file still holding buffered frames is the same truncation
+        // by another route.
+        output = nil
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: partial, to: destination)
     }
 }
 

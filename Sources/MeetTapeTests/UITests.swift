@@ -76,6 +76,97 @@ enum UITests {
                 }
             },
 
+            test("closing the panel does not overwrite a note added elsewhere") { expect in
+                // The menu bar appends a quick note straight to the file. The
+                // panel holds whatever it read when it opened, and writes the
+                // whole file on close, so an unconditional write threw the
+                // appended note away.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let archive = root.appendingPathComponent("Meetings")
+                let repository = MeetingRepository(root: archive)
+                let started = Date(timeIntervalSince1970: 1_787_070_000)
+                let created = try repository.createMeeting(
+                    source: .slackHuddle, provider: .slack, startedAt: started,
+                    titles: TitleCandidates(provider: "Standup", timestampFallback: "f"),
+                    now: started
+                )
+
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = archive.path
+                    runtime.update(settings: settings)
+                    let model = MeetingReviewModel(runtime: runtime, meetingID: created.metadata.id)
+                    expect.equal(model.notes, "")
+
+                    try? created.store.appendNote("ship on Friday", at: started)
+                    model.saveNotes()
+                    expect.isTrue(
+                        created.store.readNotes().contains("ship on Friday"),
+                        "the panel typed nothing, so it writes nothing"
+                    )
+
+                    // What the user did type still saves.
+                    model.notes = "my own note"
+                    model.saveNotes()
+                    expect.equal(created.store.readNotes(), "my own note")
+                }
+            },
+
+            test("the panel resolves the archive once, not on every render") { expect in
+                // The panel body reads the processing fraction beside the
+                // meeting's own paths, so anything computed there runs on every
+                // tick. Local diarization reports hundreds of times in a few
+                // seconds, and `findMeeting` walks the archive root, every year
+                // and month directory below it, and decodes a metadata.json,
+                // all on the actor that arms the next recording.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let archive = root.appendingPathComponent("Meetings")
+                let repository = MeetingRepository(root: archive)
+                let started = Date(timeIntervalSince1970: 1_787_070_000)
+                let earlier = try repository.createMeeting(
+                    source: .slackHuddle, provider: .slack, startedAt: started,
+                    titles: TitleCandidates(provider: "Standup", timestampFallback: "f"),
+                    now: started
+                )
+                let later = try repository.createMeeting(
+                    source: .slackHuddle, provider: .slack,
+                    startedAt: started.addingTimeInterval(900),
+                    titles: TitleCandidates(provider: "Standup", timestampFallback: "f"),
+                    now: started.addingTimeInterval(900)
+                )
+                var metadata = later.metadata
+                metadata.possibleContinuationOf = earlier.metadata.id
+                metadata.possibleContinuationReason = "same meeting, 15 minutes later"
+                try later.store.writeMetadata(metadata)
+
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = archive.path
+                    runtime.update(settings: settings)
+
+                    let model = MeetingReviewModel(runtime: runtime, meetingID: metadata.id)
+                    expect.isTrue(model.directory != nil, "the reload resolved where it lives")
+                    expect.equal(model.continuationSuggestion?.title, "Standup")
+
+                    // With the archive gone, anything still walking it answers
+                    // nil. Both of these were computed properties reached from
+                    // the body, so this is the read the progress tick paid for.
+                    try? FileManager.default.removeItem(at: archive)
+                    expect.isTrue(
+                        model.directory != nil,
+                        "the panel's paths come from the last read, not from a fresh archive walk"
+                    )
+                    expect.equal(
+                        model.continuationSuggestion?.title, "Standup",
+                        "and so does the continuation it offers"
+                    )
+                }
+            },
+
             test("menu-bar state reads correctly in each phase") { expect in
                 var status = RuntimeStatus()
                 expect.isFalse(status.isRecording)

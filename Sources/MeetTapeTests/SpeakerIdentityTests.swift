@@ -678,6 +678,14 @@ enum SpeakerIdentityTests {
                 defer { try? FileManager.default.removeItem(at: root) }
                 let service = SpeakerRecognitionService(store: store)
                 let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+                // The far end, on its own track, which is what makes "the
+                // microphone track is the local user" mean anything.
+                try await store.recordOccurrence(
+                    meetingID: "m1", clusterID: "remote-001_speaker_00", track: .remote,
+                    speechSeconds: 600, embedding: vector(seed: 88), model: .fluidAudioOffline,
+                    resolution: nil, identityID: nil, source: .ai,
+                    humanVerified: false, wasExpectedParticipant: false
+                )
                 let status = try await service.learnLocalUserVoice(
                     meetingID: "m1", identityID: me.id, vector: vector(seed: 11),
                     speechSeconds: 240, quality: 1,
@@ -685,6 +693,28 @@ enum SpeakerIdentityTests {
                 )
                 expect.equal(status?.sampleCount, 1)
                 expect.equal(try await store.localUser()?.id, me.id)
+            },
+
+            test("nothing to check bleed against is a refusal, not a pass") { expect in
+                // The far end is recorded but produced no vectors: a cloud
+                // diarizer with the fill-in pass switched off, or a track that
+                // would not decode. Reading "nothing to compare against" as "no
+                // bleed" let the microphone's dominant voice into the one profile
+                // no person ever confirms or reviews. Refusing costs this
+                // meeting's learning.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let service = SpeakerRecognitionService(store: store)
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+                let declined = try await service.learnLocalUserVoice(
+                    meetingID: "m1", identityID: me.id, vector: vector(seed: 11),
+                    speechSeconds: 240, quality: 1,
+                    spans: [AudioSpan(start: 0, end: 240)]
+                )
+                expect.isNil(declined)
+                expect.isTrue(
+                    try await store.searchableProfiles(model: .fluidAudioOffline).isEmpty
+                )
             },
 
             test("the microphone track refuses a voice heard on this call's other track") { expect in

@@ -355,6 +355,55 @@ enum AudioTests {
                 let info = try AudioFileInspector().inspect(url: layout.mixedAudio)
                 // Remote runs 0–4 s, mic is delayed to 1–4 s, so the mix is 4 s long.
                 expect.close(info.seconds, 4.0, tolerance: 0.1)
+
+                // The final name appears only once the mix is complete. It is
+                // written incrementally, and the caller skips the mix when that
+                // path already exists, so a quit part way through used to leave a
+                // short but perfectly valid file that nothing would ever rebuild.
+                let partial = layout.mixedAudio.deletingPathExtension()
+                    .appendingPathExtension("partial")
+                    .appendingPathExtension(layout.mixedAudio.pathExtension)
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: partial.path),
+                    "and the partial it was built under is gone"
+                )
+            },
+
+            test("a mix that cannot finish leaves no file to be mistaken for one") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+                let writer = SegmentWriter(
+                    track: .remote, layout: layout, manifest: manifest,
+                    format: format, segmentSeconds: 60
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 4, sampleRate: 48_000, frequency: 220),
+                    hostTime: 100.0
+                ))
+                writer.finish(reason: "test")
+                manifest.close()
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+
+                // The manifest still names the segment; the audio is gone, which
+                // is what a half-written archive looks like after a SIGKILL.
+                for file in try FileManager.default.contentsOfDirectory(
+                    at: layout.segments, includingPropertiesForKeys: nil
+                ) {
+                    try FileManager.default.removeItem(at: file)
+                }
+                try? AudioMixer().mix(
+                    timeline: timeline, segmentsDirectory: layout.segments, to: layout.mixedAudio
+                )
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: layout.mixedAudio.path),
+                    "nothing at the final path, rather than an empty file that reads as done"
+                )
             },
 
             test("importing preserves the original and produces normal segments") { expect in

@@ -900,6 +900,94 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("naming a cluster leaves the lines already given to somebody else") { expect in
+                // A line-level correction outranks the cluster's name on screen.
+                // Claiming the whole cluster's audio for the person being named
+                // took the corrected line's voice away from the person still
+                // shown as speaking it, so the transcript said one thing and
+                // voice memory the other.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let key = "remote-001_speaker_00"
+                try meeting.store.writeRawDiarization(RawDiarization(runs: [
+                    DiarizationRun(
+                        id: "remote-001", track: .remote, backend: "test",
+                        producedAt: Date(), timelineOffset: 0,
+                        clusters: [DiarizationCluster(id: "speaker_00", speechSeconds: 300)],
+                        intervals: [DiarizationInterval(start: 0, end: 300, clusterID: "speaker_00")]
+                    ),
+                ]))
+                try await store.recordOccurrence(
+                    meetingID: meeting.metadata.id, clusterID: key, track: .remote,
+                    speechSeconds: 300, embedding: SpeakerIdentityTests.vector(seed: 97),
+                    model: .fluidAudioOffline, resolution: nil, identityID: nil,
+                    source: .ai, humanVerified: false, wasExpectedParticipant: false
+                )
+
+                // Bob owns one line inside the cluster, and enough of it to hold
+                // a vector of his own.
+                let bob = try await store.createPerson(name: "Bob")
+                let line = Utterance(
+                    id: "u1", start: 100, end: 180, track: .remote, rawSpeakerLabel: nil,
+                    speakerKey: key, text: "this bit is Bob", chunkID: "c", model: "m"
+                )
+                try meeting.store.writeCanonicalTranscript(
+                    CanonicalTranscript(generatedAt: Date(), utterances: [line])
+                )
+                var map = SpeakerMap()
+                map.overrideUtterance(
+                    line,
+                    with: SpeakerAssignment(
+                        displayName: "Bob", origin: .human, identityID: bob.id,
+                        provenance: .human()
+                    ),
+                    at: Date()
+                )
+                try meeting.store.writeSpeakerMap(map)
+                _ = try await store.enrol(VoiceEnrollmentCandidate(
+                    identityID: bob.id, vector: SpeakerIdentityTests.vector(seed: 98),
+                    model: .fluidAudioOffline, speechSeconds: 80, qualityScore: 1,
+                    source: .humanConfirmedUtterances,
+                    evidence: [VoiceEvidence(
+                        meetingID: meeting.metadata.id, track: .remote,
+                        spans: [AudioSpan(start: 100, end: 180)],
+                        confirmation: .humanConfirmedUtterances
+                    )]
+                ))
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let alice = try expect.unwrap(
+                    await pipeline.applySpeakerName(
+                        "Alice", to: key, meetingID: meeting.metadata.id
+                    )
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: bob.id, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "the line is still Bob's on screen, so it is still his in voice memory"
+                )
+                expect.equal(
+                    try await store.profileStatus(
+                        of: alice, model: .fluidAudioOffline
+                    ).sampleCount,
+                    1,
+                    "and Alice is enrolled from the rest of the cluster"
+                )
+            },
+
             test("undoing a line correction hands the audio back, it does not orphan it") { expect in
                 // Correcting one line away from the cluster's owner and then
                 // clearing it returns that line to them. Retracting it for

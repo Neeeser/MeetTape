@@ -1693,12 +1693,23 @@ public actor ProcessingPipeline {
                   clusterID, in: try found.store.readRawDiarization()
               ), !audio.spans.isEmpty
         else { return }
+        // Minus the lines inside it a person has already given to somebody else.
+        // A line-level correction outranks the cluster's name on screen, so
+        // claiming the whole cluster's audio took the corrected lines' voice
+        // away from the person still shown as speaking them: the transcript said
+        // one thing and voice memory the other.
+        let claimed = AudioSpan.subtracting(
+            correctedElsewhere(in: found.store, track: occurrence.track, besides: identityID),
+            from: audio.spans
+        )
+        guard !claimed.isEmpty else { return }
         _ = try await service.confirmCluster(
             meetingID: meetingID,
             cluster: SpeakerClusterInput(
                 clusterID: clusterID, track: occurrence.track,
-                speechSeconds: occurrence.speechSeconds, centroid: vector,
-                spans: audio.spans, analysisID: audio.run.id
+                speechSeconds: min(occurrence.speechSeconds, AudioSpan.totalDuration(claimed)),
+                centroid: vector,
+                spans: claimed, analysisID: audio.run.id
             ),
             identityID: identityID,
             settings: settings.processing.speakers,
@@ -1803,6 +1814,26 @@ public actor ProcessingPipeline {
             // are track-relative because that is what the extractor reads.
             spans: lines.map { AudioSpan(start: $0.start, end: $0.end) },
             settings: settings.processing.speakers, now: clock.now
+        )
+    }
+
+    /// The audio a person has already assigned to somebody other than
+    /// `identityID`, line by line.
+    private func correctedElsewhere(
+        in store: MeetingStore, track: CaptureTrack, besides identityID: IdentityID
+    ) -> [AudioSpan] {
+        guard let transcript = (try? store.readCanonicalTranscript()) ?? nil,
+              let speakers = try? store.readSpeakerMap()
+        else { return [] }
+        return AudioSpan.union(
+            transcript.utterances.compactMap { utterance in
+                guard utterance.track == track,
+                      let override = speakers.override(for: utterance)?.assignment,
+                      override.origin == .human,
+                      override.identityID != identityID
+                else { return nil }
+                return AudioSpan(start: utterance.start, end: utterance.end)
+            }
         )
     }
 

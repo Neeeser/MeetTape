@@ -434,6 +434,107 @@ enum SpeakerCorrectionTests {
                 expect.equal(map.displayName(for: SpeakerLabel.localUser), "Andrew")
                 expect.isTrue(map.utteranceOverrides.isEmpty)
             },
+
+            test("correcting one line leaves an overlapping neighbour alone") { expect in
+                // Chunks overlap by eight seconds and near-duplicate text
+                // survives when it is not similar enough to drop, so two
+                // utterances on one track routinely share a moment.
+                func line(
+                    _ id: String, _ start: Double, _ end: Double, _ text: String, chunk: String
+                ) -> Utterance {
+                    Utterance(
+                        id: id, start: start, end: end, track: .remote, rawSpeakerLabel: nil,
+                        speakerKey: "remote-001_speaker_00", text: text, chunkID: chunk, model: "m"
+                    )
+                }
+                // The tail of one chunk and the fuller version from the next.
+                let tail = line("u1", 1_130, 1_134, "so I think we should", chunk: "chunk_000")
+                let full = line(
+                    "u2", 1_130, 1_138, "so I think we should ship it on friday",
+                    chunk: "chunk_001"
+                )
+
+                var map = SpeakerMap()
+                map.overrideUtterance(
+                    full,
+                    with: SpeakerAssignment(displayName: "Chris", origin: .human),
+                    at: Date()
+                )
+                expect.equal(map.resolvedName(for: full), "Chris")
+                expect.notEqual(
+                    map.resolvedName(for: tail), "Chris",
+                    "a line the user never touched keeps its own speaker"
+                )
+
+                // And correcting the shorter line does not delete the longer
+                // one's correction.
+                map.overrideUtterance(
+                    tail,
+                    with: SpeakerAssignment(displayName: "Dana", origin: .human),
+                    at: Date()
+                )
+                expect.equal(map.resolvedName(for: tail), "Dana")
+                expect.equal(map.resolvedName(for: full), "Chris")
+            },
+
+            test("a correction survives the line being split in two") { expect in
+                func line(_ id: String, _ start: Double, _ end: Double) -> Utterance {
+                    Utterance(
+                        id: id, start: start, end: end, track: .remote, rawSpeakerLabel: nil,
+                        speakerKey: "remote-001_speaker_00", text: "x", chunkID: "c", model: "m"
+                    )
+                }
+                var map = SpeakerMap()
+                map.overrideUtterance(
+                    line("u1", 10, 20),
+                    with: SpeakerAssignment(displayName: "Chris", origin: .human),
+                    at: Date()
+                )
+                // Re-assembly splits the turn where the speaker changed.
+                expect.equal(map.resolvedName(for: line("u1", 10, 15)), "Chris")
+                expect.equal(map.resolvedName(for: line("u2", 15, 20)), "Chris")
+            },
+
+            test("words no interval claimed are not filed under a real cluster") { expect in
+                let raw = RawTranscript(chunks: [RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 10,
+                    model: "whisper", responseFormat: "verbose_json",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 6, text: "yeah we ship friday", speaker: nil,
+                        words: [
+                            // Dropped by the diarizer: 0.8s before the first interval.
+                            RawTranscriptWord(start: 0.0, end: 0.2, text: " yeah"),
+                            RawTranscriptWord(start: 1.2, end: 1.6, text: " we"),
+                            RawTranscriptWord(start: 1.7, end: 2.1, text: " ship"),
+                            RawTranscriptWord(start: 2.2, end: 2.8, text: " friday"),
+                        ]
+                    )]
+                )])
+                var diarization = RawDiarization()
+                diarization.setActive(DiarizationRun(
+                    id: "remote-001", track: .remote, backend: "fluidaudio",
+                    producedAt: Date(), timelineOffset: 0, configuration: [:],
+                    clusters: [DiarizationCluster(id: "remote-001_speaker_00", speechSeconds: 5)],
+                    intervals: [DiarizationInterval(
+                        start: 1.0, end: 6.0, clusterID: "remote-001_speaker_00"
+                    )]
+                ))
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: raw, diarization: diarization,
+                    micTrackIsLocalUser: true, generatedAt: Date()
+                )
+                let keys = Set(transcript.speakerKeys)
+                for key in keys where key != SpeakerLabel.localUser {
+                    expect.isFalse(
+                        key.hasSuffix("_speaker_00") && !key.hasPrefix("remote-001"),
+                        "no key outside the run may render as one of its clusters: \(key)"
+                    )
+                }
+                if let stray = keys.first(where: { $0.hasSuffix(SpeakerLabel.unattributed) }) {
+                    expect.equal(SpeakerMap.fallbackName(for: stray), "Unattributed")
+                }
+            },
         ])
     }
 

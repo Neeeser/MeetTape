@@ -138,6 +138,14 @@ public struct RawTranscript: Codable, Sendable, Equatable {
 /// participant.
 public enum SpeakerLabel {
     public static let localUser = "local"
+    /// Words no diarization interval claimed.
+    ///
+    /// They used to be filed under a fabricated cluster key, which renders the
+    /// same as a real one: two rows both read "Speaker 1", naming one did not
+    /// name the other, and the textual suggestion pass could put a real
+    /// person's name on a scatter of stray backchannels. This key belongs to no
+    /// run, has no occurrence row and no vector, so it reads as what it is.
+    public static let unattributed = "unattributed"
 
     public static func namespaced(chunkID: String, rawLabel: String) -> String {
         // A label that already carries a namespace keeps it. Attribution against
@@ -145,6 +153,12 @@ public enum SpeakerLabel {
         // inherit names that belonged to the previous clustering.
         if rawLabel.contains("_speaker_") { return rawLabel }
         return "\(chunkID)_speaker_\(normalise(rawLabel))"
+    }
+
+    /// A key for one track's unattributed words. Namespaced by track so the
+    /// microphone's and the far end's do not merge into one row.
+    public static func unattributed(track: CaptureTrack) -> String {
+        "\(track.rawValue)_\(unattributed)"
     }
 
     public static func chunkID(index: Int) -> String {

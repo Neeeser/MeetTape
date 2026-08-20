@@ -925,7 +925,9 @@ public actor ProcessingPipeline {
         guard let transcript = try store.readCanonicalTranscript() else { return }
         let speakers = try store.readSpeakerMap()
         let labels = transcript.speakerKeys.filter {
-            $0 != SpeakerLabel.localUser && speakers.entries[$0] == nil
+            $0 != SpeakerLabel.localUser
+                && !$0.hasSuffix(SpeakerLabel.unattributed)
+                && speakers.entries[$0] == nil
         }
         guard !labels.isEmpty else { return }
 

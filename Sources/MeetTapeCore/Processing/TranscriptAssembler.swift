@@ -272,7 +272,7 @@ public struct TranscriptAssembler: Sendable {
             }
             let speakerKey = treatAsLocalUser
                 ? SpeakerLabel.localUser
-                : (rawLabel ?? SpeakerLabel.namespaced(chunkID: chunk.id, rawLabel: "00"))
+                : (rawLabel ?? SpeakerLabel.unattributed(track: chunk.track))
             result.append(Utterance(
                 id: "\(chunk.id)-\(result.count)",
                 start: chunk.timelineOffset + group.start,

@@ -94,11 +94,20 @@ public struct UtteranceOverride: Codable, Sendable, Equatable {
     /// The identifier of the line as it stood when the correction was made.
     /// Diagnostic only; matching goes through the span.
     public var utteranceID: String?
+    /// The chunk the corrected line came from.
+    ///
+    /// Time alone cannot tell a split half of the corrected line from a
+    /// different line that overlaps it: both sit inside the span. A split half
+    /// keeps its chunk, and an overlapping near-duplicate comes from the
+    /// neighbouring chunk, which is what separates them. Absent on a file
+    /// written before this, where it matches anything.
+    public var chunkID: String?
 
     public init(
         track: CaptureTrack, anchorSeconds: Double,
         startSeconds: Double? = nil, endSeconds: Double? = nil,
-        assignment: SpeakerAssignment, createdAt: Date, utteranceID: String? = nil
+        assignment: SpeakerAssignment, createdAt: Date, utteranceID: String? = nil,
+        chunkID: String? = nil
     ) {
         self.track = track
         self.anchorSeconds = anchorSeconds
@@ -107,16 +116,31 @@ public struct UtteranceOverride: Codable, Sendable, Equatable {
         self.assignment = assignment
         self.createdAt = createdAt
         self.utteranceID = utteranceID
+        self.chunkID = chunkID
     }
 
-    /// Whether this correction covers any part of a line.
+    /// Whether this correction is about a line.
+    ///
+    /// Most of the line has to be inside the corrected span, not any part of
+    /// it. Chunks overlap by eight seconds and near-duplicate text is only
+    /// dropped above a similarity bar, so two utterances on one track routinely
+    /// share a moment; a plain intersection made correcting one line rename the
+    /// other, and correcting that one delete the first correction outright.
+    ///
+    /// Majority rather than containment, because re-assembly splits and merges
+    /// turns: each piece of a split line is wholly inside the original span, and
+    /// a merged line is mostly inside it.
     func covers(_ utterance: Utterance) -> Bool {
         guard track == utterance.track else { return false }
+        if let chunkID, chunkID != utterance.chunkID { return false }
         let end = max(utterance.end, utterance.start + 0.001)
         guard let start = startSeconds, let finish = endSeconds else {
             return anchorSeconds >= utterance.start && anchorSeconds < end
         }
-        return start < end && utterance.start < max(finish, start + 0.001)
+        let spanEnd = max(finish, start + 0.001)
+        let overlap = min(end, spanEnd) - max(utterance.start, start)
+        guard overlap > 0 else { return false }
+        return overlap / (end - utterance.start) >= 0.5
     }
 }
 
@@ -209,7 +233,8 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
             endSeconds: max(utterance.end, utterance.start + 0.001),
             assignment: assignment,
             createdAt: date,
-            utteranceID: utterance.id
+            utteranceID: utterance.id,
+            chunkID: utterance.chunkID
         ))
     }
 
@@ -280,6 +305,7 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     /// so they must not read as one person.
     public static func fallbackName(for key: String) -> String {
         if key == SpeakerLabel.localUser { return "Me" }
+        if key.hasSuffix(SpeakerLabel.unattributed) { return "Unattributed" }
         guard let range = key.range(of: "_speaker_") else { return key }
         let suffix = String(key[range.upperBound...])
         let number = Int(suffix).map { "\($0 + 1)" } ?? suffix.uppercased()

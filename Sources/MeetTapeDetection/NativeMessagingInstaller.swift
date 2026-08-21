@@ -116,6 +116,18 @@ public struct NativeMessagingInstaller: Sendable {
 
     /// Where the host binary lives inside a packaged app, falling back to the
     /// build directory during development.
+    /// The extension manifest inside the app bundle.
+    ///
+    /// Firefox loads the extension from this path as a temporary add-on, so the
+    /// panel has to be able to show it and reveal it: there is nothing to click
+    /// in MeetTape that installs it.
+    public static func bundledExtensionManifestURL(bundle: Bundle = .main) -> URL? {
+        guard let resources = bundle.resourceURL else { return nil }
+        let manifest = resources
+            .appendingPathComponent("extension/firefox/manifest.json")
+        return FileManager.default.fileExists(atPath: manifest.path) ? manifest : nil
+    }
+
     public static func bundledHostURL(bundle: Bundle = .main) -> URL? {
         if let helpers = bundle.executableURL?.deletingLastPathComponent() {
             let candidate = helpers.appendingPathComponent("meettape-nativehost")

@@ -9,7 +9,7 @@ only, no code-signing identity.
 
 ## Automated
 
-`./scripts/test.sh` runs 284 tests, all passing, in about 10 seconds.
+`./scripts/test.sh` runs 294 tests, all passing, in about 12 seconds.
 Fifteen further tests are skipped unless explicitly enabled, as described below.
 
 `cd extension && npm test` runs 10 tests, all passing.
@@ -361,19 +361,59 @@ The review cost about as much as the implementation. That ratio is the finding:
 this subsystem has many quiet failure modes, and a fix in it is as likely to
 need review as the code it repairs.
 
+**The installed application, driven through its own interface.** A release build
+was assembled, copied to `/Applications`, and operated as a user operates it:
+the menu bar item, the settings tabs, the meeting panel and the file picker.
+What follows was observed on that build, not on a test harness.
+
+*Slack Huddle, accessibility path.* Opening the huddle preview produced
+`slack:1:accessibility` and armed without committing; it stayed armed for the 48
+seconds the preview was on screen and wrote no meeting. Joining raised the
+evidence to `slack:2:accessibility` and committed 1.5 seconds later. During the
+call the accessibility subtree read empty nine times and the meeting was
+reasserted each time rather than ended. Leaving paused the session with
+`provider_evidence_gone`, and it finished 90 seconds later at the reconnect
+window. Both tracks recorded; the far end carried real audio.
+
+*Google Meet, browser sensor.* With the extension loaded as a temporary add-on,
+a prejoin screen produced `google_meet:1:browser_sensor` and armed without
+recording, which is the distinction the extension exists to make.
+
+*Processing while recording.* A twelve-minute import was transcribed by
+WhisperKit and diarized by FluidAudio while a recording ran. Capture armed
+within about three seconds, every segment closed at exactly 30.00 seconds, the
+microphone wrote a continuous 192 KB/s with no gaps, rebuilds stayed at the four
+the echo-cancellation fallback costs, and 186.4 seconds of frames matched the
+reported duration exactly. Concurrent Neural Engine work did not cost the
+recording anything.
+
+*Speaker corrections.* Correcting one line wrote a single span-anchored
+override; the raw diarization stayed byte-identical, the cluster entries were
+untouched, and the same speaker's other line kept its previous name. Clearing
+the cluster to unknown left the corrected line intact. A re-analysis appended
+`mic-002`, left `mic-001` on disk inactive, did not re-transcribe, and the line
+correction survived the renumbering.
+
+*Recurring identity.* Three voices seeded from one meeting were matched in a
+second meeting built from different sentences: scores 0.935 to 0.964, margins
+0.535 to 0.744, all in the high band. They became persistent, appeared in the
+gallery as heard in two meetings, and naming one updated the other meeting's
+transcript. The voices were synthesised with `say`, which is more consistent
+than a person, so those margins are better than a real pairing should be
+expected to give.
+
 ## Not verified
 
 The following behaviour is implemented but has not been exercised, and should not
 be assumed to work.
 
-- **A real Slack Huddle with accessibility granted.** The `Leave Huddle` control
-  path is covered by tests written against recorded observations. A real huddle
-  has been recorded end to end through the audio-only fallback (below), but not
-  through the accessibility path.
-- **A real Google Meet or Zoom call in Firefox** with the extension loaded from
-  `extension/dist/firefox`. The sensor path was verified with a synthetic relay
-  before peer verification was added, and the browser-launched path has not been
-  run.
+- **A Google Meet carried through to a recording.** The prejoin and the sensor
+  connection were observed with the extension loaded; joining, recording,
+  leaving and a refresh mid-call were not run.
+- **Zoom.** No Zoom call has been observed at all.
+- **Two people on a call.** Every recording so far has one participant, so no
+  diarization result has been checked against a second real voice, and the
+  microphone track's enrolment guard has never had a genuine far end to refuse.
 - **Chrome.** The extension builds and its manifest parses, but MV3 service
   workers suspend when idle and no Chrome session has been observed. The Chrome
   native messaging manifest is not installed, because it requires the packed

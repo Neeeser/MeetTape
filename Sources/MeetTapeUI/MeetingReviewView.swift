@@ -256,7 +256,8 @@ public struct MeetingReviewView: View {
             Text(
                 model.localModelsReady
                     ? "Leave the count empty to let MeetTape decide. The words are not "
-                        + "re-transcribed."
+                        + "re-transcribed. Speaker names are cleared, because the clusters "
+                        + "they name no longer exist. Corrections to single lines are kept."
                     : "Runs on this Mac. Download the speech models in Settings to use it."
             )
             .font(.caption2).foregroundStyle(.secondary)

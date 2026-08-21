@@ -1297,6 +1297,64 @@ enum LocalPipelineTests {
                 )
                 expect.equal(reread.nextRunID(track: .remote), "remote-003")
             },
+
+            test("a re-analysis keeps line corrections and drops cluster names") { expect in
+                // What a person is left with after pressing Re-analyze speakers,
+                // observed on the installed app: the line they corrected still
+                // reads their name, and every speaker they named at the cluster
+                // level reads "Speaker 1" again.
+                //
+                // Both halves are deliberate. A line override is anchored to a
+                // span of the timeline, which renumbering does not move. A
+                // cluster name is attached to a cluster of the previous run, and
+                // the new run's clusters are not the same sets of audio, so
+                // carrying the name across would be a guess about who the new
+                // cluster is. Pinned so that changing either half has to be a
+                // decision rather than an accident.
+                var map = SpeakerMap()
+                map.assign("Andrew", to: "remote-001_speaker_00")
+                let corrected = Utterance(
+                    id: "chunk_000-remote-001000-004000", start: 1, end: 4, track: .remote,
+                    rawSpeakerLabel: "remote-001_speaker_00",
+                    speakerKey: "remote-001_speaker_00", text: "hello",
+                    chunkID: "chunk_000", model: "stub"
+                )
+                map.overrideUtterance(
+                    corrected,
+                    with: SpeakerAssignment(
+                        displayName: "Chris", origin: .human,
+                        provenance: SpeakerProvenance(source: .human, humanVerified: true)
+                    ),
+                    at: Date(timeIntervalSince1970: 1_787_070_000)
+                )
+
+                let renumbered = Utterance(
+                    id: "chunk_000-remote-001000-004000", start: 1, end: 4, track: .remote,
+                    rawSpeakerLabel: "remote-002_speaker_00",
+                    speakerKey: "remote-002_speaker_00", text: "hello",
+                    chunkID: "chunk_000", model: "stub"
+                )
+                expect.equal(
+                    map.resolvedName(for: renumbered), "Chris",
+                    "the correction is anchored to the audio, not to the cluster"
+                )
+                expect.isTrue(map.hasOverride(for: renumbered))
+
+                let otherLine = Utterance(
+                    id: "chunk_000-remote-010000-014000", start: 10, end: 14, track: .remote,
+                    rawSpeakerLabel: "remote-002_speaker_00",
+                    speakerKey: "remote-002_speaker_00", text: "and again",
+                    chunkID: "chunk_000", model: "stub"
+                )
+                expect.equal(
+                    map.resolvedName(for: otherLine), "Speaker 1",
+                    "the name given to the previous run's cluster does not follow it"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_00"), "Andrew",
+                    "and is still on disk rather than deleted"
+                )
+            },
         ])
     }
 }

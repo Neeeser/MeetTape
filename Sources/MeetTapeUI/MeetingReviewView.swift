@@ -38,7 +38,7 @@ public struct MeetingReviewView: View {
             .padding(20)
         }
         .frame(minWidth: 640, minHeight: 480)
-        .onDisappear { model.saveNotes() }
+        .onDisappear { model.saveEdits() }
     }
 
     private var header: some View {

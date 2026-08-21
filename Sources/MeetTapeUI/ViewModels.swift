@@ -353,6 +353,7 @@ public final class MeetingReviewModel {
     /// What the last read put on screen, so an edit made since is recognisable.
     @ObservationIgnored private var lastLoadedTitle = ""
     @ObservationIgnored private var lastLoadedNotes = ""
+    @ObservationIgnored private var pendingEditSave: Task<Void, Never>?
 
     public init(runtime: MeetTapeRuntime, meetingID: String) {
         self.runtime = runtime
@@ -627,6 +628,30 @@ public final class MeetingReviewModel {
         reload()
     }
 
+    /// Writes what has been typed a moment after typing stops.
+    ///
+    /// Notes reached disk only when the panel closed and the title only when
+    /// Return was pressed, under a card that says editing is saved immediately.
+    /// Quitting with the panel open lost both, and `onDisappear` does not run
+    /// on termination, so closing the window was the only path that saved.
+    private func scheduleEditSave() {
+        pendingEditSave?.cancel()
+        pendingEditSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self?.saveEdits()
+        }
+    }
+
+    /// Writes the title and notes, each only when the user changed it.
+    public func saveEdits() {
+        if title != lastLoadedTitle {
+            runtime.saveTitle(title, meetingID: meetingID)
+            lastLoadedTitle = title
+        }
+        saveNotes()
+    }
+
     /// Writes the notes only when the user changed them.
     ///
     /// Called when the panel closes, and it writes the whole file. A quick note
@@ -688,11 +713,11 @@ public final class MeetingReviewModel {
     public func reveal() { runtime.revealInFinder(meetingID: meetingID) }
 
     public func titleBinding() -> Binding<String> {
-        Binding(get: { self.title }, set: { self.title = $0 })
+        Binding(get: { self.title }, set: { self.title = $0; self.scheduleEditSave() })
     }
 
     public func notesBinding() -> Binding<String> {
-        Binding(get: { self.notes }, set: { self.notes = $0 })
+        Binding(get: { self.notes }, set: { self.notes = $0; self.scheduleEditSave() })
     }
 
     public func nameBinding(for key: String) -> Binding<String> {

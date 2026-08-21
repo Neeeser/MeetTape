@@ -114,6 +114,46 @@ enum UITests {
                 }
             },
 
+            test("typing a title or a note reaches disk without closing the panel") { expect in
+                // Both were written only when the panel closed, under a card
+                // that says editing is saved immediately, and the title only
+                // when Return was pressed. onDisappear does not run on
+                // termination, so quitting with the panel open lost everything
+                // typed into it.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let archive = root.appendingPathComponent("Meetings")
+                let repository = MeetingRepository(root: archive)
+                let started = Date(timeIntervalSince1970: 1_787_070_000)
+                let created = try repository.createMeeting(
+                    source: .manual, provider: .unknown, startedAt: started,
+                    titles: TitleCandidates(timestampFallback: "Manual"), now: started
+                )
+
+                let model = await MainActor.run { () -> MeetingReviewModel in
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = archive.path
+                    runtime.update(settings: settings)
+                    let model = MeetingReviewModel(runtime: runtime, meetingID: created.metadata.id)
+                    model.titleBinding().wrappedValue = "Frankfurt cutover"
+                    model.notesBinding().wrappedValue = "Chris owns the runbook"
+                    return model
+                }
+                _ = model
+
+                var savedNotes = ""
+                var savedTitle: String?
+                for _ in 0..<40 {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    savedNotes = created.store.readNotes()
+                    savedTitle = (try? created.store.readMetadata())?.titles.human
+                    if !savedNotes.isEmpty, savedTitle != nil { break }
+                }
+                expect.equal(savedNotes, "Chris owns the runbook")
+                expect.equal(savedTitle, "Frankfurt cutover")
+            },
+
             test("the panel resolves the archive once, not on every render") { expect in
                 // The panel body reads the processing fraction beside the
                 // meeting's own paths, so anything computed there runs on every

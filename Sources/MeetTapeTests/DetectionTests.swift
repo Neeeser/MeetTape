@@ -487,6 +487,60 @@ enum DetectionTests {
                     )
                 }
             },
+
+            test("never record takes effect while the app still holds the microphone") { expect in
+                // The user answers the provisional prompt with "never record this
+                // app" while the call is still live. The tracked entry kept
+                // publishing confirmed evidence for the six-second end grace,
+                // which restarted the provisional recording and asked again.
+                var detector = GenericCallDetector()
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.example.videochat", processID: 4_242,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: true, windowTitle: "Team call"
+                    ),
+                ]
+                _ = detector.update(states: states, at: 100)
+                _ = detector.update(states: states, at: 109)
+                expect.equal(detector.currentEvidence().first?.confidence, .confirmed)
+
+                detector.configuration.neverRecord = ["com.example.videochat"]
+                let events = detector.update(states: states, at: 109.5)
+                expect.equal(events, [.callEnded(bundleIdentifier: "com.example.videochat")])
+                expect.equal(
+                    detector.currentEvidence().count, 0,
+                    "the ban is immediate, not after the end grace"
+                )
+            },
+
+            test("never record covers the application's helper processes") { expect in
+                // The prompt names whichever helper held the microphone, and an
+                // Electron app rotates through .helper, .helper.Renderer and
+                // .helper.GPU. An exact match would prompt again for a sibling.
+                var detector = GenericCallDetector(
+                    configuration: .init(neverRecord: ["com.example.videochat"])
+                )
+                var now = 100.0
+                for _ in 0..<200 {
+                    now += 0.5
+                    expect.equal(
+                        detector.update(
+                            states: [
+                                ApplicationAudioState(
+                                    bundleIdentifier: "com.example.videochat.helper.Renderer",
+                                    processID: 1,
+                                    holdsMicrophone: true, producesOutput: true,
+                                    isFrontmost: true, windowTitle: nil
+                                ),
+                            ],
+                            at: now
+                        ),
+                        []
+                    )
+                }
+                expect.equal(detector.currentEvidence().count, 0)
+            },
         ])
     }
 

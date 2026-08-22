@@ -60,8 +60,11 @@ public enum MicrophoneIgnoreList {
         if notMeetings.contains(bundleIdentifier) { return true }
         if ownBundleIdentifiers.contains(bundleIdentifier) { return true }
         if additional.contains(bundleIdentifier) { return true }
-        // Helper processes of an ignored application.
-        let excluded = systemServices.union(notMeetings)
+        // Helper processes of an ignored application. The user's never-record
+        // choice names whichever helper held the microphone when they were
+        // asked, and an Electron app rotates through .helper, .helper.Renderer
+        // and .helper.GPU, so it gets the same prefix treatment.
+        let excluded = systemServices.union(notMeetings).union(additional)
         return excluded.contains { bundleIdentifier.hasPrefix($0 + ".") }
     }
 }
@@ -194,8 +197,14 @@ public struct GenericCallDetector: Sendable {
 
         // A single missed poll is not the end of a call: CoreAudio recreates
         // audio objects for sub-second stretches during normal operation.
+        // A ban is not a flap, though. An entry whose application is now on the
+        // never-record list kept publishing confirmed evidence through the end
+        // grace, and the session re-prompted the user it had just answered.
         for (bundleIdentifier, entry) in tracked where !seen.contains(bundleIdentifier) {
-            guard now - entry.lastSeen >= configuration.endGraceSeconds else { continue }
+            let banned = MicrophoneIgnoreList.isIgnored(
+                bundleIdentifier, additional: configuration.neverRecord
+            )
+            guard banned || now - entry.lastSeen >= configuration.endGraceSeconds else { continue }
             if entry.promoted { events.append(.callEnded(bundleIdentifier: bundleIdentifier)) }
             tracked.removeValue(forKey: bundleIdentifier)
         }

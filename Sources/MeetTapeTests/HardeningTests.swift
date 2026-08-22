@@ -565,6 +565,35 @@ enum HardeningTests {
                 )
             },
 
+            test("an always-record entry saved against a helper still preapproves") { expect in
+                // What is saved and what the detector looks up have to name the
+                // same thing. Resolving the process to its application on one
+                // side only leaves a saved entry matching nothing at all, which
+                // is silent: the application simply waits out the dwell again.
+                let json = Data(
+                    #"{"alwaysRecordApplications":["com.openai.chat.helper.Renderer"]}"#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                var detector = GenericCallDetector(
+                    configuration: settings.genericDetectorConfiguration
+                )
+                let events = detector.update(
+                    states: [
+                        ApplicationAudioState(
+                            bundleIdentifier: "com.openai.chat.helper.GPU", processID: 1,
+                            holdsMicrophone: true, producesOutput: false,
+                            isFrontmost: true, windowTitle: nil
+                        ),
+                    ],
+                    at: 100
+                )
+                guard case .callLikely(let candidate) = events.first else {
+                    expect.fail("expected an immediate candidate, got \(events)")
+                    return
+                }
+                expect.isTrue(candidate.isPreapproved)
+            },
+
             test("banning an application from the prompt records the application") { expect in
                 // The prompt names the process CoreAudio reported, which for an
                 // Electron application is a helper. Stored verbatim, the ban was
@@ -580,6 +609,12 @@ enum HardeningTests {
                         runtime.settings.neverRecordApplications, ["com.openai.chat"],
                         "the same application twice is one ban"
                     )
+
+                    // The other list is written the same way, and the two of them
+                    // hold the same kind of name, so a choice reverses cleanly.
+                    runtime.alwaysRecord(applicationBundleID: "com.openai.chat.helper")
+                    expect.equal(runtime.settings.alwaysRecordApplications, ["com.openai.chat"])
+                    expect.equal(runtime.settings.neverRecordApplications, [])
                 }
             },
 

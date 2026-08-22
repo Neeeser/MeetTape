@@ -181,6 +181,24 @@ public struct SessionController: Sendable {
     private var pendingEnd: Double?
     private var reconnectingSince: Double?
     private var announcedOtherTabs = false
+    /// The call whose provisional recording the user declined.
+    ///
+    /// The prompt is raised from evidence, and evidence is reasserted on every
+    /// poll, so an answer the session did not remember was undone half a second
+    /// later: it went idle, read the same evidence again and asked again. The
+    /// answer is released once that call stops producing evidence, which is what
+    /// makes a later call in the same application ask afresh.
+    ///
+    /// The provider is part of the identity because the application alone is a
+    /// browser for anything running in a tab. Declining one call must not stop a
+    /// Meet in the same browser from recording.
+    private struct DeclinedCall {
+        let provider: MeetingProvider
+        let application: String
+        var lastSeen: Double
+    }
+
+    private var declined: DeclinedCall?
     /// Bundle prefixes the process tap is currently bound to, so a change of
     /// provider between arming and confirming retargets it instead of recording
     /// the wrong application.
@@ -200,6 +218,8 @@ public struct SessionController: Sendable {
     public mutating func update(
         evidence allEvidence: [ProviderEvidence], now: Double, wallClock: Date
     ) -> [SessionAction] {
+        ageDeclinedCall(in: allEvidence, now: now)
+
         guard !snapshot.isManual else {
             // A manually started recording is the user's, and provider state never
             // ends it. Evidence is still recorded so the meeting gets a title.
@@ -401,11 +421,38 @@ public struct SessionController: Sendable {
     }
 
     /// Answer to "This looks like a meeting. Keep recording?".
-    public mutating func resolveProvisional(keep: Bool, reason: String) -> [SessionAction] {
+    public mutating func resolveProvisional(
+        keep: Bool, reason: String, now: Double
+    ) -> [SessionAction] {
         guard snapshot.isProvisional else { return [] }
         snapshot.isProvisional = false
         if keep { return [] }
+        // Read before finishing, which clears the evidence this came from.
+        if let application = evidence?.applicationBundleID {
+            declined = DeclinedCall(
+                provider: snapshot.provider, application: application, lastSeen: now
+            )
+        }
         return finishRecording(reason: reason, discard: true)
+    }
+
+    /// Releases a declined call once it is over.
+    private mutating func ageDeclinedCall(in allEvidence: [ProviderEvidence], now: Double) {
+        guard var current = declined else { return }
+        let stillThere = allEvidence.contains { candidate in
+            candidate.confidence > .none && Self.matches(current, candidate)
+        }
+        if stillThere {
+            current.lastSeen = now
+            declined = current
+        } else if now - current.lastSeen >= configuration.endGraceSeconds {
+            declined = nil
+        }
+    }
+
+    private static func matches(_ declined: DeclinedCall, _ candidate: ProviderEvidence) -> Bool {
+        candidate.provider == declined.provider
+            && candidate.applicationBundleID == declined.application
     }
 
     // MARK: - internals
@@ -419,6 +466,10 @@ public struct SessionController: Sendable {
         evidence
             .filter { $0.confidence > .none }
             .filter { policies.policy(for: $0.provider).autoStart != .never }
+            .filter { candidate in
+                guard let declined else { return true }
+                return !Self.matches(declined, candidate)
+            }
             .max { lhs, rhs in
                 if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }
                 if lhs.sourceRank != rhs.sourceRank { return lhs.sourceRank < rhs.sourceRank }

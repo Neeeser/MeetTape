@@ -533,6 +533,24 @@ enum HardeningTests {
 
     static var sessionSuite: Suite {
         Suite("SessionHardening", [
+            test("banning an application from the prompt records the application") { expect in
+                // The prompt names the process CoreAudio reported, which for an
+                // Electron application is a helper. Stored verbatim, the ban was
+                // one entry per helper and covered none of the others.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    runtime.neverRecord(applicationBundleID: "com.openai.chat.helper.Renderer")
+                    expect.equal(runtime.settings.neverRecordApplications, ["com.openai.chat"])
+                    runtime.neverRecord(applicationBundleID: "com.openai.chat.helper.GPU")
+                    expect.equal(
+                        runtime.settings.neverRecordApplications, ["com.openai.chat"],
+                        "the same application twice is one ban"
+                    )
+                }
+            },
+
             test("a provider set to never record does not suppress another one") { expect in
                 var policies = ProviderPolicies()
                 policies.zoom = ProviderPolicy(autoStart: .never, autoStop: true)

@@ -15,6 +15,17 @@ enum SessionTests {
         )
     }
 
+    static func genericEvidence(
+        confidence: MeetingConfidence, bundleIdentifier: String = "com.example.videochat"
+    ) -> ProviderEvidence {
+        ProviderEvidence(
+            provider: .unknown, confidence: confidence, source: .native,
+            meetingID: nil, url: nil, title: "Team call", browser: nil,
+            applicationBundleID: bundleIdentifier,
+            audioBundlePrefixes: [bundleIdentifier]
+        )
+    }
+
     static var suite: Suite {
         Suite("SessionController", [
             test("a candidate arms capture before anything reaches disk") { expect in
@@ -327,7 +338,9 @@ enum SessionTests {
                 })
                 expect.isTrue(commitIndex < askIndex, "capture must already be running when we ask")
 
-                let discarded = controller.resolveProvisional(keep: false, reason: "user_discarded")
+                let discarded = controller.resolveProvisional(
+                    keep: false, reason: "user_discarded", now: 101
+                )
                 guard case .discardCapture = discarded.first else {
                     expect.fail("declining should discard, got \(discarded)")
                     return
@@ -342,7 +355,9 @@ enum SessionTests {
                     titles: TitleCandidates(timestampFallback: "f"), now: 100, wallClock: wall,
                     isProvisional: true, applicationBundleID: "com.example.videochat"
                 )
-                expect.equal(controller.resolveProvisional(keep: true, reason: "kept"), [])
+                expect.equal(
+                    controller.resolveProvisional(keep: true, reason: "kept", now: 101), []
+                )
                 expect.equal(controller.snapshot.state, .recording)
                 expect.isFalse(controller.snapshot.isProvisional)
             },
@@ -363,6 +378,78 @@ enum SessionTests {
                     titles: TitleCandidates(timestampFallback: "f"), now: 100, wallClock: wall
                 )
                 expect.isFalse(manual.isEmpty)
+            },
+
+            test("a discarded provisional is not asked about again during the call") { expect in
+                // The prompt is raised from evidence, and evidence is reasserted
+                // on every poll. With the answer forgotten the session went idle,
+                // read the same evidence half a second later and asked again, so
+                // the user had to answer once per poll for the length of the call.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let call = genericEvidence(confidence: .confirmed)
+                let first = controller.update(evidence: [call], now: 100, wallClock: wall)
+                expect.isTrue(
+                    first.contains { if case .askToKeepProvisional = $0 { true } else { false } },
+                    "an unrecognised call asks"
+                )
+
+                let discarded = controller.resolveProvisional(
+                    keep: false, reason: "user_discarded", now: 101
+                )
+                guard case .discardCapture = discarded.first else {
+                    expect.fail("declining should discard, got \(discarded)")
+                    return
+                }
+
+                var now = 101.0
+                for _ in 0..<120 {
+                    now += 0.5
+                    expect.equal(
+                        controller.update(evidence: [call], now: now, wallClock: wall), [],
+                        "the answer holds while the application keeps the microphone"
+                    )
+                }
+                expect.equal(controller.snapshot.state, .idle)
+            },
+
+            test("a later call in the same application asks again") { expect in
+                // The answer is scoped to the call it was asked about, not to the
+                // application forever. That is what Never Record This App is for.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let call = genericEvidence(confidence: .confirmed)
+                _ = controller.update(evidence: [call], now: 100, wallClock: wall)
+                _ = controller.resolveProvisional(keep: false, reason: "user_discarded", now: 101)
+
+                // The call ends: no evidence at all for longer than the grace.
+                _ = controller.update(evidence: [], now: 102, wallClock: wall)
+                _ = controller.update(evidence: [], now: 110, wallClock: wall)
+
+                let second = controller.update(evidence: [call], now: 400, wallClock: wall)
+                expect.isTrue(
+                    second.contains { if case .askToKeepProvisional = $0 { true } else { false } },
+                    "a new call in the same application is a new question"
+                )
+            },
+
+            test("declining one call does not suppress another in the same application") { expect in
+                // Anything running in a tab reports the browser as its
+                // application, so an answer scoped to the application alone would
+                // stop every meeting in that browser from recording.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let call = genericEvidence(confidence: .confirmed, bundleIdentifier: "org.mozilla.firefox")
+                _ = controller.update(evidence: [call], now: 100, wallClock: wall)
+                _ = controller.resolveProvisional(keep: false, reason: "user_discarded", now: 101)
+
+                let meet = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 102, wallClock: wall
+                )
+                expect.isTrue(
+                    meet.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a Meet call in the same browser still records"
+                )
             },
 
             test("a provider set to never record is left alone") { expect in

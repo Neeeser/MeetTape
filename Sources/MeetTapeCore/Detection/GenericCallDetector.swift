@@ -54,17 +54,39 @@ public enum MicrophoneIgnoreList {
     /// MeetTape's own capture must never look like a meeting to itself.
     public static let ownBundleIdentifiers: Set<String> = ["com.meettape.app"]
 
+    /// The application a helper process belongs to.
+    ///
+    /// Electron and Chromium applications open the microphone from a helper, and
+    /// which one varies over the life of the process: `.helper`,
+    /// `.helper.Renderer`, `.helper.GPU`. CoreAudio reports whichever it was, so
+    /// a choice the user made about "this application" is recorded against the
+    /// application rather than against the helper that happened to be asked
+    /// about.
+    ///
+    /// Nothing is collapsed below three components. A bundle identifier is
+    /// reverse-DNS, and shortening `com.helper.app` to `com` would ban most of
+    /// the machine through the prefix match.
+    public static func applicationIdentifier(for bundleIdentifier: String) -> String {
+        let components = bundleIdentifier.split(separator: ".")
+        guard let helper = components.firstIndex(where: { $0.lowercased() == "helper" }),
+              helper >= 3
+        else { return bundleIdentifier }
+        return components[..<helper].joined(separator: ".")
+    }
+
     public static func isIgnored(_ bundleIdentifier: String, additional: Set<String> = []) -> Bool {
         if bundleIdentifier.isEmpty { return true }
         if systemServices.contains(bundleIdentifier) { return true }
         if notMeetings.contains(bundleIdentifier) { return true }
         if ownBundleIdentifiers.contains(bundleIdentifier) { return true }
         if additional.contains(bundleIdentifier) { return true }
-        // Helper processes of an ignored application. The user's never-record
-        // choice names whichever helper held the microphone when they were
-        // asked, and an Electron app rotates through .helper, .helper.Renderer
-        // and .helper.GPU, so it gets the same prefix treatment.
-        let excluded = systemServices.union(notMeetings).union(additional)
+        // Helper processes of an ignored application, MeetTape's own included:
+        // its capture must never look like a meeting to itself, and it is the
+        // helper that would hold the microphone.
+        let excluded = systemServices
+            .union(notMeetings)
+            .union(ownBundleIdentifiers)
+            .union(additional)
         return excluded.contains { bundleIdentifier.hasPrefix($0 + ".") }
     }
 }
@@ -232,9 +254,5 @@ public struct GenericCallDetector: Sendable {
                 audioBundlePrefixes: [bundleIdentifier]
             )
         }
-    }
-
-    public mutating func forget(_ bundleIdentifier: String) {
-        tracked.removeValue(forKey: bundleIdentifier)
     }
 }

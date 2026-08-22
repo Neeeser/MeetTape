@@ -514,10 +514,63 @@ enum DetectionTests {
                 )
             },
 
-            test("never record covers the application's helper processes") { expect in
-                // The prompt names whichever helper held the microphone, and an
-                // Electron app rotates through .helper, .helper.Renderer and
-                // .helper.GPU. An exact match would prompt again for a sibling.
+            test("a ban recorded against a helper covers the whole application") { expect in
+                // CoreAudio names whichever helper opened the microphone, and an
+                // Electron application rotates through .helper, .helper.Renderer
+                // and .helper.GPU. Stored as reported, the ban missed both the
+                // siblings and the application itself, so the next poll that
+                // found a different helper asked again.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.openai.chat.helper.Renderer"),
+                    "com.openai.chat"
+                )
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.tinyspeck.slackmacgap.helper"),
+                    "com.tinyspeck.slackmacgap"
+                )
+                // An application that is not a helper is stored exactly as it is.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.example.videochat"),
+                    "com.example.videochat"
+                )
+                // Nothing is ever collapsed to fewer than three components: a ban
+                // on "com" would prefix-match most of the machine.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.helper.app"),
+                    "com.helper.app"
+                )
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.acme.helperapp"),
+                    "com.acme.helperapp"
+                )
+
+                let banned = MicrophoneIgnoreList.applicationIdentifier(
+                    for: "com.openai.chat.helper.Renderer"
+                )
+                var detector = GenericCallDetector(configuration: .init(neverRecord: [banned]))
+                var when = 100.0
+                for sibling in [
+                    "com.openai.chat", "com.openai.chat.helper", "com.openai.chat.helper.GPU",
+                ] {
+                    when += 30
+                    expect.equal(
+                        detector.update(
+                            states: [
+                                ApplicationAudioState(
+                                    bundleIdentifier: sibling, processID: 1,
+                                    holdsMicrophone: true, producesOutput: true,
+                                    isFrontmost: true, windowTitle: nil
+                                ),
+                            ],
+                            at: when
+                        ),
+                        [], "\(sibling) belongs to an application the user banned"
+                    )
+                }
+                expect.equal(detector.currentEvidence().count, 0)
+            },
+
+            test("never record covers a descendant of a banned identifier") { expect in
                 var detector = GenericCallDetector(
                     configuration: .init(neverRecord: ["com.example.videochat"])
                 )

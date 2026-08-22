@@ -376,6 +376,9 @@ public struct SessionController: Sendable {
         let wasCandidate = snapshot.state == .candidate
         guard snapshot.state == .idle || snapshot.state == .ended || wasCandidate else { return [] }
         snapshot = Snapshot()
+        // This starts a session without going through reset(), so an unanswered
+        // question from an earlier one would otherwise still be here to answer.
+        askedAbout = nil
         snapshot.state = .recording
         snapshot.source = source
         snapshot.provider = source.provider

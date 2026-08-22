@@ -422,11 +422,12 @@ public final class MeetTapeRuntime {
     }
 
     public func alwaysRecord(applicationBundleID: String) {
+        let application = MicrophoneIgnoreList.applicationIdentifier(for: applicationBundleID)
         var updated = settings
-        if !updated.alwaysRecordApplications.contains(applicationBundleID) {
-            updated.alwaysRecordApplications.append(applicationBundleID)
+        if !updated.alwaysRecordApplications.contains(application) {
+            updated.alwaysRecordApplications.append(application)
         }
-        updated.neverRecordApplications.removeAll { $0 == applicationBundleID }
+        updated.neverRecordApplications.removeAll { $0 == application }
         update(settings: updated)
     }
 

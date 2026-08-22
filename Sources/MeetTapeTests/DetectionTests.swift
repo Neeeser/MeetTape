@@ -465,6 +465,31 @@ enum DetectionTests {
                 expect.isTrue(candidate.isPreapproved)
             },
 
+            test("an application the user always records preapproves its helpers") { expect in
+                // The two lists hold applications, and the microphone is held by
+                // a helper. Matching one list on the application and the other on
+                // the raw process left always-record working only for the
+                // applications that have no helpers.
+                var detector = GenericCallDetector(
+                    configuration: .init(alwaysRecord: ["com.openai.chat"])
+                )
+                let events = detector.update(
+                    states: [
+                        ApplicationAudioState(
+                            bundleIdentifier: "com.openai.chat.helper.Renderer", processID: 1,
+                            holdsMicrophone: true, producesOutput: false,
+                            isFrontmost: true, windowTitle: nil
+                        ),
+                    ],
+                    at: 100
+                )
+                guard case .callLikely(let candidate) = events.first else {
+                    expect.fail("expected an immediate candidate, got \(events)")
+                    return
+                }
+                expect.isTrue(candidate.isPreapproved)
+            },
+
             test("an application the user never records is ignored") { expect in
                 var detector = GenericCallDetector(
                     configuration: .init(neverRecord: ["com.example.videochat"])

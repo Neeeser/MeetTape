@@ -203,7 +203,11 @@ public struct GenericCallDetector: Sendable {
             let threshold = entry.sawOutput
                 ? configuration.dwellSecondsWithOutput
                 : configuration.dwellSeconds
-            let preapproved = configuration.alwaysRecord.contains(state.bundleIdentifier)
+            // Both lists name applications, and the microphone is held by a
+            // helper, so the process is resolved to its application either way.
+            let preapproved = configuration.alwaysRecord.contains(
+                MicrophoneIgnoreList.applicationIdentifier(for: state.bundleIdentifier)
+            )
 
             if !entry.promoted, preapproved || held >= threshold {
                 entry.promoted = true

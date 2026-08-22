@@ -544,6 +544,27 @@ enum HardeningTests {
                 expect.equal(settings.neverRecordApplications, ["com.hnc.Discord"])
             },
 
+            test("one application banned under three helpers is one entry") { expect in
+                // Which is how the bug that prompted this arrived: the prompt came
+                // back twice and was answered each time, naming a different helper
+                // each time. Settings lists the application once.
+                let json = Data(
+                    #"""
+                    {"neverRecordApplications":[
+                        "com.hnc.Discord.helper",
+                        "com.hnc.Discord.helper.Renderer",
+                        "com.hnc.Discord.helper.GPU",
+                        "com.example.videochat"
+                    ]}
+                    """#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                expect.equal(
+                    settings.neverRecordApplications, ["com.hnc.Discord", "com.example.videochat"],
+                    "collapsed to the application, in the order they were banned"
+                )
+            },
+
             test("banning an application from the prompt records the application") { expect in
                 // The prompt names the process CoreAudio reported, which for an
                 // Electron application is a helper. Stored verbatim, the ban was

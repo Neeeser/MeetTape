@@ -317,16 +317,19 @@ public struct AppSettings: Codable, Sendable, Equatable {
         preRollSeconds =
             try container.decodeIfPresent(Double.self, forKey: .preRollSeconds)
             ?? defaults.preRollSeconds
-        alwaysRecordApplications =
+        // Both lists hold applications. Reading them through the same
+        // normalisation the prompt writes means a choice saved when the
+        // identifier was stored verbatim covers the application it was always
+        // meant to, and three helpers of one application read back as the one
+        // application the user chose.
+        alwaysRecordApplications = Self.applications(
             try container.decodeIfPresent([String].self, forKey: .alwaysRecordApplications)
-            ?? defaults.alwaysRecordApplications
-        // Read through the same normalisation the prompt writes, so a ban saved
-        // when the identifier was stored verbatim covers the application it was
-        // always meant to.
-        neverRecordApplications =
-            (try container.decodeIfPresent([String].self, forKey: .neverRecordApplications)
-                ?? defaults.neverRecordApplications)
-            .map(MicrophoneIgnoreList.applicationIdentifier(for:))
+                ?? defaults.alwaysRecordApplications
+        )
+        neverRecordApplications = Self.applications(
+            try container.decodeIfPresent([String].self, forKey: .neverRecordApplications)
+                ?? defaults.neverRecordApplications
+        )
         hasCompletedOnboarding =
             try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding)
             ?? defaults.hasCompletedOnboarding
@@ -336,6 +339,17 @@ public struct AppSettings: Codable, Sendable, Equatable {
         echoCancellation =
             try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
             ?? defaults.echoCancellation
+    }
+
+    /// The applications a saved list of process identifiers names, in the order
+    /// the user chose them and without repeats.
+    private static func applications(_ identifiers: [String]) -> [String] {
+        identifiers
+            .map(MicrophoneIgnoreList.applicationIdentifier(for:))
+            .reduce(into: [String]()) { unique, application in
+                guard !unique.contains(application) else { return }
+                unique.append(application)
+            }
     }
 
     public var storageRoot: URL { URL(fileURLWithPath: storageRootPath) }

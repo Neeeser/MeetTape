@@ -162,10 +162,19 @@ against real hardware and what has not.
   CoreAudio implementations behind `MicrophoneEngineController` and
   `ProcessTapController`. Tests drive the real algorithm through fakes instead of
   reimplementing it.
-- Source CAF segments, manifest lines, raw transcription and diarization output
-  and imported originals are immutable once written. Titles, notes, the speaker
-  map and metadata are mutable. Markdown files, `mixed.caf` and summaries are
+- Source audio, manifest lines, raw transcription and diarization output and
+  imported originals are immutable once written. Titles, notes, the speaker map
+  and metadata are mutable. Markdown files, `recording.m4a` and summaries are
   derived and can be regenerated.
+- Source audio has two representations, and `metadata.audioArchive` says which
+  one a meeting has; readers never infer it from what files exist. While a
+  meeting records and processes, the source is float32 CAF segments under
+  `raw/segments/`. After `complete`, compaction transcodes each track to
+  `raw/audio/<track>.m4a` (AAC mono 16 kHz, the only rate any model reads),
+  verifies the decoded duration against the manifest, records the archive in
+  the metadata, and only then deletes the segments. Every failure mode leaves
+  at least one verified copy: deletion is strictly after the metadata write,
+  and an interrupted deletion resumes on the next launch sweep.
 - Speaker corrections are layers above immutable diarization: a cluster mapping
   and per-line overrides, both in `speakers.map.json`. A line override is
   anchored to a moment on the timeline rather than to an utterance identifier,
@@ -183,7 +192,9 @@ against real hardware and what has not.
   transcript are derived on read; linking and separating write one field on each
   side and move no audio.
 - Nothing before `audio_safe` sends data to OpenAI. Every stage after it is
-  retryable and must never delete source audio.
+  retryable, and until `complete` nothing deletes source audio. Compaction is
+  the one deletion in the system, and it removes only a representation whose
+  verified replacement is already recorded.
 
 ## Secrets
 

@@ -74,16 +74,20 @@ public struct ChunkExporter: Sendable {
     }
 }
 
-/// Produces `mixed.caf`, the single-file version of a meeting for listening.
+/// Produces `recording.m4a`, the single-file version of a meeting for listening.
 ///
-/// Derived and safe to delete: the two source tracks stay untouched. Alignment
-/// uses the host timestamps both sources stamped their first frame with, which is
-/// what keeps them together without resampling either one.
+/// AAC mono at a spoken-word bitrate: the mixdown exists to be played and
+/// shared, and the per-track archives hold what reprocessing reads. Derived and
+/// safe to delete: the source tracks stay untouched. Alignment uses the host
+/// timestamps both sources stamped their first frame with, which is what keeps
+/// them together without resampling either one.
 public struct AudioMixer: Sendable {
     public let sampleRate: Double
+    public let bitRate: Int
 
-    public init(sampleRate: Double = 48_000) {
+    public init(sampleRate: Double = 48_000, bitRate: Int = 64_000) {
         self.sampleRate = sampleRate
+        self.bitRate = bitRate
     }
 
     /// Folds both tracks into one file at `destination`.
@@ -94,9 +98,9 @@ public struct AudioMixer: Sendable {
     /// and the caller skips the mix when that path exists. The result was a
     /// playback file holding the first few minutes of a meeting, with nothing to
     /// distinguish it from a complete one and nothing that would ever rebuild it.
-    public func mix(timeline: RecordingTimeline, segmentsDirectory: URL, to destination: URL) throws {
-        let micSegments = timeline.segments(track: .mic)
-        let remoteSegments = timeline.segments(track: .remote)
+    public func mix(mic: TrackAudioLocation, remote: TrackAudioLocation, to destination: URL) throws {
+        let micSegments = mic.segments
+        let remoteSegments = remote.segments
         guard !micSegments.isEmpty || !remoteSegments.isEmpty else { return }
         let partial = destination.deletingPathExtension()
             .appendingPathExtension("partial")
@@ -106,13 +110,10 @@ public struct AudioMixer: Sendable {
             throw ProcessingError.audioUnreadable(path: destination.lastPathComponent)
         }
         let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: false,
-            AVLinearPCMIsBigEndianKey: false,
+            AVEncoderBitRateKey: bitRate,
         ]
         try? FileManager.default.removeItem(at: partial)
         var output: AVAudioFile? = try AVAudioFile(forWriting: partial, settings: settings)
@@ -121,10 +122,10 @@ public struct AudioMixer: Sendable {
         defer { if output != nil { try? FileManager.default.removeItem(at: partial) } }
 
         let micReader = micSegments.isEmpty ? nil : TrackAudioReader(
-            segments: micSegments, segmentsDirectory: segmentsDirectory, targetFormat: format
+            segments: micSegments, segmentsDirectory: mic.directory, targetFormat: format
         )
         let remoteReader = remoteSegments.isEmpty ? nil : TrackAudioReader(
-            segments: remoteSegments, segmentsDirectory: segmentsDirectory, targetFormat: format
+            segments: remoteSegments, segmentsDirectory: remote.directory, targetFormat: format
         )
 
         // Whichever source started later is delayed by the difference between the
@@ -201,6 +202,76 @@ public struct AudioMixer: Sendable {
         output = nil
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: partial, to: destination)
+    }
+}
+
+/// Writes one track's archive file, the compressed replacement for its PCM
+/// segment chain.
+///
+/// AAC in an M4A container, mono, 16 kHz: the only rate any model reads the
+/// track at, and 48 kbps sits 50% above the bitrate the cloud transcription
+/// path already sends. The caller owns verification and promotion; this writes
+/// `destination` and reports the frames it read from the source.
+public struct TrackArchiveExporter: Sendable {
+    public struct Settings: Sendable, Equatable {
+        public var sampleRate: Double
+        public var channelCount: Int
+        public var bitRate: Int
+
+        public init(sampleRate: Double = 16_000, channelCount: Int = 1, bitRate: Int = 48_000) {
+            self.sampleRate = sampleRate
+            self.channelCount = channelCount
+            self.bitRate = bitRate
+        }
+
+        public static let archive = Settings()
+    }
+
+    public let settings: Settings
+
+    public init(settings: Settings = .archive) {
+        self.settings = settings
+    }
+
+    public var readFormat: AudioFormatDescriptor {
+        AudioFormatDescriptor(sampleRate: settings.sampleRate, channelCount: settings.channelCount)
+    }
+
+    /// Exports the whole track to `destination`. Returns the number of frames
+    /// read from the source at the archive sample rate.
+    @discardableResult
+    public func export(location: TrackAudioLocation, to destination: URL) throws -> Int64 {
+        let stream = TrackAudioStream(
+            segments: location.segments, segmentsDirectory: location.directory, format: readFormat
+        )
+        let duration = stream.durationSeconds
+        guard duration > 0 else { return 0 }
+
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: settings.sampleRate,
+            AVNumberOfChannelsKey: settings.channelCount,
+            AVEncoderBitRateKey: settings.bitRate,
+        ]
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? FileManager.default.removeItem(at: destination)
+
+        let file: AVAudioFile
+        do {
+            file = try AVAudioFile(forWriting: destination, settings: outputSettings)
+        } catch {
+            throw ProcessingError.audioUnreadable(path: destination.lastPathComponent)
+        }
+
+        var written: Int64 = 0
+        try stream.forEachBuffer(from: 0, to: duration) { buffer, _ in
+            try file.write(from: buffer)
+            written += Int64(buffer.frameLength)
+            return true
+        }
+        return written
     }
 }
 

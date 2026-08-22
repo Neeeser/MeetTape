@@ -4,29 +4,50 @@ import Foundation
 ///
 /// The archive is ordinary files in ordinary folders. Deleting MeetTape leaves a
 /// readable recording, a readable transcript and readable notes behind.
+///
+/// The root holds only files a person opens directly: the transcript, the
+/// recording, the summary and the notes. Everything the application maintains
+/// lives under `raw/`.
 public struct MeetingLayout: Sendable, Equatable {
     public let root: URL
 
     public init(root: URL) { self.root = root }
 
-    public var segments: URL { root.appendingPathComponent("segments", isDirectory: true) }
-    public var manifest: URL { segments.appendingPathComponent("manifest.jsonl") }
-    public var metadata: URL { root.appendingPathComponent("metadata.json") }
-    public var rawTranscript: URL { root.appendingPathComponent("transcript.raw.json") }
+    /// Application-maintained files: metadata, manifests, source audio, model
+    /// output. Users read the root; tooling reads here.
+    public var raw: URL { root.appendingPathComponent("raw", isDirectory: true) }
+
+    public var segments: URL { raw.appendingPathComponent("segments", isDirectory: true) }
+    /// Outside `segments/` because compaction deletes that directory and the
+    /// manifest is the durable record of the recording timeline.
+    public var manifest: URL { raw.appendingPathComponent("manifest.jsonl") }
+    public var metadata: URL { raw.appendingPathComponent("metadata.json") }
+    public var rawTranscript: URL { raw.appendingPathComponent("transcript.raw.json") }
     /// Who spoke when, as the diarizer produced it. Immutable, and separate from
     /// the words because the two come from independently chosen backends and
     /// re-analysing speakers must never invalidate a transcription.
-    public var rawDiarization: URL { root.appendingPathComponent("diarization.raw.json") }
-    public var speakerMap: URL { root.appendingPathComponent("speakers.map.json") }
-    public var canonicalTranscript: URL { root.appendingPathComponent("transcript.json") }
+    public var rawDiarization: URL { raw.appendingPathComponent("diarization.raw.json") }
+    public var speakerMap: URL { raw.appendingPathComponent("speakers.map.json") }
+    public var canonicalTranscript: URL { raw.appendingPathComponent("transcript.json") }
     public var transcriptMarkdown: URL { root.appendingPathComponent("transcript.md") }
     public var notes: URL { root.appendingPathComponent("notes.md") }
     public var summary: URL { root.appendingPathComponent("summary.md") }
-    public var mixedAudio: URL { root.appendingPathComponent("mixed.caf") }
+    /// The listenable mixdown of both tracks.
+    public var recordingAudio: URL { root.appendingPathComponent("recording.m4a") }
     /// Raw API responses, kept verbatim as ground truth for what the model said.
-    public var apiResponses: URL { root.appendingPathComponent("api", isDirectory: true) }
+    public var apiResponses: URL { raw.appendingPathComponent("api", isDirectory: true) }
     /// Imported originals live here untouched.
-    public var originals: URL { root.appendingPathComponent("original", isDirectory: true) }
+    public var originals: URL { raw.appendingPathComponent("original", isDirectory: true) }
+    /// Per-track archive files that replace the segment chain after compaction.
+    public var trackArchiveDirectory: URL { raw.appendingPathComponent("audio", isDirectory: true) }
+
+    public func trackArchiveFile(track: CaptureTrack) -> URL {
+        trackArchiveDirectory.appendingPathComponent(trackArchiveFileName(track: track))
+    }
+
+    public func trackArchiveFileName(track: CaptureTrack) -> String {
+        "\(track.segmentPrefix).m4a"
+    }
 
     public func segmentFile(track: CaptureTrack, index: Int) -> URL {
         segments.appendingPathComponent(String(format: "%@.%04d.caf", track.segmentPrefix, index))
@@ -39,6 +60,23 @@ public struct MeetingLayout: Sendable, Equatable {
     public func apiResponseFile(named name: String) -> URL {
         apiResponses.appendingPathComponent(name)
     }
+
+    // MARK: - the layout before raw/ existed
+
+    /// Where files lived before the `raw/` reorganisation: everything at the
+    /// root, the manifest inside `segments/`, the mixdown as `mixed.caf`.
+    /// `MeetingLayoutMigration` moves a folder forward; the metadata read path
+    /// falls back here so an unmigrated folder still lists.
+    public var legacyMetadata: URL { root.appendingPathComponent("metadata.json") }
+    public var legacySegments: URL { root.appendingPathComponent("segments", isDirectory: true) }
+    public var legacyManifest: URL { legacySegments.appendingPathComponent("manifest.jsonl") }
+    public var legacyMixedAudio: URL { root.appendingPathComponent("mixed.caf") }
+    public var legacyRawTranscript: URL { root.appendingPathComponent("transcript.raw.json") }
+    public var legacyRawDiarization: URL { root.appendingPathComponent("diarization.raw.json") }
+    public var legacySpeakerMap: URL { root.appendingPathComponent("speakers.map.json") }
+    public var legacyCanonicalTranscript: URL { root.appendingPathComponent("transcript.json") }
+    public var legacyAPIResponses: URL { root.appendingPathComponent("api", isDirectory: true) }
+    public var legacyOriginals: URL { root.appendingPathComponent("original", isDirectory: true) }
 }
 
 /// Builds meeting directory identifiers and locates them under the archive root.

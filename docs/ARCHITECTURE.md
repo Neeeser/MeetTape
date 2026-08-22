@@ -115,7 +115,7 @@ a quiet meeting as broken whenever nobody spoke.
 
 Audio container headers are not trusted. Every segment open, close, format
 change, restart, health transition and marker is appended to
-`segments/manifest.jsonl` and flushed with `fsync`, so a hard kill loses at most
+`raw/manifest.jsonl` and flushed with `fsync`, so a hard kill loses at most
 a partial final line, which the reader tolerates.
 
 Duration is the sum of each segment's own frame count over that segment's own
@@ -198,7 +198,7 @@ The two tracks do not start at the same instant, and a chunk's offset is a
 position inside one track's audio. The track's lead-in, meaning the delay between
 the first frame of the earliest track and the first frame of this one, is added
 when the chunk is recorded. The mixdown pads the later track with the same amount
-of silence, so `mixed.caf` and the transcript agree.
+of silence, so `recording.m4a` and the transcript agree.
 
 ### On-device processing
 

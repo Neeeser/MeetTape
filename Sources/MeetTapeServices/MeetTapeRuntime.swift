@@ -270,6 +270,10 @@ public final class MeetTapeRuntime {
             await pruneVoiceMemory()
             await pipeline.resumeInterrupted()
             refreshRecentMeetings()
+            // After resume, so a meeting that was mid-pipeline is finished
+            // before its storage is compacted. Runs through the pipeline's own
+            // slot, so it pauses while anything records.
+            await pipeline.compactPending()
         }
     }
 
@@ -313,6 +317,14 @@ public final class MeetTapeRuntime {
 
     /// Adopts anything a crash left behind, before detection can see it.
     private func recover() async {
+        // Folders written by an earlier build move to the raw/ layout first, so
+        // recovery and processing only ever see one layout. Renames only.
+        let migration = repository.migrateLayouts()
+        if migration.migrated > 0 || migration.failed > 0 {
+            Log.app.notice(
+                "layout migration: \(migration.migrated) moved, \(migration.failed) failed"
+            )
+        }
         let scanner = RecoveryScanner(
             repository: repository, inspector: AudioFileInspector(), clock: clock
         )

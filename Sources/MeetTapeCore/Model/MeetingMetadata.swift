@@ -169,6 +169,9 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// Another browser tab was audible during the meeting, so the remote track may
     /// contain audio that was not part of the call.
     public var hadOtherAudibleTabs: Bool
+    /// Set once the PCM segments have been transcoded to verified archive files
+    /// and deleted. Nil while the segments are still the source representation.
+    public var audioArchive: AudioArchive?
 
     public enum ProvisionalDecision: String, Codable, Sendable {
         case pending
@@ -212,6 +215,7 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.provisionalDecision = nil
         self.captureWarnings = []
         self.hadOtherAudibleTabs = false
+        self.audioArchive = nil
     }
 
     public var displayTitle: String { titles.resolved }

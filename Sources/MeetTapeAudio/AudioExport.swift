@@ -265,11 +265,22 @@ public struct TrackArchiveExporter: Sendable {
             throw ProcessingError.audioUnreadable(path: destination.lastPathComponent)
         }
 
+        // Trimmed to the manifest duration exactly: the read loop can overshoot
+        // by one buffer, and on a track with an unadopted crash tail that
+        // overshoot is real audio the manifest does not account for. The
+        // caller's verification compares against the manifest, so the file
+        // must not run past it.
+        let totalFrames = Int64((duration * settings.sampleRate).rounded())
         var written: Int64 = 0
         try stream.forEachBuffer(from: 0, to: duration) { buffer, _ in
+            let remaining = totalFrames - written
+            guard remaining > 0 else { return false }
+            if Int64(buffer.frameLength) > remaining {
+                buffer.frameLength = AVAudioFrameCount(remaining)
+            }
             try file?.write(from: buffer)
             written += Int64(buffer.frameLength)
-            return true
+            return written < totalFrames
         }
         // Released before returning: AVAudioFile finalises the container on
         // deallocation, and the caller decodes this file to verify it.

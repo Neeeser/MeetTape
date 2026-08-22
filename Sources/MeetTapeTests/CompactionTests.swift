@@ -399,6 +399,78 @@ enum CompactionTests {
             }
         },
 
+        test("compaction after complete waits for the recording gate") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCompleteMeeting(root: root)
+            let store = meeting.store
+
+            let capture = LockedBox(RecordingAwareGate.CaptureState.recording)
+            let gate = RecordingAwareGate(pollSeconds: 0.05) { capture.withLock { $0 } }
+            let pipeline = ProcessingPipeline(
+                repository: MeetingRepository(root: root),
+                backend: FakeAIBackend(),
+                gate: gate,
+                clock: ManualClock(),
+                settingsProvider: { AppSettings() },
+                wait: { _ in }
+            )
+
+            let job = Task { await pipeline.process(meetingID: meeting.metadata.id) }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            expect.isTrue(
+                FileManager.default.fileExists(atPath: store.layout.segments.path),
+                "nothing is transcoded or deleted while a recording is live"
+            )
+            expect.isTrue(try store.readMetadata().audioArchive == nil)
+
+            capture.withLock { $0 = .idle }
+            await job.value
+            expect.isTrue(try store.readMetadata().audioArchive != nil)
+            expect.isFalse(FileManager.default.fileExists(atPath: store.layout.segments.path))
+        },
+
+        test("recovery waits for a folder whose migration has not run") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let made = try PipelineTests.makeRecordedMeeting(root: root)
+            let store = made.store
+            let layout = store.layout
+            _ = try store.updateMetadata {
+                $0.processing = ProcessingStatus(state: .recording, updatedAt: $0.startedAt)
+            }
+
+            // The folder as an old build left it after a crash: everything at
+            // the root, and this launch's migration failed to move it.
+            let fileManager = FileManager.default
+            try fileManager.moveItem(at: layout.metadata, to: layout.legacyMetadata)
+            try fileManager.moveItem(at: layout.segments, to: layout.legacySegments)
+            try fileManager.moveItem(at: layout.manifest, to: layout.legacyManifest)
+            try fileManager.removeItem(at: layout.raw)
+
+            let scanner = RecoveryScanner(
+                repository: MeetingRepository(root: root), inspector: AudioFileInspector()
+            )
+            let report = scanner.scan()
+            expect.equal(report.recovered.count, 0)
+
+            // The failure mode this pins: recovery must not open a fresh empty
+            // manifest at the new path, which would shadow the real one and
+            // block the manifest's migration forever.
+            expect.isFalse(
+                fileManager.fileExists(atPath: layout.manifest.path),
+                "no empty manifest was created at the new path"
+            )
+            let metadata = try store.readMetadata()
+            expect.equal(metadata.processing.state, ProcessingState.recording)
+
+            // Once the migration succeeds, recovery proceeds normally.
+            try MeetingLayoutMigration.migrate(layout: layout)
+            let second = scanner.scan()
+            expect.equal(second.recovered.count, 1)
+            expect.equal(try store.readMetadata().processing.state, ProcessingState.audioSafe)
+        },
+
         test("an old-layout folder migrates to raw/ and reads the same") { expect in
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }

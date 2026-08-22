@@ -246,8 +246,10 @@ public actor ProcessingPipeline {
         // The gate is re-checked the way every stage checks it: a recording
         // that started during enrichment must not share the disk with a
         // transcode and a bulk delete.
-        if metadata.processing.state == .complete {
+        if metadata.processing.state == .complete,
+           AudioCompactor.hasWork(store: store, metadata: metadata) {
             while gate.isBlocked {
+                report(metadata, chunks: nil, detail: "Waiting until recording finishes")
                 if holdsSlot {
                     jobLock.release()
                     holdsSlot = false
@@ -1633,8 +1635,11 @@ public actor ProcessingPipeline {
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
 
-        let metadata = found.metadata
+        // Re-read after the wait: the pre-wait snapshot predates whatever job
+        // held the slot, and compaction in particular flips audioArchive and
+        // deletes the segment files a stale location would name.
         let store = found.store
+        let metadata = (try? store.readMetadata()) ?? found.metadata
         let settings = settingsProvider()
         let track = diarizedTrack(metadata)
         let timeline = try store.readTimeline()
@@ -1712,7 +1717,8 @@ public actor ProcessingPipeline {
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
-        var metadata = found.metadata
+        // Re-read after the wait; see reanalyzeSpeakers.
+        var metadata = (try? found.store.readMetadata()) ?? found.metadata
         try await recognizeVoices(
             store: found.store, metadata: &metadata, settings: settingsProvider()
         )
@@ -1887,16 +1893,22 @@ public actor ProcessingPipeline {
         let policy = await service.resolutionPolicy
         guard seconds >= policy.enrolmentSpeechSeconds else { return }
 
-        let timeline = try store.readTimeline()
-        let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
-        guard !location.isEmpty else { return }
-
         // Reading a whole meeting off disk and running the embedding model is
         // the same class of work a processing stage does, so it waits for the
         // same things.
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: metadata.id) }
+
+        // Resolved after the wait, from a fresh read: the job this call queued
+        // behind can be compaction, which moves the audio into the archive and
+        // deletes the segments a pre-wait location would still point at.
+        let currentMetadata = (try? store.readMetadata()) ?? metadata
+        let timeline = try store.readTimeline()
+        let location = store.trackAudioLocation(
+            track: track, metadata: currentMetadata, timeline: timeline
+        )
+        guard !location.isEmpty else { return }
 
         guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(

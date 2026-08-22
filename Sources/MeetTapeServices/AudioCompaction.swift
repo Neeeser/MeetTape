@@ -66,20 +66,68 @@ public struct AudioCompactor: Sendable {
                 removeEmptySegmentsDirectory(store: store)
                 return .nothingToDo
             }
+            // Mixed while the metadata still points at the segments: the
+            // listening copy is built from the 48 kHz PCM, not from the 16 kHz
+            // archives that are about to replace it.
+            ensureMixdown(store: store, metadata: metadata, timeline: timeline)
             metadata = try store.updateMetadata { $0.audioArchive = archive }
         }
         guard let archive = metadata.audioArchive else { return .nothingToDo }
+
+        // Resume-path regeneration: reads through the location resolution, so
+        // a compacted meeting whose mixdown was lost gets one back from the
+        // archives. A no-op whenever the file exists.
+        ensureMixdown(store: store, metadata: metadata, timeline: timeline)
+
+        // A meeting the sweep revisits only because it keeps files the
+        // manifest does not account for has nothing to delete; answering that
+        // from a directory listing keeps the per-launch cost at a stat instead
+        // of decoding both archives.
+        guard hasDeletionWork(store: store, archive: archive, timeline: timeline) else {
+            return .alreadyCompacted
+        }
 
         // Deletion trusts nothing but what it can decode right now. The record
         // in the metadata says an archive was verified once; a synced, restored
         // or hand-edited folder can have lost it since, and the segments about
         // to be removed would then be the only copy.
         try verifyArchivesIntact(store: store, archive: archive)
-        ensureMixdown(store: store, metadata: metadata, timeline: timeline)
         let removedAnything = try deleteReplacedAudio(
             store: store, archive: archive, timeline: timeline
         )
         return removedAnything ? .compacted : .alreadyCompacted
+    }
+
+    /// Filenames of the segments each archived track replaced: the closed
+    /// segments the manifest names. Open segments never reached the archive
+    /// and are not covered.
+    private func coveredSegmentFiles(
+        archive: AudioArchive, timeline: RecordingTimeline
+    ) -> Set<String> {
+        var covered: Set<String> = []
+        for track in CaptureTrack.allCases where archive.track(track) != nil {
+            for segment in timeline.segments(track: track) where segment.isClosed {
+                covered.insert(segment.file)
+            }
+        }
+        return covered
+    }
+
+    /// Whether `deleteReplacedAudio` would remove anything right now.
+    private func hasDeletionWork(
+        store: MeetingStore, archive: AudioArchive, timeline: RecordingTimeline
+    ) -> Bool {
+        let fileManager = FileManager.default
+        let covered = coveredSegmentFiles(archive: archive, timeline: timeline)
+        for directory in [store.layout.segments, store.layout.legacySegments] {
+            guard let contents = try? fileManager.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            ) else { continue }
+            if contents.isEmpty { return true }
+            if contents.contains(where: { covered.contains($0.lastPathComponent) }) { return true }
+        }
+        return fileManager.fileExists(atPath: store.layout.legacyMixedAudio.path)
+            && fileManager.fileExists(atPath: store.layout.recordingAudio.path)
     }
 
     /// Transcodes every track that has audio and verifies each file by decoding
@@ -119,7 +167,9 @@ public struct AudioCompactor: Sendable {
                 try? FileManager.default.removeItem(at: partial)
                 throw error
             }
-            let tolerance = max(0.5, expectedSeconds * 0.01)
+            // Floored for codec padding on short files, capped so a long
+            // meeting cannot lose most of a minute and still verify.
+            let tolerance = max(0.5, min(expectedSeconds * 0.01, 2.0))
             guard frames > 0, abs(info.seconds - expectedSeconds) <= tolerance else {
                 try? FileManager.default.removeItem(at: partial)
                 throw ProcessingError.localProcessingFailed(
@@ -158,7 +208,7 @@ public struct AudioCompactor: Sendable {
             guard let record = archive.track(track) else { continue }
             let url = store.layout.trackArchiveDirectory.appendingPathComponent(record.file)
             guard let info = try? inspector.inspect(url: url),
-                  abs(info.seconds - record.seconds) <= max(0.5, record.seconds * 0.01)
+                  abs(info.seconds - record.seconds) <= max(0.5, min(record.seconds * 0.01, 2.0))
             else {
                 throw ProcessingError.localProcessingFailed(
                     reason: "recorded archive for \(track.segmentPrefix) is missing or short; "
@@ -213,13 +263,7 @@ public struct AudioCompactor: Sendable {
     ) throws -> Bool {
         let fileManager = FileManager.default
         var removedAnything = false
-
-        var covered: Set<String> = []
-        for track in CaptureTrack.allCases where archive.track(track) != nil {
-            for segment in timeline.segments(track: track) where segment.isClosed {
-                covered.insert(segment.file)
-            }
-        }
+        let covered = coveredSegmentFiles(archive: archive, timeline: timeline)
 
         for directory in [store.layout.segments, store.layout.legacySegments] {
             guard let contents = try? fileManager.contentsOfDirectory(

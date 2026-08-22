@@ -243,8 +243,22 @@ public actor ProcessingPipeline {
         // Compaction runs strictly after `complete`: every model has read the
         // PCM at full fidelity by now. A failure leaves the segments as the
         // source and the startup sweep retries; it never fails the meeting.
+        // The gate is re-checked the way every stage checks it: a recording
+        // that started during enrichment must not share the disk with a
+        // transcode and a bulk delete.
         if metadata.processing.state == .complete {
-            compactQuietly(store: store)
+            while gate.isBlocked {
+                if holdsSlot {
+                    jobLock.release()
+                    holdsSlot = false
+                }
+                await gate.waitUntilAllowed()
+                if !holdsSlot {
+                    await jobLock.acquire()
+                    holdsSlot = true
+                }
+            }
+            await compactQuietly(store: store)
         }
     }
 
@@ -255,7 +269,7 @@ public actor ProcessingPipeline {
         guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
         await waitForSlot()
         defer { jobLock.release() }
-        compactQuietly(store: found.store)
+        await compactQuietly(store: found.store)
     }
 
     /// Compacts every finished meeting that still has PCM audio, one at a
@@ -272,9 +286,16 @@ public actor ProcessingPipeline {
         }
     }
 
-    private func compactQuietly(store: MeetingStore) {
+    /// The transcode is minutes of synchronous CPU work for a long meeting, so
+    /// it runs detached rather than on this actor's executor: the job slot is
+    /// already held, and the actor must stay free to answer a rename or a line
+    /// correction from the panel while the encode runs.
+    private func compactQuietly(store: MeetingStore) async {
+        let compactor = AudioCompactor(clock: clock)
         do {
-            let outcome = try AudioCompactor(clock: clock).compact(store: store)
+            let outcome = try await Task.detached(priority: .utility) {
+                try compactor.compact(store: store)
+            }.value
             if outcome == .compacted {
                 Log.processing.info("audio compacted")
             }

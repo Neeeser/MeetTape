@@ -137,12 +137,20 @@ public struct MeetingStore: Sendable {
     // MARK: timeline
 
     public func readTimeline() throws -> RecordingTimeline {
-        guard FileManager.default.fileExists(atPath: layout.manifest.path) else {
+        // The legacy fallback matches readMetadata: an unmigrated folder must
+        // report its real duration and audio, not read as an empty meeting.
+        let fileManager = FileManager.default
+        let url: URL
+        if fileManager.fileExists(atPath: layout.manifest.path) {
+            url = layout.manifest
+        } else if fileManager.fileExists(atPath: layout.legacyManifest.path) {
+            url = layout.legacyManifest
+        } else {
             return ManifestReader.timeline(
                 from: ManifestReadResult(lines: [], hasTruncatedTail: false, unrecognisedLines: 0)
             )
         }
-        return try ManifestReader.timeline(contentsOf: layout.manifest)
+        return try ManifestReader.timeline(contentsOf: url)
     }
 
     // MARK: audio
@@ -155,14 +163,27 @@ public struct MeetingStore: Sendable {
     public func trackAudioLocation(
         track: CaptureTrack, metadata: MeetingMetadata, timeline: RecordingTimeline
     ) -> TrackAudioLocation {
-        if let archive = metadata.audioArchive, let record = archive.track(track) {
+        if let archive = metadata.audioArchive {
+            guard let record = archive.track(track) else {
+                // A compacted meeting whose archive has no record for this
+                // track recorded nothing worth archiving on it. The segment
+                // chain must not be offered instead: its directory may already
+                // be gone, and the metadata, not the disk, decides.
+                return TrackAudioLocation(segments: [], directory: layout.trackArchiveDirectory)
+            }
             return .archived(
                 track: track, record: record,
                 directory: layout.trackArchiveDirectory,
                 compactedAt: archive.compactedAt
             )
         }
-        return TrackAudioLocation(segments: timeline.segments(track: track), directory: layout.segments)
+        // Archive-versus-segments is decided above, by the metadata alone. The
+        // directory check below only answers where the segment chain lives for
+        // a folder whose layout migration has not run.
+        let directory = FileManager.default.fileExists(atPath: layout.segments.path)
+            ? layout.segments
+            : layout.legacySegments
+        return TrackAudioLocation(segments: timeline.segments(track: track), directory: directory)
     }
 
     private func read(_ url: URL) throws -> Data {

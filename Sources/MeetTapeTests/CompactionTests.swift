@@ -197,6 +197,208 @@ enum CompactionTests {
             )
         },
 
+        test("the archive is recorded before anything is deleted") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCompleteMeeting(root: root)
+            let store = meeting.store
+
+            // One segment file refuses deletion. The transcode and the metadata
+            // write must both have happened by the time the delete throws, or
+            // the ordering the whole design rests on is broken.
+            let fileManager = FileManager.default
+            let locked = try fileManager.contentsOfDirectory(
+                at: store.layout.segments, includingPropertiesForKeys: nil
+            ).first { $0.lastPathComponent.hasPrefix("mic.") }
+            guard let locked else { throw TestSkip("fixture wrote no mic segment") }
+            try fileManager.setAttributes([.immutable: true], ofItemAtPath: locked.path)
+
+            var thrown: (any Error)?
+            do { _ = try AudioCompactor().compact(store: store) } catch { thrown = error }
+            try fileManager.setAttributes([.immutable: false], ofItemAtPath: locked.path)
+
+            expect.isTrue(thrown != nil, "the refused delete surfaces")
+            let metadata = try store.readMetadata()
+            expect.isTrue(
+                metadata.audioArchive != nil,
+                "the archive was recorded before deletion was attempted"
+            )
+            expect.isTrue(
+                fileManager.fileExists(atPath: locked.path),
+                "the undeletable segment is still there"
+            )
+
+            // With the lock lifted the next sweep finishes the job.
+            let outcome = try AudioCompactor().compact(store: store)
+            expect.equal(outcome, AudioCompactor.Outcome.compacted)
+            expect.isFalse(fileManager.fileExists(atPath: store.layout.segments.path))
+        },
+
+        test("a failure on the second track records no archive and keeps every segment") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCompleteMeeting(root: root)
+            let store = meeting.store
+
+            // The mic track (first in CaptureTrack.allCases) exports and is
+            // promoted; the system track then comes up empty. Nothing may be
+            // recorded and nothing deleted, or the mic segments would be
+            // removed on the next sweep while the system audio has no archive.
+            for file in try FileManager.default.contentsOfDirectory(
+                at: store.layout.segments, includingPropertiesForKeys: nil
+            ) where file.lastPathComponent.hasPrefix("system.") {
+                try FileManager.default.removeItem(at: file)
+            }
+
+            var thrown: (any Error)?
+            do { _ = try AudioCompactor().compact(store: store) } catch { thrown = error }
+            expect.isTrue(thrown != nil)
+            expect.isTrue(try store.readMetadata().audioArchive == nil)
+            let micSegments = try FileManager.default.contentsOfDirectory(
+                at: store.layout.segments, includingPropertiesForKeys: nil
+            ).filter { $0.lastPathComponent.hasPrefix("mic.") }
+            expect.isTrue(!micSegments.isEmpty, "the mic segments survive the failed run")
+        },
+
+        test("a file the manifest does not account for survives compaction") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCompleteMeeting(root: root)
+            let store = meeting.store
+            _ = try AudioCompactor().compact(store: store)
+
+            // A leftover state holding one file the archive covered and one it
+            // never saw: only the covered one goes.
+            try FileManager.default.createDirectory(
+                at: store.layout.segments, withIntermediateDirectories: true
+            )
+            let covered = store.layout.segments.appendingPathComponent("mic.0001.caf")
+            let unknown = store.layout.segments.appendingPathComponent("mic.9999.caf")
+            try Data("covered".utf8).write(to: covered)
+            try Data("unknown".utf8).write(to: unknown)
+
+            _ = try AudioCompactor().compact(store: store)
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: covered.path),
+                "the manifest-known file the archive replaced is removed"
+            )
+            expect.isTrue(
+                FileManager.default.fileExists(atPath: unknown.path),
+                "audio the manifest does not account for is never deleted"
+            )
+        },
+
+        test("a missing archive file stops deletion cold") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCompleteMeeting(root: root)
+            let store = meeting.store
+            _ = try AudioCompactor().compact(store: store)
+
+            // The archive record survives a restore; the archive file did not.
+            // The recreated segments are now the only audio, and the resume
+            // path must refuse to touch them.
+            try FileManager.default.removeItem(at: store.layout.trackArchiveFile(track: .mic))
+            try FileManager.default.createDirectory(
+                at: store.layout.segments, withIntermediateDirectories: true
+            )
+            let survivor = store.layout.segments.appendingPathComponent("mic.0001.caf")
+            try Data("the only copy".utf8).write(to: survivor)
+
+            var thrown: (any Error)?
+            do { _ = try AudioCompactor().compact(store: store) } catch { thrown = error }
+            expect.isTrue(thrown != nil, "verification refuses the missing archive")
+            expect.isTrue(
+                FileManager.default.fileExists(atPath: survivor.path),
+                "nothing was deleted"
+            )
+        },
+
+        test("the archive starts where the PCM started") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let repository = MeetingRepository(root: root)
+            let started = Date(timeIntervalSince1970: 1_787_070_000)
+            let created = try repository.createMeeting(
+                source: .manual, provider: .unknown, startedAt: started,
+                titles: TitleCandidates(timestampFallback: "offset"), now: started
+            )
+            let manifest = try ManifestWriter(url: created.store.layout.manifest)
+            manifest.append(.sessionStart(.init(
+                meetingID: created.metadata.id, source: .manual, segmentSeconds: 30,
+                appVersion: "test", processID: 1
+            )))
+            let writer = SegmentWriter(
+                track: .mic, layout: created.store.layout, manifest: manifest,
+                format: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!,
+                segmentSeconds: 30
+            )
+            // One second of silence, then two of tone. AAC encoder priming that
+            // leaked into the timeline would shift the onset by ~0.13 s, which
+            // every word timing and diarization boundary would inherit.
+            writer.enqueueSynchronously(AudioBufferPacket(
+                buffer: AudioTests.makeTone(seconds: 1, sampleRate: 48_000, amplitude: 0), hostTime: 100
+            ))
+            writer.enqueueSynchronously(AudioBufferPacket(
+                buffer: AudioTests.makeTone(seconds: 2, sampleRate: 48_000), hostTime: 101
+            ))
+            writer.finish(reason: "test")
+            manifest.append(.sessionEnd(.init(reason: "test", micSeconds: 3, remoteSeconds: 0)))
+            manifest.close()
+            _ = try created.store.updateMetadata {
+                $0.processing = ProcessingStatus(state: .complete, updatedAt: started)
+            }
+
+            _ = try AudioCompactor().compact(store: created.store)
+
+            let metadata = try created.store.readMetadata()
+            let timeline = try created.store.readTimeline()
+            let location = created.store.trackAudioLocation(
+                track: .mic, metadata: metadata, timeline: timeline
+            )
+            let stream = TrackAudioStream(
+                segments: location.segments,
+                segmentsDirectory: location.directory,
+                format: AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1)
+            )
+            var firstLoudFrame: Int64 = -1
+            var position: Int64 = 0
+            try stream.forEachBuffer(from: 0, to: 3) { buffer, _ in
+                if firstLoudFrame < 0, let data = buffer.floatChannelData {
+                    for frame in 0..<Int(buffer.frameLength) where abs(data[0][frame]) > 0.05 {
+                        firstLoudFrame = position + Int64(frame)
+                        break
+                    }
+                }
+                position += Int64(buffer.frameLength)
+                return firstLoudFrame < 0
+            }
+            expect.isTrue(firstLoudFrame >= 0, "the tone is in the archive")
+            expect.close(Double(firstLoudFrame) / 16_000, 1.0, tolerance: 0.1)
+        },
+
+        test("the startup sweep compacts a folded continuation") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let primary = try makeCompleteMeeting(root: root)
+            let folded = try makeCompleteMeeting(root: root)
+            _ = try folded.store.updateMetadata { $0.mergedIntoMeetingID = primary.metadata.id }
+            _ = try primary.store.updateMetadata { $0.absorbedMeetingIDs = [folded.metadata.id] }
+
+            let pipeline = PipelineTests.makePipeline(
+                repository: MeetingRepository(root: root), backend: FakeAIBackend()
+            )
+            await pipeline.compactPending()
+
+            for store in [primary.store, folded.store] {
+                expect.isTrue(
+                    try store.readMetadata().audioArchive != nil,
+                    "the hidden continuation compacts like the meeting it folded into"
+                )
+                expect.isFalse(FileManager.default.fileExists(atPath: store.layout.segments.path))
+            }
+        },
+
         test("an old-layout folder migrates to raw/ and reads the same") { expect in
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }

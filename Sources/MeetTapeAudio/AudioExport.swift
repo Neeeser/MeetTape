@@ -258,7 +258,7 @@ public struct TrackArchiveExporter: Sendable {
         )
         try? FileManager.default.removeItem(at: destination)
 
-        let file: AVAudioFile
+        var file: AVAudioFile?
         do {
             file = try AVAudioFile(forWriting: destination, settings: outputSettings)
         } catch {
@@ -267,10 +267,13 @@ public struct TrackArchiveExporter: Sendable {
 
         var written: Int64 = 0
         try stream.forEachBuffer(from: 0, to: duration) { buffer, _ in
-            try file.write(from: buffer)
+            try file?.write(from: buffer)
             written += Int64(buffer.frameLength)
             return true
         }
+        // Released before returning: AVAudioFile finalises the container on
+        // deallocation, and the caller decodes this file to verify it.
+        file = nil
         return written
     }
 }

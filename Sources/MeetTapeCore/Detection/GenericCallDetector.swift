@@ -54,14 +54,41 @@ public enum MicrophoneIgnoreList {
     /// MeetTape's own capture must never look like a meeting to itself.
     public static let ownBundleIdentifiers: Set<String> = ["com.meettape.app"]
 
+    /// The application a helper process belongs to.
+    ///
+    /// Electron and Chromium applications open the microphone from a helper, and
+    /// which one varies over the life of the process: `.helper`,
+    /// `.helper.Renderer`, `.helper.GPU`. CoreAudio reports whichever it was, so
+    /// a choice the user made about "this application" is recorded against the
+    /// application rather than against the helper that happened to be asked
+    /// about.
+    ///
+    /// Nothing is collapsed below two components. A bundle identifier is
+    /// reverse-DNS, and shortening `com.helper.app` to `com` would ban most of
+    /// the machine through the prefix match. Two is the floor rather than three
+    /// because vendor identifiers that short exist: Notion ships as `notion.id`
+    /// with helpers under `notion.id.helper`.
+    public static func applicationIdentifier(for bundleIdentifier: String) -> String {
+        let components = bundleIdentifier.split(separator: ".")
+        guard let helper = components.firstIndex(where: { $0.lowercased() == "helper" }),
+              helper >= 2
+        else { return bundleIdentifier }
+        return components[..<helper].joined(separator: ".")
+    }
+
     public static func isIgnored(_ bundleIdentifier: String, additional: Set<String> = []) -> Bool {
         if bundleIdentifier.isEmpty { return true }
         if systemServices.contains(bundleIdentifier) { return true }
         if notMeetings.contains(bundleIdentifier) { return true }
         if ownBundleIdentifiers.contains(bundleIdentifier) { return true }
         if additional.contains(bundleIdentifier) { return true }
-        // Helper processes of an ignored application.
-        let excluded = systemServices.union(notMeetings)
+        // Helper processes of an ignored application, MeetTape's own included:
+        // its capture must never look like a meeting to itself, and it is the
+        // helper that would hold the microphone.
+        let excluded = systemServices
+            .union(notMeetings)
+            .union(ownBundleIdentifiers)
+            .union(additional)
         return excluded.contains { bundleIdentifier.hasPrefix($0 + ".") }
     }
 }
@@ -176,7 +203,11 @@ public struct GenericCallDetector: Sendable {
             let threshold = entry.sawOutput
                 ? configuration.dwellSecondsWithOutput
                 : configuration.dwellSeconds
-            let preapproved = configuration.alwaysRecord.contains(state.bundleIdentifier)
+            // Both lists name applications, and the microphone is held by a
+            // helper, so the process is resolved to its application either way.
+            let preapproved = configuration.alwaysRecord.contains(
+                MicrophoneIgnoreList.applicationIdentifier(for: state.bundleIdentifier)
+            )
 
             if !entry.promoted, preapproved || held >= threshold {
                 entry.promoted = true
@@ -194,8 +225,14 @@ public struct GenericCallDetector: Sendable {
 
         // A single missed poll is not the end of a call: CoreAudio recreates
         // audio objects for sub-second stretches during normal operation.
+        // A ban is not a flap, though. An entry whose application is now on the
+        // never-record list kept publishing confirmed evidence through the end
+        // grace, and the session re-prompted the user it had just answered.
         for (bundleIdentifier, entry) in tracked where !seen.contains(bundleIdentifier) {
-            guard now - entry.lastSeen >= configuration.endGraceSeconds else { continue }
+            let banned = MicrophoneIgnoreList.isIgnored(
+                bundleIdentifier, additional: configuration.neverRecord
+            )
+            guard banned || now - entry.lastSeen >= configuration.endGraceSeconds else { continue }
             if entry.promoted { events.append(.callEnded(bundleIdentifier: bundleIdentifier)) }
             tracked.removeValue(forKey: bundleIdentifier)
         }
@@ -223,9 +260,5 @@ public struct GenericCallDetector: Sendable {
                 audioBundlePrefixes: [bundleIdentifier]
             )
         }
-    }
-
-    public mutating func forget(_ bundleIdentifier: String) {
-        tracked.removeValue(forKey: bundleIdentifier)
     }
 }

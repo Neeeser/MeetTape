@@ -320,9 +320,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
         alwaysRecordApplications =
             try container.decodeIfPresent([String].self, forKey: .alwaysRecordApplications)
             ?? defaults.alwaysRecordApplications
+        // Read through the same normalisation the prompt writes, so a ban saved
+        // when the identifier was stored verbatim covers the application it was
+        // always meant to.
         neverRecordApplications =
-            try container.decodeIfPresent([String].self, forKey: .neverRecordApplications)
-            ?? defaults.neverRecordApplications
+            (try container.decodeIfPresent([String].self, forKey: .neverRecordApplications)
+                ?? defaults.neverRecordApplications)
+            .map(MicrophoneIgnoreList.applicationIdentifier(for:))
         hasCompletedOnboarding =
             try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding)
             ?? defaults.hasCompletedOnboarding

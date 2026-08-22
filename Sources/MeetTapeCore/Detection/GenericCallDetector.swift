@@ -63,13 +63,15 @@ public enum MicrophoneIgnoreList {
     /// application rather than against the helper that happened to be asked
     /// about.
     ///
-    /// Nothing is collapsed below three components. A bundle identifier is
+    /// Nothing is collapsed below two components. A bundle identifier is
     /// reverse-DNS, and shortening `com.helper.app` to `com` would ban most of
-    /// the machine through the prefix match.
+    /// the machine through the prefix match. Two is the floor rather than three
+    /// because vendor identifiers that short exist: Notion ships as `notion.id`
+    /// with helpers under `notion.id.helper`.
     public static func applicationIdentifier(for bundleIdentifier: String) -> String {
         let components = bundleIdentifier.split(separator: ".")
         guard let helper = components.firstIndex(where: { $0.lowercased() == "helper" }),
-              helper >= 3
+              helper >= 2
         else { return bundleIdentifier }
         return components[..<helper].joined(separator: ".")
     }

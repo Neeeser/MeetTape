@@ -194,11 +194,17 @@ public struct SessionController: Sendable {
     /// Meet in the same browser from recording.
     private struct DeclinedCall {
         let provider: MeetingProvider
+        /// Normalised to the application, so a helper rotating under the call
+        /// does not read as a different one.
         let application: String
         var lastSeen: Double
     }
 
     private var declined: DeclinedCall?
+    /// What the open prompt asked about. The evidence moves on while the prompt
+    /// waits for an answer, so reading the answer's subject from it recorded
+    /// whichever call happened to be strongest when the user clicked.
+    private var askedAbout: (provider: MeetingProvider, application: String)?
     /// Bundle prefixes the process tap is currently bound to, so a change of
     /// provider between arming and confirming retargets it instead of recording
     /// the wrong application.
@@ -398,6 +404,7 @@ public struct SessionController: Sendable {
             )),
         ]
         if isProvisional, let applicationBundleID {
+            askedAbout = (provider: source.provider, application: applicationBundleID)
             actions.append(.askToKeepProvisional(
                 bundleIdentifier: applicationBundleID, title: titles.window
             ))
@@ -427,10 +434,11 @@ public struct SessionController: Sendable {
         guard snapshot.isProvisional else { return [] }
         snapshot.isProvisional = false
         if keep { return [] }
-        // Read before finishing, which clears the evidence this came from.
-        if let application = evidence?.applicationBundleID {
+        if let asked = askedAbout {
             declined = DeclinedCall(
-                provider: snapshot.provider, application: application, lastSeen: now
+                provider: asked.provider,
+                application: MicrophoneIgnoreList.applicationIdentifier(for: asked.application),
+                lastSeen: now
             )
         }
         return finishRecording(reason: reason, discard: true)
@@ -451,8 +459,10 @@ public struct SessionController: Sendable {
     }
 
     private static func matches(_ declined: DeclinedCall, _ candidate: ProviderEvidence) -> Bool {
-        candidate.provider == declined.provider
-            && candidate.applicationBundleID == declined.application
+        guard candidate.provider == declined.provider,
+              let application = candidate.applicationBundleID
+        else { return false }
+        return MicrophoneIgnoreList.applicationIdentifier(for: application) == declined.application
     }
 
     // MARK: - internals
@@ -530,6 +540,7 @@ public struct SessionController: Sendable {
             actions.insert(.retargetCapture(bundlePrefixes: best.audioBundlePrefixes), at: 0)
         }
         if snapshot.isProvisional, let bundle = best.applicationBundleID {
+            askedAbout = (provider: best.provider, application: bundle)
             actions.append(.askToKeepProvisional(bundleIdentifier: bundle, title: best.title))
         } else {
             actions.append(.notify(.startedRecording(provider: best.provider, title: titles.resolved)))
@@ -570,6 +581,7 @@ public struct SessionController: Sendable {
         evidence = nil
         announcedOtherTabs = false
         armedPrefixes = []
+        askedAbout = nil
     }
 
     public static func source(for provider: MeetingProvider) -> MeetingSource {

@@ -533,6 +533,17 @@ enum HardeningTests {
 
     static var sessionSuite: Suite {
         Suite("SessionHardening", [
+            test("a ban saved against a helper is read back as its application") { expect in
+                // Bans written before the identifier was normalised are on disk
+                // as whichever helper the prompt named, and covered only their
+                // own descendants.
+                let json = Data(
+                    #"{"neverRecordApplications":["com.hnc.Discord.helper.Renderer"]}"#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                expect.equal(settings.neverRecordApplications, ["com.hnc.Discord"])
+            },
+
             test("banning an application from the prompt records the application") { expect in
                 // The prompt names the process CoreAudio reported, which for an
                 // Electron application is a helper. Stored verbatim, the ban was

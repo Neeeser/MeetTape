@@ -907,10 +907,16 @@ public final class MeetTapeRuntime {
         }
     }
 
+    /// The name to show for a process that opened the microphone.
+    ///
+    /// Helpers are not registered with LaunchServices, so asking for the name of
+    /// `com.hnc.Discord.helper.Renderer` gets that string back and the prompt
+    /// read as an identifier rather than an application.
     private func applicationName(for bundleIdentifier: String) -> String {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        let application = MicrophoneIgnoreList.applicationIdentifier(for: bundleIdentifier)
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: application)
             .map { FileManager.default.displayName(atPath: $0.path) }
-            ?? bundleIdentifier
+            ?? application
     }
 
     func apply(_ progress: ProcessingPipeline.Progress) {

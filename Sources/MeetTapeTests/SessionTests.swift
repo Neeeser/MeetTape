@@ -433,6 +433,55 @@ enum SessionTests {
                 )
             },
 
+            test("the answer is about the call the prompt named") { expect in
+                // While the prompt is open, another unrecognised microphone
+                // holder can become the strongest evidence. Reading the answer
+                // from whatever the evidence had drifted to asked again about the
+                // call the user had just answered, and suppressed a call they
+                // were never offered for as long as it ran.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let asked = genericEvidence(
+                    confidence: .confirmed, bundleIdentifier: "com.hnc.Discord.helper"
+                )
+                let other = genericEvidence(
+                    confidence: .confirmed, bundleIdentifier: "com.example.videochat"
+                )
+                _ = controller.update(evidence: [asked], now: 100, wallClock: wall)
+                _ = controller.update(evidence: [other, asked], now: 100.5, wallClock: wall)
+                _ = controller.resolveProvisional(keep: false, reason: "user_discarded", now: 101)
+
+                expect.equal(
+                    controller.update(evidence: [asked], now: 101.5, wallClock: wall), [],
+                    "the call the prompt named stays answered"
+                )
+                let untouched = controller.update(evidence: [other], now: 102, wallClock: wall)
+                expect.isTrue(
+                    untouched.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a call nobody was asked about is still recorded"
+                )
+            },
+
+            test("a helper rotating under the call does not undo the answer") { expect in
+                // The same application opens the microphone from .helper on one
+                // poll and .helper.Renderer on the next. Compared as raw process
+                // identifiers, the answer stopped applying the moment it rotated.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let asked = genericEvidence(
+                    confidence: .confirmed, bundleIdentifier: "com.hnc.Discord.helper"
+                )
+                let rotated = genericEvidence(
+                    confidence: .confirmed, bundleIdentifier: "com.hnc.Discord.helper.Renderer"
+                )
+                _ = controller.update(evidence: [asked], now: 100, wallClock: wall)
+                _ = controller.resolveProvisional(keep: false, reason: "user_discarded", now: 101)
+                expect.equal(
+                    controller.update(evidence: [rotated], now: 101.5, wallClock: wall), [],
+                    "the same application under a different helper is the same answer"
+                )
+            },
+
             test("declining one call does not suppress another in the same application") { expect in
                 // Anything running in a tab reports the browser as its
                 // application, so an answer scoped to the application alone would

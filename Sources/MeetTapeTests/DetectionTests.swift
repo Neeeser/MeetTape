@@ -528,13 +528,19 @@ enum DetectionTests {
                     MicrophoneIgnoreList.applicationIdentifier(for: "com.tinyspeck.slackmacgap.helper"),
                     "com.tinyspeck.slackmacgap"
                 )
+                // A two-component vendor identifier still normalises: Notion ships
+                // as notion.id, with its helpers under notion.id.helper.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "notion.id.helper.Renderer"),
+                    "notion.id"
+                )
                 // An application that is not a helper is stored exactly as it is.
                 expect.equal(
                     MicrophoneIgnoreList.applicationIdentifier(for: "com.example.videochat"),
                     "com.example.videochat"
                 )
-                // Nothing is ever collapsed to fewer than three components: a ban
-                // on "com" would prefix-match most of the machine.
+                // Nothing is ever collapsed to one component: a ban on "com"
+                // would prefix-match most of the machine.
                 expect.equal(
                     MicrophoneIgnoreList.applicationIdentifier(for: "com.helper.app"),
                     "com.helper.app"
@@ -544,6 +550,8 @@ enum DetectionTests {
                     "com.acme.helperapp"
                 )
 
+                // Each sibling is held past the dwell it would otherwise promote
+                // at, so the ban is what keeps it out rather than the clock.
                 let banned = MicrophoneIgnoreList.applicationIdentifier(
                     for: "com.openai.chat.helper.Renderer"
                 )
@@ -552,19 +560,45 @@ enum DetectionTests {
                 for sibling in [
                     "com.openai.chat", "com.openai.chat.helper", "com.openai.chat.helper.GPU",
                 ] {
-                    when += 30
+                    for _ in 0..<60 {
+                        when += 0.5
+                        expect.equal(
+                            detector.update(
+                                states: [
+                                    ApplicationAudioState(
+                                        bundleIdentifier: sibling, processID: 1,
+                                        holdsMicrophone: true, producesOutput: true,
+                                        isFrontmost: true, windowTitle: nil
+                                    ),
+                                ],
+                                at: when
+                            ),
+                            [], "\(sibling) belongs to an application the user banned"
+                        )
+                    }
+                    expect.equal(detector.currentEvidence().count, 0, "\(sibling) is not evidence")
+                }
+            },
+
+            test("MeetTape's own helpers are never a meeting") { expect in
+                // Its capture holds the microphone for the length of every
+                // recording, and it is the helper that would hold it.
+                var detector = GenericCallDetector()
+                var when = 100.0
+                for _ in 0..<60 {
+                    when += 0.5
                     expect.equal(
                         detector.update(
                             states: [
                                 ApplicationAudioState(
-                                    bundleIdentifier: sibling, processID: 1,
+                                    bundleIdentifier: "com.meettape.app.helper", processID: 1,
                                     holdsMicrophone: true, producesOutput: true,
-                                    isFrontmost: true, windowTitle: nil
+                                    isFrontmost: false, windowTitle: nil
                                 ),
                             ],
                             at: when
                         ),
-                        [], "\(sibling) belongs to an application the user banned"
+                        []
                     )
                 }
                 expect.equal(detector.currentEvidence().count, 0)

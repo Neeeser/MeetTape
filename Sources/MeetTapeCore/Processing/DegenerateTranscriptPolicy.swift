@@ -16,11 +16,14 @@ public enum DegenerateTranscriptPolicy {
     /// loop whose wording drifts.
     public static let phraseWords = 5
 
-    /// Share of a chunk's phrases that may be ones it has already said. A
-    /// six-minute AMI transcript repeats about 2% of its 8-grams, so half is
-    /// far above anything conversation produces and far below a loop, which
-    /// runs above 0.8.
-    public static let repeatedShareLimit = 0.5
+    /// Share of a chunk's phrases that may be ones it has already said.
+    ///
+    /// Measured over the sixteen chunks of ES2003a: the eleven that hold speech
+    /// score between 0.00 and 0.03, and the five that came back with the same
+    /// fabricated paragraph all score 0.28. A fifth is between the two with
+    /// room on both sides, and the cost of being wrong is one window retried
+    /// and then dropped.
+    public static let repeatedShareLimit = 0.2
 
     /// Below this the measure has too few phrases to mean anything, and a short
     /// chunk cannot hold much fabrication either.

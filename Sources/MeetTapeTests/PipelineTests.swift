@@ -143,10 +143,16 @@ enum PipelineTests {
                 // paragraph: 438 invented words against a 386-word reference,
                 // 266 insertions, 153 repeated 8-grams and 193% DER, with the
                 // meeting reporting success.
-                let loop = Array(repeating:
-                    "The world is a very important part of the world and I think that is what we need to do",
-                    count: 6
-                ).joined(separator: ". ")
+                // What five of ES2003a's sixteen chunks returned, verbatim.
+                let loop = "The world is a very important part of the world. And I think "
+                    + "that's what we need to do in terms of the world, and it's not just "
+                    + "about the world, but also about the world, and we need to be able to "
+                    + "make sure that there are people who are not going to be able to do "
+                    + "that. So, I think that's what we need to do in terms of the world."
+                expect.isTrue(
+                    DegenerateTranscriptPolicy.repeatedShare(of: loop) > 0.25,
+                    "the loop scores \(DegenerateTranscriptPolicy.repeatedShare(of: loop))"
+                )
                 var caught: ProcessingError?
                 do {
                     _ = try ProcessingPipeline.dropIfLooping(
@@ -171,9 +177,15 @@ enum PipelineTests {
                 )
                 expect.isTrue(dropped, "the last attempt drops the chunk instead of failing")
 
-                // Six minutes of ordinary conversation repeats about 2% of its
-                // phrases, so a real transcript of the same length is accepted.
-                let spoken = (0..<120).map { "word\($0)" }.joined(separator: " ")
+                // The eleven ES2003a chunks that hold speech score between
+                // 0.00 and 0.03, so a chunk that says one thing twice is
+                // still a chunk of speech and is kept.
+                let spoken = ((0..<100).map { "word\($0)" }
+                    + (0..<8).map { "word\($0)" }).joined(separator: " ")
+                expect.isTrue(
+                    DegenerateTranscriptPolicy.repeatedShare(of: spoken) < 0.2,
+                    "a repeated sentence scores \(DegenerateTranscriptPolicy.repeatedShare(of: spoken))"
+                )
                 let keptSpeech = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: spoken),
                     chunkID: "remote_chunk_008", purpose: .words, isLastAttempt: true

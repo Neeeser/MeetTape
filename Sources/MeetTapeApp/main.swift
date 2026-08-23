@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Applied from the loaded settings rather than hardcoded, and again on
         // every settings change through the menu bar controller's observer.
         DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
+        LoginItem.apply(launchAtLogin: runtime.settings.launchAtLogin)
         windows = WindowManager(runtime: runtime)
         menuBar = MenuBarController(runtime: runtime, windows: windows)
         notificationRouter = NotificationRouter(runtime: runtime, windows: windows)

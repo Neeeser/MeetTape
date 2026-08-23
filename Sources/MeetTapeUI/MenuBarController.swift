@@ -32,6 +32,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             self?.refreshButton()
             self?.syncProvisionalPrompt()
             DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
+            LoginItem.apply(launchAtLogin: runtime.settings.launchAtLogin)
         }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)

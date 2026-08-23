@@ -231,6 +231,19 @@ enum UITests {
                 }
             },
 
+            test("reconciling the login item does nothing when it already matches") { expect in
+                // The setting was stored, shown and read by nothing, so the
+                // toggle did nothing. Registration itself is a call into
+                // launchd and is verified by hand; what is testable is that an
+                // unchanged state asks for no work, which matters because
+                // registering an already-registered item throws and this runs
+                // on every settings change.
+                expect.isNil(LoginItem.action(wanted: true, isRegistered: true))
+                expect.isNil(LoginItem.action(wanted: false, isRegistered: false))
+                expect.equal(LoginItem.action(wanted: true, isRegistered: false), .register)
+                expect.equal(LoginItem.action(wanted: false, isRegistered: true), .unregister)
+            },
+
             test("a speaker who never speaks is not offered for naming") { expect in
                 // A cloud-diarized meeting listed eleven speakers, six of them
                 // showing 0s: labels the diarizer emitted that own no words.

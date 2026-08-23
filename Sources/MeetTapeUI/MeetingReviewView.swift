@@ -269,15 +269,15 @@ public struct MeetingReviewView: View {
             title: "Transcript",
             subtitle: model.transcript == nil
                 ? "Not available yet."
-                : "Click a name to correct that line alone."
+                : "Click a line's name or time to correct that line alone."
         ) {
             if !model.combinedLines.isEmpty {
                 if model.isSplitRecording { continuationNotice }
                 // Lazy because a long meeting is thousands of lines and each one
                 // carries a menu.
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(model.combinedLines) { line in
-                        utteranceRow(line)
+                    ForEach(CombinedLineBlock.blocks(from: model.combinedLines)) { block in
+                        blockView(block)
                     }
                 }
                 if model.namingLine != nil { namingField }
@@ -322,25 +322,32 @@ public struct MeetingReviewView: View {
         model.recordings.firstIndex { $0.id == recording.id } ?? 0
     }
 
-    private func utteranceRow(_ line: CombinedLine) -> some View {
+    /// One speaker's consecutive lines under a single name header. Every line
+    /// keeps its own correction menu: the first on its name, the rest on their
+    /// timecodes.
+    private func blockView(_ block: CombinedLineBlock) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(block.lines.enumerated()), id: \.element.id) { index, line in
+                utteranceRow(line, showsName: index == 0)
+            }
+        }
+    }
+
+    private func utteranceRow(_ line: CombinedLine, showsName: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Menu(line.speakerName) {
-                    ForEach(model.knownPeople) { person in
-                        Button(person.identity.resolvedName) {
-                            model.assignUtterance(line, to: person)
-                        }
-                    }
-                    if !model.knownPeople.isEmpty { Divider() }
-                    Button("New person…") { model.beginNamingUtterance(line) }
-                    Button("Use this speaker's name") { model.clearUtterance(line) }
+                if showsName {
+                    speakerMenu(for: line, label: line.speakerName)
+                        .font(.callout.weight(.semibold))
+                    Text(TranscriptRenderer().timecode(line.timelineStart))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    speakerMenu(for: line, label: TranscriptRenderer().timecode(line.timelineStart))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("Correct the speaker on this line alone")
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .font(.callout.weight(.semibold))
-                Text(TranscriptRenderer().timecode(line.timelineStart))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
                 if model.correctedLines.contains(line.id) {
                     Image(systemName: "pencil.circle.fill")
                         .font(.caption2)
@@ -350,6 +357,21 @@ public struct MeetingReviewView: View {
             }
             Text(line.utterance.text).font(.callout).textSelection(.enabled)
         }
+    }
+
+    private func speakerMenu(for line: CombinedLine, label: String) -> some View {
+        Menu(label) {
+            ForEach(model.knownPeople) { person in
+                Button(person.identity.resolvedName) {
+                    model.assignUtterance(line, to: person)
+                }
+            }
+            if !model.knownPeople.isEmpty { Divider() }
+            Button("New person…") { model.beginNamingUtterance(line) }
+            Button("Use this speaker's name") { model.clearUtterance(line) }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     /// What the panel says while it waits.

@@ -16,6 +16,7 @@ suites.append(UITests.suite)
 suites += LocalConfigurationTests.all
 suites += SpeakerIdentityTests.all
 suites.append(VoiceEvidenceTests.suite)
+suites.append(TranscriptGroupingTests.suite)
 suites.append(ReconnectTests.suite)
 suites += SpeakerCorrectionTests.all
 suites += BackendSelectionTests.all

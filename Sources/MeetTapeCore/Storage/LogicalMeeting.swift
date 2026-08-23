@@ -86,6 +86,37 @@ public struct CombinedLine: Sendable, Equatable, Identifiable {
     }
 }
 
+/// Consecutive lines spoken by the same person, for display.
+///
+/// The diarizer prefers splitting over merging and the assembler caps a turn at
+/// 30 seconds, so one person talking often arrives as several lines in a row.
+/// Grouping happens here, at render time, rather than in the stored transcript:
+/// the lines keep their identities, so a correction still targets one line.
+public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
+    /// Never empty.
+    public var lines: [CombinedLine]
+
+    public var id: String { lines[0].id }
+    public var speakerName: String { lines[0].speakerName }
+
+    /// Groups consecutive lines with the same resolved name in the same
+    /// recording. Names are only comparable within one recording: the two
+    /// halves of a dropped call can both show "Speaker 1" and mean different
+    /// people, so a block never crosses a recording boundary.
+    public static func blocks(from lines: [CombinedLine]) -> [CombinedLineBlock] {
+        var out: [CombinedLineBlock] = []
+        for line in lines {
+            if let last = out.last, last.lines[0].recordingID == line.recordingID,
+                last.speakerName == line.speakerName {
+                out[out.count - 1].lines.append(line)
+            } else {
+                out.append(CombinedLineBlock(lines: [line]))
+            }
+        }
+        return out
+    }
+}
+
 extension LogicalMeeting {
     /// Every recording's transcript, in the order the conversation happened.
     ///

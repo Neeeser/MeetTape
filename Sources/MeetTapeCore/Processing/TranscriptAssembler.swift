@@ -391,6 +391,30 @@ public struct TranscriptAssembler: Sendable {
 ///
 /// Rendering resolves speaker names at display time, so changing a name never
 /// touches the transcript or the raw diarization behind it.
+/// One person in the participant block, as the transcript introduces them.
+///
+/// What a reader downstream needs before the first line of dialogue: who was
+/// talking, where they work, and whatever the user wrote about them.
+public struct TranscriptParticipant: Sendable, Equatable {
+    public var name: String
+    public var organization: String?
+    public var notes: String?
+
+    public init(name: String, organization: String? = nil, notes: String? = nil) {
+        self.name = name
+        self.organization = organization
+        self.notes = notes
+    }
+
+    /// A participant with nothing but a name adds nothing the dialogue does not
+    /// already say, so the block is built from the ones that do.
+    public var isInformative: Bool {
+        let organization = self.organization?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let notes = self.notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !organization.isEmpty || !notes.isEmpty
+    }
+}
+
 public struct TranscriptRenderer: Sendable {
     public init() {}
 
@@ -399,13 +423,15 @@ public struct TranscriptRenderer: Sendable {
         speakers: SpeakerMap,
         title: String,
         startedAt: Date,
-        durationSeconds: Double
+        durationSeconds: Double,
+        participants: [TranscriptParticipant]
     ) -> String {
         var lines: [String] = []
         lines.append("# \(title)")
         lines.append("")
         lines.append("\(startedAt.formatted(date: .long, time: .shortened)) · \(formatDuration(durationSeconds))")
         lines.append("")
+        lines.append(contentsOf: participantBlock(participants))
 
         var lastSpeaker: String?
         for utterance in transcript.utterances {
@@ -421,6 +447,32 @@ public struct TranscriptRenderer: Sendable {
         }
         lines.append("")
         return lines.joined(separator: "\n")
+    }
+
+    /// Written above the dialogue, because a reader who meets the notes after
+    /// the conversation has already decided who everybody is.
+    private func participantBlock(_ participants: [TranscriptParticipant]) -> [String] {
+        let informative = participants.filter(\.isInformative)
+        guard !informative.isEmpty else { return [] }
+        var lines = ["## Participants", ""]
+        for participant in informative {
+            var line = "- **\(participant.name)**"
+            if let organization = participant.organization?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !organization.isEmpty {
+                line += " · \(organization)"
+            }
+            lines.append(line)
+            if let notes = participant.notes?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !notes.isEmpty {
+                // Indented under the name so a multi-line note stays inside the
+                // list item instead of ending it.
+                for note in notes.split(separator: "\n", omittingEmptySubsequences: false) {
+                    lines.append("  \(note)")
+                }
+            }
+        }
+        lines.append("")
+        return lines
     }
 
     public func plainText(transcript: CanonicalTranscript, speakers: SpeakerMap) -> String {

@@ -46,7 +46,7 @@ final class SpeakerDatabase {
 
     /// Bumped for every schema change. Migrations are additive; nothing here
     /// ever drops a column or a table that holds user data.
-    static let latestVersion: Int32 = 1
+    static let latestVersion: Int32 = 2
 
     init(url: URL) throws {
         self.url = url
@@ -138,6 +138,7 @@ final class SpeakerDatabase {
     private func applyMigration(to version: Int32) throws {
         switch version {
         case 1: try execute(Self.schemaV1)
+        case 2: try execute(Self.personDetailTables)
         default:
             // Advancing user_version for a step that did nothing marks the
             // schema as migrated when it is not, and the loop never retries.
@@ -149,6 +150,34 @@ final class SpeakerDatabase {
     }
 
     static var schemaV1: String { schemaCore + evidenceTables }
+
+    /// What a person keeps about somebody, as opposed to what the matcher keeps.
+    ///
+    /// Notes ride on the identity row so a delete carries them off with
+    /// everything else, and badges take the same shape as `identity_alias`
+    /// because they are the same kind of thing: a small set of values belonging
+    /// to one identity, cascading with it.
+    ///
+    /// The picture is a table of its own rather than a column, so listing four
+    /// hundred people stays one cheap query and does not read four hundred PNGs
+    /// to draw a sidebar. In the database rather than a sibling directory
+    /// because the cascade then covers it too, and nothing has to sweep for an
+    /// avatar whose person is gone.
+    static let personDetailTables = """
+        ALTER TABLE identity ADD COLUMN notes TEXT;
+
+        CREATE TABLE identity_badge(
+          identity_id INTEGER NOT NULL REFERENCES identity(id) ON DELETE CASCADE,
+          platform TEXT NOT NULL,
+          PRIMARY KEY(identity_id, platform)
+        );
+
+        CREATE TABLE identity_avatar(
+          identity_id INTEGER PRIMARY KEY REFERENCES identity(id) ON DELETE CASCADE,
+          image BLOB NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        """
 
     static let schemaCore = """
         CREATE TABLE identity(

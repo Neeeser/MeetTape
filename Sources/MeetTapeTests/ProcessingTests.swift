@@ -434,14 +434,16 @@ enum ProcessingTests {
 
                 let before = renderer.markdown(
                     transcript: transcript, speakers: speakers, title: "Sync",
-                    startedAt: Date(timeIntervalSince1970: 0), durationSeconds: 2
+                    startedAt: Date(timeIntervalSince1970: 0), durationSeconds: 2,
+                    participants: []
                 )
                 expect.isTrue(before.contains("Speaker 1"), "unnamed speakers get a readable fallback")
 
                 speakers.assign("Chris", to: "remote_chunk_001_speaker_00")
                 let after = renderer.markdown(
                     transcript: transcript, speakers: speakers, title: "Sync",
-                    startedAt: Date(timeIntervalSince1970: 0), durationSeconds: 2
+                    startedAt: Date(timeIntervalSince1970: 0), durationSeconds: 2,
+                    participants: []
                 )
                 expect.isTrue(after.contains("Chris"))
                 expect.isFalse(after.contains("Speaker 1"))

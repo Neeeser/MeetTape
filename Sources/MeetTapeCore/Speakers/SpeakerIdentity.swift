@@ -55,6 +55,16 @@ public struct Identity: Codable, Sendable, Equatable, Identifiable {
     public var anonymousNumber: Int?
     public var aliases: [String]
     public var organization: String?
+    /// What the user typed about this person. Rendered into the participant
+    /// block of every transcript they appear in, so the downstream reader knows
+    /// who was in the room before reading a word of it.
+    public var notes: String?
+    /// Where this person is usually heard. Set by hand; nothing infers it.
+    public var badges: [PersonBadge]
+    /// Whether a picture is stored for this identity. The image itself lives in
+    /// its own table and is fetched when something is about to draw it, so
+    /// listing four hundred people does not read four hundred PNGs.
+    public var hasAvatar: Bool
     /// True for the one identity that represents the person using this Mac.
     public var isLocalUser: Bool
     public var state: IdentityState
@@ -73,6 +83,9 @@ public struct Identity: Codable, Sendable, Equatable, Identifiable {
         anonymousNumber: Int? = nil,
         aliases: [String] = [],
         organization: String? = nil,
+        notes: String? = nil,
+        badges: [PersonBadge] = [],
+        hasAvatar: Bool = false,
         isLocalUser: Bool = false,
         state: IdentityState = .persistent,
         mergedInto: IdentityID? = nil,
@@ -86,6 +99,9 @@ public struct Identity: Codable, Sendable, Equatable, Identifiable {
         self.anonymousNumber = anonymousNumber
         self.aliases = aliases
         self.organization = organization
+        self.notes = notes
+        self.badges = badges
+        self.hasAvatar = hasAvatar
         self.isLocalUser = isLocalUser
         self.state = state
         self.mergedInto = mergedInto
@@ -103,6 +119,16 @@ public struct Identity: Codable, Sendable, Equatable, Identifiable {
     }
 
     public var isNamed: Bool { kind == .person && !(displayName ?? "").isEmpty }
+
+    /// Up to two letters for the fallback avatar. An unnamed voice has no
+    /// initials to take, and a number rendered in a circle reads as a label
+    /// rather than a person.
+    public var initials: String {
+        guard let displayName, !displayName.isEmpty else { return "" }
+        let words = displayName.split(separator: " ").filter { !$0.isEmpty }
+        let letters = words.prefix(2).compactMap { $0.first }
+        return String(letters).uppercased()
+    }
 }
 
 /// How much verified material a profile holds.

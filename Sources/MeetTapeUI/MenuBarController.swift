@@ -163,6 +163,9 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         pause.state = status.detectionPaused ? .on : .off
         menu.addItem(pause)
 
+        let people = NSMenuItem(title: "People…", action: #selector(openPeople), keyEquivalent: "p")
+        people.target = self
+        menu.addItem(people)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -335,6 +338,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() { windows.showSettings() }
+
+    @objc private func openPeople() { windows.showPeople() }
 
     @objc private func togglePause() {
         runtime.setDetectionPaused(!runtime.status.detectionPaused)

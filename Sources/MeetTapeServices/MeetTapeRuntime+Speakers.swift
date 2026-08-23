@@ -3,22 +3,6 @@ import MeetTapeCore
 import MeetTapeLocalAI
 import MeetTapeSpeakers
 
-/// One row of the people list: who they are, how much voice material exists,
-/// and how often they have been heard.
-public struct SpeakerDirectoryEntry: Sendable, Equatable, Identifiable {
-    public var identity: Identity
-    public var profile: VoiceProfileStatus
-    public var meetingCount: Int
-
-    public var id: IdentityID { identity.id }
-
-    public init(identity: Identity, profile: VoiceProfileStatus, meetingCount: Int) {
-        self.identity = identity
-        self.profile = profile
-        self.meetingCount = meetingCount
-    }
-}
-
 /// One line of a turn, and the stretch of it a person named.
 ///
 /// In the line's own coordinates. A turn's lines are not in time order, so a
@@ -277,11 +261,71 @@ extension MeetTapeRuntime {
         }
     }
 
+    /// Free text about a person, and the markdown that carries it.
+    ///
+    /// Every transcript this person appears in is re-rendered, because the notes
+    /// are written into the participant block of each one and a stale block is
+    /// what the downstream reader will actually see.
+    public func setNotes(_ notes: String?, on identityID: IdentityID) async {
+        guard let store = speakerStore else { return }
+        do {
+            try await store.setNotes(notes, on: identityID)
+            try await pipeline.refreshCachedNames(for: identityID)
+        } catch {
+            Log.app.error("notes update failed: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
+    public func setBadges(_ badges: [PersonBadge], on identityID: IdentityID) async {
+        guard let store = speakerStore else { return }
+        do {
+            try await store.setBadges(badges, on: identityID)
+        } catch {
+            Log.app.error("badge update failed: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
+    public func setOrganization(_ organization: String?, on identityIDs: [IdentityID]) async {
+        guard let store = speakerStore else { return }
+        do {
+            try await store.setOrganization(organization, on: identityIDs)
+            for identityID in identityIDs {
+                try await pipeline.refreshCachedNames(for: identityID)
+            }
+        } catch {
+            Log.app.error("organization update failed: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
+    public func setAvatar(_ png: Data?, on identityID: IdentityID) async {
+        guard let store = speakerStore else { return }
+        do {
+            try await store.setAvatar(png, on: identityID)
+        } catch {
+            Log.app.error("avatar update failed: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
+    public func avatar(of identityID: IdentityID) async -> Data? {
+        guard let store = speakerStore else { return nil }
+        return try? await store.avatar(of: identityID)
+    }
+
+    public func deletePeople(_ identityIDs: [IdentityID]) async {
+        for identityID in identityIDs { await deletePerson(identityID) }
+    }
+
     public func deletePerson(_ identityID: IdentityID) async {
         guard let store = speakerStore else { return }
         do {
             let family = try await store.family(of: identityID)
+            // Collected first: once the row is gone `meetingsReferencing` cannot
+            // find it, and the participant block of every transcript this person
+            // is in still holds the notes the confirmation just said were
+            // removed.
+            let affected = (try? await store.meetingsReferencing(identityID)) ?? []
             try await store.delete(identityID)
+            await pipeline.rerenderMeetings(affected)
             // Otherwise the stored identifier names a row that no longer
             // exists, and every new meeting writes it into its speaker map.
             if let stored = settings.processing.localUserIdentityID, family.contains(stored) {

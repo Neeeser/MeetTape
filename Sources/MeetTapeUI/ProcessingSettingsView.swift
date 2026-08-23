@@ -337,49 +337,25 @@ struct LocalModelChoicePicker: View {
     }
 }
 
-/// The people MeetTape can recognize, and the voices it has heard more than
-/// once without knowing who they are.
+/// Where the voice database is and what is in it.
+///
+/// The directory itself moved to its own window: a list that grows to hundreds
+/// of people needs search, grouping and multiple selection, and none of that
+/// fits a settings pane sized by seven other tabs.
 struct PeopleSettingsTab: View {
     let model: SettingsModel
-    private var runtime: MeetTapeRuntime { model.runtime }
 
     var body: some View {
         Form {
-            if let renaming = model.renaming {
-                Section(renaming.identity.kind == .anonymous ? "Name this voice" : "Rename") {
-                    TextField("Name", text: model.text(\.renameDraft))
-                    TextField("Organization (optional)", text: model.text(\.renameOrganization))
-                    HStack {
-                        Button("Save") { Task { await model.commitRename() } }
-                            .disabled(model.renameDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Button("Cancel") { model.cancelRename() }
-                    }
-                    if renaming.identity.kind == .anonymous {
-                        Text(
-                            "Every meeting this voice appeared in will show the name. Nothing is "
-                                + "transcribed or analysed again."
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Section("People") {
-                if model.people.isEmpty {
-                    Text("Nobody yet. Naming a speaker on a meeting creates them here.")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.people) { entry in row(entry) }
-                }
-            }
-            Section("Voices heard more than once") {
-                if model.recurringVoices.isEmpty {
+            Section {
+                Button("Manage people…") { model.openPeople() }
+                if let statistics = model.voiceStatistics {
                     Text(
-                        "None yet. A voice with at least 45 seconds of clean speech that turns "
-                            + "up in a second meeting is remembered here until you name it."
+                        "\(statistics.namedPeople) named, \(statistics.recurringVoices) unnamed "
+                            + "recurring voices."
                     )
-                    .font(.callout).foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.recurringVoices) { entry in row(entry) }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 }
             }
             if let statistics = model.voiceStatistics {
@@ -401,52 +377,5 @@ struct PeopleSettingsTab: View {
         }
         .formStyle(.grouped)
         .task { await model.refreshPeople() }
-        .alert(
-            model.pendingDestructiveAction?.title ?? "",
-            isPresented: Binding(
-                get: { model.pendingDestructiveAction != nil },
-                set: { if !$0 { model.pendingDestructiveAction = nil } }
-            )
-        ) {
-            Button("Cancel", role: .cancel) { model.pendingDestructiveAction = nil }
-            Button(
-                model.pendingDestructiveAction?.confirmLabel ?? "Delete", role: .destructive
-            ) {
-                Task { await model.performPendingDestructiveAction() }
-            }
-        } message: {
-            Text(model.pendingDestructiveAction?.message ?? "")
-        }
-    }
-
-    private func row(_ entry: SpeakerDirectoryEntry) -> some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.identity.resolvedName).font(.callout)
-                Text(subtitle(entry)).font(.caption2).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Menu("Edit") {
-                Button(entry.identity.kind == .anonymous ? "Name this person…" : "Rename…") {
-                    model.beginRename(entry)
-                }
-                Button("Forget learned voice") { model.confirmForgetVoice(entry) }
-                Divider()
-                Button("Delete", role: .destructive) { model.confirmDelete(entry) }
-            }
-            .fixedSize()
-        }
-    }
-
-    private func subtitle(_ entry: SpeakerDirectoryEntry) -> String {
-        var parts: [String] = []
-        if let organization = entry.identity.organization, !organization.isEmpty {
-            parts.append(organization)
-        }
-        parts.append(entry.profile.summary)
-        if entry.meetingCount > 0 {
-            parts.append("heard in \(entry.meetingCount) meeting\(entry.meetingCount == 1 ? "" : "s")")
-        }
-        return parts.joined(separator: " · ")
     }
 }

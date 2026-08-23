@@ -26,50 +26,10 @@ public final class SettingsModel {
     public var apiKey = ""
     public var hasStoredKey: Bool
     public var testState = TestState.idle
-    public var people: [SpeakerDirectoryEntry] = []
-    public var recurringVoices: [SpeakerDirectoryEntry] = []
     public var voiceStatistics: SpeakerStore.Statistics?
-    public var renaming: SpeakerDirectoryEntry?
-    public var renameDraft = ""
-    public var renameOrganization = ""
-    /// A destructive action waiting on the person who asked for it.
-    ///
-    /// Deleting a profile removes biometric material with no undo and no source
-    /// to re-derive it from, and the local user's own row sits in this list one
-    /// menu item away from Rename.
-    public var pendingDestructiveAction: DestructiveAction?
-
-    public struct DestructiveAction: Identifiable, Equatable {
-        public enum Kind: Equatable { case forgetVoice, delete }
-        public var id: IdentityID { entry.id }
-        public var entry: SpeakerDirectoryEntry
-        public var kind: Kind
-
-        public var title: String {
-            switch kind {
-            case .forgetVoice: "Forget \(entry.identity.resolvedName)'s voice?"
-            case .delete: "Delete \(entry.identity.resolvedName)?"
-            }
-        }
-
-        public var message: String {
-            switch kind {
-            case .forgetVoice:
-                "Past transcripts keep the name. MeetTape will not recognise this "
-                    + "voice again until someone confirms it on a new recording."
-            case .delete:
-                "The name and every recording of this voice are removed. "
-                    + "This cannot be undone."
-            }
-        }
-
-        public var confirmLabel: String {
-            switch kind {
-            case .forgetVoice: "Forget Voice"
-            case .delete: "Delete"
-            }
-        }
-    }
+    /// Opens the people directory. Set by the window manager, which owns both
+    /// this model and that window.
+    @ObservationIgnored public var onOpenPeople: (() -> Void)?
 
     public enum TestState: Equatable {
         case idle
@@ -166,55 +126,10 @@ public final class SettingsModel {
     }
 
     public func refreshPeople() async {
-        people = await runtime.speakerDirectory(kind: .person)
-        recurringVoices = await runtime.speakerDirectory(kind: .anonymous)
         voiceStatistics = await runtime.voiceMemoryStatistics()
     }
 
-    public func beginRename(_ entry: SpeakerDirectoryEntry) {
-        renaming = entry
-        renameDraft = entry.identity.kind == .person ? entry.identity.resolvedName : ""
-        renameOrganization = entry.identity.organization ?? ""
-    }
-
-    public func cancelRename() {
-        renaming = nil
-        renameDraft = ""
-        renameOrganization = ""
-    }
-
-    /// Names a person, or gives a recurring unnamed voice a name for the first
-    /// time. Every meeting that voice appeared in reads the new name; nothing is
-    /// transcribed or diarized again.
-    public func commitRename() async {
-        guard let entry = renaming else { return }
-        let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return cancelRename() }
-        let organization = renameOrganization.trimmingCharacters(in: .whitespacesAndNewlines)
-        await runtime.renamePerson(
-            entry.id, to: name, organization: organization.isEmpty ? nil : organization
-        )
-        cancelRename()
-        await refreshPeople()
-    }
-
-    public func confirmForgetVoice(_ entry: SpeakerDirectoryEntry) {
-        pendingDestructiveAction = DestructiveAction(entry: entry, kind: .forgetVoice)
-    }
-
-    public func confirmDelete(_ entry: SpeakerDirectoryEntry) {
-        pendingDestructiveAction = DestructiveAction(entry: entry, kind: .delete)
-    }
-
-    public func performPendingDestructiveAction() async {
-        guard let action = pendingDestructiveAction else { return }
-        pendingDestructiveAction = nil
-        switch action.kind {
-        case .forgetVoice: await runtime.forgetVoice(of: action.entry.id)
-        case .delete: await runtime.deletePerson(action.entry.id)
-        }
-        await refreshPeople()
-    }
+    public func openPeople() { onOpenPeople?() }
 
     public func installLocalModels() async {
         await runtime.installLocalModels()

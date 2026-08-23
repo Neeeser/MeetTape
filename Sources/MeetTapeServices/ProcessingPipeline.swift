@@ -1453,7 +1453,8 @@ public actor ProcessingPipeline {
                 speakers: speakers,
                 title: metadata.displayTitle,
                 startedAt: metadata.startedAt,
-                durationSeconds: metadata.durationSeconds
+                durationSeconds: metadata.durationSeconds,
+                participants: await participants(in: speakers)
             ))
         }
 
@@ -1506,7 +1507,7 @@ public actor ProcessingPipeline {
     /// Re-assembles the canonical transcript from the raw chunks on disk and
     /// re-renders the Markdown. Makes no API call. Used after an assembly
     /// improvement, so a meeting processed under the old rules picks them up.
-    public func rebuildTranscript(meetingID: String) throws {
+    public func rebuildTranscript(meetingID: String) async throws {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
@@ -1526,8 +1527,7 @@ public actor ProcessingPipeline {
         try found.store.writeCanonicalTranscript(transcript)
         // Read back rather than rendered from what was just assembled, so the
         // boundaries a person put in the transcript are in the markdown too.
-        let speakers = try found.store.readSpeakerMap()
-        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+        try await rerenderMarkdown(store: found.store, metadata: found.metadata)
     }
 
     /// Re-renders the transcript after a human speaker correction.
@@ -1570,7 +1570,7 @@ public actor ProcessingPipeline {
         var speakers = try found.store.readSpeakerMap()
         speakers.assign(name, to: key, identityID: resolved)
         try found.store.writeSpeakerMap(speakers)
-        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+        try await rerenderMarkdown(store: found.store, metadata: found.metadata)
 
         // The microphone track has no diarization cluster, because its speaker is
         // true by construction. Saying it is somebody else withdraws that
@@ -1869,7 +1869,7 @@ public actor ProcessingPipeline {
                 .append(AudioSpan(start: utterance.start, end: utterance.end))
         }
         try found.store.writeSpeakerMap(speakers)
-        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+        try await rerenderMarkdown(store: found.store, metadata: found.metadata)
 
         try await settleVoiceMemory(
             found: found, moved: moved, claimant: resolved, speakers: speakers, settings: settings
@@ -2027,7 +2027,7 @@ public actor ProcessingPipeline {
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)
         let speakers = try store.readSpeakerMap()
-        try rerenderMarkdown(store: store, metadata: metadataCopy, speakers: speakers)
+        try await rerenderMarkdown(store: store, metadata: metadataCopy)
     }
 
     /// Re-runs identity resolution alone, after the expected-participant list
@@ -2048,7 +2048,7 @@ public actor ProcessingPipeline {
             store: found.store, metadata: &metadata, settings: settingsProvider()
         )
         let speakers = try found.store.readSpeakerMap()
-        try rerenderMarkdown(store: found.store, metadata: metadata, speakers: speakers)
+        try await rerenderMarkdown(store: found.store, metadata: metadata)
     }
 
     // MARK: - identity plumbing
@@ -2286,6 +2286,8 @@ public actor ProcessingPipeline {
     /// stays readable on its own. Renaming, promoting or merging updates the
     /// store, and this brings the copies in line without touching a transcript's
     /// words or its raw diarization.
+    /// Brings every meeting this person appears in back in line with the
+    /// database: the cached name in the speaker map, and the rendered markdown.
     public func refreshCachedNames(for identityID: IdentityID) async throws {
         guard let service = backends.speakers else { return }
         let store = await service.speakerStore
@@ -2314,9 +2316,26 @@ public actor ProcessingPipeline {
             where speakers.refreshName(of: member, to: identity.resolvedName) {
                 changed = true
             }
-            guard changed else { continue }
-            try found.store.writeSpeakerMap(speakers)
-            try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
+            // The map is written only when an entry was found to update; the
+            // markdown is re-rendered either way, because the participant block
+            // carries the organization and the notes as well as the name, and a
+            // meeting can reference this person through an occurrence whose
+            // speaker map no longer names them.
+            if changed { try found.store.writeSpeakerMap(speakers) }
+            try await rerenderMarkdown(store: found.store, metadata: found.metadata)
+        }
+    }
+
+    /// Re-renders named meetings whatever they currently resolve to.
+    ///
+    /// For a person who has just been deleted: `meetingsReferencing` can no
+    /// longer find them, so the caller collects the identifiers first and the
+    /// render then drops their line from each participant block.
+    public func rerenderMeetings(_ meetingIDs: [String]) async {
+        for meetingID in meetingIDs {
+            guard let found = repository.findMeeting(id: meetingID, includingMerged: true)
+            else { continue }
+            try? await rerenderMarkdown(store: found.store, metadata: found.metadata)
         }
     }
 
@@ -2367,16 +2386,53 @@ public actor ProcessingPipeline {
         )
     }
 
+    /// Re-renders one meeting's markdown from what is on disk.
+    ///
+    /// The speaker map is read here rather than passed in. Resolving the
+    /// participants suspends on the speaker store, so a map handed over before
+    /// that suspension can be stale by the time the file is written: two
+    /// corrections in quick succession would leave `transcript.md` showing the
+    /// earlier one while `speakers.map.json` held the later.
     private func rerenderMarkdown(
-        store: MeetingStore, metadata: MeetingMetadata, speakers: SpeakerMap
-    ) throws {
+        store: MeetingStore, metadata: MeetingMetadata
+    ) async throws {
         guard let transcript = try store.readCanonicalTranscript() else { return }
+        // Read twice on purpose: once to learn which identities to look up, and
+        // again after the last suspension point so the map the file is rendered
+        // from is the one currently on disk.
+        let participants = await participants(in: try store.readSpeakerMap())
+        let speakers = try store.readSpeakerMap()
         try store.writeTranscriptMarkdown(TranscriptRenderer().markdown(
             transcript: transcript,
             speakers: speakers,
             title: metadata.displayTitle,
             startedAt: metadata.startedAt,
-            durationSeconds: metadata.durationSeconds
+            durationSeconds: metadata.durationSeconds,
+            participants: participants
         ))
+    }
+
+    /// Who was in the meeting, with whatever the user has written about them.
+    ///
+    /// Read from the identity links the speaker map already carries, so a line
+    /// the user reassigned brings the right person's notes with it. Resolved
+    /// through `current`, because a meeting keeps the identifier it was written
+    /// with and a merge since then has to land on the survivor.
+    private func participants(in speakers: SpeakerMap) async -> [TranscriptParticipant] {
+        guard let service = backends.speakers else { return [] }
+        let store = await service.speakerStore
+        var seen = Set<IdentityID>()
+        var out: [TranscriptParticipant] = []
+        for identityID in speakers.referencedIdentities {
+            guard let identity = try? await store.current(identityID),
+                  seen.insert(identity.id).inserted
+            else { continue }
+            out.append(TranscriptParticipant(
+                name: identity.resolvedName,
+                organization: identity.organization,
+                notes: identity.notes
+            ))
+        }
+        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }

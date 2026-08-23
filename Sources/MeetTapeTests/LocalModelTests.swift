@@ -133,6 +133,56 @@ enum LocalModelTests {
                 }
             },
 
+            test("the archive bitrate preserves the voices the identity models read") { expect in
+                let (support, audio) = try requireModels()
+                let manager = LocalModelManager(applicationSupport: support)
+                _ = try await manager.install()
+                let backend = FluidAudioDiarizationBackend(models: manager)
+
+                // The fixture re-encoded exactly as compaction stores a track:
+                // AAC, mono, 16 kHz, 48 kbps. Identity margins are thin (the
+                // worst impostor scored 0.957 against the true speaker's own
+                // 0.951), so the archive representation must keep each voice
+                // where the PCM put it.
+                let tmp = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: tmp) }
+                let info = try AudioFileInspector().inspect(url: audio)
+                let location = TrackAudioLocation.archived(
+                    track: .remote,
+                    record: AudioArchive.Track(
+                        file: audio.lastPathComponent, sampleRate: info.sampleRate,
+                        channelCount: info.channelCount, frameCount: info.frameCount,
+                        seconds: info.seconds, firstFrameHostTime: nil
+                    ),
+                    directory: audio.deletingLastPathComponent(),
+                    compactedAt: Date()
+                )
+                let compressed = tmp.appendingPathComponent("archive.m4a")
+                _ = try TrackArchiveExporter().export(location: location, to: compressed)
+
+                let original = try await backend.diarize(audio: audio) { _ in }
+                let archived = try await backend.diarize(audio: compressed) { _ in }
+                expect.isTrue(
+                    archived.speakerCount >= 2,
+                    "the archive still separates the voices, found \(archived.speakerCount)"
+                )
+
+                func centroids(_ chunks: [(clusterID: String, vector: [Float])]) -> [[Float]] {
+                    var byCluster: [String: [[Float]]] = [:]
+                    for chunk in chunks { byCluster[chunk.clusterID, default: []].append(chunk.vector) }
+                    return byCluster.values.map { VoiceVector.centroid($0) }
+                }
+                let pcmVoices = centroids(original.chunkEmbeddings.map { ($0.clusterID, $0.vector) })
+                let aacVoices = centroids(archived.chunkEmbeddings.map { ($0.clusterID, $0.vector) })
+                for voice in pcmVoices {
+                    let best = aacVoices.map { VoiceVector.cosine(voice, $0) }.max() ?? -1
+                    expect.isTrue(
+                        best > 0.9,
+                        "each PCM voice has a close match in the archive, best \(best)"
+                    )
+                }
+            },
+
             test("the models load with the network refused") { expect in
                 let (support, audio) = try requireModels()
                 let manager = LocalModelManager(applicationSupport: support)

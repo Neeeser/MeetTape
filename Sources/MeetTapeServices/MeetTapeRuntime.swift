@@ -270,6 +270,10 @@ public final class MeetTapeRuntime {
             await pruneVoiceMemory()
             await pipeline.resumeInterrupted()
             refreshRecentMeetings()
+            // After resume, so a meeting that was mid-pipeline is finished
+            // before its storage is compacted. Runs through the pipeline's own
+            // slot, so it pauses while anything records.
+            await pipeline.compactPending()
         }
     }
 
@@ -313,6 +317,14 @@ public final class MeetTapeRuntime {
 
     /// Adopts anything a crash left behind, before detection can see it.
     private func recover() async {
+        // Folders written by an earlier build move to the raw/ layout first, so
+        // recovery and processing only ever see one layout. Renames only.
+        let migration = repository.migrateLayouts()
+        if migration.migrated > 0 || migration.failed > 0 {
+            Log.app.notice(
+                "layout migration: \(migration.migrated) moved, \(migration.failed) failed"
+            )
+        }
         let scanner = RecoveryScanner(
             repository: repository, inspector: AudioFileInspector(), clock: clock
         )
@@ -451,12 +463,25 @@ public final class MeetTapeRuntime {
     }
 
     public func update(settings newSettings: AppSettings) {
+        let rootChanged = newSettings.storageRootPath != settings.storageRootPath
         settings = newSettings
         settingsSnapshot.withLock { $0 = newSettings }
         do {
             try settingsStore.save(newSettings)
         } catch {
             Log.app.error("settings not saved: \(logSafeDescription(error), privacy: .public)")
+        }
+        // A newly chosen root can be a restored archive in the old layout, and
+        // only launch ran the migration until now. Without this, every read of
+        // an unmigrated meeting's transcript or speaker map misses until the
+        // next relaunch.
+        if rootChanged {
+            let migration = repository.migrateLayouts()
+            if migration.migrated > 0 || migration.failed > 0 {
+                Log.app.notice(
+                    "layout migration on root change: \(migration.migrated) moved, \(migration.failed) failed"
+                )
+            }
         }
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)

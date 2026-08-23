@@ -457,11 +457,11 @@ struct StorageSettingsTab: View {
             Section("What is stored") {
                 Text(
                     """
-                    Each meeting is a folder of ordinary files: the recorded audio in CAF \
-                    segments, an append-only manifest, the API responses, the transcript as \
-                    JSON and Markdown, your notes, and a speaker map. Every file can be read \
-                    without MeetTape, and uninstalling the application leaves the recordings \
-                    in place.
+                    Each meeting is a folder of ordinary files: the transcript as Markdown, \
+                    the recording as M4A, your notes and summary, and a raw folder holding \
+                    the per-track source audio, the manifest, the API responses and the \
+                    speaker map. Every file can be read without MeetTape, and uninstalling \
+                    the application leaves the recordings in place.
                     """
                 )
                 .font(.caption).foregroundStyle(.secondary)

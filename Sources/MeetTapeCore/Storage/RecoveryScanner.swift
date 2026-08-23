@@ -81,6 +81,17 @@ public struct RecoveryScanner: Sendable {
             let needsRecovery = metadata.processing.state == .recording
                 || metadata.processing.state == .finalizing
             if needsRecovery {
+                // A folder still in the old layout waits for its migration.
+                // Recovering it here would open a fresh, empty manifest at the
+                // new path, which then shadows the real one at the old path:
+                // the meeting reads as zero seconds, is stamped with a
+                // non-retryable failure, and the migration skips the manifest
+                // move forever because the destination exists. Migration runs
+                // before this scan and retries next launch; recovery waits.
+                if MeetingLayoutMigration.needsMigration(layout: store.layout) {
+                    report.unreadable.append(metadata.id)
+                    continue
+                }
                 do {
                     let recovery = try recoverAudio(store: store, metadata: &metadata)
                     try store.writeMetadata(metadata)

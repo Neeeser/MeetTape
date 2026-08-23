@@ -11,7 +11,7 @@ public struct MeetingStore: Sendable {
     public init(layout: MeetingLayout) { self.layout = layout }
 
     public func createDirectories() throws {
-        for directory in [layout.root, layout.segments] {
+        for directory in [layout.root, layout.raw, layout.segments] {
             do {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             } catch {
@@ -23,8 +23,13 @@ public struct MeetingStore: Sendable {
     // MARK: metadata
 
     public func readMetadata() throws -> MeetingMetadata {
-        let data = try read(layout.metadata)
-        return try ArchiveCoding.decode(MeetingMetadata.self, from: data, path: layout.metadata.path)
+        // The legacy fallback keeps a folder restored from an old backup
+        // readable; the startup migration normalises it on the next launch.
+        let url = FileManager.default.fileExists(atPath: layout.metadata.path)
+            ? layout.metadata
+            : layout.legacyMetadata
+        let data = try read(url)
+        return try ArchiveCoding.decode(MeetingMetadata.self, from: data, path: url.path)
     }
 
     public func writeMetadata(_ metadata: MeetingMetadata) throws {
@@ -132,12 +137,53 @@ public struct MeetingStore: Sendable {
     // MARK: timeline
 
     public func readTimeline() throws -> RecordingTimeline {
-        guard FileManager.default.fileExists(atPath: layout.manifest.path) else {
+        // The legacy fallback matches readMetadata: an unmigrated folder must
+        // report its real duration and audio, not read as an empty meeting.
+        let fileManager = FileManager.default
+        let url: URL
+        if fileManager.fileExists(atPath: layout.manifest.path) {
+            url = layout.manifest
+        } else if fileManager.fileExists(atPath: layout.legacyManifest.path) {
+            url = layout.legacyManifest
+        } else {
             return ManifestReader.timeline(
                 from: ManifestReadResult(lines: [], hasTruncatedTail: false, unrecognisedLines: 0)
             )
         }
-        return try ManifestReader.timeline(contentsOf: layout.manifest)
+        return try ManifestReader.timeline(contentsOf: url)
+    }
+
+    // MARK: audio
+
+    /// Where one track's audio reads from.
+    ///
+    /// Decided by the metadata, never by listing the disk: after compaction the
+    /// archive file stands in for the segment chain, and a meeting that has not
+    /// been compacted reads its segments even if stray files exist elsewhere.
+    public func trackAudioLocation(
+        track: CaptureTrack, metadata: MeetingMetadata, timeline: RecordingTimeline
+    ) -> TrackAudioLocation {
+        if let archive = metadata.audioArchive {
+            guard let record = archive.track(track) else {
+                // A compacted meeting whose archive has no record for this
+                // track recorded nothing worth archiving on it. The segment
+                // chain must not be offered instead: its directory may already
+                // be gone, and the metadata, not the disk, decides.
+                return TrackAudioLocation(segments: [], directory: layout.trackArchiveDirectory)
+            }
+            return .archived(
+                track: track, record: record,
+                directory: layout.trackArchiveDirectory,
+                compactedAt: archive.compactedAt
+            )
+        }
+        // Archive-versus-segments is decided above, by the metadata alone. The
+        // directory check below only answers where the segment chain lives for
+        // a folder whose layout migration has not run.
+        let directory = FileManager.default.fileExists(atPath: layout.segments.path)
+            ? layout.segments
+            : layout.legacySegments
+        return TrackAudioLocation(segments: timeline.segments(track: track), directory: directory)
     }
 
     private func read(_ url: URL) throws -> Data {
@@ -281,32 +327,19 @@ public struct MeetingRepository: Sendable {
     /// audio a reconnection recorded, so processing and recovery have to be able
     /// to enumerate them.
     public func mergedMeetingIDs() -> [String] {
-        let fileManager = FileManager.default
-        guard let years = try? fileManager.contentsOfDirectory(
-            at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ) else { return [] }
         var out: [String] = []
-        for year in years where year.hasDirectoryPath {
-            guard let months = try? fileManager.contentsOfDirectory(
-                at: year, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-            ) else { continue }
-            for month in months where month.hasDirectoryPath {
-                guard let meetings = try? fileManager.contentsOfDirectory(
-                    at: month, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-                ) else { continue }
-                for directory in meetings where directory.hasDirectoryPath {
-                    let store = MeetingStore(layout: MeetingLayout(root: directory))
-                    guard let metadata = try? store.readMetadata(),
-                          metadata.mergedIntoMeetingID != nil
-                    else { continue }
-                    out.append(metadata.id)
-                }
-            }
+        for directory in meetingDirectories() {
+            let store = MeetingStore(layout: MeetingLayout(root: directory))
+            guard let metadata = try? store.readMetadata(),
+                  metadata.mergedIntoMeetingID != nil
+            else { continue }
+            out.append(metadata.id)
         }
         return out
     }
 
-    public func listMeetings(limit: Int? = nil) -> [MeetingSummary] {
+    /// Every meeting directory in the archive, folded continuations included.
+    public func meetingDirectories() -> [URL] {
         let fileManager = FileManager.default
         guard let years = try? fileManager.contentsOfDirectory(
             at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
@@ -324,7 +357,35 @@ public struct MeetingRepository: Sendable {
                 directories.append(contentsOf: meetings.filter(\.hasDirectoryPath))
             }
         }
+        return directories
+    }
 
+    /// Moves every meeting folder still in the pre-`raw/` layout forward.
+    ///
+    /// Cheap renames only; run before the recovery scan so recovery and
+    /// processing see one layout. A folder whose move fails is left for the
+    /// next launch and reported, not fatal: its metadata still reads through
+    /// the legacy fallback.
+    @discardableResult
+    public func migrateLayouts() -> (migrated: Int, failed: Int) {
+        var migrated = 0
+        var failed = 0
+        for directory in meetingDirectories() {
+            let layout = MeetingLayout(root: directory)
+            guard MeetingLayoutMigration.needsMigration(layout: layout) else { continue }
+            do {
+                try MeetingLayoutMigration.migrate(layout: layout)
+                migrated += 1
+            } catch {
+                failed += 1
+                Log.storage.error("layout migration failed: \(logSafeDescription(error), privacy: .public)")
+            }
+        }
+        return (migrated, failed)
+    }
+
+    public func listMeetings(limit: Int? = nil) -> [MeetingSummary] {
+        let directories = meetingDirectories()
         var summaries: [MeetingSummary] = []
         for directory in directories {
             guard let summary = summary(forDirectory: directory) else { continue }
@@ -337,11 +398,7 @@ public struct MeetingRepository: Sendable {
 
     public func summary(forDirectory directory: URL) -> MeetingSummary? {
         let layout = MeetingLayout(root: directory)
-        guard let data = try? Data(contentsOf: layout.metadata),
-              let metadata = try? ArchiveCoding.decode(
-                  MeetingMetadata.self, from: data, path: layout.metadata.path
-              )
-        else { return nil }
+        guard let metadata = try? MeetingStore(layout: layout).readMetadata() else { return nil }
         guard metadata.mergedIntoMeetingID == nil else { return nil }
         // A conversation recorded in two halves is one row, reporting the audio
         // both halves hold. Derived here rather than added into the first

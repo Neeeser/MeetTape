@@ -14,10 +14,16 @@ enum TranscriptParagraphAction: Equatable {
 }
 
 /// The words of one line that a selection covered.
-struct SelectedLineRange: Equatable {
-    var utteranceID: String
-    var startSeconds: Double
-    var endSeconds: Double
+public struct SelectedLineRange: Equatable {
+    public var utteranceID: String
+    public var startSeconds: Double
+    public var endSeconds: Double
+
+    public init(utteranceID: String, startSeconds: Double, endSeconds: Double) {
+        self.utteranceID = utteranceID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+    }
 }
 
 /// One speaker's turn as a paragraph that can be selected, copied and divided.
@@ -76,15 +82,17 @@ struct TranscriptParagraph: NSViewRepresentable {
 
 /// The text view behind a block, holding what a click has to be resolved
 /// against.
-final class TranscriptTextView: NSTextView {
-    var spans: [TranscriptWordSpan] = []
+public final class TranscriptTextView: NSTextView {
+    /// Every word in the paragraph and the moment behind it. What a click and a
+    /// selection are resolved against.
+    public var spans: [TranscriptWordSpan] = []
     var people: [SpeakerDirectoryEntry] = []
     var onAction: ((TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void)?
     var onNewPerson: ((TranscriptParagraphAction) -> Void)?
 
     /// The height this paragraph needs at a given width. Laid out rather than
     /// estimated, because a turn can be one line or twenty.
-    func height(forWidth width: CGFloat) -> CGFloat {
+    public func height(forWidth width: CGFloat) -> CGFloat {
         guard let container = textContainer, let manager = layoutManager else { return 0 }
         container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
         manager.ensureLayout(for: container)
@@ -92,12 +100,12 @@ final class TranscriptTextView: NSTextView {
     }
 
     /// Wraps at the width it was given, so what is measured is what is drawn.
-    override func layout() {
+    public override func layout() {
         textContainer?.size = CGSize(width: bounds.width, height: .greatestFiniteMagnitude)
         super.layout()
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? {
+    public override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         guard !spans.isEmpty else { return menu }
         let selection = selectedRange()
@@ -137,7 +145,7 @@ final class TranscriptTextView: NSTextView {
     ///
     /// Nearest rather than the word under the pointer, because the reader is
     /// aiming at the gap between two words and the gap belongs to both.
-    func nearestBoundary(to index: Int) -> TranscriptWordSpan? {
+    public func nearestBoundary(to index: Int) -> TranscriptWordSpan? {
         // From the second word on: splitting before the first would leave one
         // piece with nothing in it.
         var best: TranscriptWordSpan?
@@ -155,7 +163,7 @@ final class TranscriptTextView: NSTextView {
     /// lines of one turn are not in time order: a selection dragged across a
     /// chunk seam can end at a moment earlier than it started, and one range
     /// over the pair would be backwards.
-    func selectedRanges(_ range: NSRange) -> [SelectedLineRange] {
+    public func selectedRanges(_ range: NSRange) -> [SelectedLineRange] {
         var out: [SelectedLineRange] = []
         for span in spans where span.location < range.location + range.length
             && range.location < span.location + span.length {

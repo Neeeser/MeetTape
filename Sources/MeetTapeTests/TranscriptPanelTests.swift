@@ -2,9 +2,9 @@ import AppKit
 import Foundation
 import MeetTapeCore
 import MeetTapeServices
+import MeetTapeUI
 import SwiftUI
 import TestKit
-@testable import MeetTapeUI
 
 /// The review panel's transcript, laid out for real.
 ///

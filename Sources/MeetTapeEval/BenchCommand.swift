@@ -532,7 +532,10 @@ enum BenchCommand {
         print("  DER is on the merged mapping, strict on the injective one, and above 100% is")
         print("  arithmetic rather than a defect: false alarm has no upper bound.")
         print("")
-        var header = "  engine      cases   WER   floor     net   no filler   conv"
+        // The count is rows, which is cases times repeats, so it is named for
+        // what it counts rather than left saying "cases" over a number three
+        // times the roster.
+        var header = "  engine       \(repeats > 1 ? "runs" : "case")   WER   floor     net   no filler   conv"
         header += "   attribution   coverage   merged     DER   strict   repeats"
         if repeats > 1 { header += "   WER spread" }
         print(header)

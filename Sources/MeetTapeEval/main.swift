@@ -13,6 +13,7 @@ import MeetTapeSpeakers
 //   meettape-eval diarize   --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
 //   meettape-eval identity  --audio FILE [--audio FILE ...]
 //   meettape-eval voices
+//   meettape-eval bench     [--suite ami-core] [--engine parakeet ...] [--diarizer local]
 //
 // The audio never leaves the machine and nothing here writes to a meeting.
 
@@ -24,12 +25,15 @@ struct Arguments {
     var engine = "whisper"
     var transcript: URL?
     var applicationSupport: URL
+    var bench: BenchCommand.Options
 
     init?(_ raw: [String]) {
         guard let command = raw.first else { return nil }
         self.command = command
         var support = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/MeetTape", isDirectory: true)
+        var benchOptions = BenchCommand.Options(applicationSupport: support)
+        var engines: [String] = []
         var index = 1
         while index < raw.count {
             let flag = raw[index]
@@ -41,13 +45,26 @@ struct Arguments {
             case "--audio": audio.append(URL(fileURLWithPath: value))
             case "--fa": if let scaling = Double(value) { acousticScalings.append(scaling) }
             case "--speakers": speakerCount = Int(value)
-            case "--engine": engine = value
+            case "--engine": engine = value; engines.append(value)
             case "--transcript": transcript = URL(fileURLWithPath: value)
             case "--support": support = URL(fileURLWithPath: value)
+            case "--suite": benchOptions.suite = value
+            case "--case": benchOptions.meetings.append(value)
+            case "--truth": benchOptions.truthFiles.append(URL(fileURLWithPath: value))
+            case "--diarizer": benchOptions.diarizer = value
+            case "--benchmarks": benchOptions.benchmarks = URL(fileURLWithPath: value)
+            case "--audio-dir": benchOptions.audioDirectory = URL(fileURLWithPath: value)
+            case "--out": benchOptions.out = URL(fileURLWithPath: value)
+            case "--baseline": benchOptions.baseline = URL(fileURLWithPath: value)
             default: break
             }
         }
         applicationSupport = support
+        // `bench` takes engines repeatably; the single-engine commands read the
+        // last one, which is what `--engine` meant before.
+        benchOptions.engines = engines
+        benchOptions.applicationSupport = support
+        bench = benchOptions
     }
 }
 
@@ -80,6 +97,10 @@ func usage() -> Never {
           meettape-eval diarize  --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
           meettape-eval identity --audio FILE [--audio FILE ...]
           meettape-eval voices
+          meettape-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
+                                 [--engine parakeet|cohere|whisper|<cloud model>]...
+                                 [--diarizer local|cloud] [--out FILE] [--baseline FILE]
+                                 [--audio-dir DIR]
         """)
     exit(2)
 }
@@ -290,6 +311,10 @@ case "voices":
             worst.pair.0, worst.pair.1, worst.score
         ))
     }
+
+case "bench":
+    let code = await BenchCommand.run(arguments.bench)
+    if code != 0 { exit(code) }
 
 default:
     usage()

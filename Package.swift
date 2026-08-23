@@ -75,11 +75,19 @@ let package = Package(
         // hosts with a minimal PATH and an interpreter shebang silently fails.
         .executableTarget(name: "MeetTapeNativeHost", dependencies: ["MeetTapeCore"]),
 
+        // The benchmark meter: ground-truth model, scorer and suite manifest.
+        // Foundation only, so the same arithmetic runs in the test suite and in
+        // the evaluation tool, and so nothing eval-only lands in MeetTapeCore.
+        .target(name: "MeetTapeBench"),
+
         // Developer evaluation tool. Not bundled into the application: it is how
         // the local stack's measured numbers get checked again on real audio.
         .executableTarget(
             name: "MeetTapeEval",
-            dependencies: ["MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers"]
+            dependencies: [
+                "MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers",
+                "MeetTapeBench", "MeetTapeIntegrations", "MeetTapeServices",
+            ]
         ),
 
         // Minimal test harness. XCTest and swift-testing ship with Xcode, which is
@@ -90,7 +98,7 @@ let package = Package(
             dependencies: [
                 "TestKit", "MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection",
                 "MeetTapeIntegrations", "MeetTapeSpeakers", "MeetTapeLocalAI",
-                "MeetTapeServices", "MeetTapeUI",
+                "MeetTapeServices", "MeetTapeUI", "MeetTapeBench",
             ],
             resources: [.copy("Fixtures")]
         ),

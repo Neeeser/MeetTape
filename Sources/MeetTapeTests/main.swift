@@ -31,6 +31,7 @@ suites.append(PipelineTests.suite)
 suites.append(CompactionTests.suite)
 suites.append(LocalPipelineTests.suite)
 suites.append(LocalModelTests.suite)
+suites.append(BenchScorerTests.suite)
 suites.append(LiveOpenAITests.suite)
 suites.append(LiveEndToEndTests.suite)
 

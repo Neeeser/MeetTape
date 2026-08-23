@@ -388,6 +388,94 @@ enum ProcessingTests {
                 expect.equal(transcript.utterances[2].speakerKey, "remote_chunk_001_speaker_01")
             },
 
+            test("short overlapping chunks do not repeat the words they share") { expect in
+                // The Cohere path chunks at 35 s and aligns each chunk on its
+                // own, so the planner's overlap arrives twice with the two
+                // chunks grouping it into different turns. One 6-minute
+                // recording came out with 35 repeated 8-grams and utterance
+                // pairs overlapping by up to 8.6 s, the same sentence given to
+                // two speakers. Grouping is not a unit either chunk agrees on,
+                // so the near-duplicate merge never saw a duplicate.
+                let vocabulary = [
+                    "we", "should", "surface", "the", "index", "to", "the", "user",
+                    "and", "push", "a", "button", "maybe", "to", "start", "talking",
+                    "about", "it", "before", "the", "second", "pass", "runs", "again",
+                    "so", "nobody", "waits", "for", "the", "slow", "one", "twice",
+                    "which", "is", "what", "we", "agreed", "on", "last", "friday",
+                    "and", "the", "week", "before", "that", "as", "well", "again",
+                    "now", "let", "us", "write", "it", "down", "somewhere", "useful",
+                    "for", "the", "next", "person",
+                ]
+                // One word every half second on the meeting timeline.
+                func word(_ index: Int, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(
+                        start: Double(index) * 0.5 - offset,
+                        end: Double(index) * 0.5 + 0.4 - offset,
+                        text: " \(vocabulary[index])"
+                    )
+                }
+                func segment(_ indices: [Int], offset: Double, speaker: String) -> RawTranscriptSegment {
+                    let words = indices.map { word($0, offset: offset) }
+                    return RawTranscriptSegment(
+                        start: words[0].start, end: words[words.count - 1].end,
+                        text: words.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                        speaker: speaker, words: words
+                    )
+                }
+
+                // Chunk one holds 0 to 22 s as one turn; chunk two starts at
+                // 14 s, repeats every word from there, and groups them in
+                // fives under a different speaker.
+                let firstIndices = Array(0..<44)
+                let first = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [segment(firstIndices, offset: 0, speaker: "A")]
+                )
+                let secondIndices = Array(28..<vocabulary.count)
+                let second = RawTranscriptChunk(
+                    id: "remote_chunk_002", track: .remote, timelineOffset: 14,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: stride(from: 0, to: secondIndices.count, by: 5).map { start in
+                        segment(
+                            Array(secondIndices[start..<min(start + 5, secondIndices.count)]),
+                            offset: 14, speaker: "B"
+                        )
+                    }
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                var seen = Set<String>()
+                var repeated: [String] = []
+                if words.count >= 8 {
+                    for start in 0...(words.count - 8) {
+                        let gram = words[start..<(start + 8)].joined(separator: " ")
+                        if !seen.insert(gram).inserted { repeated.append(gram) }
+                    }
+                }
+                expect.isTrue(repeated.isEmpty, "repeated 8-grams: \(repeated)")
+
+                var worstOverlap: Double = 0
+                for (index, utterance) in transcript.utterances.enumerated() {
+                    for other in transcript.utterances[(index + 1)...] {
+                        let shared = min(utterance.end, other.end) - max(utterance.start, other.start)
+                        worstOverlap = max(worstOverlap, shared)
+                    }
+                }
+                expect.isTrue(
+                    worstOverlap <= 1,
+                    "utterances overlap in time by \(worstOverlap) s"
+                )
+                // And the words themselves survive: the overlap is cut, not dropped.
+                expect.equal(words.count, vocabulary.count, "every word appears exactly once")
+            },
+
             test("the diarizer the user chose beats labels embedded in the words") { expect in
                 // Cloud transcription with diarization set to Local ran the
                 // local diarizer, wrote an active run with the right four

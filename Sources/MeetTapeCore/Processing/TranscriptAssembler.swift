@@ -260,11 +260,76 @@ public struct TranscriptAssembler: Sendable {
         return pieces.isEmpty ? [segment] : pieces
     }
 
+    /// Cuts the deliberate overlap between consecutive chunks at one instant, so
+    /// the seconds each pair shares are transcribed by exactly one of them.
+    ///
+    /// The near-duplicate merge below compares whole turns, and a turn is not a
+    /// unit either chunk agrees on: a 35-second Cohere chunk grouped an 8-second
+    /// shared span inside a 31-second segment, which is nowhere near a duplicate
+    /// of the other chunk's rendering of the same words. One 6-minute recording
+    /// came out with 35 repeated 8-grams and utterance pairs overlapping by up
+    /// to 8.6 seconds, the same sentence given to two speakers. Every path has
+    /// word timings by the time the assembler runs, aligned or native, so the
+    /// overlap is cut by time instead: the earlier chunk keeps what starts
+    /// before the middle of the shared span, the later chunk keeps the rest.
+    private func trimOverlaps(_ chunks: [RawTranscriptChunk]) -> [RawTranscriptChunk] {
+        let ordered = chunks.sorted { $0.timelineOffset < $1.timelineOffset }
+        guard ordered.count > 1 else { return ordered }
+        var result = ordered
+        for index in 0..<(result.count - 1) {
+            let earlier = result[index]
+            let later = result[index + 1]
+            // Measured from the words themselves rather than the declared
+            // chunk lengths: a chunk's duration is the audio that was sent,
+            // which runs past the last thing said in it.
+            guard let earlierEnd = contentEnd(earlier), let laterStart = contentStart(later),
+                  laterStart < earlierEnd
+            else { continue }
+            let cut = (laterStart + earlierEnd) / 2
+            result[index] = keep(earlier) { $0 < cut }
+            result[index + 1] = keep(later) { $0 >= cut }
+        }
+        return result
+    }
+
+    /// The first and last moments, on the meeting timeline, that a chunk has
+    /// anything to say.
+    private func contentStart(_ chunk: RawTranscriptChunk) -> Double? {
+        chunk.segments.map { chunk.timelineOffset + $0.start }.min()
+    }
+
+    private func contentEnd(_ chunk: RawTranscriptChunk) -> Double? {
+        chunk.segments.map { chunk.timelineOffset + $0.end }.max()
+    }
+
+    /// One chunk with only the content whose start, on the meeting timeline,
+    /// satisfies `include`.
+    private func keep(
+        _ chunk: RawTranscriptChunk, where include: (Double) -> Bool
+    ) -> RawTranscriptChunk {
+        var trimmed = chunk
+        trimmed.segments = chunk.segments.compactMap { segment in
+            guard let words = segment.words, !words.isEmpty else {
+                return include(chunk.timelineOffset + segment.start) ? segment : nil
+            }
+            let kept = words.filter { include(chunk.timelineOffset + $0.start) }
+            if kept.count == words.count { return segment }
+            guard let first = kept.first, let last = kept.last else { return nil }
+            let text = kept.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            return RawTranscriptSegment(
+                start: first.start, end: last.end, text: text,
+                speaker: segment.speaker, words: kept
+            )
+        }
+        return trimmed
+    }
+
     private func assembleTrack(
         _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance]
     ) -> [Utterance] {
         var accepted: [Utterance] = []
-        for chunk in chunks {
+        for chunk in trimOverlaps(chunks) {
             let candidates = utterances(
                 from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference
             )

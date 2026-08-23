@@ -77,6 +77,65 @@ enum PipelineTests {
 
     static var suite: Suite {
         Suite("ProcessingPipeline", [
+            test("a chunk that came back with words is accepted without reading its audio") { expect in
+                // The level only separates silence from a lost transcript, so
+                // decoding on the success path costs a full converter pass per
+                // chunk and turns audio that has become unreadable into a
+                // permanent failure for a transcript already in hand.
+                final class Counter: @unchecked Sendable { var reads = 0 }
+                let counter = Counter()
+                let measure: (URL) throws -> AudioLevel = { _ in
+                    counter.reads += 1
+                    return AudioLevel(peakDBFS: 0, rmsDBFS: 0)
+                }
+                let withSegments = TranscriptionOutput(
+                    segments: [RawTranscriptSegment(start: 0, end: 1, text: "Hello.", speaker: nil)],
+                    text: ""
+                )
+                try ProcessingPipeline.requireTranscribedOrSilent(
+                    response: withSegments, audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                    chunkID: "mic_0", purpose: .words, level: measure
+                )
+                let textOnly = TranscriptionOutput(segments: [], text: "Hello.")
+                try ProcessingPipeline.requireTranscribedOrSilent(
+                    response: textOnly, audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                    chunkID: "mic_1", purpose: .words, level: measure
+                )
+                expect.equal(counter.reads, 0, "a non-empty response never reads the audio")
+
+                var failed = false
+                do {
+                    try ProcessingPipeline.requireTranscribedOrSilent(
+                        response: TranscriptionOutput(segments: [], text: ""),
+                        audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                        chunkID: "mic_2", purpose: .words, level: measure
+                    )
+                } catch {
+                    failed = true
+                }
+                expect.equal(counter.reads, 1, "an empty response reads the audio")
+                expect.isTrue(failed, "an empty response for audible audio fails")
+            },
+
+            test("an empty response whose audio cannot be read fails retryably") { expect in
+                // Nothing proves the audio was silent, so the chunk cannot be
+                // accepted, and a non-retryable failure would strand the
+                // meeting on a scratch file that a retry may well read.
+                struct Unreadable: Error {}
+                var caught: ProcessingError?
+                do {
+                    try ProcessingPipeline.requireTranscribedOrSilent(
+                        response: TranscriptionOutput(segments: [], text: ""),
+                        audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                        chunkID: "mic_0", purpose: .words, level: { _ in throw Unreadable() }
+                    )
+                } catch let error as ProcessingError {
+                    caught = error
+                }
+                expect.equal(caught, .emptyTranscript(chunk: "mic_0"), "fails as an empty transcript")
+                expect.isTrue(caught?.isRetryable == true, "the stage retries")
+            },
+
             test("each track is placed at its own start on the meeting timeline") { expect in
                 // The remote writer opens on the first packet from the meeting
                 // application, which here is 12 s after the microphone started. A

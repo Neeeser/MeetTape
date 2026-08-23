@@ -653,24 +653,33 @@ public actor ProcessingPipeline {
     /// that keeps coming back empty is left failed and retryable. A muted
     /// microphone transcribes to nothing legitimately and must not fail forever,
     /// so the level of the audio that was sent decides between the two.
-    static func requireTranscribedOrSilent(
-        response: TranscriptionOutput, audio: URL, chunkID: String, purpose: RawChunkPurpose
+    public static func requireTranscribedOrSilent(
+        response: TranscriptionOutput, audio: URL, chunkID: String, purpose: RawChunkPurpose,
+        level measure: (URL) throws -> AudioLevel = MonoAudioDecoder.level
     ) throws {
         // A speakers chunk is asked for intervals, not words; an empty
         // transcript there is not a loss.
         guard purpose == .words else { return }
+        // The level only decides between silence and a lost transcript, so a
+        // chunk that came back with words is accepted before any decoding: at
+        // the 1400 s chunk limit that read is 22M samples of AVAudioConverter
+        // work per successful chunk, and a chunk whose audio has since become
+        // unreadable would have failed a meeting whose words were already safe.
+        guard response.segments.isEmpty, response.text.isEmpty else { return }
         let level: AudioLevel
         do {
-            level = try MonoAudioDecoder.level(audio)
+            level = try measure(audio)
         } catch {
-            // Unreadable chunk audio is its own failure, and treating it as
-            // silence would restore exactly the bug this guards.
-            throw ProcessingError.audioUnreadable(path: audio.lastPathComponent)
+            // Empty transcript and unreadable audio together: nothing proves
+            // the audio was silent, and treating it as silence restores exactly
+            // the bug this guards. Fail as an empty transcript rather than as
+            // audioUnreadable so the stage retries, because the usual cause is
+            // a scratch file that has not settled rather than a corrupt one.
+            Log.processing.error("empty transcript with unreadable audio for chunk \(chunkID, privacy: .public)")
+            throw ProcessingError.emptyTranscript(chunk: chunkID)
         }
         let decision = EmptyTranscriptPolicy.decide(
-            hasSegments: !response.segments.isEmpty,
-            hasText: !response.text.isEmpty,
-            level: level
+            hasSegments: false, hasText: false, level: level
         )
         guard decision == .fail else { return }
         Log.processing.error(
@@ -815,6 +824,11 @@ public actor ProcessingPipeline {
 
     /// The local path: one pass over the whole track, producing intervals and
     /// the vectors speaker memory needs.
+    ///
+    /// No empty-transcript guard here, unlike the transcription paths: this
+    /// writes a diarization run and no `.words` chunk, and the backend returns
+    /// intervals rather than words. A run with no intervals is written as an
+    /// empty run, which the assembler reads as nobody having been separated.
     private func runWholeTrackDiarization(
         store: MeetingStore,
         metadata: inout MeetingMetadata,

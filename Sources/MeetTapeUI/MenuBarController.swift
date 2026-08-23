@@ -16,6 +16,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     /// Ticks the elapsed-time display. Held as a cancellable so teardown does not
     /// need a deinit, which cannot touch main-actor state.
     private var elapsedTimer: DispatchSourceTimer?
+    /// The value of the launch-at-login setting last handed to `LoginItem`.
+    /// The status observer fires on every capture health update, warning and
+    /// list refresh, and `LoginItem.apply` reads `SMAppService.mainApp.status`,
+    /// a synchronous launchd query on the main thread. Only a changed setting
+    /// reaches launchd; the launch-time reconcile below still runs once.
+    private var appliedLaunchAtLogin: Bool?
 
     public init(runtime: MeetTapeRuntime, windows: WindowManager) {
         self.runtime = runtime
@@ -32,7 +38,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             self?.refreshButton()
             self?.syncProvisionalPrompt()
             DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
-            LoginItem.apply(launchAtLogin: runtime.settings.launchAtLogin)
+            self?.applyLoginItemIfChanged(runtime.settings.launchAtLogin)
         }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1)
@@ -45,6 +51,13 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         Log.ui.info(
             "menu bar item ready: \(self.statusItem.button != nil, privacy: .public), visible: \(self.statusItem.isVisible, privacy: .public)"
         )
+    }
+
+    /// Hands a changed setting to `LoginItem`, and nothing otherwise.
+    private func applyLoginItemIfChanged(_ launchAtLogin: Bool) {
+        guard appliedLaunchAtLogin != launchAtLogin else { return }
+        appliedLaunchAtLogin = launchAtLogin
+        LoginItem.apply(launchAtLogin: launchAtLogin)
     }
 
     /// Removes the status item and stops the timer.

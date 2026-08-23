@@ -10,8 +10,8 @@ The reference data `meettape-eval bench` scores against.
   score a whole meeting, which is what puts the chunk seams under measurement.
 - `manifest.json` pins the SHA-256 of every recording, the annotation archive
   the truth comes from, and the suite rosters.
-- `baselines.json`, once a deciding run has produced one, holds the numbers a
-  later run is compared against.
+- `baselines.json` holds the numbers a later run is compared against, one
+  entry per `<engine>/<diarizer>/<meeting>`.
 
 ## No audio in the tree
 
@@ -42,6 +42,47 @@ enrolment both need every participant to say enough. Window selection is
 deterministic, so regenerating from the same archive reproduces these files
 byte for byte. ES2005a has only 306 seconds of annotated speech, so it is
 scored whole rather than as an excerpt.
+
+## Baselines
+
+`baselines.json` comes from the deciding run of 2026-08-23: all 14 `ami-core`
+cases on Parakeet with local diarization, which is the shipping configuration.
+The same run measured Cohere over the same cases and it lost every one, so the
+committed baselines are Parakeet's.
+
+Regenerate from a bench run's own output:
+
+```bash
+scripts/eval.sh bench --suite ami-core --engine parakeet --diarizer local \
+    --out /tmp/parakeet.json
+python3 scripts/build-bench-baselines.py /tmp/parakeet.json \
+    --out Benchmarks/baselines.json
+```
+
+The generator keeps the four numbers the rule reads (`wer`, `werNoFiller`,
+`attribution`, `der`), refuses a case that did not reach `complete`, and carries
+the existing tolerances over.
+
+## What a baseline check enforces
+
+Pass `--baseline Benchmarks/baselines.json` and each case is compared against
+its entry. A case with no entry is still run and still reported; it just has
+nothing to compare against.
+
+- `werNoFiller` may rise by 1.5 points, attribution may fall by 1.0, DER may
+  rise by 2.0. The tolerances are absolute percentage points, sized to absorb
+  the run-to-run variation a Neural Engine decode produces. Improvements are
+  never failures.
+- `wer` is recorded and not compared: filler words are transcribed or not on
+  the decoder's whim and the assembly defect the suite hunts for shows in the
+  stripped number.
+- A single repeated 8-gram fails outright, with or without an entry. One
+  sentence transcribed twice means the assembler kept a chunk overlap, which is
+  a defect at any margin. Two Parakeet cases carry repeats in the deciding run
+  (ES2002c 1, IS1009c 7), so those two fail this check until the seam work that
+  removes them lands.
+
+Any regression exits nonzero, which is what makes the command usable as a gate.
 
 ## Attribution
 

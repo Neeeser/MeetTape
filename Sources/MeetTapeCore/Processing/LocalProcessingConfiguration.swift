@@ -134,9 +134,21 @@ public enum LocalAlignmentTuning {
     /// And never longer than this, so duplicate detection over chunk overlaps
     /// keeps something to compare.
     public static let segmentMaximumSeconds: Double = 30
-    /// A text-only backend is chunked to this length so every chunk's Viterbi
-    /// trellis stays small; the planner still moves boundaries to silence.
+    /// A cloud text-only backend is chunked to this length so every chunk's
+    /// Viterbi trellis stays small; the planner still moves boundaries to
+    /// silence.
     public static let chunkSeconds: Double = 300
+}
+
+/// The local Cohere engine's chunking.
+public enum LocalCohereTuning {
+    /// One model window per chunk, so the library's own overlap stitching
+    /// never runs. Its LCS merge dropped a five-second span at the 35-second
+    /// window boundary on the 38.5-second fixture; MeetTape's energy-guided
+    /// chunk boundaries and the assembler's overlap dedup do the same job and
+    /// are the machinery the cloud path has always used. Matches
+    /// `CohereAsrConfig.maxAudioSeconds`.
+    public static let chunkSeconds: Double = 35
 }
 
 /// The offline diarizer settings MeetTape overrides, and why.

@@ -37,8 +37,9 @@ public struct ParakeetTranscriptionBackend: TranscriptionBackend {
 /// Cohere Transcribe behind the transcription protocol.
 ///
 /// The most accurate local engine on meeting audio, and a text-only one: it
-/// returns no timings, so it is chunked short enough for the aligner's
-/// per-chunk trellis and the alignment stage supplies the timings afterwards.
+/// returns no timings, so the alignment stage supplies them per chunk. Chunks
+/// are one model window long, which keeps the library's own window stitching
+/// out of the path and every alignment trellis short.
 public struct CohereTranscriptionBackend: TranscriptionBackend {
     private let models: LocalModelManager
 
@@ -49,7 +50,7 @@ public struct CohereTranscriptionBackend: TranscriptionBackend {
     public var identifier: String { LocalSpeechStack.cohereBackendIdentifier }
     public var isLocal: Bool { true }
     public var limits: BackendAudioLimits {
-        BackendAudioLimits(maximumSeconds: LocalAlignmentTuning.chunkSeconds)
+        BackendAudioLimits(maximumSeconds: LocalCohereTuning.chunkSeconds)
     }
     public var timing: TranscriptTiming { .text }
 

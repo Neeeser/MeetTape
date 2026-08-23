@@ -414,6 +414,17 @@ these runs prove the machinery, not the accuracy numbers.
   essentially correct.
 - **CTC forced alignment, per-file.** A single 4.4 s turn aligns
   frame-accurately (0.08–4.13 s for a 4.4 s file) with either aligner variant.
+- **Cohere Transcribe through FluidAudio.** The 2.1 GB download, load and a
+  38.5 s transcription ran end to end. The words were the best of the three
+  engines: it alone heard "Tim", "replication lag" and "production moves"
+  where Parakeet produced near-homophones. Two costs were measured on this
+  M2 Pro: the cold first call ran at 0.2x realtime with a 6.8 GB peak, and
+  the library's own 35-second window stitching dropped a five-second span at
+  the window boundary. That drop is why the pipeline now chunks Cohere at
+  one model window and lets its own boundary planning and overlap dedup do
+  the stitching.
+- **The offline diarizer through the per-unit manager.** Unit-scoped install
+  (21 MB, no Whisper pulled), 3 of 3 fixture voices found at 72x realtime.
 - **CTC forced alignment, whole file.** The 110M variant warped badly wherever
   a voice gave it weak posteriors: whole turns stacked onto single 0.08 s
   frames at confidently wrong instants, and the winning path changed between
@@ -439,10 +450,10 @@ be assumed to work.
 - **whisper-1 word granularity against the live API.** The parser nests the
   flat `words` array in tests; the live response shape has not been fetched
   since the request changed.
-- **Cohere accuracy and the first-load compile on real hardware.** The 7.0%
-  AMI figure is the public leaderboard's; nothing here has reproduced it, and
-  the several-minute first-load ANE compile is FluidAudio's measurement, not
-  ours.
+- **Cohere accuracy on real meetings.** The 7.0% AMI figure is the public
+  leaderboard's; the fixture run above shows the quality direction but is one
+  synthetic file. Warm throughput on long recordings has not been measured
+  under the one-window chunking.
 - **Per-unit installs against a previous install.** The receipt migration from
   `installed.json` has a test; a real upgrade of a machine with the old layout
   has not been performed. The migration is one-way: after this build writes

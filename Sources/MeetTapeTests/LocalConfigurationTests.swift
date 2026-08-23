@@ -205,6 +205,9 @@ enum LocalConfigurationTests {
                 expect.equal(LocalAlignmentTuning.segmentPauseSeconds, 1.0)
                 expect.equal(LocalAlignmentTuning.segmentMaximumSeconds, 30)
                 expect.equal(LocalAlignmentTuning.chunkSeconds, 300)
+                // One model window per Cohere chunk: the library's own window
+                // stitching dropped a five-second span on the fixture.
+                expect.equal(LocalCohereTuning.chunkSeconds, 35)
             },
 
             test("the voice database is outside the meeting archive") { expect in

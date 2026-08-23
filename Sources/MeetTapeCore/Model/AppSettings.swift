@@ -208,7 +208,7 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
-        localTranscriptionModel: LocalTranscriptionModel = .cohere,
+        localTranscriptionModel: LocalTranscriptionModel = .parakeet,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
         localUserIdentityID: IdentityID? = nil
     ) {
@@ -235,8 +235,9 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
             ?? defaults.diarization
         // The key's absence means the file predates the model choice, which is
-        // an install with Whisper on disk. The fresh default is Cohere, but a
-        // 2.1 GB download must follow a person picking it, not an upgrade.
+        // an install with Whisper on disk. The fresh default is Parakeet, but
+        // no stored value is migrated: a download must follow a person picking
+        // a model, not an upgrade.
         localTranscriptionModel =
             try container.decodeIfPresent(LocalTranscriptionModel.self, forKey: .localTranscriptionModel)
             ?? .whisper

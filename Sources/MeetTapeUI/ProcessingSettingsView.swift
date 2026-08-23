@@ -100,7 +100,7 @@ struct ProcessingSettingsTab: View {
                 cloudChoice(
                     "gpt-transcribe",
                     "Most accurate, takes vocabulary hints. Timings are computed on "
-                        + "this Mac by a 160 MB aligner model."
+                        + "this Mac by a 600 MB aligner model."
                 )
                 cloudChoice(
                     "gpt-4o-transcribe-diarize",
@@ -312,7 +312,7 @@ struct LocalModelChoicePicker: View {
         )) {
             choice(
                 .cohere, "Cohere Transcribe",
-                "Most accurate on meeting audio. 2.1 GB plus a 160 MB aligner; the "
+                "Most accurate on meeting audio. 2.1 GB plus a 600 MB aligner; the "
                     + "first use takes a few minutes to prepare."
             )
             choice(

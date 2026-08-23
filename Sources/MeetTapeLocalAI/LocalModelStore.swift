@@ -1,3 +1,4 @@
+import FluidAudio
 import Foundation
 import MeetTapeCore
 
@@ -33,19 +34,30 @@ public struct LocalModelLocations: Sendable, Equatable {
         root.appendingPathComponent("Diarizer", isDirectory: true)
     }
 
+    /// FluidAudio's downloaders resolve each repository's own folder name
+    /// under a base directory, so the unit directories are those names rather
+    /// than names of MeetTape's choosing: giving the library a different
+    /// directory meant it downloaded to the resolved one and every presence
+    /// check looked at an empty folder.
     public var parakeetDirectory: URL {
-        root.appendingPathComponent("Parakeet", isDirectory: true)
+        root.appendingPathComponent(
+            AsrModels.defaultCacheDirectory(for: .v3).lastPathComponent, isDirectory: true
+        )
     }
 
+    /// Includes the precision subpath (`…/q8`); the compiled models and the
+    /// vocabulary all land inside it.
     public var cohereDirectory: URL {
-        root.appendingPathComponent("Cohere", isDirectory: true)
+        root.appendingPathComponent(Repo.cohereTranscribeCoreml.folderName, isDirectory: true)
     }
 
     public var alignerDirectory: URL {
-        root.appendingPathComponent("Aligner", isDirectory: true)
+        root.appendingPathComponent(
+            CtcModelVariant.ctc06b.repo.folderName, isDirectory: true
+        )
     }
 
-    /// The directory a unit installs into and is deleted from.
+    /// Where a unit's files are read from.
     public func directory(for unit: LocalModelUnit) -> URL {
         switch unit {
         case .whisper: whisperBase
@@ -54,6 +66,20 @@ public struct LocalModelLocations: Sendable, Equatable {
         case .ctcAligner: alignerDirectory
         case .diarizer: diarizerDirectory
         }
+    }
+
+    /// The top-level folder under `root` that a unit occupies: what gets
+    /// sized and deleted. Differs from `directory(for:)` only when the
+    /// repository nests a precision subpath.
+    public func containerDirectory(for unit: LocalModelUnit) -> URL {
+        let deep = directory(for: unit)
+        var container = deep
+        while container.deletingLastPathComponent().standardizedFileURL.path
+            != root.standardizedFileURL.path,
+            container.path.hasPrefix(root.path) {
+            container = container.deletingLastPathComponent()
+        }
+        return container.path.hasPrefix(root.path) ? container : deep
     }
 
     /// One receipt per installed unit, written after each unit completes.

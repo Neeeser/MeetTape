@@ -194,10 +194,10 @@ enum LocalConfigurationTests {
                     LocalSpeechStack.cohereBackendIdentifier,
                     "fluidaudio-cohere-transcribe-03-2026-q8"
                 )
-                expect.equal(LocalSpeechStack.alignerIdentifier, "fluidaudio-parakeet-ctc-110m")
+                expect.equal(LocalSpeechStack.alignerIdentifier, "fluidaudio-parakeet-ctc-0.6b")
                 expect.equal(LocalSpeechStack.revision(for: .cohere), "cohere-transcribe-03-2026-q8 @ FluidAudio 0.15.6")
                 expect.equal(LocalSpeechStack.revision(for: .parakeet), "parakeet-tdt-0.6b-v3-int8 @ FluidAudio 0.15.6")
-                expect.equal(LocalSpeechStack.revision(for: .ctcAligner), "parakeet-ctc-110m @ FluidAudio 0.15.6")
+                expect.equal(LocalSpeechStack.revision(for: .ctcAligner), "parakeet-ctc-0.6b @ FluidAudio 0.15.6")
 
                 // Alignment tuning: the aligner's segments feed duplicate
                 // detection and attribution, and the chunk length bounds the

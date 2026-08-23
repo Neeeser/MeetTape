@@ -255,8 +255,10 @@ public actor LocalModelManager {
             parakeetManager = AsrManager(models: models)
 
         case .cohere:
+            // ModelHub appends the repository folder itself, so it gets the
+            // base directory, unlike the per-model helpers below.
             try await ModelHub.download(
-                .cohereTranscribeCoreml, to: directory,
+                .cohereTranscribeCoreml, to: locations.root,
                 progressHandler: { update in
                     progress(update.fractionCompleted * 0.8, "Downloading Cohere Transcribe")
                 }
@@ -269,18 +271,10 @@ public actor LocalModelManager {
             )
 
         case .ctcAligner:
-            _ = try await CtcModels.download(to: directory, variant: .ctc110m, force: force)
-            // The tokenizer is a root file outside the model bundles; fetch it
-            // explicitly so alignment never reaches the network mid-meeting.
-            if !FileManager.default.fileExists(
-                atPath: directory.appendingPathComponent("tokenizer.json").path
-            ) {
-                try await ModelHub.download(
-                    .parakeetCtc110m, subdirectory: "tokenizer.json", to: directory
-                )
-            }
+            // tokenizer.json arrives with the repository's root files.
+            _ = try await CtcModels.download(to: directory, variant: .ctc06b, force: force)
             progress(0.9, "Preparing the aligner")
-            let models = try await CtcModels.load(from: directory, variant: .ctc110m)
+            let models = try await CtcModels.load(from: directory, variant: .ctc06b)
             let tokenizer = try await CtcTokenizer.load(from: directory)
             alignerModels = (models, tokenizer)
 
@@ -291,7 +285,7 @@ public actor LocalModelManager {
 
         receipts[unit] = LocalUnitReceipt(
             revision: LocalSpeechStack.revision(for: unit),
-            bytes: DirectorySize.bytes(of: directory),
+            bytes: DirectorySize.bytes(of: locations.containerDirectory(for: unit)),
             installedAt: Date(),
             detail: detail
         )
@@ -307,7 +301,7 @@ public actor LocalModelManager {
         installTask = nil
         unloadAll()
         for unit in LocalModelUnit.allCases {
-            try? FileManager.default.removeItem(at: locations.directory(for: unit))
+            try? FileManager.default.removeItem(at: locations.containerDirectory(for: unit))
         }
         receipts = [:]
         receiptStore.clear()
@@ -319,7 +313,7 @@ public actor LocalModelManager {
         installTask?.cancel()
         installTask = nil
         unload(unit)
-        try? FileManager.default.removeItem(at: locations.directory(for: unit))
+        try? FileManager.default.removeItem(at: locations.containerDirectory(for: unit))
         receipts[unit] = nil
         try? receiptStore.write(receipts)
         refreshState()
@@ -432,7 +426,7 @@ public actor LocalModelManager {
         if let alignerModels { return alignerModels }
         guard Self.filesPresent(.ctcAligner, locations: locations, receipt: receipts[.ctcAligner])
         else { throw LocalModelError.notInstalled }
-        let models = try await CtcModels.loadDirect(from: locations.alignerDirectory, variant: .ctc110m)
+        let models = try await CtcModels.loadDirect(from: locations.alignerDirectory, variant: .ctc06b)
         let tokenizer = try await CtcTokenizer.load(from: locations.alignerDirectory)
         alignerModels = (models, tokenizer)
         return alignerModels!
@@ -501,7 +495,7 @@ public actor LocalModelManager {
             }
         }
         guard !tokenized.isEmpty,
-            let alignedSubset = CtcForcedAlignment.align(
+            var alignedSubset = CtcForcedAlignment.align(
                 logProbs: result.logProbs,
                 frameDuration: result.frameDuration,
                 blankId: spotter.blankId,
@@ -510,6 +504,9 @@ public actor LocalModelManager {
         else {
             throw TranscriptAlignmentRefused(reason: "no monotonic path through \(rawWords.count) words")
         }
+        alignedSubset = CtcForcedAlignment.spreadCrammedRuns(
+            alignedSubset, frameDuration: result.frameDuration
+        )
 
         // Put untokenizable words back, spanning the gap they sit in.
         var timed = [CtcForcedAlignment.AlignedWord?](repeating: nil, count: rawWords.count)

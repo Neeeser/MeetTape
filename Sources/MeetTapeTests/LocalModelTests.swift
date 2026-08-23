@@ -136,6 +136,74 @@ enum LocalModelTests {
                 }
             },
 
+            test("parakeet transcribes the fixture with word timings of its own") { expect in
+                let (support, audio) = try requireModels()
+                let manager = LocalModelManager(applicationSupport: support)
+                _ = try await manager.install(units: [.parakeet])
+                let output = try await ParakeetTranscriptionBackend(models: manager)
+                    .transcribe(audio: audio) { _ in }
+                expect.isFalse(output.text.isEmpty)
+                expect.isTrue(output.hasWordTimings, "word timings are what attribution consumes")
+                expect.isTrue(output.wordCount > 50, "got \(output.wordCount) words")
+            },
+
+            test("the aligner recovers timings for a text-only transcript") { expect in
+                let (support, audio) = try requireModels()
+                let manager = LocalModelManager(applicationSupport: support)
+                _ = try await manager.install(units: [.parakeet, .ctcAligner])
+                // Parakeet's own timed words are the reference: align its text
+                // as though it had none, and the timings should come back
+                // close to where the decoder heard them.
+                let reference = try await ParakeetTranscriptionBackend(models: manager)
+                    .transcribe(audio: audio) { _ in }
+                let aligned = try await CtcTranscriptAligner(models: manager)
+                    .align(audio: audio, text: reference.text)
+
+                let alignedWords = aligned.flatMap { $0.words ?? [] }
+                let referenceWords = reference.segments.flatMap { $0.words ?? [] }
+                expect.isTrue(
+                    alignedWords.count * 10 >= referenceWords.count * 9,
+                    "aligned \(alignedWords.count) of \(referenceWords.count) words"
+                )
+                var last = -1.0
+                for word in alignedWords {
+                    expect.isTrue(word.start >= last - 0.001, "word starts went backwards")
+                    last = word.start
+                }
+                // Same words in, so start times should track the decoder's own.
+                var deviations: [Double] = []
+                for (aligned, reference) in zip(alignedWords, referenceWords)
+                where aligned.text.trimmingCharacters(in: .whitespaces).lowercased()
+                    == reference.text.trimmingCharacters(in: .whitespaces).lowercased() {
+                    deviations.append(abs(aligned.start - reference.start))
+                }
+                let mean = deviations.isEmpty
+                    ? .infinity : deviations.reduce(0, +) / Double(deviations.count)
+                expect.isTrue(
+                    mean < 0.5,
+                    "mean start deviation \(mean)s over \(deviations.count) matched words"
+                )
+            },
+
+            test("cohere transcribes the fixture, text only, and the pipeline shape holds") { expect in
+                // The heavyweight: about 2.1 GB on first run and a several
+                // minute ANE compile. Deliberately last in the suite.
+                let (support, audio) = try requireModels()
+                let manager = LocalModelManager(applicationSupport: support)
+                _ = try await manager.install(units: [.cohere])
+                let backend = CohereTranscriptionBackend(models: manager)
+                expect.equal(backend.timing, .text)
+                let output = try await backend.transcribe(audio: audio) { _ in }
+                expect.isFalse(output.text.isEmpty)
+                expect.equal(output.segments.count, 0, "no timings are invented")
+                let terms = ["staging", "rollback", "replication"]
+                let survived = terms.filter { output.text.lowercased().contains($0) }
+                expect.isTrue(
+                    survived.count >= 2,
+                    "expected the fixture's terms to survive, got: \(output.text.prefix(120))"
+                )
+            },
+
             test("the models load with the network refused") { expect in
                 let (support, audio) = try requireModels()
                 let manager = LocalModelManager(applicationSupport: support)

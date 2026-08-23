@@ -140,6 +140,9 @@ case "align":
     print("segments        \(segments.count)")
     for segment in segments {
         print(String(format: "%8.2f –%8.2f  %@", segment.start, segment.end, segment.text))
+        for word in segment.words ?? [] {
+            print(String(format: "    %7.2f –%7.2f %@", word.start, word.end, word.text))
+        }
     }
 
 case "diarize":

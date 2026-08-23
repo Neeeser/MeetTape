@@ -402,10 +402,52 @@ transcript. The voices were synthesised with `say`, which is more consistent
 than a person, so those margins are better than a real pairing should be
 expected to give.
 
+## Exercised against the synthetic fixture (2026-08-23)
+
+The transcription backend overhaul was checked against the locally synthesised
+fixture on an M2 Pro, with models downloaded into a scratch directory. The
+fixture's `say` voices are out of distribution for every model involved, so
+these runs prove the machinery, not the accuracy numbers.
+
+- **Parakeet TDT v3 through FluidAudio.** 38.5 s transcribed in 0.3 s (117x
+  realtime, 501 MB peak resident), 111 words with native timings, content
+  essentially correct.
+- **CTC forced alignment, per-file.** A single 4.4 s turn aligns
+  frame-accurately (0.08–4.13 s for a 4.4 s file) with either aligner variant.
+- **CTC forced alignment, whole file.** The 110M variant warped badly wherever
+  a voice gave it weak posteriors: whole turns stacked onto single 0.08 s
+  frames at confidently wrong instants, and the winning path changed between
+  runs on Neural Engine numeric jitter. The 0.6B variant held the same file to
+  about a second everywhere, which is why it is the shipped aligner. The
+  crammed-run spreading pass exists because of this observation.
+
 ## Not verified
 
 The following behaviour is implemented but has not been exercised, and should not
 be assumed to work.
+
+- **Alignment on real meeting audio.** Every alignment measurement above is
+  against synthetic voices, which are exactly the weak-posterior case. Real
+  speech should align better, but no real meeting has been through
+  `meettape-eval align`, and word-level attribution for the text-only engines
+  (Cohere locally, `gpt-transcribe` in the cloud) inherits whatever error the
+  aligner has. The coarse whole-chunk fallback bounds the damage when the
+  aligner refuses; it does not detect a wrong-but-confident alignment.
+- **`gpt-transcribe` against the live API.** The request shape (`json` format,
+  `keywords[]`) follows the documentation and the parser has tests; no live
+  request has been made. `MEETTAPE_LIVE_OPENAI=1` covers it once run.
+- **whisper-1 word granularity against the live API.** The parser nests the
+  flat `words` array in tests; the live response shape has not been fetched
+  since the request changed.
+- **Cohere accuracy and the first-load compile on real hardware.** The 7.0%
+  AMI figure is the public leaderboard's; nothing here has reproduced it, and
+  the several-minute first-load ANE compile is FluidAudio's measurement, not
+  ours.
+- **Per-unit installs against a previous install.** The receipt migration from
+  `installed.json` has a test; a real upgrade of a machine with the old layout
+  has not been performed. The migration is one-way: after this build writes
+  `units.json`, an older build sees no receipt and offers its full download
+  again.
 
 - **A Google Meet carried through to a recording.** The prejoin and the sensor
   connection were observed with the extension loaded; joining, recording,

@@ -162,6 +162,48 @@ public enum CtcForcedAlignment {
         return aligned
     }
 
+    /// Re-spreads runs of words the Viterbi crammed into single frames.
+    ///
+    /// Where the acoustic model's posteriors are weak — a distorted voice, a
+    /// bad microphone — the best path stacks that stretch's words on whatever
+    /// stray peaks match and rides blank over the actual speech. The words
+    /// come out one frame long, dozens in a row, at confidently wrong
+    /// instants. A run of them is unmistakable, and spreading the run evenly
+    /// between its aligned neighbours is honest: roughly where the speech is,
+    /// with no false precision. Words the model actually heard keep their
+    /// frame-accurate timings.
+    public static func spreadCrammedRuns(
+        _ words: [AlignedWord], frameDuration: Double, minimumRun: Int = 3
+    ) -> [AlignedWord] {
+        guard words.count >= minimumRun, frameDuration > 0 else { return words }
+        let crammed = words.map { $0.end - $0.start <= frameDuration * 1.5 }
+
+        var spread = words
+        var index = 0
+        while index < words.count {
+            guard crammed[index] else {
+                index += 1
+                continue
+            }
+            var runEnd = index
+            while runEnd + 1 < words.count, crammed[runEnd + 1] { runEnd += 1 }
+            defer { index = runEnd + 1 }
+            guard runEnd - index + 1 >= minimumRun else { continue }
+
+            // The run belongs somewhere between its aligned neighbours.
+            let spanStart = index == 0 ? words[index].start : words[index - 1].end
+            let spanEnd = runEnd == words.count - 1 ? words[runEnd].end : words[runEnd + 1].start
+            let count = runEnd - index + 1
+            guard spanEnd > spanStart else { continue }
+            let slice = (spanEnd - spanStart) / Double(count)
+            for offset in 0..<count {
+                spread[index + offset].start = spanStart + Double(offset) * slice
+                spread[index + offset].end = spanStart + Double(offset + 1) * slice
+            }
+        }
+        return spread
+    }
+
     /// Groups aligned words into segments at pauses, capped in length.
     ///
     /// The caps are coarse on purpose: the assembler re-groups into

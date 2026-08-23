@@ -62,6 +62,11 @@ bump.
 | No VAD chunking | 15% faster over 65 minutes, dropped 231 of 9278 words, and produced a segment whose start went backwards |
 | Models under Application Support, never Documents | WhisperKit defaults to `~/Documents/huggingface`, putting 624 MB where Finder shows it and iCloud syncs it |
 | Pass `modelFolder` explicitly on every load | WhisperKit with `download: false` does not resolve its own cache and fails with "Model folder is not set" |
+| Timing is a declared backend capability, and a text-only chunk goes through the CTC aligner before assembly | The best transcription models (gpt-transcribe, Cohere) return no timings at all, and the assembler, attribution, dedup and correction anchors all consume timings. `whisper-1` is the only OpenAI model with word timestamps |
+| An alignment refusal writes one whole-chunk segment, never a failed meeting | The words are already safe on disk; a Viterbi with no monotonic path must not take the transcript with it |
+| A text-only backend is chunked to 300 s | Bounds each chunk's Viterbi trellis in memory; the planner still moves boundaries to silence |
+| Word texts carry a leading space | The assembler concatenates word texts verbatim, the Whisper convention. Aligned words without it rendered as "weshipfriday" |
+| Models install as independent units, and picking a model is the consent for its download | One 650 MB blob meant choosing a 21 MB diarizer-only configuration still offered the full download, and a 2.1 GB engine must never arrive on an upgrade nobody asked for |
 | Score, margin and duration together for a name | Over 326 verified-distinct speakers the worst impostor scored 0.957 against the true speaker's own 0.951. Score alone names the wrong person |
 | Score against a derived centroid only | A maximum over exemplars lifted impostor scores far more than genuine ones and cost a quarter of the margin |
 | Only the mic track and a human confirmation may write a profile | A match that widens the profile it matched against turns one wrong answer into a permanent one |
@@ -87,8 +92,9 @@ bump.
 | A dropped and rejoined call is one logical meeting over two immutable recordings | Each keeps its own segments, manifest, raw output and speaker map. The combined duration and transcript are derived on read, so separating them again is clearing two fields |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
-decoder settings in `LocalDiarizationTuning` and `LocalTranscriptionTuning`, and
-`LocalConfigurationTests` and `SpeakerIdentityTests` assert them.
+decoder settings in `LocalDiarizationTuning`, `LocalTranscriptionTuning` and
+`LocalAlignmentTuning`, and `LocalConfigurationTests` and
+`SpeakerIdentityTests` assert them.
 `VoiceEvidenceTests` covers what a vector was derived from and what may be taken
 back, and `ReconnectTests` covers a call recorded in two halves. A change to any
 of these numbers should fail a test before it reaches a user.

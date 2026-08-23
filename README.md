@@ -30,7 +30,7 @@ confirmed.
 | Manual recording | Started from the menu bar and unaffected by provider state |
 | In-person meeting | Microphone only, diarized |
 | Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation |
-| Transcription | Whisper Large-v3-Turbo on device, or OpenAI |
+| Transcription | Cohere Transcribe, Parakeet or Whisper on device, or OpenAI |
 | Speaker separation | FluidAudio on device, or OpenAI |
 | Speaker recognition | Local voice profiles, named people and recurring unnamed voices |
 | Speaker names | Editable per speaker and per transcript line |
@@ -47,7 +47,9 @@ state, the same path Firefox uses without the extension.
 ```
 meeting ends
       ↓
-transcription        Whisper Large-v3-Turbo, on this Mac
+transcription        Cohere Transcribe, Parakeet or Whisper, on this Mac
+      ↓
+timing alignment     for a model that returns text alone, on this Mac
       ↓
 speaker separation   FluidAudio offline diarizer, on this Mac
       ↓
@@ -72,11 +74,15 @@ peaking under 1 GB and under two of ten cores, with no thermal throttling.
 Capture always outranks processing: a job waits between stages while a recording
 is live, and one meeting is processed at a time.
 
-Local transcription matches `whisper-1` on words and is less consistent about
-punctuation and capitalisation between passages, because the decoder picks a
-style per 30-second window. That is a rendering problem and the optional
-enrichment step can fix it; the word timings underneath, which speaker
-attribution depends on, are what the local configuration protects.
+Three local engines are offered, picked on the Processing page. Cohere
+Transcribe is the default: the strongest open model on meeting audio, and one
+that returns text with no timings, so a small CTC aligner forces the words
+against the audio afterwards to recover them. Parakeet TDT v3 is the fast
+tier, with word timings of its own. Whisper Large-v3-Turbo remains for
+installs that already have it; it matches `whisper-1` on words and is less
+consistent about punctuation between passages. Word timings, which speaker
+attribution depends on, are protected in every configuration: native from
+Parakeet and Whisper, aligned for Cohere.
 
 ## Speaker recognition
 
@@ -257,8 +263,11 @@ confirm both the key and access to that model.
 
 Model identifiers are settings rather than constants:
 
-- transcription defaults to `whisper-1`, which returns the segment timings the
-  timeline needs, while several newer models return good text with no timings;
+- transcription defaults to `gpt-transcribe`, OpenAI's most accurate
+  transcription model. It returns text with no timings, so the local CTC
+  aligner recovers them, the same way it does for local Cohere.
+  `gpt-4o-transcribe-diarize` is the self-contained option with nothing to
+  download, and `whisper-1` remains for word timings straight from the API;
 - diarization defaults to `gpt-4o-transcribe-diarize`;
 - metadata defaults to `gpt-5.6-luna`, selectable from a dropdown or entered by
   hand. Metadata requests run at low reasoning effort, because titles, summaries

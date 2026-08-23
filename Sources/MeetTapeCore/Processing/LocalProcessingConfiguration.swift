@@ -36,10 +36,13 @@ public enum LocalSpeechStack {
     public static let cohereBackendIdentifier = "fluidaudio-cohere-transcribe-03-2026-q8"
     public static let approximateCohereBytes: Int64 = 2_100 * 1_024 * 1_024
 
-    /// Parakeet CTC 110M, the forced-alignment model. Recorded as alignment
-    /// provenance on every aligned chunk.
-    public static let alignerIdentifier = "fluidaudio-parakeet-ctc-110m"
-    public static let approximateAlignerBytes: Int64 = 160 * 1_024 * 1_024
+    /// Parakeet CTC 0.6B, the forced-alignment model. Recorded as alignment
+    /// provenance on every aligned chunk. The 110M variant was measured first
+    /// and warped badly where a voice gave it weak posteriors, stacking whole
+    /// turns onto single frames; the 0.6B held the same audio to about a
+    /// second.
+    public static let alignerIdentifier = "fluidaudio-parakeet-ctc-0.6b"
+    public static let approximateAlignerBytes: Int64 = 600 * 1_024 * 1_024
 
     /// What each unit's files came from, written into its receipt so a
     /// dependency or variant bump reads as a stale install rather than as
@@ -49,7 +52,7 @@ public enum LocalSpeechStack {
         case .whisper: "\(whisperModel) @ \(whisperPackage)"
         case .parakeet: "parakeet-tdt-0.6b-v3-int8 @ \(diarizerPackage)"
         case .cohere: "cohere-transcribe-03-2026-q8 @ \(diarizerPackage)"
-        case .ctcAligner: "parakeet-ctc-110m @ \(diarizerPackage)"
+        case .ctcAligner: "parakeet-ctc-0.6b @ \(diarizerPackage)"
         case .diarizer: diarizerPackage
         }
     }

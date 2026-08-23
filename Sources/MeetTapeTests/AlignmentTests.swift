@@ -67,6 +67,43 @@ enum AlignmentTests {
                 )
             },
 
+            test("a crammed run is spread between its aligned neighbours") { expect in
+                // Four one-frame words stacked at 2.5s, between a word ending
+                // at 2.0 and one starting at 6.0: a weak-posterior stretch.
+                var words = [
+                    CtcForcedAlignment.AlignedWord(text: "good", start: 1.0, end: 2.0)
+                ]
+                for offset in 0..<4 {
+                    let start = 2.5 + Double(offset) * 0.08
+                    words.append(CtcForcedAlignment.AlignedWord(
+                        text: "crammed\(offset)", start: start, end: start + 0.08
+                    ))
+                }
+                words.append(CtcForcedAlignment.AlignedWord(text: "fine", start: 6.0, end: 6.5))
+
+                let spread = CtcForcedAlignment.spreadCrammedRuns(words, frameDuration: 0.08)
+                expect.equal(spread[0], words[0], "an aligned word keeps its timing")
+                expect.equal(spread[5], words[5])
+                expect.close(spread[1].start, 2.0, tolerance: 0.001, "the run starts after its anchor")
+                expect.close(spread[4].end, 6.0, tolerance: 0.001, "and ends at the next one")
+                expect.close(
+                    spread[2].end - spread[2].start, 1.0, tolerance: 0.001,
+                    "four words share the four-second gap evenly"
+                )
+            },
+
+            test("a short cram and honest short words stay put") { expect in
+                let words = [
+                    CtcForcedAlignment.AlignedWord(text: "I", start: 0.0, end: 0.08),
+                    CtcForcedAlignment.AlignedWord(text: "do", start: 0.1, end: 0.18),
+                    CtcForcedAlignment.AlignedWord(text: "agree", start: 0.4, end: 0.9),
+                ]
+                expect.equal(
+                    CtcForcedAlignment.spreadCrammedRuns(words, frameDuration: 0.08), words,
+                    "two short words in a row are normal speech, not a degenerate path"
+                )
+            },
+
             test("empty input aligns to nothing") { expect in
                 expect.equal(
                     CtcForcedAlignment.align(

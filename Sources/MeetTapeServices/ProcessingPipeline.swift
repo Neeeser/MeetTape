@@ -1524,15 +1524,10 @@ public actor ProcessingPipeline {
             generatedAt: clock.now
         )
         try found.store.writeCanonicalTranscript(transcript)
+        // Read back rather than rendered from what was just assembled, so the
+        // boundaries a person put in the transcript are in the markdown too.
         let speakers = try found.store.readSpeakerMap()
-        let renderer = TranscriptRenderer()
-        try found.store.writeTranscriptMarkdown(renderer.markdown(
-            transcript: transcript,
-            speakers: speakers,
-            title: found.metadata.displayTitle,
-            startedAt: found.metadata.startedAt,
-            durationSeconds: found.metadata.durationSeconds
-        ))
+        try rerenderMarkdown(store: found.store, metadata: found.metadata, speakers: speakers)
     }
 
     /// Re-renders the transcript after a human speaker correction.
@@ -1658,6 +1653,97 @@ public actor ProcessingPipeline {
         _ = try await correctUtterances(
             name, utteranceIDs: utteranceIDs, meetingID: meetingID, identityID: identityID
         )
+    }
+
+    /// Divides the transcript where a person put a boundary, and gives the
+    /// stretch between the boundaries to one speaker.
+    ///
+    /// This is what a split and a pull-out both are. A split names everything
+    /// from a word to the end of the turn, so its range ends where the turn
+    /// does; a pull-out names a phrase inside a turn and the words on either
+    /// side stay where they were. Nothing is transcribed again and the raw
+    /// diarization is untouched: the boundaries go in `speakers.map.json`
+    /// beside the corrections and the transcript is divided when it is read.
+    ///
+    /// The boundaries are written first and the names second. A failure between
+    /// them leaves the line divided and both halves reading as the cluster,
+    /// which is a state the panel can show and the user can finish. Writing the
+    /// names first would leave a correction covering words that were never
+    /// separated from the ones around them.
+    @discardableResult
+    public func applySpeakerRange(
+        _ name: String, meetingID: String, track: CaptureTrack,
+        startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
+    ) async throws -> IdentityID? {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        try divide(store: found.store, track: track, at: [startSeconds, endSeconds])
+        guard let transcript = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: "")
+        }
+        // By the middle of each piece, so a boundary landing a hair inside a
+        // neighbour cannot hand it over. The pieces are what the reader
+        // selected, and their edges are the boundaries just written.
+        let selected = transcript.utterances.filter { utterance in
+            guard utterance.track == track else { return false }
+            let middle = (utterance.start + utterance.end) / 2
+            return middle >= startSeconds && middle <= endSeconds
+        }
+        guard !selected.isEmpty else { throw ProcessingError.utteranceNotFound(id: "") }
+        return try await correctUtterances(
+            name, utteranceIDs: selected.map(\.id), meetingID: meetingID, identityID: identityID
+        )
+    }
+
+    /// Records boundaries and carries any correction on a divided line onto its
+    /// pieces.
+    ///
+    /// Both pieces of a corrected line sit inside the correction's span, so a
+    /// later correction on one of them would take the wide override off both.
+    /// Splitting the override with the line keeps the piece nobody touched
+    /// reading as the person it was corrected to.
+    private func divide(store: MeetingStore, track: CaptureTrack, at moments: [Double]) throws {
+        guard let transcript = try store.readCanonicalTranscript() else { return }
+        var speakers = try store.readSpeakerMap()
+        var lines = transcript.utterances
+        var changed = false
+        for moment in moments {
+            guard let line = lines.first(where: {
+                $0.track == track && moment > $0.start && moment < $0.end
+            }) else { continue }
+            guard let boundary = LineDivision.boundary(in: line, near: moment) else { continue }
+            let cut = LineCut(
+                track: track, atSeconds: boundary, chunkID: line.chunkID, createdAt: clock.now
+            )
+            let before = speakers.lineCuts.count
+            speakers.cut(cut)
+            guard speakers.lineCuts.count != before else { continue }
+            changed = true
+            let pieces = LineDivision.divide(line, at: [cut])
+            if pieces.count > 1, let override = speakers.override(for: line) {
+                speakers.utteranceOverrides.removeAll { $0 == override }
+                for piece in pieces {
+                    speakers.utteranceOverrides.append(UtteranceOverride(
+                        track: piece.track,
+                        anchorSeconds: (piece.start + piece.end) / 2,
+                        startSeconds: piece.start,
+                        endSeconds: max(piece.end, piece.start + 0.001),
+                        assignment: override.assignment,
+                        createdAt: override.createdAt,
+                        utteranceID: piece.id,
+                        chunkID: piece.chunkID
+                    ))
+                }
+            }
+            // Later moments are placed against the pieces, so two boundaries
+            // inside one line both land.
+            if let index = lines.firstIndex(where: { $0.id == line.id }) {
+                lines.replaceSubrange(index...index, with: pieces)
+            }
+        }
+        guard changed else { return }
+        try store.writeSpeakerMap(speakers)
     }
 
     /// Moves a set of lines to one speaker, all of them or none.

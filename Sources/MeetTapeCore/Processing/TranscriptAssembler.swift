@@ -256,7 +256,9 @@ public struct TranscriptAssembler: Sendable {
             )
             for candidate in candidates {
                 if isDuplicate(candidate, of: accepted) { continue }
-                accepted.append(candidate)
+                guard let trimmed = trimmingSeamRepeat(candidate, after: accepted.last)
+                else { continue }
+                accepted.append(trimmed)
             }
         }
         return accepted
@@ -268,7 +270,9 @@ public struct TranscriptAssembler: Sendable {
         from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, echoReference: [Utterance]
     ) -> [Utterance] {
         var result: [Utterance] = []
-        var current: (start: Double, end: Double, speaker: String?, text: String)?
+        var current: (
+            start: Double, end: Double, speaker: String?, text: String, words: [RawTranscriptWord]
+        )?
 
         func flush() {
             guard let group = current, !group.text.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -309,7 +313,17 @@ public struct TranscriptAssembler: Sendable {
                 speakerKey: speakerKey,
                 text: group.text.trimmingCharacters(in: .whitespaces),
                 chunkID: chunk.id,
-                model: chunk.model
+                model: chunk.model,
+                // On the meeting timeline, like the line's own start and end.
+                // A division of this line is compared against corrections and
+                // diarization intervals, which are all in those coordinates.
+                words: group.words.isEmpty ? nil : group.words.map {
+                    RawTranscriptWord(
+                        start: chunk.timelineOffset + $0.start,
+                        end: chunk.timelineOffset + $0.end,
+                        text: $0.text, probability: $0.probability
+                    )
+                }
             ))
             current = nil
         }
@@ -327,10 +341,11 @@ public struct TranscriptAssembler: Sendable {
                segment.end - group.start <= configuration.maxUtteranceSeconds {
                 group.end = max(group.end, segment.end)
                 group.text += group.text.isEmpty ? text : " \(text)"
+                group.words += segment.words ?? []
                 current = group
             } else {
                 flush()
-                current = (segment.start, segment.end, segment.speaker, text)
+                current = (segment.start, segment.end, segment.speaker, text, segment.words ?? [])
             }
         }
         flush()
@@ -356,6 +371,94 @@ public struct TranscriptAssembler: Sendable {
             }
         }
         return false
+    }
+
+    /// Drops the opening words of a line that repeat the closing words of the
+    /// line before it, and returns nil when nothing is left.
+    ///
+    /// Adjacent chunks overlap by eight seconds so a sentence on the boundary
+    /// lands whole in one of them, and the model transcribes that overlap
+    /// twice. `isDuplicate` removes a line that is wholly a repeat; a line that
+    /// begins with one and then carries on is the common case and used to be
+    /// kept intact. Measured on a 25-minute meeting: 21 of 148 consecutive
+    /// pairs repeated between 3 and 17 words, every one of them across a chunk
+    /// boundary. Separate timecodes rendered that as a stutter. One paragraph
+    /// per speaker renders it as nonsense.
+    ///
+    /// Three words minimum, and only where the two lines really share time, so
+    /// a speaker who ends on "that's fine" and opens the next turn the same way
+    /// keeps both.
+    private func trimmingSeamRepeat(_ candidate: Utterance, after previous: Utterance?) -> Utterance? {
+        guard let previous, previous.chunkID != candidate.chunkID else { return candidate }
+        guard rangesOverlap(previous, candidate)
+            || candidate.start - previous.end <= configuration.duplicateSearchSeconds
+        else { return candidate }
+        let before = units(of: previous)
+        let after = units(of: candidate)
+        var repeated = 0
+        for count in stride(from: min(before.count, after.count), through: minimumSeamWords, by: -1)
+        where Array(before.suffix(count)) == Array(after.prefix(count)) {
+            repeated = count
+            break
+        }
+        guard repeated > 0 else { return candidate }
+        return dropping(repeated, from: candidate)
+    }
+
+    /// Words already repeated once are speech, not overlap, below this.
+    private var minimumSeamWords: Int { 3 }
+
+    /// One line's words as they compare: the timed words where the backend
+    /// reported them, and whitespace-separated text where it did not. Both
+    /// sides normalise the same way, so a line with timings compares against
+    /// one without.
+    private func units(of utterance: Utterance) -> [String] {
+        if let words = utterance.words, !words.isEmpty {
+            return words.map(normalisedUnit)
+        }
+        return utterance.text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .map(normalisedUnit)
+            .filter { !$0.isEmpty }
+    }
+
+    private func normalisedUnit(_ word: RawTranscriptWord) -> String {
+        normalisedUnit(word.text)
+    }
+
+    private func normalisedUnit(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+    }
+
+    /// Removes the first `count` words from a line, moving its start to where
+    /// the words that remain begin. A line whose words were not timed keeps its
+    /// start, because nothing on it says where the repeat ended.
+    private func dropping(_ count: Int, from utterance: Utterance) -> Utterance? {
+        var trimmed = utterance
+        if let words = utterance.words, !words.isEmpty {
+            let remaining = Array(words.dropFirst(count))
+            guard let first = remaining.first else { return nil }
+            let text = remaining.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            trimmed.words = remaining
+            trimmed.text = text
+            trimmed.start = first.start
+        } else {
+            let remaining = utterance.text
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .dropFirst(count)
+            let text = remaining.joined(separator: " ")
+            guard !text.isEmpty else { return nil }
+            trimmed.text = text
+        }
+        trimmed.id = Utterance.identifier(
+            chunkID: trimmed.chunkID, track: trimmed.track,
+            start: trimmed.start, end: trimmed.end
+        )
+        return trimmed
     }
 
     /// An utterance in the overlap region that repeats something already accepted.

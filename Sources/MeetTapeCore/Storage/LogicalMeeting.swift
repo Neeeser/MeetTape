@@ -96,8 +96,26 @@ public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
     /// Never empty.
     public var lines: [CombinedLine]
 
+    public init(lines: [CombinedLine]) {
+        self.lines = lines
+    }
+
     public var id: String { lines[0].id }
     public var speakerName: String { lines[0].speakerName }
+    /// Where the block sits on the conversation's timeline, which is what the
+    /// header reads.
+    public var timelineStart: Double { lines[0].timelineStart }
+    public var timelineEnd: Double {
+        lines.map { $0.timelineStart + ($0.utterance.end - $0.utterance.start) }.max()
+            ?? timelineStart
+    }
+    /// The recording these lines came from. A block never spans two, because
+    /// names are only comparable inside one recording's diarization.
+    public var recordingID: String { lines[0].recordingID }
+    public var track: CaptureTrack { lines[0].utterance.track }
+    /// On the recording's own timeline, which is where a boundary is written.
+    public var startSeconds: Double { lines[0].utterance.start }
+    public var endSeconds: Double { lines.map(\.utterance.end).max() ?? startSeconds }
 
     /// Groups consecutive lines with the same resolved name, in the same
     /// recording and on the same track. Names are only comparable within one
@@ -117,6 +135,86 @@ public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
         }
         return out
     }
+
+    /// The block as one paragraph, with the moment behind every word in it.
+    ///
+    /// The text is the lines' own text joined, so what the reader selects is
+    /// what the transcript says. Each word is located inside it by searching
+    /// forward from the last one, which either finds the word where it is or
+    /// finds nothing, in which case the line contributes one span covering the
+    /// whole of it and can still be divided at its edges. Nothing here
+    /// estimates a position from a proportion of the characters: the spans
+    /// decide where a boundary is written, and a boundary decides which seconds
+    /// of audio a correction hands to a voice profile.
+    public func paragraph() -> (text: String, spans: [TranscriptWordSpan]) {
+        var text = ""
+        var spans: [TranscriptWordSpan] = []
+        for line in lines {
+            let lineText = line.utterance.text
+            guard !lineText.isEmpty else { continue }
+            if !text.isEmpty { text += " " }
+            let offset = (text as NSString).length
+            text += lineText
+            spans.append(contentsOf: TranscriptWordSpan.spans(
+                in: lineText, offset: offset, of: line
+            ))
+        }
+        return (text, spans)
+    }
+}
+
+/// One word of a rendered block: where it is in the paragraph and when it was
+/// spoken, in the recording's own coordinates.
+public struct TranscriptWordSpan: Sendable, Equatable {
+    /// UTF-16 offset into the paragraph, so it addresses the same characters
+    /// AppKit does.
+    public var location: Int
+    public var length: Int
+    public var startSeconds: Double
+    public var endSeconds: Double
+    public var lineID: String
+
+    public init(
+        location: Int, length: Int, startSeconds: Double, endSeconds: Double, lineID: String
+    ) {
+        self.location = location
+        self.length = length
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.lineID = lineID
+    }
+
+    static func spans(
+        in lineText: String, offset: Int, of line: CombinedLine
+    ) -> [TranscriptWordSpan] {
+        let whole = [TranscriptWordSpan(
+            location: offset, length: (lineText as NSString).length,
+            startSeconds: line.utterance.start, endSeconds: line.utterance.end,
+            lineID: line.id
+        )]
+        guard let words = line.utterance.words, !words.isEmpty else { return whole }
+        let text = lineText as NSString
+        var found: [TranscriptWordSpan] = []
+        var cursor = 0
+        for word in words {
+            let token = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty, cursor < text.length else { continue }
+            let range = text.range(
+                of: token, options: .literal,
+                range: NSRange(location: cursor, length: text.length - cursor)
+            )
+            // The words and the text disagree, which no backend should produce
+            // and one may. The line then divides at its edges and not inside,
+            // rather than at a position nothing verified.
+            guard range.location != NSNotFound else { return whole }
+            found.append(TranscriptWordSpan(
+                location: offset + range.location, length: range.length,
+                startSeconds: word.start, endSeconds: word.end, lineID: line.id
+            ))
+            cursor = range.location + range.length
+        }
+        return found.isEmpty ? whole : found
+    }
 }
 
 extension LogicalMeeting {
@@ -132,6 +230,8 @@ extension LogicalMeeting {
         for recording in recordings {
             guard let transcript = (try? recording.store.readCanonicalTranscript()) ?? nil
             else { continue }
+            // Already divided by the store, so a piece is named on its own
+            // rather than on the line it was cut out of.
             let lines = transcript.utterances
             let speakers = (try? recording.store.readSpeakerMap()) ?? SpeakerMap()
             let offset = recording.metadata.startedAt.timeIntervalSince(startedAt)

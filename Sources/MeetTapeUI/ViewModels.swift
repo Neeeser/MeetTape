@@ -237,6 +237,24 @@ public final class SettingsModel {
     }
 }
 
+/// A stretch of one track that is about to change speaker.
+///
+/// In the recording's own coordinates, not the conversation's, because that is
+/// where a boundary is written and a continuation keeps its own timeline.
+public struct SpeakerRangeTarget: Sendable, Equatable {
+    public var recordingID: String
+    public var track: CaptureTrack
+    public var startSeconds: Double
+    public var endSeconds: Double
+
+    public init(recordingID: String, track: CaptureTrack, startSeconds: Double, endSeconds: Double) {
+        self.recordingID = recordingID
+        self.track = track
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+    }
+}
+
 /// Loads and edits one meeting's files.
 @MainActor
 @Observable
@@ -261,6 +279,9 @@ public final class MeetingReviewModel {
     /// The line waiting for a name, with the recording it belongs to.
     public var namingLine: CombinedLine?
     public var namingCluster: String?
+    /// The stretch of one track waiting for a name, after a split or a
+    /// selection whose speaker is not in the list yet.
+    public var namingRange: SpeakerRangeTarget?
     public var newPersonDraft = ""
     public var reanalyzeCount = ""
     public var isReanalyzing = false
@@ -379,6 +400,37 @@ public final class MeetingReviewModel {
         runtime.assignSpeaker(name: "", key: clusterID, meetingID: meetingID)
     }
 
+    /// Divides a turn and hands the stretch to someone.
+    ///
+    /// No optimistic update: a division changes where the lines are, so the
+    /// panel shows it once the write lands and the reload that follows it
+    /// rebuilds the blocks. Naming a whole line moves one name and can be shown
+    /// straight away; this cannot without rebuilding the same thing twice.
+    public func assignRange(_ target: SpeakerRangeTarget, to entry: SpeakerDirectoryEntry) {
+        runtime.assignSpeakerRange(
+            name: entry.identity.resolvedName, meetingID: target.recordingID,
+            track: target.track, startSeconds: target.startSeconds,
+            endSeconds: target.endSeconds, identityID: entry.id
+        )
+    }
+
+    public func assignRange(_ target: SpeakerRangeTarget, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runtime.assignSpeakerRange(
+            name: trimmed, meetingID: target.recordingID, track: target.track,
+            startSeconds: target.startSeconds, endSeconds: target.endSeconds
+        )
+    }
+
+    public func beginNamingRange(_ target: SpeakerRangeTarget) {
+        namingRange = target
+        namingLine = nil
+        namingUtterance = nil
+        namingCluster = nil
+        newPersonDraft = ""
+    }
+
     /// Changes the speaker on one line only. Every other line in the same
     /// cluster keeps its name.
     public func assignUtterance(_ line: CombinedLine, to entry: SpeakerDirectoryEntry) {
@@ -443,6 +495,7 @@ public final class MeetingReviewModel {
         namingLine = line
         namingUtterance = line.utterance
         namingCluster = nil
+        namingRange = nil
         newPersonDraft = ""
     }
 
@@ -450,6 +503,7 @@ public final class MeetingReviewModel {
         namingCluster = clusterID
         namingLine = nil
         namingUtterance = nil
+        namingRange = nil
         newPersonDraft = ""
     }
 
@@ -457,11 +511,14 @@ public final class MeetingReviewModel {
         namingLine = nil
         namingUtterance = nil
         namingCluster = nil
+        namingRange = nil
         newPersonDraft = ""
     }
 
     public func commitNaming() {
-        if let line = namingLine {
+        if let target = namingRange {
+            assignRange(target, toNewPerson: newPersonDraft)
+        } else if let line = namingLine {
             assignUtterance(line, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
             assignCluster(cluster, toNewPerson: newPersonDraft)

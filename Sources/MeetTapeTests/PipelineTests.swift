@@ -416,7 +416,154 @@ enum PipelineTests {
                 expect.isTrue(!AIModelSettings.acceptsReasoningEffort("gpt-4o-transcribe-diarize"))
                 expect.isTrue(!AIModelSettings.acceptsReasoningEffort("whisper-1"))
             },
+
+            test("splitting a turn names the words after the boundary only") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                // "so what do you think" | "i think we ship on friday": the
+                // question and its answer, run together by the diarizer. A
+                // split runs to the end of the turn, which is already a
+                // boundary, so it records one cut and not two.
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    startSeconds: 5, endSeconds: 11
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                expect.equal(map.lineCuts.count, 1, "one boundary, recorded once")
+                expect.close(map.lineCuts.first?.atSeconds ?? 0, 5, tolerance: 0.001)
+
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.count, 2, "the line reads as two")
+                expect.equal(lines[0].text, "so what do you think")
+                expect.equal(lines[1].text, "i think we ship on friday")
+                expect.equal(map.resolvedName(for: lines[1]), "Dana")
+                expect.equal(
+                    map.resolvedName(for: lines[0]), "Priya",
+                    "the words before the boundary stay with the cluster"
+                )
+                let markdown = try String(
+                    contentsOf: meeting.store.layout.transcriptMarkdown, encoding: .utf8
+                )
+                expect.isTrue(markdown.contains("Dana"), "and the markdown says so too")
+                expect.isTrue(markdown.contains("Priya"), "on the half that kept its name")
+            },
+
+            test("pulling a phrase out leaves the words either side alone") { expect in
+                // What an interjection needs: the diarizer missed someone
+                // chiming in, and correcting the whole turn would move the
+                // speaker's own words with it.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    startSeconds: 5, endSeconds: 7
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.count, 3, "two boundaries, three pieces")
+                expect.equal(lines.map { map.resolvedName(for: $0) }, ["Priya", "Dana", "Priya"])
+                expect.equal(lines[1].text, "i think", "only the phrase moved")
+            },
+
+            test("a name set before the split stays on the piece nobody touched") { expect in
+                // Both pieces sit inside the correction's span, so a correction
+                // on one of them would take the wide override off the other and
+                // the first half would silently revert to the cluster.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                let first = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances[0]
+                _ = try await pipeline.applyUtteranceSpeaker(
+                    "Sam", utteranceID: first.id, meetingID: meeting.id
+                )
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    startSeconds: 5, endSeconds: 11
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.map { map.resolvedName(for: $0) }, ["Sam", "Dana"])
+            },
+
+            test("a boundary is kept when the transcript is assembled again") { expect in
+                // A cut is a claim about the audio, so it outlives re-assembly
+                // and re-analysis the way a line correction does.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    startSeconds: 5, endSeconds: 11
+                )
+                // Whatever else re-assembly does, the boundary and the name it
+                // carries are still there to apply.
+                let map = try meeting.store.readSpeakerMap()
+                expect.equal(map.lineCuts.count, 1)
+                expect.equal(map.utteranceOverrides.count, 1)
+                expect.equal(map.utteranceOverrides.first?.assignment.displayName, "Dana")
+            },
         ])
+    }
+
+    /// A meeting with one transcript line: a question and its answer run
+    /// together on one speaker, with word timings a second apart.
+    static func makeTranscribedMeeting(
+        root: URL
+    ) throws -> (id: String, store: MeetingStore, repository: MeetingRepository) {
+        let repository = MeetingRepository(root: root)
+        let started = Date(timeIntervalSince1970: 1_787_070_000)
+        let created = try repository.createMeeting(
+            source: .googleMeet, provider: .googleMeet, startedAt: started,
+            titles: TitleCandidates(provider: "Weekly sync", timestampFallback: "f"), now: started
+        )
+        _ = try created.store.updateMetadata { $0.durationSeconds = 30 }
+        let texts = ["so", "what", "do", "you", "think", "i", "think", "we", "ship", "on", "friday"]
+        let words = texts.enumerated().map {
+            RawTranscriptWord(
+                start: Double($0.offset), end: Double($0.offset) + 0.7, text: " \($0.element)"
+            )
+        }
+        try created.store.writeCanonicalTranscript(CanonicalTranscript(
+            generatedAt: started,
+            utterances: [Utterance(
+                id: Utterance.identifier(chunkID: "c1", track: .remote, start: 0, end: 11),
+                start: 0, end: 11, track: .remote, rawSpeakerLabel: "remote-001_speaker_00",
+                speakerKey: "remote-001_speaker_00", text: texts.joined(separator: " "),
+                chunkID: "c1", model: "m", words: words
+            )]
+        ))
+        var map = SpeakerMap()
+        map.assign("Priya", to: "remote-001_speaker_00")
+        try created.store.writeSpeakerMap(map)
+        return (created.metadata.id, created.store, repository)
     }
 }
 

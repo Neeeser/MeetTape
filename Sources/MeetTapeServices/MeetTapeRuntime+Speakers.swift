@@ -355,6 +355,26 @@ extension MeetTapeRuntime {
         }
     }
 
+    /// Divides the transcript at a word and gives the stretch that follows, or
+    /// a phrase inside a turn, to one speaker.
+    public func assignSpeakerRange(
+        name: String, meetingID: String, track: CaptureTrack,
+        startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
+    ) {
+        runProcessing { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await pipeline.applySpeakerRange(
+                    name, meetingID: meetingID, track: track,
+                    startSeconds: startSeconds, endSeconds: endSeconds, identityID: identityID
+                )
+            } catch {
+                Log.app.error("range speaker not saved: \(logSafeDescription(error), privacy: .public)")
+            }
+            onProcessingUpdate?(meetingID)
+        }
+    }
+
     /// Re-runs clustering, optionally at a count the user chose.
     ///
     /// Words are untouched. Where the meeting's prepared state is still in

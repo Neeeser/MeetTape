@@ -492,6 +492,15 @@ enum CompactionTests {
             expect.equal(try store.readMetadata().id, originalID)
             expect.isTrue(MeetingLayoutMigration.needsMigration(layout: layout))
 
+            // Compaction refuses the folder while it is unmigrated: a metadata
+            // write here would create raw/metadata.json and permanently block
+            // that file's move.
+            expect.equal(try AudioCompactor().compact(store: store), AudioCompactor.Outcome.nothingToDo)
+            expect.isFalse(
+                fileManager.fileExists(atPath: layout.metadata.path),
+                "no raw/metadata.json shadow was created"
+            )
+
             let repository = MeetingRepository(root: root)
             let result = repository.migrateLayouts()
             expect.equal(result.migrated, 1)

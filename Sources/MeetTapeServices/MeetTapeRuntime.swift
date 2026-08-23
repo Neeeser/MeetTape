@@ -458,12 +458,25 @@ public final class MeetTapeRuntime {
     }
 
     public func update(settings newSettings: AppSettings) {
+        let rootChanged = newSettings.storageRootPath != settings.storageRootPath
         settings = newSettings
         settingsSnapshot.withLock { $0 = newSettings }
         do {
             try settingsStore.save(newSettings)
         } catch {
             Log.app.error("settings not saved: \(logSafeDescription(error), privacy: .public)")
+        }
+        // A newly chosen root can be a restored archive in the old layout, and
+        // only launch ran the migration until now. Without this, every read of
+        // an unmigrated meeting's transcript or speaker map misses until the
+        // next relaunch.
+        if rootChanged {
+            let migration = repository.migrateLayouts()
+            if migration.migrated > 0 || migration.failed > 0 {
+                Log.app.notice(
+                    "layout migration on root change: \(migration.migrated) moved, \(migration.failed) failed"
+                )
+            }
         }
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)

@@ -55,6 +55,12 @@ public struct AudioCompactor: Sendable {
     }
 
     public func compact(store: MeetingStore) throws -> Outcome {
+        // A folder still in the old layout waits for its migration, exactly as
+        // recovery does: the metadata write below would create raw/metadata.json
+        // and permanently block that file's move.
+        guard !MeetingLayoutMigration.needsMigration(layout: store.layout) else {
+            return .nothingToDo
+        }
         var metadata = try store.readMetadata()
         guard metadata.processing.state == .complete else { return .nothingToDo }
         let timeline = try store.readTimeline()
@@ -74,24 +80,30 @@ public struct AudioCompactor: Sendable {
         }
         guard let archive = metadata.audioArchive else { return .nothingToDo }
 
+        // A meeting the sweep revisits only because it keeps files the
+        // manifest does not account for has nothing to do; answering that from
+        // a directory listing keeps the per-launch cost at a stat instead of
+        // decoding both archives.
+        let needsMixdown = !FileManager.default.fileExists(atPath: store.layout.recordingAudio.path)
+        let needsDeletion = hasDeletionWork(store: store, archive: archive, timeline: timeline)
+        guard needsMixdown || needsDeletion else { return .alreadyCompacted }
+
+        // Verified first on both paths. For deletion this is the guard that
+        // matters: the record in the metadata says an archive was verified
+        // once, and a synced, restored or hand-edited folder can have lost it
+        // since, so the segments about to be removed would be the only copy.
+        // For the mixdown it turns "re-mix the whole meeting from a broken
+        // archive every launch, silently" into a cheap decode check that
+        // throws where someone can see it.
+        try verifyArchivesIntact(store: store, archive: archive)
+
         // Resume-path regeneration: reads through the location resolution, so
         // a compacted meeting whose mixdown was lost gets one back from the
         // archives. A no-op whenever the file exists.
-        ensureMixdown(store: store, metadata: metadata, timeline: timeline)
-
-        // A meeting the sweep revisits only because it keeps files the
-        // manifest does not account for has nothing to delete; answering that
-        // from a directory listing keeps the per-launch cost at a stat instead
-        // of decoding both archives.
-        guard hasDeletionWork(store: store, archive: archive, timeline: timeline) else {
-            return .alreadyCompacted
+        if needsMixdown {
+            ensureMixdown(store: store, metadata: metadata, timeline: timeline)
         }
-
-        // Deletion trusts nothing but what it can decode right now. The record
-        // in the metadata says an archive was verified once; a synced, restored
-        // or hand-edited folder can have lost it since, and the segments about
-        // to be removed would then be the only copy.
-        try verifyArchivesIntact(store: store, archive: archive)
+        guard needsDeletion else { return .alreadyCompacted }
         let removedAnything = try deleteReplacedAudio(
             store: store, archive: archive, timeline: timeline
         )

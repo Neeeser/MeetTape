@@ -47,12 +47,47 @@ enum BenchCommand {
         var diarizationBackends: [String]
     }
 
-    /// Which engines need a key, and which local unit each local engine is.
-    static func isCloud(_ engine: String) -> Bool {
-        !["parakeet", "cohere", "whisper"].contains(engine)
+    /// Which backend an --engine value names.
+    ///
+    /// A value is a local engine, one of the cloud transcription models, or a
+    /// custom cloud identifier written with the `cloud:` prefix. Anything else
+    /// is a typo and stops the run: silently routing "parkeet" to the cloud
+    /// produced a row labelled with a model nothing ran.
+    enum Engine: Equatable {
+        case local(LocalTranscriptionModel)
+        case cloud(String)
+
+        /// What the row, the baseline key and the table call it.
+        var name: String {
+            switch self {
+            case .local(let model): model.rawValue
+            case .cloud(let model): model
+            }
+        }
+
+        var isCloud: Bool {
+            if case .cloud = self { return true }
+            return false
+        }
+
+        static func parse(_ value: String) -> Engine? {
+            if let model = LocalTranscriptionModel(rawValue: value) { return .local(model) }
+            if value.hasPrefix("cloud:") {
+                let model = String(value.dropFirst("cloud:".count))
+                return model.isEmpty ? nil : .cloud(model)
+            }
+            if AIModelSettings.transcriptionChoices.contains(value) { return .cloud(value) }
+            return nil
+        }
+
+        static var valid: String {
+            (LocalTranscriptionModel.allCases.map(\.rawValue)
+                + AIModelSettings.transcriptionChoices
+                + ["cloud:<model>"]).joined(separator: ", ")
+        }
     }
 
-    static func settings(engine: String, diarizer: String) -> AppSettings {
+    static func settings(engine: Engine, diarizer: String) -> AppSettings {
         var settings = AppSettings()
         // The transcript is the measurement. Everything else costs money and
         // changes nothing the scorer reads.
@@ -66,16 +101,26 @@ enum BenchCommand {
             recognizeKnownVoices: false, rememberRecurringVoices: false,
             learnMyVoice: false, learnFromCorrections: false
         )
-        if isCloud(engine) {
+        switch engine {
+        case .cloud(let model):
             settings.processing.transcription = .openAI
-            settings.models.transcription = engine
-        } else {
+            settings.models.transcription = model
+        case .local(let model):
             settings.processing.transcription = .local
-            settings.processing.localTranscriptionModel =
-                LocalTranscriptionModel(rawValue: engine) ?? .parakeet
+            settings.processing.localTranscriptionModel = model
         }
         settings.processing.diarization = diarizer == "cloud" ? .openAI : .local
         return settings
+    }
+
+    /// One digest per file per invocation. The same recording backs several
+    /// cases and several engines, and hashing a 300 MB WAV once per row is
+    /// minutes of the run spent re-reading a file that cannot have changed.
+    static func sha256(of url: URL, cache: inout [String: String]) throws -> String {
+        if let known = cache[url.path] { return known }
+        let digest = try sha256(of: url)
+        cache[url.path] = digest
+        return digest
     }
 
     static func sha256(of url: URL) throws -> String {
@@ -169,14 +214,21 @@ enum BenchCommand {
             note("bench: \(error)")
             return 2
         }
-        var engines = options.engines
-        if engines.isEmpty { engines = ["parakeet"] }
+        var engines: [Engine] = []
+        for value in options.engines {
+            guard let engine = Engine.parse(value) else {
+                note("bench: unknown --engine \(value). Valid: \(Engine.valid)")
+                return 2
+            }
+            engines.append(engine)
+        }
+        if engines.isEmpty { engines = [.local(.parakeet)] }
 
         let hasKey = !(ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "").isEmpty
-        let cloudEngines = engines.filter(isCloud)
+        let cloudEngines = engines.filter(\.isCloud)
         if !cloudEngines.isEmpty && !hasKey {
-            note("skipping \(cloudEngines.joined(separator: ", ")): OPENAI_API_KEY is not set")
-            engines = engines.filter { !isCloud($0) }
+            note("skipping \(cloudEngines.map(\.name).joined(separator: ", ")): OPENAI_API_KEY is not set")
+            engines = engines.filter { !$0.isCloud }
         }
         if options.diarizer == "cloud" && !hasKey {
             note("cloud diarization needs OPENAI_API_KEY")
@@ -198,6 +250,7 @@ enum BenchCommand {
 
         var rows: [Row] = []
         var failures: [String] = []
+        var digests: [String: String] = [:]
         for engine in engines {
             for benchCase in cases {
                 guard FileManager.default.fileExists(atPath: benchCase.audio.path) else {
@@ -206,7 +259,7 @@ enum BenchCommand {
                     continue
                 }
                 if let expected = manifest?.audio[benchCase.truth.meeting] {
-                    let actual = (try? sha256(of: benchCase.audio)) ?? ""
+                    let actual = (try? sha256(of: benchCase.audio, cache: &digests)) ?? ""
                     guard actual == expected else {
                         note("\(benchCase.truth.meeting): audio hashes \(actual), manifest says \(expected)")
                         failures.append("\(benchCase.truth.meeting): checksum")
@@ -221,7 +274,7 @@ enum BenchCommand {
                     report(row)
                     if let baselines {
                         let key = BenchBaselines.key(
-                            engine: engine, diarizer: options.diarizer,
+                            engine: engine.name, diarizer: options.diarizer,
                             meeting: benchCase.truth.meeting
                         )
                         let broken = baselines.regressions(key: key, score: row.score)
@@ -229,8 +282,8 @@ enum BenchCommand {
                         failures.append(contentsOf: broken.map { "\(key): \($0)" })
                     }
                 } catch {
-                    note("\(benchCase.truth.meeting) on \(engine) failed: \(error)")
-                    failures.append("\(benchCase.truth.meeting) on \(engine)")
+                    note("\(benchCase.truth.meeting) on \(engine.name) failed: \(error)")
+                    failures.append("\(benchCase.truth.meeting) on \(engine.name)")
                 }
             }
         }
@@ -251,7 +304,7 @@ enum BenchCommand {
     }
 
     static func runOne(
-        _ benchCase: Case, engine: String, options: Options, backends: ProcessingBackends
+        _ benchCase: Case, engine: Engine, options: Options, backends: ProcessingBackends
     ) async throws -> Row {
         let scratchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("meettape-bench-\(UUID().uuidString)", isDirectory: true)
@@ -320,7 +373,7 @@ enum BenchCommand {
         let raw = try? created.store.readRawTranscript()
         let runs = (try? created.store.readRawDiarization())?.runs ?? []
         return Row(
-            engine: engine,
+            engine: engine.name,
             diarizer: options.diarizer,
             score: BenchScorer.score(truth: benchCase.truth, utterances: utterances),
             processingSeconds: elapsed,
@@ -339,8 +392,9 @@ enum BenchCommand {
                      score.wer * 100, score.werNoFiller * 100))
         print(String(format: "  words               %5d ref / %d hyp",
                      score.referenceWords, score.hypothesisWords))
-        print(String(format: "  attribution         %5.1f%%   (of labelled %.1f%%)",
-                     score.attribution * 100, score.attributionOfLabelled * 100))
+        print(String(format: "  attribution         %5.1f%%   (of labelled %.1f%%, merged %.1f%%)",
+                     score.attribution * 100, score.attributionOfLabelled * 100,
+                     score.attributionMerged * 100))
         print("  speakers            \(score.hypothesisSpeakers) found / \(score.referenceSpeakers) true")
         if let der = score.der {
             print(String(format: "  DER                 %5.1f%%   (miss %.1f  FA %.1f  conf %.1f)",
@@ -359,16 +413,20 @@ enum BenchCommand {
     static func summarise(_ rows: [Row]) {
         guard rows.count > 1 else { return }
         print("")
-        print("  engine      cases   WER   no filler   attribution   DER   repeats")
+        print("  engine      cases   WER   no filler   attribution   merged   DER   repeats")
         for engine in Array(Set(rows.map(\.engine))).sorted() {
             let group = rows.filter { $0.engine == engine }
             let ders = group.compactMap(\.score.der)
-            print(String(
-                format: "  %-10s %5d  %5.1f%%     %5.1f%%        %5.1f%%  %5.1f%%   %d",
-                (engine as NSString).utf8String!, group.count,
+            let padded = engine.padding(
+                toLength: max(engine.count, 10), withPad: " ", startingAt: 0
+            )
+            print(padded.prefix(10) + String(
+                format: " %5d  %5.1f%%     %5.1f%%        %5.1f%%   %5.1f%%  %5.1f%%   %d",
+                group.count,
                 median(group.map(\.score.wer)) * 100,
                 median(group.map(\.score.werNoFiller)) * 100,
                 median(group.map(\.score.attribution)) * 100,
+                median(group.map(\.score.attributionMerged)) * 100,
                 ders.isEmpty ? 0 : median(ders) * 100,
                 group.reduce(0) { $0 + $1.score.repeatedNgrams }
             ))

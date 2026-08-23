@@ -1684,14 +1684,23 @@ public actor ProcessingPipeline {
         guard let after = try found.store.readCanonicalTranscript() else {
             throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
         }
-        // A piece of a line the reader named, by the middle of it: a boundary
-        // landing a hair inside the neighbouring piece cannot hand that piece
-        // over.
+        // A piece of a line the reader named, by the middle of what is spoken
+        // in it: a boundary landing a hair inside the neighbouring piece cannot
+        // hand that piece over.
+        //
+        // Measured across its words rather than its span. A line begins before
+        // its first word and ends after its last, and the outermost piece keeps
+        // those outer edges so no audio ends up belonging to nobody. The range
+        // comes from the words the reader pointed at, so comparing it against
+        // the padded span made pulling out the first or last phrase of a turn
+        // match no piece at all: the boundary was written and the name was not.
         let selected = after.utterances.filter { piece in
             guard piece.track == track, targets.contains(where: {
                 $0.chunkID == piece.chunkID && piece.start >= $0.start && piece.end <= $0.end
             }) else { return false }
-            let middle = (piece.start + piece.end) / 2
+            let spokenStart = piece.words?.first?.start ?? piece.start
+            let spokenEnd = piece.words?.last?.end ?? piece.end
+            let middle = (spokenStart + spokenEnd) / 2
             return middle >= startSeconds && middle <= endSeconds
         }
         guard !selected.isEmpty else {

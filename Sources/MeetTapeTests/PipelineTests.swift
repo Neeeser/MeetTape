@@ -610,6 +610,63 @@ enum PipelineTests {
                 )
             },
 
+            test("pulling out the first words of a turn names them") { expect in
+                // A line starts before its first word and ends after its last,
+                // and the outermost piece keeps those edges. Compared against
+                // the span rather than the words, the first phrase of a turn
+                // matched no piece: the boundary was written, the name was not,
+                // and the paragraph split in two with one name on both halves.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root, padded: true)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                // "so", the first word, which starts a second after the line
+                // does and lasts less than that second.
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
+                    startSeconds: 1, endSeconds: 1.7
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.count, 2)
+                expect.equal(lines[0].text, "so")
+                expect.equal(map.resolvedName(for: lines[0]), "Dana")
+                expect.equal(map.resolvedName(for: lines[1]), "Priya", "the rest is untouched")
+            },
+
+            test("pulling out the last words of a turn names them") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root, padded: true)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                // "friday", the last word, which ends a second before the line
+                // does and lasts less than that second.
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
+                    startSeconds: 11, endSeconds: 11.7
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.count, 2)
+                expect.equal(lines[1].text, "friday")
+                expect.equal(map.resolvedName(for: lines[1]), "Dana")
+                expect.equal(map.resolvedName(for: lines[0]), "Priya")
+            },
+
             test("a boundary is kept when the transcript is assembled again") { expect in
                 // A cut is a claim about the audio, so it outlives re-assembly
                 // and re-analysis the way a line correction does.
@@ -641,8 +698,10 @@ enum PipelineTests {
 
     /// A meeting with one transcript line: a question and its answer run
     /// together on one speaker, with word timings a second apart.
+    /// - Parameter padded: the line starts a second before its first word and
+    ///   ends a second after its last, which is what a decoder reports.
     static func makeTranscribedMeeting(
-        root: URL, withOverlappingTwin: Bool = false
+        root: URL, withOverlappingTwin: Bool = false, padded: Bool = false
     ) throws -> (id: String, store: MeetingStore, repository: MeetingRepository) {
         let repository = MeetingRepository(root: root)
         let started = Date(timeIntervalSince1970: 1_787_070_000)
@@ -652,14 +711,23 @@ enum PipelineTests {
         )
         _ = try created.store.updateMetadata { $0.durationSeconds = 30 }
         let texts = ["so", "what", "do", "you", "think", "i", "think", "we", "ship", "on", "friday"]
+        // A padded line begins a second before its first word and ends a
+        // second after its last, which is what a decoder reports.
+        let lead = padded ? 1.0 : 0.0
         let words = texts.enumerated().map {
             RawTranscriptWord(
-                start: Double($0.offset), end: Double($0.offset) + 0.7, text: " \($0.element)"
+                start: lead + Double($0.offset), end: lead + Double($0.offset) + 0.7,
+                text: " \($0.element)"
             )
         }
+        let lineStart = 0.0
+        let lineEnd = padded ? 12.7 : 11.0
         var utterances = [Utterance(
-            id: Utterance.identifier(chunkID: "c1", track: .remote, start: 0, end: 11),
-            start: 0, end: 11, track: .remote, rawSpeakerLabel: "remote-001_speaker_00",
+            id: Utterance.identifier(
+                chunkID: "c1", track: .remote, start: lineStart, end: lineEnd
+            ),
+            start: lineStart, end: lineEnd, track: .remote,
+            rawSpeakerLabel: "remote-001_speaker_00",
             speakerKey: "remote-001_speaker_00", text: texts.joined(separator: " "),
             chunkID: "c1", model: "m", words: words
         )]

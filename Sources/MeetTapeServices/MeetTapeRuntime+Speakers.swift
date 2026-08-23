@@ -90,16 +90,6 @@ extension MeetTapeRuntime {
         await refreshLocalModelState()
     }
 
-    public func removeLocalModels() async {
-        guard let models else { return }
-        do {
-            try await models.removeInstalledModels()
-        } catch {
-            Log.app.error("model removal failed: \(logSafeDescription(error), privacy: .public)")
-        }
-        await refreshLocalModelState()
-    }
-
     // MARK: - the local user
 
     /// Makes sure one identity represents the person using this Mac.

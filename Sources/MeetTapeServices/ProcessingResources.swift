@@ -34,6 +34,10 @@ public struct ProcessingBackends: Sendable {
     /// settings need. The chunks being aligned were written by whichever
     /// model was chosen at the time, and the settings may have moved since.
     public var prepareAligner: (@Sendable () async throws -> Void)?
+    /// Installs the diarizer alone. Re-analysing speakers needs nothing else,
+    /// and asking for the whole configuration downloaded a 600 MB aligner for
+    /// a cloud user who would never reach it.
+    public var prepareDiarizer: (@Sendable () async throws -> Void)?
     /// Extracts one vector for a track known to hold a single speaker, used for
     /// the microphone track where the speaker is the local user by construction.
     public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)?
@@ -51,6 +55,7 @@ public struct ProcessingBackends: Sendable {
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
         aligner: (any TranscriptAligner)? = nil,
         prepareAligner: (@Sendable () async throws -> Void)? = nil,
+        prepareDiarizer: (@Sendable () async throws -> Void)? = nil,
         singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         reanalyzeDiarization: (@Sendable (String, URL, Int?) async throws -> DiarizationOutput)? = nil
     ) {
@@ -62,6 +67,7 @@ public struct ProcessingBackends: Sendable {
         self.requireLocalModels = requireLocalModels
         self.aligner = aligner
         self.prepareAligner = prepareAligner
+        self.prepareDiarizer = prepareDiarizer
         self.singleSpeakerEmbedding = singleSpeakerEmbedding
         self.reanalyzeDiarization = reanalyzeDiarization
     }

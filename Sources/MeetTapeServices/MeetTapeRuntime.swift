@@ -89,7 +89,7 @@ public final class MeetTapeRuntime {
     public private(set) var settings: AppSettings
     /// Whether the on-device speech models are installed, and how far a
     /// download has got. Recording never waits on this.
-    public internal(set) var localModelState: LocalModelState = .notInstalled
+    public internal(set) var localModelState: LocalModelState = .notInstalled(LocalModelSnapshot())
 
     /// Called when a meeting's processing state changes, so an open review
     /// window can reload its files without the user refreshing by hand.
@@ -232,6 +232,7 @@ public final class MeetTapeRuntime {
                 requireLocalModels: { try await modelManager.ensureInstalled() },
                 aligner: CtcTranscriptAligner(models: modelManager),
                 prepareAligner: { _ = try await modelManager.install(units: [.ctcAligner]) },
+                prepareDiarizer: { _ = try await modelManager.install(units: [.diarizer]) },
                 singleSpeakerEmbedding: { url in
                     try await modelManager.embedSingleSpeaker(audio: url)
                 },

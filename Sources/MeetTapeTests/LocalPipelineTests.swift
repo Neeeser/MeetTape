@@ -65,14 +65,21 @@ final class StubTextTranscriber: TranscriptionBackend, @unchecked Sendable {
     var text: String
     var identifier = "stub-cohere"
     var isLocal = true
-    var limits = BackendAudioLimits.none
+    var limits: BackendAudioLimits
     var timing = TranscriptTiming.text
+    private let state = Mutex<[String]>([])
+    /// The audio handed to this backend, so a test can count its chunks.
+    var received: [String] { state.withLock { $0 } }
 
-    init(text: String) { self.text = text }
+    init(text: String, limits: BackendAudioLimits = .none) {
+        self.text = text
+        self.limits = limits
+    }
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
+        state.withLock { $0.append(audio.lastPathComponent) }
         progress(1)
         return TranscriptionOutput(segments: [], text: text, durationSeconds: 6)
     }
@@ -267,6 +274,82 @@ enum LocalPipelineTests {
                 expect.equal(remote.last?.text, "no we do not")
             },
 
+            test("a chunked local engine and a cloud diarizer do not collide") { expect in
+                // Both chunk the same track, and both went through the same
+                // naming. The diarizer's plans matched the transcriber's
+                // chunks, so every one was skipped as already done: nothing
+                // was diarized, no run was written, and the far end came back
+                // as one unattributed speaker with the meeting reporting
+                // success.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let backend = FakeAIBackend()
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 1.5, text: "Theirs.", speaker: "A"),
+                ]
+                // Chunked, the way Cohere is: a request limit under the
+                // meeting's own length.
+                let transcriber = StubTextTranscriber(
+                    text: "we ship friday",
+                    limits: BackendAudioLimits(maximumSeconds: 3)
+                )
+                let aligner = StubAligner(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 1.2, text: "we ship friday", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.4, text: " we"),
+                            RawTranscriptWord(start: 0.5, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.2, text: " friday"),
+                        ]
+                    ),
+                ])
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.processing.diarization = .openAI
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    backends: ProcessingBackends(
+                        transcription: { _, _ in transcriber },
+                        diarization: { _, model in
+                            OpenAIDiarizationBackend(backend: backend, model: model)
+                        },
+                        aligner: aligner
+                    ),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { resolved },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                expect.isTrue(transcriber.received.count > 1, "the local engine really chunked")
+                expect.isTrue(
+                    backend.calls.contains { $0.kind == "diarize" },
+                    "the diarizer was actually asked, not skipped as already done"
+                )
+                let diarization = try meeting.store.readRawDiarization()
+                let run = try expect.unwrap(diarization.activeRun(track: .remote))
+                expect.isFalse(run.intervals.isEmpty, "a run was written")
+
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let remote = transcript.utterances.filter { $0.track == .remote }
+                expect.isFalse(remote.isEmpty)
+                expect.isFalse(
+                    remote.allSatisfy { $0.speakerKey == SpeakerLabel.unattributed(track: .remote) },
+                    "the far end must not collapse into one unattributed speaker"
+                )
+            },
+
             test("an aligner refusal keeps the words at chunk precision") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -296,6 +379,14 @@ enum LocalPipelineTests {
                     transcript.utterances.contains { $0.text.contains("nothing aligned here") },
                     "the words survive at chunk-level timing instead of vanishing"
                 )
+                // A refusal is recorded as one, so the next run does not pay
+                // for the same hopeless alignment again, and a later build can
+                // tell it from real timings.
+                let raw = try meeting.store.readRawTranscript()
+                let chunk = try expect.unwrap(raw.chunks.first { $0.text != nil })
+                let alignment = try expect.unwrap(meeting.store.readAlignment(chunkID: chunk.id))
+                expect.isTrue(alignment.refused, "recorded as a refusal, not as timings")
+                expect.isTrue(alignment.segments.isEmpty)
             },
 
             test("rebuilding the transcript keeps every speaker") { expect in

@@ -789,6 +789,25 @@ public actor ProcessingPipeline {
         }
     }
 
+    /// Names one chunk, uniquely per producer rather than per track.
+    ///
+    /// Transcription and diarization can both chunk the same track: a local
+    /// engine with a request limit transcribes the far end while a cloud
+    /// diarizer labels it. Sharing an identifier made the diarizer's plans
+    /// match the transcriber's chunks, so every one was skipped as already
+    /// done, no diarization was requested, no run was written, and the whole
+    /// far end rendered as a single unattributed speaker with the meeting
+    /// reporting success. Words keep the original form, because every meeting
+    /// on disk uses it; speaker chunks take a distinct one.
+    static func chunkIdentifier(
+        track: CaptureTrack, purpose: RawChunkPurpose, plan: ChunkPlan
+    ) -> String {
+        switch purpose {
+        case .words: "\(track.rawValue)_\(plan.chunkID)"
+        case .speakers: "\(track.rawValue)_spk_\(plan.chunkID)"
+        }
+    }
+
     /// Chunks a track, sends each chunk, and records results as they arrive so an
     /// interrupted run resumes at the chunk it stopped on.
     private func runChunks(
@@ -844,8 +863,14 @@ public actor ProcessingPipeline {
         }
         var pending: [PreparedChunk] = []
         for plan in plans {
-            let chunkID = "\(track.rawValue)_\(plan.chunkID)"
-            if raw.chunks.contains(where: { $0.id == chunkID }) { continue }
+            let chunkID = Self.chunkIdentifier(track: track, purpose: purpose, plan: plan)
+            // The identifier an earlier build wrote for this plan, so an
+            // interrupted cloud diarization resumes instead of paying for
+            // every chunk again and counting its intervals twice.
+            let legacyID = "\(track.rawValue)_\(plan.chunkID)"
+            if raw.chunks.contains(
+                where: { $0.id == chunkID || ($0.id == legacyID && $0.purpose == purpose) }
+            ) { continue }
 
             let audioURL = workingDirectory.appendingPathComponent("\(chunkID).m4a")
             let frames = try exporter.export(
@@ -1706,7 +1731,15 @@ public actor ProcessingPipeline {
         let segments = timeline.segments(track: track)
         guard !segments.isEmpty else { return }
 
-        try await prepareLocalModels(metadata: metadata)
+        // The diarizer alone: re-analysis re-clusters, it never re-transcribes,
+        // so pulling the configured transcription engine and its aligner would
+        // download gigabytes this button will not use.
+        if let prepare = backends.prepareDiarizer {
+            report(metadata, chunks: nil, detail: "Preparing on-device models")
+            try await prepare()
+        } else {
+            try await prepareLocalModels(metadata: metadata)
+        }
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: track, segments: segments,
             segmentsDirectory: store.layout.segments

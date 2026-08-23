@@ -77,10 +77,10 @@ public struct OnboardingView: View {
                 case .outdated:
                     Label("Installed, pinned by an older build", systemImage: "checkmark.circle")
                         .foregroundStyle(.secondary).font(.callout)
-                case .downloading(let fraction, let detail):
+                case .downloading(let fraction, let detail, _):
                     ProgressView(value: fraction)
                     Text(detail).font(.caption).foregroundStyle(.secondary)
-                case .failed(let message):
+                case .failed(let message, _):
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange).font(.caption)
                     Button("Try Again") { Task { await model.runtime.installLocalModels() } }

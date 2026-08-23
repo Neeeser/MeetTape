@@ -33,6 +33,9 @@ public actor LocalModelManager {
     private var installTask: Task<LocalModelSnapshot, Error>?
     /// Identifies which call owns `installTask`; see `install`.
     private var installGeneration: UInt64 = 0
+    /// What the running install is fetching, so deleting an unrelated unit
+    /// does not cancel it.
+    private var installing: Set<LocalModelUnit> = []
     /// Segmentation and embeddings for the meeting most recently diarized, so
     /// "re-analyze speakers" re-clusters instead of starting again.
     ///
@@ -87,7 +90,7 @@ public actor LocalModelManager {
             filesPresent(unit, locations: locations, receipt: receipt)
         }
         let snapshot = LocalModelSnapshot(receipts: present)
-        guard required.allSatisfy({ present[$0] != nil }) else { return .notInstalled }
+        guard required.allSatisfy({ present[$0] != nil }) else { return .notInstalled(snapshot) }
         let outdated = required.contains { present[$0]?.matchesCurrentBuild(for: $0) == false }
         return outdated ? .outdated(snapshot) : .installed(snapshot)
     }
@@ -129,6 +132,17 @@ public actor LocalModelManager {
             return CtcModels.modelsExist(at: directory)
                 && manager.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path)
         }
+    }
+
+    /// A progress tick, carrying whatever is already on disk so the rows for
+    /// installed units keep reporting their sizes while another downloads.
+    private func publishProgress(fraction: Double, detail: String) {
+        publish(.downloading(
+            fraction: fraction, detail: detail,
+            present: Self.computeState(
+                receipts: receipts, required: required, locations: locations
+            ).present
+        ))
     }
 
     private func publish(_ newState: LocalModelState) {
@@ -179,9 +193,9 @@ public actor LocalModelManager {
                 let share = Double(unit.approximateBytes) / Double(totalBytes)
                 try Task.checkCancellation()
                 try await installUnit(unit, force: force) { fraction, detail in
-                    Task { await self.publish(.downloading(
+                    Task { await self.publishProgress(
                         fraction: base + share * min(max(fraction, 0), 1), detail: detail
-                    )) }
+                    ) }
                 }
                 completedBytes += unit.approximateBytes
             }
@@ -202,8 +216,14 @@ public actor LocalModelManager {
         installGeneration += 1
         let generation = installGeneration
         installTask = task
-        publish(.downloading(fraction: 0, detail: "Preparing"))
-        defer { if installGeneration == generation { installTask = nil } }
+        installing = missing
+        publishProgress(fraction: 0, detail: "Preparing")
+        defer {
+            if installGeneration == generation {
+                installTask = nil
+                installing = []
+            }
+        }
         do {
             let snapshot = try await task.value
             if installGeneration == generation { refreshState() }
@@ -219,10 +239,11 @@ public actor LocalModelManager {
             }
             let message = Self.message(for: error)
             let usable = Self.computeState(receipts: receipts, required: required, locations: locations)
+            let present = usable.present
             // Published last, and after the slot is released, so nothing
             // recomputes a plain state over the reason the user needs to see.
             if installGeneration == generation { installTask = nil }
-            publish(usable.isUsable ? usable : .failed(message))
+            publish(usable.isUsable ? usable : .failed(message, present: present))
             throw error
         }
     }
@@ -302,36 +323,23 @@ public actor LocalModelManager {
         )
     }
 
-    /// Removes every installed unit. Everything here is re-downloadable, and
-    /// nothing a user recorded lives in these directories.
-    public func removeInstalledModels() throws {
-        // Cancel first. An install left running would finish writing the files
-        // the user just asked to delete, rewrite the receipts and flip the
-        // panel back to installed.
-        installTask?.cancel()
-        installTask = nil
-        unloadAll()
-        for unit in LocalModelUnit.allCases {
-            try? FileManager.default.removeItem(at: locations.containerDirectory(for: unit))
-        }
-        receipts = [:]
-        receiptStore.clear()
-        publish(.notInstalled)
-    }
-
     /// Removes one unit's files and receipt.
+    ///
+    /// An install of *other* units keeps running: cancelling it would report a
+    /// failure for something the user did not do. One that is fetching this
+    /// unit is cancelled, because it would otherwise write back the files
+    /// being deleted and rewrite the receipt.
     public func remove(unit: LocalModelUnit) {
-        installTask?.cancel()
-        installTask = nil
+        if installing.contains(unit) {
+            installGeneration += 1
+            installTask?.cancel()
+            installTask = nil
+        }
         unload(unit)
         try? FileManager.default.removeItem(at: locations.containerDirectory(for: unit))
         receipts[unit] = nil
         try? receiptStore.write(receipts)
         refreshState()
-    }
-
-    private func unloadAll() {
-        for unit in LocalModelUnit.allCases { unload(unit) }
     }
 
     private func unload(_ unit: LocalModelUnit) {

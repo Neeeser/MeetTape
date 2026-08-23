@@ -198,12 +198,12 @@ struct ProcessingSettingsTab: View {
                 }
             }
             switch runtime.localModelState {
-            case .downloading(let fraction, let detail):
+            case .downloading(let fraction, let detail, _):
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: fraction)
                     Text(detail).font(.caption).foregroundStyle(.secondary)
                 }
-            case .failed(let message):
+            case .failed(let message, _):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange).font(.caption)
                 Button("Try Again") { Task { await runtime.installLocalModels() } }
@@ -244,15 +244,14 @@ struct ProcessingSettingsTab: View {
     }
 
     private func installedBytes(_ unit: LocalModelUnit) -> Int64? {
-        switch runtime.localModelState {
-        case .installed(let snapshot), .outdated(let snapshot): snapshot.bytes(for: unit)
-        case .notInstalled, .downloading, .failed: nil
-        }
+        runtime.localModelState.present.bytes(for: unit)
     }
 
     private func unitStatus(_ unit: LocalModelUnit) -> String {
         if let bytes = installedBytes(unit) { return "Installed — \(Self.megabytes(bytes))" }
-        if case .downloading = runtime.localModelState { return "Downloading" }
+        if case .downloading = runtime.localModelState, requiredUnits.contains(unit) {
+            return "Downloading"
+        }
         return "Not installed — about \(Self.megabytes(unit.approximateBytes))"
     }
 

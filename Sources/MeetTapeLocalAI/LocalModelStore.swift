@@ -128,12 +128,24 @@ public struct LocalModelSnapshot: Sendable, Equatable {
 
 /// Whether the units the current configuration needs can run right now.
 public enum LocalModelState: Sendable, Equatable {
-    case notInstalled
-    case downloading(fraction: Double, detail: String)
+    /// Every case carries what is on disk, not just the usable ones: a user
+    /// who has Whisper and switches to Cohere is mid-download, and the rows
+    /// for what they already have must still say so.
+    case notInstalled(LocalModelSnapshot)
+    case downloading(fraction: Double, detail: String, present: LocalModelSnapshot)
     case installed(LocalModelSnapshot)
     /// Present, but installed by a build that pinned different revisions.
     case outdated(LocalModelSnapshot)
-    case failed(String)
+    case failed(String, present: LocalModelSnapshot)
+
+    /// What is on disk right now, whatever the aggregate says.
+    public var present: LocalModelSnapshot {
+        switch self {
+        case .notInstalled(let snapshot), .installed(let snapshot),
+            .outdated(let snapshot): snapshot
+        case .downloading(_, _, let snapshot), .failed(_, let snapshot): snapshot
+        }
+    }
 
     public var isUsable: Bool {
         switch self {

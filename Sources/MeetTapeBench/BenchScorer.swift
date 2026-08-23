@@ -14,9 +14,18 @@ public struct BenchScore: Codable, Sendable, Equatable {
     public var hypothesisWords: Int
     public var utterances: Int
     /// Share of reference words the transcript put on the right speaker, under
-    /// the cluster mapping that explains the most words.
+    /// the best injective cluster mapping: each reference speaker is claimed by
+    /// at most one cluster, and a cluster left over contributes nothing.
+    ///
+    /// This is the number the baselines and the regression rule read. A
+    /// diarizer that splits one voice into six is wrong about five of them,
+    /// and the deciding run must not pay it for the split.
     public var attribution: Double
-    /// The same over words that landed on some speaker at all.
+    /// The same after every leftover cluster is folded onto the reference
+    /// speaker it mostly covers, which is what a user merging clusters by hand
+    /// would recover. Reported, never decided on.
+    public var attributionMerged: Double
+    /// The strict share over words that landed on some speaker at all.
     public var attributionOfLabelled: Double
     public var attributionScored: Int
     /// Words spoken across another speaker's turn, which one stream of
@@ -138,11 +147,11 @@ public enum BenchScorer {
     public static func referenceStream(_ truth: BenchTruth) -> [BenchTruth.Word] {
         var bySpeaker: [String: [BenchTruth.Word]] = [:]
         for word in truth.words { bySpeaker[word.speaker, default: []].append(word) }
-        for key in bySpeaker.keys { bySpeaker[key]?.sort { $0.start < $1.start } }
+        for key in bySpeaker.keys { bySpeaker[key]?.sort(by: wordOrder) }
 
         var ordered: [BenchTruth.Word] = []
         ordered.reserveCapacity(truth.words.count)
-        for turn in truth.turns.sorted(by: { $0.start < $1.start }) {
+        for turn in truth.turns.sorted(by: turnOrder) {
             guard let candidates = bySpeaker[turn.speaker] else { continue }
             // The words are sorted, so the turn's slice is a contiguous range.
             var index = lowerBound(candidates, start: turn.start - 0.001)
@@ -153,6 +162,27 @@ public enum BenchScorer {
             }
         }
         return ordered
+    }
+
+    /// Equal starts are ordered by end and then by text, so two words at the
+    /// same moment cannot swap between runs.
+    static func wordOrder(_ left: BenchTruth.Word, _ right: BenchTruth.Word) -> Bool {
+        if left.start != right.start { return left.start < right.start }
+        if left.end != right.end { return left.end < right.end }
+        return left.text < right.text
+    }
+
+    static func turnOrder(_ left: BenchTruth.Turn, _ right: BenchTruth.Turn) -> Bool {
+        if left.start != right.start { return left.start < right.start }
+        if left.end != right.end { return left.end < right.end }
+        return left.speaker < right.speaker
+    }
+
+    static func utteranceOrder(_ left: BenchUtterance, _ right: BenchUtterance) -> Bool {
+        if left.start != right.start { return left.start < right.start }
+        if left.end != right.end { return left.end < right.end }
+        if left.speakerKey != right.speakerKey { return left.speakerKey < right.speakerKey }
+        return left.text < right.text
     }
 
     private static func lowerBound(_ words: [BenchTruth.Word], start: Double) -> Int {
@@ -176,9 +206,9 @@ public enum BenchScorer {
     static func attribution(
         words: [BenchTruth.Word], utterances: [BenchUtterance], turns: [BenchTruth.Turn]
     ) -> (pairs: [(reference: String, hypothesis: String?)], overlapExcluded: Int) {
-        let ordered = utterances.sorted { $0.start < $1.start }
+        let ordered = utterances.sorted(by: utteranceOrder)
         let starts = ordered.map(\.start)
-        let byStart = turns.sorted { $0.start < $1.start }
+        let byStart = turns.sorted(by: turnOrder)
         let turnStarts = byStart.map(\.start)
         let longestTurn = byStart.map { $0.end - $0.start }.max() ?? 0
         let longestUtterance = ordered.map { $0.end - $0.start }.max() ?? 0
@@ -210,7 +240,10 @@ public enum BenchScorer {
                     break
                 }
             }
-            pairs.append((word.speaker, best))
+            // An utterance with no speaker key is unlabelled, not labelled with
+            // the empty string: the key list drops it, so a pair holding it
+            // would count against a mapping that cannot contain it.
+            pairs.append((word.speaker, (best?.isEmpty ?? true) ? nil : best))
         }
         return (pairs, excluded)
     }
@@ -238,25 +271,44 @@ public enum BenchScorer {
         return false
     }
 
+    /// One cluster-to-speaker solution, scored both ways.
+    public struct Mapping: Sendable, Equatable {
+        /// Each reference speaker claimed by at most one cluster.
+        public var injective: [String: String]
+        /// The same with every leftover cluster folded onto its majority
+        /// speaker.
+        public var merged: [String: String]
+        public var strictCorrect: Int
+        public var mergedCorrect: Int
+    }
+
     /// Assigns hypothesis keys to reference speakers to maximise correct words.
     ///
     /// Exhaustive while the permutations stay cheap, greedy once a diarizer has
     /// over-split badly, which is exactly when the mapping matters most.
     /// Falling through to no mapping at all scored a ten-cluster run as worse
     /// than silence.
-    static func bestMapping(
+    ///
+    /// Both branches produce the same two numbers: the injective mapping is
+    /// scored on its own, and the fill of leftover clusters is scored
+    /// separately. Scoring only after the fill rewards over-splitting, because
+    /// every extra cluster lands on the speaker it mostly covers and counts as
+    /// correct.
+    public static func bestMapping(
         pairs: [(reference: String, hypothesis: String?)],
         referenceSpeakers: [String],
         hypothesisKeys: [String]
-    ) -> (mapping: [String: String], correct: Int) {
+    ) -> Mapping {
         var counts: [String: [String: Int]] = [:]
         for pair in pairs {
             guard let hypothesis = pair.hypothesis else { continue }
             counts[hypothesis, default: [:]][pair.reference, default: 0] += 1
         }
-        guard !hypothesisKeys.isEmpty else { return ([:], 0) }
+        guard !hypothesisKeys.isEmpty else {
+            return Mapping(injective: [:], merged: [:], strictCorrect: 0, mergedCorrect: 0)
+        }
 
-        var mapping: [String: String] = [:]
+        var injective: [String: String] = [:]
         if hypothesisKeys.count <= 7 && referenceSpeakers.count <= 7 {
             var bestScore = -1
             let keys = hypothesisKeys
@@ -278,7 +330,7 @@ public enum BenchScorer {
                 let score = scoreMapping(candidate, counts: counts)
                 if score > bestScore {
                     bestScore = score
-                    mapping = candidate
+                    injective = candidate
                 }
             }
         } else {
@@ -288,14 +340,22 @@ public enum BenchScorer {
                     flattened.append((hypothesis, reference, count))
                 }
             }
-            flattened.sort { $0.count > $1.count }
+            // A Swift dictionary iterates in a per-process random order and
+            // count ties are common, so the comparator decides every tie
+            // itself: without the names in it the same input scores two
+            // different mappings on two runs.
+            flattened.sort { left, right in
+                if left.count != right.count { return left.count > right.count }
+                if left.reference != right.reference { return left.reference < right.reference }
+                return left.hypothesis < right.hypothesis
+            }
             var usedKeys: Set<String> = []
             var usedRefs: Set<String> = []
             for entry in flattened {
                 guard !usedKeys.contains(entry.hypothesis), !usedRefs.contains(entry.reference) else {
                     continue
                 }
-                mapping[entry.hypothesis] = entry.reference
+                injective[entry.hypothesis] = entry.reference
                 usedKeys.insert(entry.hypothesis)
                 usedRefs.insert(entry.reference)
             }
@@ -304,14 +364,20 @@ public enum BenchScorer {
         // which is what a user merging clusters would do: a diarizer that split
         // one person into six still has those six pointing at the person they
         // mostly are.
-        for key in hypothesisKeys where mapping[key] == nil {
+        var merged = injective
+        for key in hypothesisKeys where merged[key] == nil {
             if let winner = counts[key]?.max(by: { left, right in
                 left.value == right.value ? left.key < right.key : left.value < right.value
             }) {
-                mapping[key] = winner.key
+                merged[key] = winner.key
             }
         }
-        return (mapping, scoreMapping(mapping, counts: counts))
+        return Mapping(
+            injective: injective,
+            merged: merged,
+            strictCorrect: scoreMapping(injective, counts: counts),
+            mergedCorrect: scoreMapping(merged, counts: counts)
+        )
     }
 
     private static func scoreMapping(
@@ -429,7 +495,7 @@ public enum BenchScorer {
         _ utterances: [BenchUtterance], width: Int = 8
     ) -> (repeated: Int, share: Double) {
         var words: [String] = []
-        for utterance in utterances.sorted(by: { $0.start < $1.start }) {
+        for utterance in utterances.sorted(by: utteranceOrder) {
             words.append(contentsOf: normalise(utterance.text))
         }
         guard words.count > width else { return (0, 0) }
@@ -444,7 +510,7 @@ public enum BenchScorer {
 
     /// Pairs of utterances whose spans overlap, and the worst overlap seen.
     static func overlaps(_ utterances: [BenchUtterance]) -> (pairs: Int, worstSeconds: Double) {
-        let ordered = utterances.sorted { $0.start < $1.start }
+        let ordered = utterances.sorted(by: utteranceOrder)
         var pairs = 0
         var worst = 0.0
         for (index, first) in ordered.enumerated() {
@@ -463,7 +529,7 @@ public enum BenchScorer {
     // MARK: - the whole report
 
     public static func score(truth: BenchTruth, utterances rawUtterances: [BenchUtterance]) -> BenchScore {
-        let utterances = rawUtterances.sorted { $0.start < $1.start }
+        let utterances = rawUtterances.sorted(by: utteranceOrder)
 
         let ordered = referenceStream(truth)
         let referenceTokens = tokens(ordered.map(\.text))
@@ -484,7 +550,7 @@ public enum BenchScorer {
         let labelledCount = labelled.pairs.filter { $0.hypothesis != nil }.count
         let error = diarizationError(
             turns: truth.turns, utterances: utterances,
-            mapping: mapped.mapping, duration: truth.windowSeconds
+            mapping: mapped.merged, duration: truth.windowSeconds
         )
         let repeats = duplication(utterances)
         let overlapping = overlaps(utterances)
@@ -499,18 +565,19 @@ public enum BenchScorer {
             referenceWords: referenceTokens.count,
             hypothesisWords: hypothesisTokens.count,
             utterances: utterances.count,
-            attribution: Double(mapped.correct) / Double(max(1, labelled.pairs.count)),
-            attributionOfLabelled: Double(mapped.correct) / Double(max(1, labelledCount)),
+            attribution: Double(mapped.strictCorrect) / Double(max(1, labelled.pairs.count)),
+            attributionMerged: Double(mapped.mergedCorrect) / Double(max(1, labelled.pairs.count)),
+            attributionOfLabelled: Double(mapped.strictCorrect) / Double(max(1, labelledCount)),
             attributionScored: labelled.pairs.count,
             overlapExcluded: labelled.overlapExcluded,
             referenceSpeakers: truth.speakers.count,
             hypothesisSpeakers: keys.count,
             speakerKeys: keys,
-            clusterMapping: mapped.mapping,
+            clusterMapping: mapped.merged,
             repeatedNgrams: repeats.repeated,
-            repeatedShare: repeats.share,
+            repeatedShare: (repeats.share * 10000).rounded() / 10000,
             overlappingPairs: overlapping.pairs,
-            worstOverlapSeconds: overlapping.worstSeconds,
+            worstOverlapSeconds: (overlapping.worstSeconds * 100).rounded() / 100,
             der: error?.der,
             derMissed: error?.missed,
             derFalseAlarm: error?.falseAlarm,

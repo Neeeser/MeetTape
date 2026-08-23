@@ -24,8 +24,14 @@ enum BenchScorerTests {
     }
 
     /// The transcript a perfect system would produce: one line per reference
-    /// turn, holding that turn's words, on that turn's speaker.
+    /// turn, holding that turn's words, under an opaque cluster key.
+    ///
+    /// The keys are `c0`...`c3` rather than the reference names, so the scorer
+    /// has the permutation to solve that a real diarizer hands it.
     static func oracle(_ truth: BenchTruth) -> [BenchUtterance] {
+        let key = Dictionary(uniqueKeysWithValues: truth.speakers.enumerated().map {
+            ($0.element, "c\($0.offset)")
+        })
         var bySpeaker: [String: [BenchTruth.Word]] = [:]
         for word in truth.words { bySpeaker[word.speaker, default: []].append(word) }
         for key in bySpeaker.keys { bySpeaker[key]?.sort { $0.start < $1.start } }
@@ -36,7 +42,7 @@ enum BenchScorerTests {
             return BenchUtterance(
                 start: turn.start, end: turn.end,
                 text: inside.map(\.text).joined(separator: " "),
-                speakerKey: turn.speaker
+                speakerKey: key[turn.speaker] ?? turn.speaker
             )
         }
     }
@@ -49,6 +55,54 @@ enum BenchScorerTests {
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
             return Int((state >> 33) % UInt64(bound))
         }
+    }
+
+
+    /// Four speakers with one turn each, two of them split across two clusters.
+    ///
+    /// Hand-computable: 200 words per speaker, and the diarizer cuts A's turn
+    /// into 120 words on c0 and 80 on c4, B's into 120 on c1 and 80 on c5.
+    static func splitCase() -> (truth: BenchTruth, utterances: [BenchUtterance]) {
+        let speakers = ["A", "B", "C", "D"]
+        var words: [BenchTruth.Word] = []
+        var turns: [BenchTruth.Turn] = []
+        for (index, speaker) in speakers.enumerated() {
+            let base = Double(index) * 100
+            turns.append(BenchTruth.Turn(speaker: speaker, start: base, end: base + 100))
+            for step in 0..<200 {
+                let start = base + Double(step) * 0.5
+                words.append(BenchTruth.Word(
+                    start: start, end: start + 0.4,
+                    text: "\(speaker)\(step)", speaker: speaker, truncated: false
+                ))
+            }
+        }
+        let utterances = [
+            BenchUtterance(start: 0, end: 60, text: "a", speakerKey: "c0"),
+            BenchUtterance(start: 60, end: 100, text: "b", speakerKey: "c4"),
+            BenchUtterance(start: 100, end: 160, text: "c", speakerKey: "c1"),
+            BenchUtterance(start: 160, end: 200, text: "d", speakerKey: "c5"),
+            BenchUtterance(start: 200, end: 300, text: "e", speakerKey: "c2"),
+            BenchUtterance(start: 300, end: 400, text: "f", speakerKey: "c3"),
+        ]
+        let truth = BenchTruth(
+            meeting: "split", source: "none.wav", windowStart: nil, windowSeconds: 400,
+            speakers: speakers, agentToSpeaker: [:], words: words, turns: turns
+        )
+        return (truth, utterances)
+    }
+
+    /// Eight clusters, four speakers, ten words each: every count ties.
+    static func tiesCase() -> (
+        pairs: [(reference: String, hypothesis: String?)], speakers: [String], keys: [String]
+    ) {
+        let speakers = ["A", "B", "C", "D"]
+        var pairs: [(reference: String, hypothesis: String?)] = []
+        for (index, key) in (0..<8).map({ ("c\($0)") }).enumerated() {
+            let speaker = speakers[index / 2]
+            for _ in 0..<10 { pairs.append((speaker, key)) }
+        }
+        return (pairs, speakers, (0..<8).map { "c\($0)" })
     }
 
     static var suite: Suite {
@@ -89,10 +143,10 @@ enum BenchScorerTests {
             test("shuffled speaker labels score at chance") { expect in
                 let truth = try truth()
                 var sequence = FixedSequence()
-                let speakers = truth.speakers
+                let keys = (0..<truth.speakers.count).map { "c\($0)" }
                 let shuffled = oracle(truth).map { utterance -> BenchUtterance in
                     var copy = utterance
-                    copy.speakerKey = speakers[sequence.next(upTo: speakers.count)]
+                    copy.speakerKey = keys[sequence.next(upTo: keys.count)]
                     return copy
                 }
                 let score = BenchScorer.score(truth: truth, utterances: shuffled)
@@ -109,6 +163,44 @@ enum BenchScorerTests {
                 )
                 let der = try expect.unwrap(score.der)
                 expect.isTrue(der > 0.25 && der < 0.70, "random labels scored \(der) DER")
+            },
+
+            test("an over-split transcript scores strict below merged") { expect in
+                // Four speakers, one turn each, 200 words each. Two of those
+                // turns are cut in half by the diarizer, so six clusters cover
+                // four voices and 800 words are attributed.
+                let split = splitCase()
+                let score = BenchScorer.score(truth: split.truth, utterances: split.utterances)
+                expect.equal(score.attributionScored, 800, "every word is asked about")
+                expect.equal(score.hypothesisSpeakers, 6)
+                // The four clusters of the best injective mapping hold
+                // 120 + 120 + 200 + 200 = 640 words.
+                expect.close(score.attribution, 0.8, tolerance: 0.0001)
+                // Folding c4 onto A and c5 onto B recovers the other 160.
+                expect.close(score.attributionMerged, 1.0, tolerance: 0.0001)
+                expect.close(score.attributionOfLabelled, 0.8, tolerance: 0.0001)
+            },
+
+            test("the greedy branch decides its ties by name") { expect in
+                // Eight clusters over four speakers, ten words each, so every
+                // count ties and only the tiebreakers decide the mapping.
+                let ties = tiesCase()
+                var seen: [BenchScorer.Mapping] = []
+                for _ in 0..<8 {
+                    seen.append(BenchScorer.bestMapping(
+                        pairs: ties.pairs, referenceSpeakers: ties.speakers,
+                        hypothesisKeys: ties.keys
+                    ))
+                }
+                let expected = ["c0": "A", "c2": "B", "c4": "C", "c6": "D"]
+                for mapping in seen {
+                    expect.equal(
+                        mapping.injective, expected,
+                        "count desc, reference asc, hypothesis asc decides every tie"
+                    )
+                    expect.equal(mapping.strictCorrect, 40)
+                    expect.equal(mapping.mergedCorrect, 80)
+                }
             },
         ])
     }

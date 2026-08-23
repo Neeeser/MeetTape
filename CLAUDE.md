@@ -298,12 +298,20 @@ fixture for the same command via `--truth`, which catches wiring, chunk-seam
 and assembly defects without touching the corpus.
 
 The scorer is `MeetTapeBench`, ported metric for metric from the Python scorer
-the model-path probe validated. `BenchScorerTests` puts three transcripts with
-known answers through it: the reference itself scores 0% WER and 100%
-attribution, the reference with one word in ten deleted scores 10.1% WER, and
-the reference with shuffled labels scores at chance. A wrong meter is worse
-than no meter, which is what those pin.
+the model-path probe validated. Attribution is reported twice: `attribution`
+scores the best injective cluster mapping, where a cluster left over after
+every reference speaker is claimed contributes nothing, and
+`attributionMerged` scores the same after each leftover cluster is folded onto
+the speaker it mostly covers. The baselines and the regression rule read the
+strict one, so a diarizer that splits one voice into six is not paid for the
+split.
 
+`BenchScorerTests` puts transcripts with known answers through the meter: the
+reference itself scores 0% WER and 100% attribution, the reference with one
+word in ten deleted scores 10.1% WER, the reference with shuffled labels
+scores at chance, and a hand-built six-cluster transcript over four speakers
+scores 80% strict against 100% merged. A wrong meter is worse than no meter,
+which is what those pin.
 
 ## Release
 

@@ -1,6 +1,7 @@
 # Local investigation material — read but never committed
 /plans/
 /probes/
+/.claude/specs/
 
 # Secrets
 .env

@@ -9,23 +9,38 @@
 # reads both.
 #
 # Usage: scripts/check-offline.sh [args passed to scripts/test.sh]
+
+# No `set -e`: the suite's exit status is analysed below, not a reason to abort.
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if [ "${MEETTAPE_LOCAL_MODELS:-}" = "1" ] || [ "${MEETTAPE_LIVE_OPENAI:-}" = "1" ]; then
+    echo "check-offline: refusing to run with MEETTAPE_LOCAL_MODELS or MEETTAPE_LIVE_OPENAI set, since those suites download on purpose" >&2
+    exit 2
+fi
+
 log="$(mktemp -t meettape-offline-check)"
-temp_root="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "${TMPDIR:-/tmp}")"
 before="$(mktemp -t meettape-offline-before)"
+after="$(mktemp -t meettape-offline-after)"
+trap 'rm -f "$log" "$before" "$after"' EXIT
+
+temp_root="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo "${TMPDIR:-/tmp}")"
 find "$temp_root" -maxdepth 1 -name 'meettape-tests-*' 2>/dev/null | sort > "$before"
 
 ./scripts/test.sh "$@" 2>&1 | tee "$log"
 suite_status=${PIPESTATUS[0]}
 
-# FluidAudio logs through its own category, and WhisperKit through argmax's.
-# Either line means a model fetch began.
-downloads="$(grep -E 'DownloadUtils|from HuggingFace|Downloading (Whisper|Parakeet|Cohere)' "$log" || true)"
+# Only FluidAudio's fetches are detectable here: its AppLogger mirrors every
+# line to stderr. argmax-oss-swift 1.1.0 logs through os.Logger, so WhisperKit's
+# downloads go to the unified log at MeetTape's .error level and never reach
+# stdout or stderr. The detectable half is the half that matters: FluidAudio's
+# diarizer and aligner are in every required model set, cloud included.
+#
+# Match download events, not the category: the same category logs cache hits
+# ("Found X locally, no download needed") and compilation.
+downloads="$(grep -E 'Downloading .* from HuggingFace|files to download' "$log" || true)"
 
-after="$(mktemp -t meettape-offline-after)"
 find "$temp_root" -maxdepth 1 -name 'meettape-tests-*' 2>/dev/null | sort > "$after"
 leaked="$(comm -13 "$before" "$after")"
 

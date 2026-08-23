@@ -9,8 +9,10 @@ import MeetTapeSpeakers
 /// enrichment.
 ///
 /// Every stage commits its state to disk before the next begins, and every stage
-/// after `audio_safe` is retryable. Nothing here ever deletes or rewrites source
-/// audio: a failure leaves the recording exactly where it was and the job waiting.
+/// after `audio_safe` is retryable. Until a meeting is `complete`, nothing here
+/// deletes or rewrites source audio: a failure leaves the recording exactly
+/// where it was and the job waiting. After `complete`, compaction replaces the
+/// PCM segments with verified archive files; it never deletes the only copy.
 public actor ProcessingPipeline {
     public struct Progress: Sendable, Equatable {
         public var meetingID: String
@@ -237,6 +239,73 @@ public actor ProcessingPipeline {
                 return
             }
         }
+
+        // Compaction runs strictly after `complete`: every model has read the
+        // PCM at full fidelity by now. A failure leaves the segments as the
+        // source and the startup sweep retries; it never fails the meeting.
+        // The gate is re-checked the way every stage checks it: a recording
+        // that started during enrichment must not share the disk with a
+        // transcode and a bulk delete.
+        if metadata.processing.state == .complete,
+           AudioCompactor.hasWork(store: store, metadata: metadata) {
+            while gate.isBlocked {
+                report(metadata, chunks: nil, detail: "Waiting until recording finishes")
+                if holdsSlot {
+                    jobLock.release()
+                    holdsSlot = false
+                }
+                await gate.waitUntilAllowed()
+                if !holdsSlot {
+                    await jobLock.acquire()
+                    holdsSlot = true
+                }
+            }
+            await compactQuietly(store: store)
+        }
+    }
+
+    /// Replaces a finished meeting's PCM segments with verified archives.
+    /// Public entry for the startup sweep; `process` compacts inline.
+    public func compactAudio(meetingID: String) async {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
+        guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
+        await waitForSlot()
+        defer { jobLock.release() }
+        await compactQuietly(store: found.store)
+    }
+
+    /// Compacts every finished meeting that still has PCM audio, one at a
+    /// time. Folded continuations are enumerated explicitly: the archive
+    /// listing hides them, but their folders hold the only copy of the second
+    /// half of a dropped call.
+    public func compactPending() async {
+        var candidates = repository.listMeetings()
+            .filter { $0.processingState == .complete }
+            .map(\.id)
+        candidates.append(contentsOf: repository.mergedMeetingIDs())
+        for meetingID in candidates {
+            await compactAudio(meetingID: meetingID)
+        }
+    }
+
+    /// The transcode is minutes of synchronous CPU work for a long meeting, so
+    /// it runs detached rather than on this actor's executor: the job slot is
+    /// already held, and the actor must stay free to answer a rename or a line
+    /// correction from the panel while the encode runs.
+    private func compactQuietly(store: MeetingStore) async {
+        let compactor = AudioCompactor(clock: clock)
+        do {
+            let outcome = try await Task.detached(priority: .utility) {
+                try compactor.compact(store: store)
+            }.value
+            if outcome == .compacted {
+                Log.processing.info("audio compacted")
+            }
+        } catch {
+            Log.processing.error(
+                "audio compaction failed: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
     }
 
     /// How long to wait before attempting a stage again. The server's own
@@ -360,8 +429,8 @@ public actor ProcessingPipeline {
         let timeline = try store.readTimeline()
         let existing = try store.readRawTranscript()
         for track in tracks {
-            let segments = timeline.segments(track: track)
-            guard !segments.isEmpty else { continue }
+            let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
+            guard !location.isEmpty else { continue }
             // One track's words come from one backend. A failed cloud run that
             // the user retried after switching to Local resumed at this stage,
             // and the resume guards match on chunk identifier, which the two
@@ -379,7 +448,7 @@ public actor ProcessingPipeline {
             }
             if transcriber.limits.requiresChunking {
                 try await runChunks(
-                    store: store, metadata: &metadata, track: track, segments: segments,
+                    store: store, metadata: &metadata, track: track, location: location,
                     model: transcriber.identifier,
                     configuration: ChunkPlanner.Configuration.fitting(
                         transcriber.limits, timing: transcriber.timing
@@ -394,7 +463,7 @@ public actor ProcessingPipeline {
             } else {
                 try await runWholeTrack(
                     store: store, metadata: &metadata, track: track,
-                    segments: segments, timeline: timeline, backend: transcriber
+                    location: location, timeline: timeline, backend: transcriber
                 )
             }
         }
@@ -459,6 +528,10 @@ public actor ProcessingPipeline {
             create: true
         )
         defer { try? FileManager.default.removeItem(at: workingDirectory) }
+        // Resolved per track the same way transcription resolves it, so a
+        // meeting whose segments have been compacted into per-track archives
+        // aligns from the archive rather than from a directory that is gone.
+        var locations: [CaptureTrack: TrackAudioLocation] = [:]
 
         for (index, chunk) in pending.enumerated() {
             report(
@@ -475,11 +548,14 @@ public actor ProcessingPipeline {
                 end: chunk.timelineOffset - leadIn + chunk.durationSeconds,
                 overlapEnd: 0
             )
+            let location = try locations[chunk.track]
+                ?? store.trackAudioLocation(
+                    track: chunk.track, metadata: store.readMetadata(), timeline: timeline
+                )
+            locations[chunk.track] = location
             let audioURL = workingDirectory.appendingPathComponent("\(chunk.id).m4a")
             let frames = try exporter.export(
-                plan: plan,
-                segments: timeline.segments(track: chunk.track),
-                segmentsDirectory: store.layout.segments,
+                plan: plan, segments: location.segments, segmentsDirectory: location.directory,
                 to: audioURL
             )
             defer { try? FileManager.default.removeItem(at: audioURL) }
@@ -526,7 +602,7 @@ public actor ProcessingPipeline {
         store: MeetingStore,
         metadata: inout MeetingMetadata,
         track: CaptureTrack,
-        segments: [RecordedSegment],
+        location: TrackAudioLocation,
         timeline: RecordingTimeline,
         backend: any TranscriptionBackend
     ) async throws {
@@ -534,8 +610,8 @@ public actor ProcessingPipeline {
         let chunkID = "\(track.rawValue)_full"
         guard !raw.chunks.contains(where: { $0.id == chunkID }) else { return }
         guard let audio = try scratch.trackAudio(
-            meetingID: metadata.id, track: track, segments: segments,
-            segmentsDirectory: store.layout.segments
+            meetingID: metadata.id, track: track, segments: location.segments,
+            segmentsDirectory: location.directory
         ) else { return }
 
         let meetingID = metadata.id
@@ -554,7 +630,7 @@ public actor ProcessingPipeline {
             id: chunkID,
             track: track,
             timelineOffset: timeline.leadIn(track: track),
-            durationSeconds: output.durationSeconds ?? segments.reduce(0) { $0 + $1.seconds },
+            durationSeconds: output.durationSeconds ?? location.seconds,
             model: backend.identifier,
             responseFormat: Self.localResponseFormat(for: backend.timing),
             segments: output.segments,
@@ -591,19 +667,19 @@ public actor ProcessingPipeline {
         let diarizer = backends.diarization(settings, settings.models.diarization)
         let track = diarizedTrack(metadata)
         let timeline = try store.readTimeline()
-        let segments = timeline.segments(track: track)
-        guard !segments.isEmpty else { return }
+        let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
+        guard !location.isEmpty else { return }
 
         if diarizer.isLocal { try await prepareLocalModels(metadata: metadata) }
 
         if diarizer.limits.requiresChunking {
             try await runChunkedDiarization(
                 store: store, metadata: &metadata, track: track,
-                segments: segments, backend: diarizer, settings: settings
+                location: location, backend: diarizer, settings: settings
             )
         } else {
             try await runWholeTrackDiarization(
-                store: store, metadata: &metadata, track: track, segments: segments,
+                store: store, metadata: &metadata, track: track, location: location,
                 timeline: timeline, backend: diarizer
             )
         }
@@ -619,7 +695,7 @@ public actor ProcessingPipeline {
         store: MeetingStore,
         metadata: inout MeetingMetadata,
         track: CaptureTrack,
-        segments: [RecordedSegment],
+        location: TrackAudioLocation,
         backend: any DiarizationBackend,
         settings: AppSettings
     ) async throws {
@@ -650,7 +726,7 @@ public actor ProcessingPipeline {
             ?? (transcriberOwnsWords(settings) || foreignWords ? .speakers : .words)
 
         try await runChunks(
-            store: store, metadata: &metadata, track: track, segments: segments,
+            store: store, metadata: &metadata, track: track, location: location,
             model: backend.identifier, purpose: purpose
         ) { url, _ in
             let output = try await backend.diarize(audio: url, progress: { _ in })
@@ -704,15 +780,15 @@ public actor ProcessingPipeline {
         store: MeetingStore,
         metadata: inout MeetingMetadata,
         track: CaptureTrack,
-        segments: [RecordedSegment],
+        location: TrackAudioLocation,
         timeline: RecordingTimeline,
         backend: any DiarizationBackend
     ) async throws {
         var diarization = try store.readRawDiarization()
         guard diarization.activeRun(track: track) == nil else { return }
         guard let audio = try scratch.trackAudio(
-            meetingID: metadata.id, track: track, segments: segments,
-            segmentsDirectory: store.layout.segments
+            meetingID: metadata.id, track: track, segments: location.segments,
+            segmentsDirectory: location.directory
         ) else { return }
 
         let meetingID = metadata.id
@@ -836,7 +912,7 @@ public actor ProcessingPipeline {
         store: MeetingStore,
         metadata: inout MeetingMetadata,
         track: CaptureTrack,
-        segments: [RecordedSegment],
+        location: TrackAudioLocation,
         model: String,
         purpose: RawChunkPurpose = .words,
         configuration: ChunkPlanner.Configuration? = nil,
@@ -845,8 +921,8 @@ public actor ProcessingPipeline {
     ) async throws {
         let exporter = ChunkExporter()
         let stream = TrackAudioStream(
-            segments: segments,
-            segmentsDirectory: store.layout.segments,
+            segments: location.segments,
+            segmentsDirectory: location.directory,
             format: exporter.readFormat
         )
         let duration = stream.durationSeconds
@@ -896,7 +972,8 @@ public actor ProcessingPipeline {
 
             let audioURL = workingDirectory.appendingPathComponent("\(chunkID).m4a")
             let frames = try exporter.export(
-                plan: plan, segments: segments, segmentsDirectory: store.layout.segments, to: audioURL
+                plan: plan, segments: location.segments, segmentsDirectory: location.directory,
+                to: audioURL
             )
             guard frames > 0 else { continue }
             pending.append(PreparedChunk(plan: plan, chunkID: chunkID, audioURL: audioURL))
@@ -1144,12 +1221,14 @@ public actor ProcessingPipeline {
             }
             guard !missing.isEmpty else { continue }
 
-            let segments = timeline.segments(track: run.track)
-            guard !segments.isEmpty else { continue }
+            let location = store.trackAudioLocation(
+                track: run.track, metadata: metadata, timeline: timeline
+            )
+            guard !location.isEmpty else { continue }
             guard await localModelsAvailable() else { return }
             guard let audio = try scratch.trackAudio(
-                meetingID: metadata.id, track: run.track, segments: segments,
-                segmentsDirectory: store.layout.segments
+                meetingID: metadata.id, track: run.track, segments: location.segments,
+                segmentsDirectory: location.directory
             ) else { continue }
 
             let leadIn = timeline.leadIn(track: run.track)
@@ -1200,17 +1279,19 @@ public actor ProcessingPipeline {
         guard try await service.wantsLocalUserSample(identityID: identityID) else { return }
 
         let timeline = try store.readTimeline()
-        let segments = timeline.segments(track: .mic)
-        guard !segments.isEmpty else { return }
+        let location = store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
+        guard !location.isEmpty else { return }
         // The far end has to be on its own track for "the microphone track is
         // the local user" to mean anything. Without one there is nothing to
         // check bleed against, and a call taken on a phone on speaker and
         // recorded manually would enrol whoever spoke most.
-        guard !timeline.segments(track: diarizedTrack(metadata)).isEmpty else { return }
+        guard !store.trackAudioLocation(
+            track: diarizedTrack(metadata), metadata: metadata, timeline: timeline
+        ).isEmpty else { return }
         guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
-            meetingID: metadata.id, track: .mic, segments: segments,
-            segmentsDirectory: store.layout.segments
+            meetingID: metadata.id, track: .mic, segments: location.segments,
+            segmentsDirectory: location.directory
         ) else { return }
 
         guard let sample = try await embed(audio) else { return }
@@ -1392,14 +1473,14 @@ public actor ProcessingPipeline {
             }
         }
 
-        // mixed.caf is derivable and entirely optional; a failure here must not
-        // fail the meeting.
-        if !FileManager.default.fileExists(atPath: store.layout.mixedAudio.path) {
+        // recording.m4a is derivable and entirely optional; a failure here must
+        // not fail the meeting.
+        if !FileManager.default.fileExists(atPath: store.layout.recordingAudio.path) {
             do {
                 try AudioMixer().mix(
-                    timeline: timeline,
-                    segmentsDirectory: store.layout.segments,
-                    to: store.layout.mixedAudio
+                    mic: store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline),
+                    remote: store.trackAudioLocation(track: .remote, metadata: metadata, timeline: timeline),
+                    to: store.layout.recordingAudio
                 )
             } catch {
                 Log.processing.notice("mixdown skipped: \(logSafeDescription(error), privacy: .public)")
@@ -1745,13 +1826,16 @@ public actor ProcessingPipeline {
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
 
-        let metadata = found.metadata
+        // Re-read after the wait: the pre-wait snapshot predates whatever job
+        // held the slot, and compaction in particular flips audioArchive and
+        // deletes the segment files a stale location would name.
         let store = found.store
+        let metadata = (try? store.readMetadata()) ?? found.metadata
         let settings = settingsProvider()
         let track = diarizedTrack(metadata)
         let timeline = try store.readTimeline()
-        let segments = timeline.segments(track: track)
-        guard !segments.isEmpty else { return }
+        let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
+        guard !location.isEmpty else { return }
 
         // The diarizer alone: re-analysis re-clusters, it never re-transcribes,
         // so pulling the configured transcription engine and its aligner would
@@ -1763,8 +1847,8 @@ public actor ProcessingPipeline {
             try await prepareLocalModels(metadata: metadata)
         }
         guard let audio = try scratch.trackAudio(
-            meetingID: metadata.id, track: track, segments: segments,
-            segmentsDirectory: store.layout.segments
+            meetingID: metadata.id, track: track, segments: location.segments,
+            segmentsDirectory: location.directory
         ) else { return }
 
         let output = try await reanalyze(metadata.id, audio, speakerCount)
@@ -1832,7 +1916,8 @@ public actor ProcessingPipeline {
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
-        var metadata = found.metadata
+        // Re-read after the wait; see reanalyzeSpeakers.
+        var metadata = (try? found.store.readMetadata()) ?? found.metadata
         try await recognizeVoices(
             store: found.store, metadata: &metadata, settings: settingsProvider()
         )
@@ -2007,10 +2092,6 @@ public actor ProcessingPipeline {
         let policy = await service.resolutionPolicy
         guard seconds >= policy.enrolmentSpeechSeconds else { return }
 
-        let timeline = try store.readTimeline()
-        let segments = timeline.segments(track: track)
-        guard !segments.isEmpty else { return }
-
         // Reading a whole meeting off disk and running the embedding model is
         // the same class of work a processing stage does, so it waits for the
         // same things.
@@ -2018,10 +2099,20 @@ public actor ProcessingPipeline {
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: metadata.id) }
 
+        // Resolved after the wait, from a fresh read: the job this call queued
+        // behind can be compaction, which moves the audio into the archive and
+        // deletes the segments a pre-wait location would still point at.
+        let currentMetadata = (try? store.readMetadata()) ?? metadata
+        let timeline = try store.readTimeline()
+        let location = store.trackAudioLocation(
+            track: track, metadata: currentMetadata, timeline: timeline
+        )
+        guard !location.isEmpty else { return }
+
         guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
-            meetingID: metadata.id, track: track, segments: segments,
-            segmentsDirectory: store.layout.segments
+            meetingID: metadata.id, track: track, segments: location.segments,
+            segmentsDirectory: location.directory
         ) else { return }
 
         let leadIn = timeline.leadIn(track: track)

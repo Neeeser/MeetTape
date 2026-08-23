@@ -465,6 +465,31 @@ enum DetectionTests {
                 expect.isTrue(candidate.isPreapproved)
             },
 
+            test("an application the user always records preapproves its helpers") { expect in
+                // The two lists hold applications, and the microphone is held by
+                // a helper. Matching one list on the application and the other on
+                // the raw process left always-record working only for the
+                // applications that have no helpers.
+                var detector = GenericCallDetector(
+                    configuration: .init(alwaysRecord: ["com.openai.chat"])
+                )
+                let events = detector.update(
+                    states: [
+                        ApplicationAudioState(
+                            bundleIdentifier: "com.openai.chat.helper.Renderer", processID: 1,
+                            holdsMicrophone: true, producesOutput: false,
+                            isFrontmost: true, windowTitle: nil
+                        ),
+                    ],
+                    at: 100
+                )
+                guard case .callLikely(let candidate) = events.first else {
+                    expect.fail("expected an immediate candidate, got \(events)")
+                    return
+                }
+                expect.isTrue(candidate.isPreapproved)
+            },
+
             test("an application the user never records is ignored") { expect in
                 var detector = GenericCallDetector(
                     configuration: .init(neverRecord: ["com.example.videochat"])
@@ -486,6 +511,147 @@ enum DetectionTests {
                         []
                     )
                 }
+            },
+
+            test("never record takes effect while the app still holds the microphone") { expect in
+                // The user answers the provisional prompt with "never record this
+                // app" while the call is still live. The tracked entry kept
+                // publishing confirmed evidence for the six-second end grace,
+                // which restarted the provisional recording and asked again.
+                var detector = GenericCallDetector()
+                let states = [
+                    ApplicationAudioState(
+                        bundleIdentifier: "com.example.videochat", processID: 4_242,
+                        holdsMicrophone: true, producesOutput: true,
+                        isFrontmost: true, windowTitle: "Team call"
+                    ),
+                ]
+                _ = detector.update(states: states, at: 100)
+                _ = detector.update(states: states, at: 109)
+                expect.equal(detector.currentEvidence().first?.confidence, .confirmed)
+
+                detector.configuration.neverRecord = ["com.example.videochat"]
+                let events = detector.update(states: states, at: 109.5)
+                expect.equal(events, [.callEnded(bundleIdentifier: "com.example.videochat")])
+                expect.equal(
+                    detector.currentEvidence().count, 0,
+                    "the ban is immediate, not after the end grace"
+                )
+            },
+
+            test("a ban recorded against a helper covers the whole application") { expect in
+                // CoreAudio names whichever helper opened the microphone, and an
+                // Electron application rotates through .helper, .helper.Renderer
+                // and .helper.GPU. Stored as reported, the ban missed both the
+                // siblings and the application itself, so the next poll that
+                // found a different helper asked again.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.openai.chat.helper.Renderer"),
+                    "com.openai.chat"
+                )
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.tinyspeck.slackmacgap.helper"),
+                    "com.tinyspeck.slackmacgap"
+                )
+                // A two-component vendor identifier still normalises: Notion ships
+                // as notion.id, with its helpers under notion.id.helper.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "notion.id.helper.Renderer"),
+                    "notion.id"
+                )
+                // An application that is not a helper is stored exactly as it is.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.example.videochat"),
+                    "com.example.videochat"
+                )
+                // Nothing is ever collapsed to one component: a ban on "com"
+                // would prefix-match most of the machine.
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.helper.app"),
+                    "com.helper.app"
+                )
+                expect.equal(
+                    MicrophoneIgnoreList.applicationIdentifier(for: "com.acme.helperapp"),
+                    "com.acme.helperapp"
+                )
+
+                // Each sibling is held past the dwell it would otherwise promote
+                // at, so the ban is what keeps it out rather than the clock.
+                let banned = MicrophoneIgnoreList.applicationIdentifier(
+                    for: "com.openai.chat.helper.Renderer"
+                )
+                var detector = GenericCallDetector(configuration: .init(neverRecord: [banned]))
+                var when = 100.0
+                for sibling in [
+                    "com.openai.chat", "com.openai.chat.helper", "com.openai.chat.helper.GPU",
+                ] {
+                    for _ in 0..<60 {
+                        when += 0.5
+                        expect.equal(
+                            detector.update(
+                                states: [
+                                    ApplicationAudioState(
+                                        bundleIdentifier: sibling, processID: 1,
+                                        holdsMicrophone: true, producesOutput: true,
+                                        isFrontmost: true, windowTitle: nil
+                                    ),
+                                ],
+                                at: when
+                            ),
+                            [], "\(sibling) belongs to an application the user banned"
+                        )
+                    }
+                    expect.equal(detector.currentEvidence().count, 0, "\(sibling) is not evidence")
+                }
+            },
+
+            test("MeetTape's own helpers are never a meeting") { expect in
+                // Its capture holds the microphone for the length of every
+                // recording, and it is the helper that would hold it.
+                var detector = GenericCallDetector()
+                var when = 100.0
+                for _ in 0..<60 {
+                    when += 0.5
+                    expect.equal(
+                        detector.update(
+                            states: [
+                                ApplicationAudioState(
+                                    bundleIdentifier: "com.meettape.app.helper", processID: 1,
+                                    holdsMicrophone: true, producesOutput: true,
+                                    isFrontmost: false, windowTitle: nil
+                                ),
+                            ],
+                            at: when
+                        ),
+                        []
+                    )
+                }
+                expect.equal(detector.currentEvidence().count, 0)
+            },
+
+            test("never record covers a descendant of a banned identifier") { expect in
+                var detector = GenericCallDetector(
+                    configuration: .init(neverRecord: ["com.example.videochat"])
+                )
+                var now = 100.0
+                for _ in 0..<200 {
+                    now += 0.5
+                    expect.equal(
+                        detector.update(
+                            states: [
+                                ApplicationAudioState(
+                                    bundleIdentifier: "com.example.videochat.helper.Renderer",
+                                    processID: 1,
+                                    holdsMicrophone: true, producesOutput: true,
+                                    isFrontmost: true, windowTitle: nil
+                                ),
+                            ],
+                            at: now
+                        ),
+                        []
+                    )
+                }
+                expect.equal(detector.currentEvidence().count, 0)
             },
         ])
     }

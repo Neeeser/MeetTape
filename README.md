@@ -286,29 +286,41 @@ balance and links to the OpenAI dashboard.
 Recordings are written to `~/Documents/MeetTape/Meetings/YYYY/MM/<meeting>/`,
 which can be changed in Settings.
 
+The top level holds what a person opens directly; everything the application
+maintains is under `raw/`.
+
 ```
 2026-08-18-1418-slack-huddle-engineering/
-├── segments/
-│   ├── mic.0001.caf          source audio for the local microphone
-│   ├── system.0001.caf       source audio for the meeting application
-│   └── manifest.jsonl        append-only record of every capture event
-├── api/                      API responses as received
-├── metadata.json             title, participants, calendar link, processing state
-├── transcript.raw.json       transcription output as returned, with word timings
-├── diarization.raw.json      who spoke when, as the diarizer decided it
-├── speakers.map.json         speaker names and per-line corrections
-├── transcript.json           canonical transcript on a single timeline
 ├── transcript.md             rendered transcript for reading
+├── recording.m4a             mixdown of both tracks, AAC, regenerated on demand
 ├── notes.md                  user notes, which no processing step modifies
 ├── summary.md                generated summary
-└── mixed.caf                 mixdown of both tracks, regenerated on demand
+└── raw/
+    ├── manifest.jsonl        append-only record of every capture event
+    ├── audio/
+    │   ├── mic.m4a           source audio for the local microphone
+    │   └── system.m4a        source audio for the meeting application
+    ├── api/                  API responses as received
+    ├── alignments/           word timings recovered for a model that returned none
+    ├── metadata.json         title, participants, calendar link, processing state
+    ├── transcript.raw.json   transcription output as returned, with word timings
+    ├── diarization.raw.json  who spoke when, as the diarizer decided it
+    ├── speakers.map.json     speaker names and per-line corrections
+    └── transcript.json       canonical transcript on a single timeline
 ```
 
+While a meeting records and processes, `raw/segments/` holds the source audio
+as 30-second float32 CAF files, the format that survives a kill mid-write. Once
+processing completes, each track is transcoded to `raw/audio/` as AAC mono at
+16 kHz, the rate every model reads, verified against the manifest, and the
+segments are deleted. A 72-minute meeting is about 90 MB instead of the 2.4 GB
+the PCM held.
+
 The manifest is the authoritative timeline; audio container headers are not
-trusted. The source segments, the manifest lines, the raw transcription and
+trusted. The track archives, the manifest lines, the raw transcription and
 diarization output and any imported original file are never modified after they
-are written. The Markdown files, `summary.md` and `mixed.caf` are derived from
-those inputs and can be deleted safely.
+are written. The Markdown files, `summary.md` and `recording.m4a` are derived
+from those inputs and can be deleted safely.
 
 Renaming a speaker updates `speakers.map.json` and re-renders the transcript, and
 so does correcting a single line. Neither re-transcribes the audio nor modifies

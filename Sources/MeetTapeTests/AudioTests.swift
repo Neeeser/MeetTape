@@ -350,9 +350,15 @@ enum AudioTests {
 
                 let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
                 try AudioMixer().mix(
-                    timeline: timeline, segmentsDirectory: layout.segments, to: layout.mixedAudio
+                    mic: TrackAudioLocation(
+                        segments: timeline.segments(track: .mic), directory: layout.segments
+                    ),
+                    remote: TrackAudioLocation(
+                        segments: timeline.segments(track: .remote), directory: layout.segments
+                    ),
+                    to: layout.recordingAudio
                 )
-                let info = try AudioFileInspector().inspect(url: layout.mixedAudio)
+                let info = try AudioFileInspector().inspect(url: layout.recordingAudio)
                 // Remote runs 0–4 s, mic is delayed to 1–4 s, so the mix is 4 s long.
                 expect.close(info.seconds, 4.0, tolerance: 0.1)
 
@@ -360,9 +366,9 @@ enum AudioTests {
                 // written incrementally, and the caller skips the mix when that
                 // path already exists, so a quit part way through used to leave a
                 // short but perfectly valid file that nothing would ever rebuild.
-                let partial = layout.mixedAudio.deletingPathExtension()
+                let partial = layout.recordingAudio.deletingPathExtension()
                     .appendingPathExtension("partial")
-                    .appendingPathExtension(layout.mixedAudio.pathExtension)
+                    .appendingPathExtension(layout.recordingAudio.pathExtension)
                 expect.isFalse(
                     FileManager.default.fileExists(atPath: partial.path),
                     "and the partial it was built under is gone"
@@ -398,10 +404,16 @@ enum AudioTests {
                     try FileManager.default.removeItem(at: file)
                 }
                 try? AudioMixer().mix(
-                    timeline: timeline, segmentsDirectory: layout.segments, to: layout.mixedAudio
+                    mic: TrackAudioLocation(
+                        segments: timeline.segments(track: .mic), directory: layout.segments
+                    ),
+                    remote: TrackAudioLocation(
+                        segments: timeline.segments(track: .remote), directory: layout.segments
+                    ),
+                    to: layout.recordingAudio
                 )
                 expect.isFalse(
-                    FileManager.default.fileExists(atPath: layout.mixedAudio.path),
+                    FileManager.default.fileExists(atPath: layout.recordingAudio.path),
                     "nothing at the final path, rather than an empty file that reads as done"
                 )
             },

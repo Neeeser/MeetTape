@@ -35,7 +35,32 @@ enum BenchScorerTests {
              "attributionScored":100,"overlapExcluded":0,"referenceSpeakers":4,
              "hypothesisSpeakers":4,"speakerKeys":[],"clusterMapping":{},
              "repeatedNgrams":\(repeats),"repeatedShare":0,"overlappingPairs":0,
-             "worstOverlapSeconds":0}
+             "worstOverlapSeconds":0,"werConversational":\(werNoFiller),
+             "orderingFloorWer":0,"attributionCoverage":1,
+             "speechCoverage":0.9,"wordsPerMinute":150}
+            """
+        return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
+    }
+
+    /// One run of a case, with the fields the deciding aggregation touches and
+    /// two it must leave alone: `deletions` counts a particular transcript and
+    /// `clusterMapping` describes a particular set of clusters.
+    static func run(
+        wer: Double, attribution: Double, der: Double?, repeats: Int, deletions: Int
+    ) throws -> BenchScore {
+        let json = """
+            {"meeting":"ES2002b","wer":\(wer),"werNoFiller":\(wer / 2),
+             "werConversational":\(wer / 4),"orderingFloorWer":0.1,
+             "substitutions":0,"insertions":0,"deletions":\(deletions),
+             "referenceWords":100,"hypothesisWords":100,"utterances":10,
+             "attribution":\(attribution),"attributionMerged":\(attribution + 0.05),
+             "attributionOfLabelled":\(attribution + 0.02),"attributionScored":100,
+             "overlapExcluded":0,"attributionCoverage":1,"referenceSpeakers":4,
+             "hypothesisSpeakers":4,"speakerKeys":["c\(deletions)"],
+             "clusterMapping":{"c\(deletions)":"A"},"repeatedNgrams":\(repeats),
+             "repeatedShare":0,"overlappingPairs":0,"worstOverlapSeconds":0,
+             \(der.map { "\"der\":\($0),\"derStrict\":\($0 + 0.1)," } ?? "")
+             "speechCoverage":0.9,"wordsPerMinute":150}
             """
         return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
     }
@@ -107,6 +132,32 @@ enum BenchScorerTests {
             speakers: speakers, agentToSpeaker: [:], words: words, turns: turns
         )
         return (truth, utterances)
+    }
+
+    /// A truth built from turns, each holding evenly spaced one-second words.
+    static func made(
+        _ turns: [(speaker: String, start: Double, words: [String])], seconds: Double
+    ) -> BenchTruth {
+        var words: [BenchTruth.Word] = []
+        var spans: [BenchTruth.Turn] = []
+        for turn in turns {
+            for (step, text) in turn.words.enumerated() {
+                let start = turn.start + Double(step)
+                words.append(BenchTruth.Word(
+                    start: start, end: start + 0.5, text: text,
+                    speaker: turn.speaker, truncated: false
+                ))
+            }
+            spans.append(BenchTruth.Turn(
+                speaker: turn.speaker, start: turn.start,
+                end: turn.start + Double(turn.words.count)
+            ))
+        }
+        return BenchTruth(
+            meeting: "made", source: "none.wav", windowStart: nil, windowSeconds: seconds,
+            speakers: Array(Set(turns.map(\.speaker))).sorted(), agentToSpeaker: [:],
+            words: words, turns: spans
+        )
     }
 
     /// Eight clusters, four speakers, ten words each: every count ties.
@@ -198,6 +249,128 @@ enum BenchScorerTests {
                 expect.close(score.attributionOfLabelled, 0.8, tolerance: 0.0001)
             },
 
+            test("interleaved speech costs an oracle transcript word order") { expect in
+                // One long turn with a backchannel dropped into the middle of
+                // it. Read by turn the reference ends "five yeah"; read by the
+                // clock the "yeah" falls between "four" and "five", so a
+                // transcript that gets every word right still pays two edits,
+                // which the DP takes as two substitutions over that pair.
+                let interleaved = made([
+                    ("A", 0, ["one", "two", "three", "four", "five"]),
+                    ("B", 3.5, ["yeah"]),
+                ], seconds: 10)
+                expect.close(
+                    BenchScorer.orderingFloor(interleaved), 2.0 / 6.0, tolerance: 0.0001,
+                    "one interleaved word costs two edits out of six words"
+                )
+
+                let sequential = made([
+                    ("A", 0, ["one", "two", "three"]),
+                    ("B", 4, ["four", "five", "six"]),
+                    ("A", 8, ["seven", "eight"]),
+                ], seconds: 12)
+                expect.close(
+                    BenchScorer.orderingFloor(sequential), 0, tolerance: 0.0001,
+                    "turns that do not interleave read the same both ways"
+                )
+
+                // The floor comes off wer and never takes it below zero.
+                let score = BenchScorer.score(
+                    truth: sequential,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 12, text: "one two three four five six seven eight",
+                        speakerKey: "c0"
+                    )]
+                )
+                expect.close(score.orderingFloorWer, 0, tolerance: 0.0001)
+                expect.close(score.netOfFloorWer, score.wer, tolerance: 0.0001)
+            },
+
+            test("attribution reports the share of words it asked about") { expect in
+                // Sixteen words. The first eight are spoken alone, the last
+                // eight across each other, so attribution is asked about half
+                // the meeting and says so.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 4, ["b1", "b2", "b3", "b4"]),
+                    ("A", 8, ["a5", "a6", "a7", "a8"]),
+                    ("B", 8, ["b5", "b6", "b7", "b8"]),
+                ], seconds: 12)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [
+                        BenchUtterance(start: 0, end: 4, text: "a1 a2 a3 a4", speakerKey: "c0"),
+                        BenchUtterance(start: 4, end: 8, text: "b1 b2 b3 b4", speakerKey: "c1"),
+                        BenchUtterance(start: 8, end: 12, text: "a5 a6 a7 a8", speakerKey: "c0"),
+                    ]
+                )
+                expect.equal(score.overlapExcluded, 8, "the overlapping half is not asked")
+                expect.equal(score.attributionScored, 8)
+                expect.close(
+                    score.attributionCoverage, 0.5, tolerance: 0.0001,
+                    "half the reference words reached the question"
+                )
+                expect.close(score.attribution, 1.0, tolerance: 0.0001)
+            },
+
+            test("the conversational variant drops backchannels and the plain one does not") {
+                expect in
+                // "um" is hesitation, "okay" is a backchannel, and an engine
+                // that writes neither is charged for one, both or nothing
+                // depending on which number is read.
+                let truth = made([("A", 0, ["okay", "um", "the", "budget", "is", "fine"])], seconds: 8)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 6, text: "the budget is fine", speakerKey: "c0"
+                    )]
+                )
+                expect.close(score.wer, 2.0 / 6.0, tolerance: 0.0001, "both are missing words")
+                expect.close(
+                    score.werNoFiller, 1.0 / 5.0, tolerance: 0.0001,
+                    "the filler set covers um and leaves okay charged"
+                )
+                expect.close(
+                    score.werConversational, 0, tolerance: 0.0001,
+                    "the backchannel set covers okay as well"
+                )
+            },
+
+            test("DER is reported under both mappings") { expect in
+                // Six clusters over four speakers. Merged folds the two extra
+                // clusters onto the voices they cover and scores clean; strict
+                // leaves them holding their own keys, which is the last 40
+                // seconds of A's turn and of B's, 80 of 400 seconds.
+                let split = splitCase()
+                let score = BenchScorer.score(truth: split.truth, utterances: split.utterances)
+                let merged = try expect.unwrap(score.der)
+                let strict = try expect.unwrap(score.derStrict)
+                expect.close(merged, 0, tolerance: 0.01, "the merged mapping covers every voice")
+                expect.close(
+                    strict, 0.2, tolerance: 0.01,
+                    "the two leftover clusters are 80 of 400 seconds"
+                )
+            },
+
+            test("a case reports how densely its window is spoken") { expect in
+                // Eight seconds of speech in a twenty second window, twelve
+                // words in it.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 6, ["b1", "b2", "b3", "b4"]),
+                    ("A", 6, ["a5", "a6", "a7", "a8"]),
+                ], seconds: 20)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(start: 0, end: 4, text: "a1", speakerKey: "c0")]
+                )
+                expect.close(
+                    score.speechCoverage, 0.4, tolerance: 0.0001,
+                    "two speakers over the same four seconds are four seconds of speech"
+                )
+                expect.close(score.wordsPerMinute, 36, tolerance: 0.01)
+            },
+
             test("the greedy branch decides its ties by name") { expect in
                 // Eight clusters over four speakers, ten words each, so every
                 // count ties and only the tiebreakers decide the mapping.
@@ -280,6 +453,49 @@ enum BenchScorerTests {
                 expect.equal(baselines.entries["parakeet/local/ES2002c"]?.repeatedNgrams, 1)
                 expect.equal(baselines.entries["parakeet/local/IS1009c"]?.repeatedNgrams, 7)
                 expect.equal(baselines.entries["parakeet/local/ES2002b"]?.repeatedNgrams, 0)
+            },
+
+            test("repeated runs decide on the mean, and on the worst repeats") { expect in
+                let runs = [
+                    try run(wer: 0.20, attribution: 0.80, der: 0.30, repeats: 0, deletions: 11),
+                    try run(wer: 0.30, attribution: 0.90, der: 0.50, repeats: 7, deletions: 22),
+                    try run(wer: 0.40, attribution: 0.70, der: 0.40, repeats: 2, deletions: 33),
+                ]
+                let deciding = try expect.unwrap(BenchAggregate.deciding(over: runs))
+                expect.close(deciding.wer, 0.30, tolerance: 0.0001)
+                expect.close(deciding.werNoFiller, 0.15, tolerance: 0.0001)
+                expect.close(deciding.werConversational, 0.075, tolerance: 0.0001)
+                expect.close(deciding.attribution, 0.80, tolerance: 0.0001)
+                expect.close(deciding.attributionMerged, 0.85, tolerance: 0.0001)
+                expect.close(deciding.attributionOfLabelled, 0.82, tolerance: 0.0001)
+                expect.close(try expect.unwrap(deciding.der), 0.40, tolerance: 0.0001)
+                expect.close(try expect.unwrap(deciding.derStrict), 0.50, tolerance: 0.0001)
+                expect.equal(
+                    deciding.repeatedNgrams, 7,
+                    "the repeat budget is worst of the runs, because a defect seen once is one"
+                )
+                expect.equal(
+                    deciding.deletions, 11,
+                    "a count describes one transcript and keeps the first run's value"
+                )
+                expect.equal(deciding.clusterMapping, ["c11": "A"])
+                expect.close(deciding.orderingFloorWer, 0.1, tolerance: 0.0001)
+
+                let alone = try expect.unwrap(BenchAggregate.deciding(over: [runs[1]]))
+                expect.equal(alone, runs[1], "one run decides as itself")
+                expect.isTrue(
+                    BenchAggregate.deciding(over: []) == nil, "no runs decide nothing"
+                )
+            },
+
+            test("a run with no DER leaves the aggregate without one") { expect in
+                let runs = [
+                    try run(wer: 0.2, attribution: 0.8, der: nil, repeats: 0, deletions: 1),
+                    try run(wer: 0.4, attribution: 0.6, der: nil, repeats: 0, deletions: 2),
+                ]
+                let deciding = try expect.unwrap(BenchAggregate.deciding(over: runs))
+                expect.isTrue(deciding.der == nil, "no run measured DER")
+                expect.close(deciding.wer, 0.30, tolerance: 0.0001)
             },
         ])
     }

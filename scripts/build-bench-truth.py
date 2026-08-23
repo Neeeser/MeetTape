@@ -190,8 +190,32 @@ def build(annotations, meeting, window):
     for word in reference:
         per_speaker[word["speaker"]] = per_speaker.get(word["speaker"], 0) + 1
     kind = "window %.0f-%.0fs" % (start, start + seconds) if window else "whole %.0fs" % seconds
-    print("%-8s %-22s words %5d  %s  (%d kB)" % (
-        meeting, kind, len(reference), per_speaker, os.path.getsize(path) // 1024))
+    coverage, per_minute = density(truth["turns"], seconds, len(reference))
+    print("%-8s %-22s words %5d  %3.0f%% speech  %3.0f words/min  %s  (%d kB)" % (
+        meeting, kind, len(reference), coverage * 100, per_minute, per_speaker,
+        os.path.getsize(path) // 1024))
+
+
+def density(turns, seconds, word_count):
+    """Speech as a share of the window, and words per minute of it.
+
+    Printed rather than written into the JSON: the harness derives the same two
+    numbers from the turns it already reads, and adding fields would rewrite
+    every committed truth file for something computable from its contents. The
+    window picker has no density floor, so this is how a sparse case is spotted
+    when the truth is regenerated: ES2003a comes out at 31% and 64 words/min
+    against 78% to 99% and 146 to 217 for the rest.
+    """
+    if seconds <= 0:
+        return 0.0, 0.0
+    spoken = 0.0
+    reach = float("-inf")
+    for turn in sorted(turns, key=lambda t: t["start"]):
+        begin = max(turn["start"], reach)
+        if turn["end"] > begin:
+            spoken += turn["end"] - begin
+        reach = max(reach, turn["end"])
+    return spoken / seconds, word_count / (seconds / 60)
 
 
 def main():

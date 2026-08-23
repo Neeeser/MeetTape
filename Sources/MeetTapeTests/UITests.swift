@@ -165,6 +165,39 @@ enum UITests {
                 )
             },
 
+            test("setup never touches the keychain on the local path") { expect in
+                // Asking whether a key is stored can raise the keychain password
+                // prompt: a login-keychain item enforces its access control on the
+                // search as well as on the read, so a build re-signed since the
+                // item was created is no longer trusted by it. Asked from begin(),
+                // that dialog appeared over the wizard on every open, for every
+                // user, including everyone who stays on the local default and has
+                // no key at all.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                let lookups = Counter()
+                let model = await MainActor.run {
+                    SetupModel(
+                        runtime: MeetTapeRuntime(settingsDirectory: root),
+                        keyPresence: { await lookups.bump(); return true }
+                    )
+                }
+
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(
+                    await lookups.value, 0,
+                    "the local default must never ask the keychain anything"
+                )
+
+                await MainActor.run { model.chooseBackend(.openAI) }
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(await lookups.value, 1, "choosing cloud is what asks")
+
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(await lookups.value, 1, "and it is asked once, not per redraw")
+            },
+
             test("the review panel handles a meeting with nothing processed yet") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -470,4 +503,10 @@ enum UITests {
             },
         ])
     }
+}
+
+/// Counts calls from a `@Sendable` closure.
+actor Counter {
+    private(set) var value = 0
+    func bump() { value += 1 }
 }

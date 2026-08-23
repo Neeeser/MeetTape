@@ -44,11 +44,24 @@ public final class SetupModel {
 
     @ObservationIgnored public let runtime: MeetTapeRuntime
     @ObservationIgnored private let observer: PermissionObserver
+    /// Answers whether a key is in the keychain. Injected so a test can count the
+    /// calls, since the defect this guards against is making one at all.
+    @ObservationIgnored private let keyPresence: @Sendable () async -> Bool
     @ObservationIgnored private var hasStoredKey = false
+    @ObservationIgnored private var hasCheckedForStoredKey = false
 
-    public init(runtime: MeetTapeRuntime, observer: PermissionObserver = PermissionObserver()) {
+    public init(
+        runtime: MeetTapeRuntime,
+        observer: PermissionObserver = PermissionObserver(),
+        keyPresence: @escaping @Sendable () async -> Bool = {
+            // `isKnownAbsent` can block on the keychain's authorisation prompt and
+            // must not be asked while holding the main actor.
+            await Task.detached { !KeychainAPIKeyStore().isKnownAbsent }.value
+        }
+    ) {
         self.runtime = runtime
         self.observer = observer
+        self.keyPresence = keyPresence
         self.storagePath = runtime.settings.storageRootPath
     }
 
@@ -88,7 +101,6 @@ public final class SetupModel {
     public func begin() async {
         hostStatus = NativeMessagingInstaller().status()
         await runtime.refreshLocalModelState()
-        await readStoredKey()
         statuses = await runtime.permissions.allStatuses()
         current = SetupFlow.openingStep(for: snapshot)
         observer.start { [weak self] statuses in
@@ -158,6 +170,7 @@ public final class SetupModel {
         // Both paths need local units, and which ones differ, so the download is
         // re-planned the moment the choice changes rather than at the next step.
         Task { await runtime.installLocalModels() }
+        if choice == .openAI { Task { await lookUpStoredKeyIfNeeded() } }
     }
 
     public func chooseLocalModel(_ model: LocalTranscriptionModel) {
@@ -186,13 +199,18 @@ public final class SetupModel {
         acceptedUnverifiedKey = true
     }
 
-    /// Reports whether a key is already in the keychain, without reading it.
-    private func readStoredKey() async {
-        // `isKnownAbsent` can block on an authorisation prompt, and must not be
-        // asked while holding the main actor.
-        let absent = await Task.detached { KeychainAPIKeyStore().isKnownAbsent }.value
-        hasStoredKey = !absent
-        if hasStoredKey, keyState == .absent { keyState = .absent }
+    /// Looks up whether a key is already stored, once, and only when it matters.
+    ///
+    /// Asking at all can raise the keychain's password prompt: a login-keychain
+    /// item enforces its access control on the search as well as on the read, and
+    /// a build re-signed since the item was created is no longer trusted by it.
+    /// Called from `begin()`, that prompt appeared over the wizard on every open,
+    /// for every user, including the ones who never leave the local default and
+    /// have no key at all.
+    public func lookUpStoredKeyIfNeeded() async {
+        guard !hasCheckedForStoredKey, !runtime.settings.processing.isFullyLocal else { return }
+        hasCheckedForStoredKey = true
+        hasStoredKey = await keyPresence()
     }
 
     /// Whether the cloud step can offer to check a key the user has not typed.

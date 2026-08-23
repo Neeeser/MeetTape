@@ -98,6 +98,9 @@ struct BackendStep: View {
 
             if !runtime.settings.processing.isFullyLocal { keyField }
         }
+        // Covers arriving on this step with the cloud already chosen, which
+        // `chooseBackend` does not see.
+        .task { await model.lookUpStoredKeyIfNeeded() }
     }
 
     private func choice(

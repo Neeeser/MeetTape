@@ -115,7 +115,6 @@ public final class WindowManager {
             guard app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID else {
                 return
             }
-            Log.ui.info("system settings activated, repositioning setup")
             MainActor.assumeIsolated { self?.moveSetupAsideFromSystemSettings() }
         }
         present(window)
@@ -134,16 +133,11 @@ public final class WindowManager {
         for delay in [0.3, 0.8, 1.5, 2.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, let window = self.setupWindow else { return }
-                guard let obstacle = SetupWindowPlacement.systemSettingsFrame() else {
-                    Log.ui.info("no system settings window found")
-                    return
-                }
-                guard window.frame.intersects(obstacle) else {
-                    Log.ui.info(
-                        "setup \(NSStringFromRect(window.frame), privacy: .public) clear of \(NSStringFromRect(obstacle), privacy: .public)"
-                    )
-                    return
-                }
+                // Nothing is logged when there is nothing to do: this runs four
+                // times per activation and the quiet case is the common one.
+                guard let obstacle = SetupWindowPlacement.systemSettingsFrame(),
+                    window.frame.intersects(obstacle)
+                else { return }
                 let target = SetupWindowPlacement.frame(
                     for: window.frame.size,
                     avoiding: obstacle,

@@ -167,6 +167,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         settings.target = self
         menu.addItem(settings)
 
+        let setup = NSMenuItem(title: "Setup…", action: #selector(openSetup), keyEquivalent: "")
+        setup.target = self
+        menu.addItem(setup)
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit MeetTape", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -326,6 +330,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func stopRecording() { runtime.stopRecording() }
     @objc private func keepProvisional() { runtime.resolveProvisional(keep: true) }
     @objc private func discardProvisional() { runtime.resolveProvisional(keep: false) }
+    @objc private func openSetup() {
+        windows.showSetup()
+    }
+
     @objc private func openSettings() { windows.showSettings() }
 
     @objc private func togglePause() {

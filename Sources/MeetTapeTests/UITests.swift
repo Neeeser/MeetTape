@@ -1,5 +1,7 @@
 import AppKit
+import EventKit
 import Foundation
+import UniformTypeIdentifiers
 import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeIntegrations
@@ -34,13 +36,166 @@ enum UITests {
                     settings.storageRootPath = root.appendingPathComponent("Meetings").path
                     runtime.update(settings: settings)
 
-                    // Onboarding on a machine with no permissions granted yet.
-                    render(OnboardingView(model: OnboardingModel(runtime: runtime), onFinish: {}))
+                    // Every setup step, on a machine with no permissions granted
+                    // and no models on disk. Rendered one at a time because the
+                    // wizard only builds the step it is showing, so a trap in a
+                    // later step would otherwise never be reached here.
+                    let setup = SetupModel(runtime: runtime)
+                    for step in SetupStepID.allCases {
+                        setup.jump(to: step)
+                        render(SetupWizardView(model: setup, onFinish: {}))
+                    }
                     // Settings, including the tabs that read live audio state.
                     render(SettingsView(model: SettingsModel(runtime: runtime)))
                     expect.isTrue(true, "the panels built without trapping")
                 }
                 try? FileManager.default.removeItem(at: root)
+            },
+
+            test("the dragged application is offered as a file URL") { expect in
+                // The drag adds MeetTape to the Accessibility and Screen Recording
+                // lists, which is the fast route into panes that have no prompt.
+                // Built with NSItemProvider(contentsOf:) it registered nothing
+                // usable, because that wants a readable file and an application is
+                // a directory: the drag picked up, dropped, and did nothing.
+                let bundle = URL(fileURLWithPath: "/Applications/Safari.app")
+                let provider = ApplicationIdentity.dragItemProvider(for: bundle)
+                expect.isTrue(
+                    provider.registeredTypeIdentifiers.contains(UTType.fileURL.identifier),
+                    "a drop target that takes files sees nothing without public.file-url: "
+                        + "\(provider.registeredTypeIdentifiers)"
+                )
+                expect.equal(provider.suggestedName, "Safari.app")
+
+                let loaded: URL? = await withCheckedContinuation { continuation in
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                        continuation.resume(returning: url)
+                    }
+                }
+                expect.equal(loaded, bundle, "and it resolves back to the bundle")
+            },
+
+            test("calendar access is believed over EventKit's own status") { expect in
+                // Observed on macOS 27: requestFullAccessToEvents called back with
+                // granted = true, System Settings listed MeetTape under Calendars
+                // with Full Access, and EKEventStore.authorizationStatus went on
+                // reporting notDetermined for the rest of the process's life. The
+                // wizard step never went green, and events(around:) returned
+                // nothing, so a meeting recorded in that session got no calendar
+                // title and no attendees.
+                expect.equal(
+                    PermissionsService.calendarState(reported: .notDetermined, canReadCalendars: true),
+                    .granted,
+                    "a store that can read calendars settles it"
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .notDetermined, canReadCalendars: false),
+                    .notDetermined,
+                    "and one that cannot has genuinely not been asked"
+                )
+
+                // A refusal is a refusal. The probe never overrides it, or a
+                // denied permission would read as granted off an empty answer.
+                expect.equal(
+                    PermissionsService.calendarState(reported: .denied, canReadCalendars: true),
+                    .denied
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .writeOnly, canReadCalendars: true),
+                    .denied,
+                    "write-only cannot read the events the matcher needs"
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .fullAccess, canReadCalendars: false),
+                    .granted,
+                    "and the supported answer is trusted when it is positive"
+                )
+            },
+
+            test("setup moves to whichever side of System Settings has room") { expect in
+                // The wizard floats, so it stays readable while the user works in
+                // System Settings. Floating also puts it on top of the pane it is
+                // describing, which is worse than sinking was.
+                let screen = CGRect(x: 0, y: 0, width: 1_800, height: 1_100)
+                let size = CGSize(width: 760, height: 580)
+
+                // Settings on the left, so the wizard goes right.
+                let left = CGRect(x: 0, y: 0, width: 740, height: 1_100)
+                let placedRight = SetupWindowPlacement.frame(
+                    for: size, avoiding: left, within: screen
+                )
+                expect.isFalse(placedRight.intersects(left), "must not cover the pane")
+                expect.isTrue(placedRight.maxX <= screen.maxX, "and must stay on screen")
+
+                // Settings on the right, so the wizard goes left.
+                let right = CGRect(x: 1_060, y: 0, width: 740, height: 1_100)
+                let placedLeft = SetupWindowPlacement.frame(
+                    for: size, avoiding: right, within: screen
+                )
+                expect.isFalse(placedLeft.intersects(right))
+                expect.isTrue(placedLeft.minX >= screen.minX)
+
+                // A screen too narrow to hold both: staying on screen wins over
+                // not overlapping, since a window pushed off the display cannot
+                // be read at all.
+                let narrow = CGRect(x: 0, y: 0, width: 1_000, height: 1_100)
+                let middle = CGRect(x: 130, y: 0, width: 740, height: 1_100)
+                let squeezed = SetupWindowPlacement.frame(
+                    for: size, avoiding: middle, within: narrow
+                )
+                expect.isTrue(squeezed.minX >= narrow.minX, "left edge stays on screen")
+                expect.isTrue(squeezed.maxX <= narrow.maxX, "and so does the right edge")
+            },
+
+            test("window-server rectangles are flipped into AppKit coordinates") { expect in
+                // The window list measures from the top left of the primary
+                // display and AppKit from the bottom left. Skipping the flip put
+                // the wizard off the bottom of the screen on any tall display.
+                let measured: (x: CGFloat, maxY: CGFloat, screenTop: CGFloat)? = await MainActor.run {
+                    guard let primary = NSScreen.screens.first else { return nil }
+                    let topOfScreen = CGRect(x: 10, y: 0, width: 300, height: 200)
+                    let flipped = SetupWindowPlacement.flipped(topOfScreen)
+                    return (flipped.minX, flipped.maxY, primary.frame.maxY)
+                }
+                guard let measured else { return expect.fail("no screen") }
+                expect.equal(measured.x, 10, "x is unchanged")
+                expect.equal(
+                    measured.maxY, measured.screenTop,
+                    "a window at the top in window-server coordinates is at the top in AppKit"
+                )
+            },
+
+            test("setup never touches the keychain on the local path") { expect in
+                // Asking whether a key is stored can raise the keychain password
+                // prompt: a login-keychain item enforces its access control on the
+                // search as well as on the read, so a build re-signed since the
+                // item was created is no longer trusted by it. Asked from begin(),
+                // that dialog appeared over the wizard on every open, for every
+                // user, including everyone who stays on the local default and has
+                // no key at all.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                let lookups = Counter()
+                let model = await MainActor.run {
+                    SetupModel(
+                        runtime: MeetTapeRuntime(settingsDirectory: root),
+                        keyPresence: { await lookups.bump(); return true }
+                    )
+                }
+
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(
+                    await lookups.value, 0,
+                    "the local default must never ask the keychain anything"
+                )
+
+                await MainActor.run { model.chooseBackend(.openAI) }
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(await lookups.value, 1, "choosing cloud is what asks")
+
+                await model.lookUpStoredKeyIfNeeded()
+                expect.equal(await lookups.value, 1, "and it is asked once, not per redraw")
             },
 
             test("the review panel handles a meeting with nothing processed yet") { expect in
@@ -348,4 +503,10 @@ enum UITests {
             },
         ])
     }
+}
+
+/// Counts calls from a `@Sendable` closure.
+actor Counter {
+    private(set) var value = 0
+    func bump() { value += 1 }
 }

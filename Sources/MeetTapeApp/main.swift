@@ -19,9 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notificationRouter = NotificationRouter(runtime: runtime, windows: windows)
         runtime.start()
 
-        if !runtime.settings.hasCompletedOnboarding {
-            windows.showOnboarding()
-        }
+        // Asynchronous, because reading notification permission is a call into
+        // another process. Recording and detection are already running by then;
+        // setup opening is not a precondition for either.
+        Task { @MainActor in await windows.showSetupIfNeeded() }
         Log.app.info("MeetTape started")
     }
 

@@ -17,94 +17,6 @@ import SwiftUI
 
 @MainActor
 @Observable
-public final class OnboardingModel {
-    public var statuses: [PermissionStatus] = []
-    public var apiKey = ""
-    public var apiKeyState = APIKeyState.unknown
-    public var hostStatus: NativeMessagingInstaller.Status?
-    public var storagePath = ""
-    public var isChecking = false
-
-    public enum APIKeyState: Equatable {
-        case unknown
-        case checking
-        case valid
-        case invalid(String)
-    }
-
-    @ObservationIgnored let runtime: MeetTapeRuntime
-
-    public init(runtime: MeetTapeRuntime) {
-        self.runtime = runtime
-        self.storagePath = runtime.settings.storageRootPath
-    }
-
-    public func refresh() async {
-        isChecking = true
-        defer { isChecking = false }
-        statuses = await runtime.permissions.allStatuses()
-        hostStatus = NativeMessagingInstaller().status()
-        storagePath = runtime.settings.storageRootPath
-    }
-
-    public func request(_ kind: PermissionKind) async {
-        let status = await runtime.permissions.request(kind)
-        statuses = await runtime.permissions.allStatuses()
-        // Accessibility and Screen Recording are switched on in System Settings.
-        // The request above is what adds MeetTape to that list; opening the pane
-        // straight after it puts the switch in front of the user.
-        if !status.isUsable, kind == .accessibility || kind == .screenRecording {
-            runtime.permissions.openSettings(for: kind)
-        }
-        Log.ui.info(
-            "requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"
-        )
-    }
-
-    public func saveAndTestKey() async {
-        apiKeyState = .checking
-        let store = KeychainAPIKeyStore()
-        guard store.save(apiKey) else {
-            apiKeyState = .invalid("Could not write to the keychain")
-            return
-        }
-        apiKey = ""
-        do {
-            try await OpenAIClient(keyProvider: store)
-                .verifyCredentials(model: runtime.settings.models.diarization)
-            apiKeyState = .valid
-        } catch let error as ProcessingError {
-            apiKeyState = .invalid(error.userMessage)
-        } catch {
-            apiKeyState = .invalid("Could not reach OpenAI")
-        }
-    }
-
-    public func installHost() {
-        guard let binary = NativeMessagingInstaller.bundledHostURL() else {
-            hostStatus = NativeMessagingInstaller().status()
-            return
-        }
-        hostStatus = try? NativeMessagingInstaller().install(hostBinary: binary)
-    }
-
-    public func chooseStorage() {
-        guard let url = pickDirectory() else { return }
-        var settings = runtime.settings
-        settings.storageRootPath = url.path
-        runtime.update(settings: settings)
-        storagePath = url.path
-    }
-
-    public func finish() {
-        var settings = runtime.settings
-        settings.hasCompletedOnboarding = true
-        runtime.update(settings: settings)
-    }
-}
-
-@MainActor
-@Observable
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
@@ -211,13 +123,18 @@ public final class SettingsModel {
     }
 
     public func saveKey() {
-        hasStoredKey = KeychainAPIKeyStore().save(apiKey)
+        let saved = apiKey
+        hasStoredKey = KeychainAPIKeyStore().save(saved)
+        // The runtime holds the key for the process, so a rotated one has to be
+        // handed over rather than waiting for a relaunch.
+        if hasStoredKey { runtime.apiKeys.adopt(saved) }
         apiKey = ""
         testState = .idle
     }
 
     public func removeKey() {
         _ = KeychainAPIKeyStore().delete()
+        runtime.apiKeys.invalidateCachedKey()
         hasStoredKey = false
         testState = .idle
     }
@@ -226,7 +143,7 @@ public final class SettingsModel {
         testState = .testing
         if !apiKey.isEmpty { saveKey() }
         do {
-            try await OpenAIClient(keyProvider: KeychainAPIKeyStore())
+            try await OpenAIClient(keyProvider: runtime.apiKeys)
                 .verifyCredentials(model: runtime.settings.models.diarization)
             testState = .success
         } catch let error as ProcessingError {

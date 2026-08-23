@@ -128,3 +128,74 @@ struct SectionCard<Content: View>: View {
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
     }
 }
+
+/// One permission's state and the control that changes it.
+///
+/// Shared by the Permissions tab in Settings and by the setup wizard's own
+/// summary, so both report a permission the same way.
+struct PermissionRow: View {
+    let status: PermissionStatus
+    let onRequest: () async -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(color)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(status.kind.title).font(.body.weight(.medium))
+                    if status.kind.isRequired {
+                        Text("Required").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Text(status.kind.rationale).font(.caption).foregroundStyle(.secondary)
+                if let advice = status.advice {
+                    Text(advice).font(.caption).foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            actions
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(status.kind.title), \(status.state.rawValue)")
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        switch status.state {
+        case .granted:
+            EmptyView()
+        case .notDetermined:
+            Button("Enable") { Task { await onRequest() } }
+        case .denied, .grantedButNotEffective:
+            if !status.kind.isGrantedByPrompt {
+                // Requesting first is what adds MeetTape to the list in System
+                // Settings. Without it the pane opens on a list the app is not in
+                // and there is nothing to switch on.
+                Button("Enable in System Settings") { Task { await onRequest() } }
+            } else {
+                Button("Open System Settings") { onOpenSettings() }
+            }
+        }
+    }
+
+    private var symbol: String {
+        switch status.state {
+        case .granted: "checkmark.circle.fill"
+        case .denied: "xmark.circle.fill"
+        case .notDetermined: "circle"
+        case .grantedButNotEffective: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch status.state {
+        case .granted: .green
+        case .denied: .red
+        case .notDetermined: .secondary
+        case .grantedButNotEffective: .orange
+        }
+    }
+}

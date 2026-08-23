@@ -8,10 +8,15 @@ public protocol APIKeyProviding: Sendable {
     /// unable to answer. Defaults to "cannot say", so a provider that does not
     /// know keeps the stages attempting and failing visibly.
     var isKnownAbsent: Bool { get }
+    /// Forgets anything held in memory, so the next read goes back to the
+    /// source. Called when a key is rotated and when the API refuses one.
+    func invalidateCachedKey()
 }
 
 extension APIKeyProviding {
     public var isKnownAbsent: Bool { false }
+    /// A store that holds nothing has nothing to forget.
+    public func invalidateCachedKey() {}
 }
 
 public struct OpenAIClient: AIBackend {
@@ -353,6 +358,11 @@ public struct OpenAIClient: AIBackend {
         case 200..<300:
             return data
         case 401, 403:
+            // A cached key that the API refuses is worse than no key: it would
+            // be handed to every later request in this process. Dropping it
+            // sends the next read back to the keychain, which is where a
+            // rotated key arrives.
+            keyProvider.invalidateCachedKey()
             throw ProcessingError.authenticationFailed
         case 413:
             throw ProcessingError.requestTooLarge(

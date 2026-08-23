@@ -10,8 +10,12 @@ public final class WindowManager {
     private let runtime: MeetTapeRuntime
     private var settingsWindow: NSWindow?
     private var settingsModel: SettingsModel?
-    private var onboardingWindow: NSWindow?
-    private var onboardingModel: OnboardingModel?
+    private var setupWindow: NSWindow?
+    private var setupModel: SetupModel?
+    private var setupPlacementToken: NSObjectProtocol?
+    /// Until when a permission prompt's aftermath should be treated as focus
+    /// MeetTape is owed rather than as the user choosing another application.
+    private var setupRaiseDeadline: Date?
     private var reviewWindows: [String: NSWindow] = [:]
     private var reviewModels: [String: MeetingReviewModel] = [:]
     private var provisionalWindow: NSWindow?
@@ -55,27 +59,147 @@ public final class WindowManager {
         present(window)
     }
 
-    public func showOnboarding() {
-        if let window = onboardingWindow {
+    /// Opens setup at launch when it has never been finished, or when a
+    /// permission MeetTape cannot record without has gone away since.
+    ///
+    /// The permission read is asynchronous, so this cannot be answered before
+    /// the application finishes launching.
+    public func showSetupIfNeeded() async {
+        var snapshot = SetupSnapshot(settings: runtime.settings)
+        snapshot.permissions = Dictionary(
+            uniqueKeysWithValues: await runtime.permissions.allStatuses().map { ($0.kind, $0.state) }
+        )
+        guard SetupFlow.shouldOpenAtLaunch(snapshot) else { return }
+        Log.ui.info(
+            "opening setup at launch: completed=\(snapshot.settings.hasCompletedOnboarding, privacy: .public) requiredGranted=\(SetupFlow.requiredPermissionsGranted(snapshot), privacy: .public)"
+        )
+        showSetup()
+    }
+
+    public func showSetup() {
+        if let window = setupWindow {
             present(window)
             return
         }
-        let model = OnboardingModel(runtime: runtime)
-        onboardingModel = model
+        let model = SetupModel(runtime: runtime)
+        setupModel = model
         let window = makeWindow(
-            title: "Welcome to MeetTape",
-            size: NSSize(width: 620, height: 560),
-            content: OnboardingView(model: model, onFinish: { [weak self] in
-                self?.closeOnboarding()
+            title: "MeetTape Setup",
+            size: NSSize(width: 760, height: 580),
+            content: SetupWizardView(model: model, onFinish: { [weak self] in
+                self?.closeSetup()
             })
         )
-        onboardingWindow = window
+        // An ordinary window level, deliberately.
+        //
+        // Floating was tried, to stop the wizard sinking behind other
+        // applications after a permission prompt. It also put the wizard above
+        // macOS's own permission prompt, which is the one window that must never
+        // be covered: the user cannot answer a dialog they cannot see. Staying
+        // out of the way of the system beats staying in front of it.
+        //
+        // What is left of the problem is handled without a window level: the
+        // wizard asks for focus back when a prompt closes, and steps aside when
+        // System Settings comes forward, so it is beside the pane rather than
+        // lost behind it.
+        //
+        // Follows the user rather than making them find it: ordered front, the
+        // window comes to whichever space they are on, including alongside a
+        // full-screen application. Neither of these raises the window level, so
+        // system prompts still sit above it.
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.collectionBehavior.insert(.fullScreenAuxiliary)
+        model.onNeedsFocus = { [weak self] in
+            guard let self else { return }
+            // A permission prompt belongs to another process, and closing it
+            // hands activation back to what macOS considers the previous
+            // application, which for an accessory application with no Dock
+            // presence is usually not us. Anything activating in the next couple
+            // of seconds is that handover rather than the user picking an
+            // application, so the workspace observer re-raises instead of
+            // standing down.
+            self.setupRaiseDeadline = Date().addingTimeInterval(2.5)
+            self.raiseSetup()
+        }
+        setupWindow = window
+        setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Reacting to the activation itself rather than to a timer: the
+                // window drops and comes back within one frame instead of
+                // blinking out for as long as the next scheduled attempt.
+                if let deadline = self.setupRaiseDeadline, Date() < deadline,
+                    app?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    self.raiseSetup()
+                }
+                if app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID {
+                    self.moveSetupAsideFromSystemSettings()
+                }
+            }
+        }
         present(window)
     }
 
-    public func closeOnboarding() {
-        onboardingWindow?.close()
-        onboardingWindow = nil
+    /// Brings the setup window to the front.
+    ///
+    /// `orderFrontRegardless` does the work. macOS refuses to make an accessory
+    /// application active at all: measured here, MeetTape stayed behind Finder as
+    /// the active application while its window sat ahead of Finder's in the
+    /// window list. Activation is the part that is refused; raising is not.
+    private func raiseSetup() {
+        guard let window = setupWindow else { return }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// Moves the setup window off System Settings when it comes forward.
+    ///
+    /// Deferred, because the window is not on screen yet when the activation
+    /// notification arrives, and a settings window restored from a previous
+    /// session moves again after it appears.
+    private func moveSetupAsideFromSystemSettings() {
+        // System Settings takes a variable time to put a window on screen, and
+        // measured just over a second here on a warm launch. Each attempt is a
+        // window-list read and a frame comparison, and stops at the first one
+        // that finds nothing to do.
+        for delay in [0.3, 0.8, 1.5, 2.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, let window = self.setupWindow else { return }
+                // Nothing is logged when there is nothing to do: this runs four
+                // times per activation and the quiet case is the common one.
+                guard let obstacle = SetupWindowPlacement.systemSettingsFrame(),
+                    window.frame.intersects(obstacle)
+                else { return }
+                let target = SetupWindowPlacement.frame(
+                    for: window.frame.size,
+                    avoiding: obstacle,
+                    within: SetupWindowPlacement.screen(containing: obstacle)
+                )
+                guard target != window.frame else { return }
+                Log.ui.info(
+                    "moving setup \(NSStringFromRect(window.frame), privacy: .public) to \(NSStringFromRect(target), privacy: .public)"
+                )
+                window.setFrame(target, display: true, animate: true)
+            }
+        }
+    }
+
+    public func closeSetup() {
+        if let setupPlacementToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(setupPlacementToken)
+        }
+        setupPlacementToken = nil
+        setupRaiseDeadline = nil
+        // The observer polls while the window is up, so closing it by any route
+        // has to stop that, not only pressing Done.
+        setupModel?.end()
+        setupWindow?.close()
+        setupWindow = nil
+        setupModel = nil
     }
 
     /// The post-meeting panel. It never steals focus and never blocks processing.

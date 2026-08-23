@@ -7,109 +7,13 @@ import Foundation
 import MeetTapeCore
 import UserNotifications
 
-public enum PermissionKind: String, Sendable, CaseIterable, Identifiable {
-    case microphone
-    case screenRecording
-    case accessibility
-    case calendar
-    case notifications
-
-    public var id: String { rawValue }
-
-    public var title: String {
-        switch self {
-        case .microphone: "Microphone"
-        case .screenRecording: "System Audio & Screen Recording"
-        case .accessibility: "Accessibility"
-        case .calendar: "Calendar"
-        case .notifications: "Notifications"
-        }
-    }
-
-    /// Why MeetTape asks, and what happens without it.
-    public var rationale: String {
-        switch self {
-        case .microphone:
-            "Records your side of every meeting. MeetTape cannot record without it."
-        case .screenRecording:
-            "Reads window titles to identify which meeting is on screen. Without it, browser detection relies on audio state alone."
-        case .accessibility:
-            "Detects when you join and leave a Slack Huddle. Without it, Slack detection relies on microphone activity."
-        case .calendar:
-            "Matches recordings to calendar events for titles and attendees. Recording works without it."
-        case .notifications:
-            "Reports when recording starts, when a meeting is saved, and when a stage needs attention."
-        }
-    }
-
-    public var isRequired: Bool {
-        switch self {
-        case .microphone: true
-        case .screenRecording, .accessibility, .calendar, .notifications: false
-        }
-    }
-
-    /// The System Settings pane, for the permissions macOS will not grant in-app.
-    public var settingsURL: URL? {
-        switch self {
-        case .microphone:
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-        case .screenRecording:
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-        case .accessibility:
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        case .calendar:
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
-        case .notifications:
-            URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
-        }
-    }
-}
-
-public enum PermissionState: String, Sendable, Equatable {
-    case granted
-    case denied
-    case notDetermined
-    /// System Settings shows this as enabled but the running build cannot use it.
-    ///
-    /// Observed after re-signing the application: the Accessibility toggle read as
-    /// enabled while `AXIsProcessTrusted()` returned false. Removing MeetTape from
-    /// the list in System Settings and adding it again restores access.
-    case grantedButNotEffective
-}
-
-public struct PermissionStatus: Sendable, Equatable, Identifiable {
-    public let kind: PermissionKind
-    public let state: PermissionState
-    public var id: String { kind.rawValue }
-
-    public init(kind: PermissionKind, state: PermissionState) {
-        self.kind = kind
-        self.state = state
-    }
-
-    public var isUsable: Bool { state == .granted }
-
-    public var advice: String? {
-        switch state {
-        case .granted: nil
-        case .notDetermined: "Not requested yet."
-        case .denied where kind == .accessibility || kind == .screenRecording:
-            "Switch MeetTape on in System Settings. If it is already switched on "
-                + "there, remove it with the minus button and add it again: an "
-                + "unsigned build gets a new identity every time it is rebuilt, and "
-                + "the old entry keeps the permission."
-        case .denied: "Enable it in System Settings, then return here."
-        case .grantedButNotEffective:
-            "\(kind.title) appears enabled but is not active for this MeetTape build. "
-                + "Remove MeetTape from the list in System Settings and add it again."
-        }
-    }
-}
-
 /// Reports the effective state of each permission by probing it, since a System
 /// Settings toggle can be enabled while the running build has no access.
 public struct PermissionsService: Sendable {
+    /// One store for the calendar probe. A fresh `EKEventStore` per poll would
+    /// reconnect to the calendar daemon every 1.5 seconds.
+    private static let calendarProbe = CalendarService()
+
     public init() {}
 
     public func status(for kind: PermissionKind) async -> PermissionStatus {
@@ -117,16 +21,19 @@ public struct PermissionsService: Sendable {
         case .microphone:
             return PermissionStatus(kind: kind, state: microphoneState())
         case .screenRecording:
-            return PermissionStatus(
-                kind: kind, state: CGPreflightScreenCaptureAccess() ? .granted : .denied
-            )
+            return PermissionStatus(kind: kind, state: ScreenRecordingProbe.state())
         case .accessibility:
             return PermissionStatus(kind: kind, state: accessibilityState())
         case .calendar:
-            return PermissionStatus(kind: kind, state: calendarState())
+            return PermissionStatus(kind: kind, state: await calendarState())
         case .notifications:
             return PermissionStatus(kind: kind, state: await notificationState())
         }
+    }
+
+    /// One line describing every permission, for the log.
+    public static func summary(of statuses: [PermissionStatus]) -> String {
+        statuses.map { "\($0.kind.rawValue)=\($0.state.rawValue)" }.joined(separator: " ")
     }
 
     public func allStatuses() async -> [PermissionStatus] {
@@ -134,11 +41,6 @@ public struct PermissionsService: Sendable {
         for kind in PermissionKind.allCases {
             statuses.append(await status(for: kind))
         }
-        // The effective state of each permission, which is what the panel shows.
-        // Reported because a permission that reads granted in System Settings and
-        // is not usable by the running build is otherwise invisible.
-        let summary = statuses.map { "\($0.kind.rawValue)=\($0.state.rawValue)" }.joined(separator: " ")
-        Log.app.info("permissions: \(summary, privacy: .public)")
         return statuses
     }
 
@@ -157,12 +59,34 @@ public struct PermissionsService: Sendable {
         return TCCRecordProbe.hasStaleAccessibilityRecord() ? .grantedButNotEffective : .denied
     }
 
-    private func calendarState() -> PermissionState {
-        switch EKEventStore.authorizationStatus(for: .event) {
-        case .fullAccess: .granted
-        case .denied, .restricted, .writeOnly: .denied
-        case .notDetermined: .notDetermined
-        @unknown default: .notDetermined
+    private func calendarState() async -> PermissionState {
+        let reported = EKEventStore.authorizationStatus(for: .event)
+        guard reported == .notDetermined else {
+            return Self.calendarState(reported: reported, canReadCalendars: false)
+        }
+        // The only case the probe can change, and the only one worth the cost of
+        // asking the calendar daemon on every poll.
+        return Self.calendarState(
+            reported: reported, canReadCalendars: await Self.calendarProbe.hasUsableAccess()
+        )
+    }
+
+    /// The reported status and a functional probe, resolved to one state.
+    ///
+    /// Separated from the probe so the rule is testable: the whole point is that
+    /// `notDetermined` is not trustworthy in the process that asked for access,
+    /// and a store that can read calendars overrides it.
+    public static func calendarState(
+        reported: EKAuthorizationStatus, canReadCalendars: Bool
+    ) -> PermissionState {
+        switch reported {
+        case .fullAccess: return .granted
+        case .denied, .restricted, .writeOnly: return .denied
+        case .notDetermined:
+            // EventKit reports notDetermined for the life of the process that was
+            // granted access. The probe is what catches it.
+            return canReadCalendars ? .granted : .notDetermined
+        @unknown default: return canReadCalendars ? .granted : .notDetermined
         }
     }
 
@@ -187,7 +111,9 @@ public struct PermissionsService: Sendable {
         case .microphone:
             _ = await AVCaptureDevice.requestAccess(for: .audio)
         case .calendar:
-            let granted = await CalendarService().requestAccess()
+            // The same store the probe reads from, so the grant and the check
+            // are not on two different connections to the calendar daemon.
+            let granted = await Self.calendarProbe.requestAccess()
             Log.app.info(
                 "calendar request returned \(granted, privacy: .public), status now \(EKEventStore.authorizationStatus(for: .event).rawValue, privacy: .public)"
             )
@@ -207,6 +133,52 @@ public struct PermissionsService: Sendable {
     public func openSettings(for kind: PermissionKind) {
         guard let url = kind.settingsURL else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+/// Reads screen recording access, preferring the system's own answer and falling
+/// back to the window list when it says no.
+///
+/// `CGPreflightScreenCaptureAccess` is the supported check and is what this asks
+/// first. It has a long history of answering from a cache filled once per
+/// process, which is why so many applications tell people to quit and reopen
+/// after granting; the fallback exists to spare MeetTape's users that, and does
+/// nothing at all when the supported call is already right.
+///
+/// The fallback reads `kCGWindowName`, which the window server populates only for
+/// a process holding the grant. It has to be conservative, because a false
+/// positive here lets setup finish on a machine that cannot see a window title,
+/// which is the exact failure the gating exists to prevent. So it counts only
+/// ordinary application windows: another process, and window layer 0. The window
+/// server's own `Menubar` window sits at layer 24 and reports its name to
+/// everybody, so counting any named window at all reported the grant on every
+/// machine in the world.
+///
+/// Chromium and mac-screen-capture-permissions are often cited for this trick.
+/// Both did use it once and both now call `CGPreflightScreenCaptureAccess` and
+/// nothing else, so it is kept here as a fallback rather than as the answer.
+public enum ScreenRecordingProbe {
+    public static func state() -> PermissionState {
+        if CGPreflightScreenCaptureAccess() { return .granted }
+        return canReadApplicationWindowNames() ? .granted : .denied
+    }
+
+    /// Whether any ordinary window belonging to another application reports a
+    /// name.
+    static func canReadApplicationWindowNames() -> Bool {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+        else { return false }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        return windows.contains { window in
+            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
+                // Layer 0 is an ordinary application window. Everything above it
+                // is system furniture that names itself regardless of the grant.
+                let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
+                let name = window[kCGWindowName as String] as? String, !name.isEmpty
+            else { return false }
+            return true
+        }
     }
 }
 

@@ -437,8 +437,9 @@ public actor ProcessingPipeline {
             // completed the meeting with one five-minute utterance per chunk,
             // each attributed whole to a single speaker, and nothing revisits
             // a finished meeting: this stage is the only caller of alignment.
-            // Failing keeps it retryable, and Rebuild Transcript still
-            // produces the coarse reading in the meantime.
+            // Failing keeps it retryable, which is the only recovery: the
+            // meeting has no canonical transcript yet, so Rebuild Transcript
+            // is unavailable to it.
             Log.processing.error(
                 "aligner unavailable: \(logSafeDescription(error), privacy: .public)"
             )

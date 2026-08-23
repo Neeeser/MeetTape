@@ -112,6 +112,59 @@ enum UITests {
                 )
             },
 
+            test("setup moves to whichever side of System Settings has room") { expect in
+                // The wizard floats, so it stays readable while the user works in
+                // System Settings. Floating also puts it on top of the pane it is
+                // describing, which is worse than sinking was.
+                let screen = CGRect(x: 0, y: 0, width: 1_800, height: 1_100)
+                let size = CGSize(width: 760, height: 580)
+
+                // Settings on the left, so the wizard goes right.
+                let left = CGRect(x: 0, y: 0, width: 740, height: 1_100)
+                let placedRight = SetupWindowPlacement.frame(
+                    for: size, avoiding: left, within: screen
+                )
+                expect.isFalse(placedRight.intersects(left), "must not cover the pane")
+                expect.isTrue(placedRight.maxX <= screen.maxX, "and must stay on screen")
+
+                // Settings on the right, so the wizard goes left.
+                let right = CGRect(x: 1_060, y: 0, width: 740, height: 1_100)
+                let placedLeft = SetupWindowPlacement.frame(
+                    for: size, avoiding: right, within: screen
+                )
+                expect.isFalse(placedLeft.intersects(right))
+                expect.isTrue(placedLeft.minX >= screen.minX)
+
+                // A screen too narrow to hold both: staying on screen wins over
+                // not overlapping, since a window pushed off the display cannot
+                // be read at all.
+                let narrow = CGRect(x: 0, y: 0, width: 1_000, height: 1_100)
+                let middle = CGRect(x: 130, y: 0, width: 740, height: 1_100)
+                let squeezed = SetupWindowPlacement.frame(
+                    for: size, avoiding: middle, within: narrow
+                )
+                expect.isTrue(squeezed.minX >= narrow.minX, "left edge stays on screen")
+                expect.isTrue(squeezed.maxX <= narrow.maxX, "and so does the right edge")
+            },
+
+            test("window-server rectangles are flipped into AppKit coordinates") { expect in
+                // The window list measures from the top left of the primary
+                // display and AppKit from the bottom left. Skipping the flip put
+                // the wizard off the bottom of the screen on any tall display.
+                let measured: (x: CGFloat, maxY: CGFloat, screenTop: CGFloat)? = await MainActor.run {
+                    guard let primary = NSScreen.screens.first else { return nil }
+                    let topOfScreen = CGRect(x: 10, y: 0, width: 300, height: 200)
+                    let flipped = SetupWindowPlacement.flipped(topOfScreen)
+                    return (flipped.minX, flipped.maxY, primary.frame.maxY)
+                }
+                guard let measured else { return expect.fail("no screen") }
+                expect.equal(measured.x, 10, "x is unchanged")
+                expect.equal(
+                    measured.maxY, measured.screenTop,
+                    "a window at the top in window-server coordinates is at the top in AppKit"
+                )
+            },
+
             test("the review panel handles a meeting with nothing processed yet") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

@@ -12,6 +12,7 @@ public final class WindowManager {
     private var settingsModel: SettingsModel?
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
+    private var setupPlacementToken: NSObjectProtocol?
     private var reviewWindows: [String: NSWindow] = [:]
     private var reviewModels: [String: MeetingReviewModel] = [:]
     private var provisionalWindow: NSWindow?
@@ -107,10 +108,63 @@ public final class WindowManager {
             window.makeKeyAndOrderFront(nil)
         }
         setupWindow = window
+        // Floating keeps the instructions visible, and would otherwise keep them
+        // on top of the pane they are describing.
+        setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID else {
+                return
+            }
+            Log.ui.info("system settings activated, repositioning setup")
+            MainActor.assumeIsolated { self?.moveSetupAsideFromSystemSettings() }
+        }
         present(window)
     }
 
+    /// Moves the setup window off System Settings when it comes forward.
+    ///
+    /// Deferred, because the window is not on screen yet when the activation
+    /// notification arrives, and a settings window restored from a previous
+    /// session moves again after it appears.
+    private func moveSetupAsideFromSystemSettings() {
+        // System Settings takes a variable time to put a window on screen, and
+        // measured just over a second here on a warm launch. Each attempt is a
+        // window-list read and a frame comparison, and stops at the first one
+        // that finds nothing to do.
+        for delay in [0.3, 0.8, 1.5, 2.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, let window = self.setupWindow else { return }
+                guard let obstacle = SetupWindowPlacement.systemSettingsFrame() else {
+                    Log.ui.info("no system settings window found")
+                    return
+                }
+                guard window.frame.intersects(obstacle) else {
+                    Log.ui.info(
+                        "setup \(NSStringFromRect(window.frame), privacy: .public) clear of \(NSStringFromRect(obstacle), privacy: .public)"
+                    )
+                    return
+                }
+                let target = SetupWindowPlacement.frame(
+                    for: window.frame.size,
+                    avoiding: obstacle,
+                    within: SetupWindowPlacement.screen(containing: obstacle)
+                )
+                guard target != window.frame else { return }
+                Log.ui.info(
+                    "moving setup \(NSStringFromRect(window.frame), privacy: .public) to \(NSStringFromRect(target), privacy: .public)"
+                )
+                window.setFrame(target, display: true, animate: true)
+            }
+        }
+    }
+
     public func closeSetup() {
+        if let setupPlacementToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(setupPlacementToken)
+        }
+        setupPlacementToken = nil
         // The observer polls while the window is up, so closing it by any route
         // has to stop that, not only pressing Done.
         setupModel?.end()

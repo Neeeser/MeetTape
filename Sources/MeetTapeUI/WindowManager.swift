@@ -102,8 +102,25 @@ public final class WindowManager {
         window.collectionBehavior.insert(.moveToActiveSpace)
         model.onNeedsFocus = { [weak window] in
             guard let window else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            // A permission prompt belongs to another process. When it closes,
+            // macOS restores activation to what it considers the previous
+            // application, which for an accessory application with no Dock
+            // presence is usually not us, so a single activation fired the
+            // instant the prompt returns is undone a moment later. Repeating it
+            // briefly is what survives that restore.
+            //
+            // `orderFrontRegardless` is there for the case where activation is
+            // refused outright: the window still comes up, even if MeetTape does
+            // not become the active application.
+            func raise() {
+                NSApp.activate()
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
+            raise()
+            for delay in [0.15, 0.4, 0.9] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { raise() }
+            }
         }
         setupWindow = window
         // Floating keeps the instructions visible, and would otherwise keep them

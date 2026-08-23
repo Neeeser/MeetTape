@@ -116,7 +116,26 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(map), to: layout.speakerMap)
     }
 
+    /// The transcript as it reads, which is the assembled transcript divided
+    /// wherever a person put a boundary.
+    ///
+    /// Divided here rather than at each caller, because a reader that skipped it
+    /// would see the undivided line and a correction made on one piece of it.
+    /// That line then looks human-assigned along its whole length, and the
+    /// enrolment check would embed the other speaker's half of it into the
+    /// corrected person's voice profile. `writeCanonicalTranscript` still stores
+    /// what the assembler produced: the cuts live in `speakers.map.json` and are
+    /// applied on the way out.
     public func readCanonicalTranscript() throws -> CanonicalTranscript? {
+        guard var transcript = try readAssembledTranscript() else { return nil }
+        let cuts = ((try? readSpeakerMap()) ?? SpeakerMap()).lineCuts
+        guard !cuts.isEmpty else { return transcript }
+        transcript.utterances = LineDivision.apply(cuts, to: transcript.utterances)
+        return transcript
+    }
+
+    /// What the assembler wrote, before any boundary a person put in it.
+    private func readAssembledTranscript() throws -> CanonicalTranscript? {
         guard FileManager.default.fileExists(atPath: layout.canonicalTranscript.path) else { return nil }
         let data = try read(layout.canonicalTranscript)
         return try ArchiveCoding.decode(CanonicalTranscript.self, from: data, path: layout.canonicalTranscript.path)

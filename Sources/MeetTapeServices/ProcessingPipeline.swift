@@ -1525,6 +1525,8 @@ public actor ProcessingPipeline {
             generatedAt: clock.now
         )
         try found.store.writeCanonicalTranscript(transcript)
+        // Read back rather than rendered from what was just assembled, so the
+        // boundaries a person put in the transcript are in the markdown too.
         try await rerenderMarkdown(store: found.store, metadata: found.metadata)
     }
 
@@ -1626,31 +1628,162 @@ public actor ProcessingPipeline {
         try await store.clearOccurrenceIdentity(meetingID: meetingID, clusterID: clusterID)
     }
 
-    /// Changes the speaker on one transcript line.
+    /// Changes the speaker on transcript lines, without touching the cluster
+    /// they belong to.
     ///
-    /// Writes one override. The cluster keeps its name, every other line
-    /// assigned to that cluster keeps its name, the raw diarization is
-    /// untouched, and nothing is transcribed again.
-    @discardableResult
-    public func applyUtteranceSpeaker(
-        _ name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
-    ) async throws -> IdentityID? {
-        try await correctUtterances(
-            name, utteranceIDs: [utteranceID], meetingID: meetingID, identityID: identityID
-        )
-    }
-
-    /// Applies one identity to several lines at once.
-    ///
-    /// Useful where the diarizer put two people in one cluster: the lines that
-    /// belong to the other person move without disturbing the cluster or the
-    /// lines that were right.
+    /// Writes one override per line. The cluster keeps its name, every other
+    /// line assigned to it keeps its name, the raw diarization is untouched,
+    /// and nothing is transcribed again. What a turn's header writes, and what
+    /// a division writes once it knows which pieces changed hands.
     public func applyUtteranceSpeaker(
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) async throws {
         _ = try await correctUtterances(
             name, utteranceIDs: utteranceIDs, meetingID: meetingID, identityID: identityID
         )
+    }
+
+    /// Divides the transcript where a person put a boundary, and gives the
+    /// stretch between the boundaries to one speaker.
+    ///
+    /// This is what a split and a pull-out both are. A split names everything
+    /// from a word to the end of the turn, so its range ends where the turn
+    /// does; a pull-out names a phrase inside a turn and the words on either
+    /// side stay where they were. Nothing is transcribed again and the raw
+    /// diarization is untouched: the boundaries go in `speakers.map.json`
+    /// beside the corrections and the transcript is divided when it is read.
+    ///
+    /// The boundaries are written first and the names second. A failure between
+    /// them leaves the line divided and both halves reading as the cluster,
+    /// which is a state the panel can show and the user can finish. Writing the
+    /// names first would leave a correction covering words that were never
+    /// separated from the ones around them.
+    /// - Parameter parts: one window per line the reader was pointing at, in
+    ///   that line's own coordinates. Per line rather than one range over the
+    ///   track, because a turn's lines are not in time order: chunks overlap by
+    ///   eight seconds and a near-duplicate is only dropped above a similarity
+    ///   bar, so a line printed second can begin before the line printed first.
+    ///   One range over both put a boundary in the wrong line, renamed a
+    ///   stretch the reader had not selected, and left a selection dragged
+    ///   backwards across a seam matching nothing at all.
+    @discardableResult
+    public func applySpeakerRange(
+        _ name: String, meetingID: String, track: CaptureTrack, parts: [SpeakerRangePart],
+        identityID: IdentityID? = nil
+    ) async throws -> IdentityID? {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        let first = parts.first?.utteranceID ?? ""
+        guard let before = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: first)
+        }
+        var windows: [(line: Utterance, part: SpeakerRangePart)] = []
+        for part in parts {
+            guard let line = before.utterances.first(where: {
+                $0.id == part.utteranceID && $0.track == track
+            }) else { continue }
+            windows.append((line, part))
+        }
+        guard !windows.isEmpty else { throw ProcessingError.utteranceNotFound(id: first) }
+        try divide(store: found.store, windows: windows)
+
+        guard let after = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: first)
+        }
+        // A piece of a line the reader named, by the middle of what is spoken
+        // in it: a boundary landing a hair inside the neighbouring piece cannot
+        // hand that piece over. Each piece is judged against the window of the
+        // line it came from, so two lines sharing a second cannot claim each
+        // other's words.
+        //
+        // Measured across its words rather than its span. A line begins before
+        // its first word and ends after its last, and the outermost piece keeps
+        // those outer edges so no audio ends up belonging to nobody. The window
+        // comes from the words the reader pointed at, so comparing it against
+        // the padded span made pulling out the first or last phrase of a turn
+        // match no piece at all: the boundary was written and the name was not.
+        var selected: [String] = []
+        for (line, part) in windows {
+            for piece in after.utterances where piece.chunkID == line.chunkID
+                && piece.track == track && piece.start >= line.start && piece.end <= line.end {
+                let spokenStart = piece.words?.first?.start ?? piece.start
+                let spokenEnd = piece.words?.last?.end ?? piece.end
+                let middle = (spokenStart + spokenEnd) / 2
+                guard middle >= part.startSeconds, middle <= part.endSeconds else { continue }
+                if !selected.contains(piece.id) { selected.append(piece.id) }
+            }
+        }
+        guard !selected.isEmpty else { throw ProcessingError.utteranceNotFound(id: first) }
+        return try await correctUtterances(
+            name, utteranceIDs: selected, meetingID: meetingID, identityID: identityID
+        )
+    }
+
+    /// Records boundaries and carries any correction on a divided line onto its
+    /// pieces.
+    ///
+    /// Both pieces of a corrected line sit inside the correction's span, so a
+    /// later correction on one of them would take the wide override off both.
+    /// Dividing the correction with the line keeps the piece nobody touched
+    /// reading as the person it was corrected to.
+    ///
+    /// Divided rather than re-anchored: a correction keeps the seconds it was
+    /// made on, clipped to the piece it now belongs to. Re-anchoring it to the
+    /// whole piece would widen it, and a correction's width is what says how
+    /// much of a line a person actually vouched for. A name set on a
+    /// three-second interjection displays across the turn it was merged into
+    /// and confirms none of it; stretched to the piece, it would confirm all of
+    /// it and put the other speaker's audio in that person's voice profile.
+    private func divide(
+        store: MeetingStore, windows: [(line: Utterance, part: SpeakerRangePart)]
+    ) throws {
+        var speakers = try store.readSpeakerMap()
+        var changed = false
+        for window in windows {
+            // This line's own pieces, so a second boundary is placed against
+            // what the first one left rather than against the line it replaced.
+            var pieces = [window.line]
+            for moment in [window.part.startSeconds, window.part.endSeconds] {
+                guard let piece = pieces.first(where: { moment > $0.start && moment < $0.end }),
+                      let boundary = LineDivision.boundary(in: piece, near: moment)
+                else { continue }
+                let cut = LineCut(
+                    track: piece.track, atSeconds: boundary, chunkID: piece.chunkID,
+                    createdAt: clock.now
+                )
+                let count = speakers.lineCuts.count
+                speakers.cut(cut)
+                guard speakers.lineCuts.count != count else { continue }
+                changed = true
+                let divided = LineDivision.divide(piece, at: [cut])
+                if divided.count > 1, let override = speakers.override(for: piece) {
+                    speakers.utteranceOverrides.removeAll { $0 == override }
+                    let start = override.startSeconds ?? piece.start
+                    let end = override.endSeconds ?? piece.end
+                    for part in divided {
+                        let clippedStart = max(start, part.start)
+                        let clippedEnd = min(end, part.end)
+                        guard clippedEnd > clippedStart else { continue }
+                        speakers.utteranceOverrides.append(UtteranceOverride(
+                            track: part.track,
+                            anchorSeconds: (clippedStart + clippedEnd) / 2,
+                            startSeconds: clippedStart,
+                            endSeconds: clippedEnd,
+                            assignment: override.assignment,
+                            createdAt: override.createdAt,
+                            utteranceID: part.id,
+                            chunkID: part.chunkID
+                        ))
+                    }
+                }
+                if let at = pieces.firstIndex(where: { $0.id == piece.id }) {
+                    pieces.replaceSubrange(at...at, with: divided)
+                }
+            }
+        }
+        guard changed else { return }
+        try store.writeSpeakerMap(speakers)
     }
 
     /// Moves a set of lines to one speaker, all of them or none.

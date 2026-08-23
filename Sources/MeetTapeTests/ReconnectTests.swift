@@ -202,8 +202,8 @@ enum ReconnectTests {
                     wait: { _ in }
                 )
 
-                _ = try await pipeline.applyUtteranceSpeaker(
-                    "Dana", utteranceID: "b1", meetingID: second
+                try await pipeline.applyUtteranceSpeaker(
+                    "Dana", utteranceIDs: ["b1"], meetingID: second
                 )
 
                 let continuation = try expect.unwrap(

@@ -252,6 +252,18 @@ public struct Utterance: Codable, Sendable, Equatable, Identifiable {
     public var text: String
     public var chunkID: String
     public var model: String
+    /// The words behind the text, on the meeting timeline, where the backend
+    /// reported timings.
+    ///
+    /// Carried through from the raw segments so a person can divide a line at a
+    /// word and the piece keeps the audio it actually covers. Interpolating the
+    /// division from character positions would be enough to render, and not
+    /// enough to enrol: a correction is what writes a voice profile, and the
+    /// span it hands to voice memory has to be the seconds that changed hands.
+    /// Absent for a backend that reports no timings and for a transcript
+    /// written before this existed, and a line without them is not divisible
+    /// except at its edges.
+    public var words: [RawTranscriptWord]?
 
     /// The identifier for a line covering this piece of a track.
     ///
@@ -269,7 +281,7 @@ public struct Utterance: Codable, Sendable, Equatable, Identifiable {
     public init(
         id: String, start: Double, end: Double, track: CaptureTrack,
         rawSpeakerLabel: String?, speakerKey: String, text: String,
-        chunkID: String, model: String
+        chunkID: String, model: String, words: [RawTranscriptWord]? = nil
     ) {
         self.id = id
         self.start = start
@@ -280,6 +292,7 @@ public struct Utterance: Codable, Sendable, Equatable, Identifiable {
         self.text = text
         self.chunkID = chunkID
         self.model = model
+        self.words = words
     }
 }
 

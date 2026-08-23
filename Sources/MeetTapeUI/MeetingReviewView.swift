@@ -269,7 +269,7 @@ public struct MeetingReviewView: View {
             title: "Transcript",
             subtitle: model.transcript == nil
                 ? "Not available yet."
-                : "Click a line's name or time to correct that line alone."
+                : "Right-click the words to split a turn or to pull a phrase out to another speaker."
         ) {
             if !model.combinedLines.isEmpty {
                 if model.isSplitRecording { continuationNotice }
@@ -280,7 +280,7 @@ public struct MeetingReviewView: View {
                         blockView(block)
                     }
                 }
-                if model.namingLine != nil { namingField }
+                if model.isNaming { namingField }
             } else {
                 HStack(spacing: 8) {
                     if model.metadata?.processing.state != .failed {
@@ -322,53 +322,98 @@ public struct MeetingReviewView: View {
         model.recordings.firstIndex { $0.id == recording.id } ?? 0
     }
 
-    /// One speaker's consecutive lines under a single name header. Every line
-    /// keeps its own correction menu: the first on its name, the rest on their
-    /// timecodes.
+    /// One speaker's turn: a name, the range it covers, and the words as one
+    /// paragraph.
+    ///
+    /// The assembler caps a turn at 30 seconds and the diarizer prefers
+    /// splitting a speaker over merging two, so one person talking arrives as
+    /// several lines in a row. A timecode above each of them broke a
+    /// three-minute answer into nineteen pieces on screen. The lines are still
+    /// there underneath, and the menu on the header names the whole turn.
     private func blockView(_ block: CombinedLineBlock) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(block.lines.enumerated()), id: \.element.id) { index, line in
-                utteranceRow(line, showsName: index == 0)
-            }
-        }
-    }
-
-    private func utteranceRow(_ line: CombinedLine, showsName: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        let paragraph = block.paragraph()
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                if showsName {
-                    speakerMenu(for: line, label: line.speakerName)
-                        .font(.callout.weight(.semibold))
-                    Text(TranscriptRenderer().timecode(line.timelineStart))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    speakerMenu(for: line, label: TranscriptRenderer().timecode(line.timelineStart))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help("Correct the speaker on this line alone")
-                }
-                if model.correctedLines.contains(line.id) {
+                blockMenu(for: block)
+                    .font(.callout.weight(.semibold))
+                Text(range(of: block))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if block.lines.contains(where: { model.correctedLines.contains($0.id) }) {
                     Image(systemName: "pencil.circle.fill")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .help("You set the speaker on this line")
+                        .help("You set the speaker here")
                 }
             }
-            Text(line.utterance.text).font(.callout).textSelection(.enabled)
+            TranscriptParagraph(
+                text: paragraph.text,
+                spans: paragraph.spans,
+                people: model.knownPeople,
+                onAction: { action, person in
+                    guard let person else { return }
+                    model.assignRange(target(action, in: block), to: person)
+                },
+                onNewPerson: { action in
+                    model.beginNamingRange(target(action, in: block))
+                }
+            )
         }
     }
 
-    private func speakerMenu(for line: CombinedLine, label: String) -> some View {
-        Menu(label) {
-            ForEach(model.knownPeople) { person in
-                Button(person.identity.resolvedName) {
-                    model.assignUtterance(line, to: person)
+    private func range(of block: CombinedLineBlock) -> String {
+        let renderer = TranscriptRenderer()
+        let start = renderer.timecode(block.timelineStart)
+        let end = renderer.timecode(block.timelineEnd)
+        return start == end ? start : "\(start) – \(end)"
+    }
+
+    /// Where a right-click lands, in the recording's own seconds, one window
+    /// per line it covers.
+    ///
+    /// A split runs to the end of the turn as the reader sees it: the rest of
+    /// the line the boundary fell in, and the whole of every line printed after
+    /// it. Not the rest of the turn by the clock, because a line printed later
+    /// can have started earlier.
+    private func target(
+        _ action: TranscriptParagraphAction, in block: CombinedLineBlock
+    ) -> SpeakerRangeTarget {
+        switch action {
+        case let .split(atSeconds, utteranceID):
+            let following = block.lines.drop { $0.utterance.id != utteranceID }
+            let parts = following.enumerated().map { offset, line in
+                SpeakerRangePart(
+                    utteranceID: line.utterance.id,
+                    startSeconds: offset == 0 ? atSeconds : line.utterance.start,
+                    endSeconds: line.utterance.end
+                )
+            }
+            return SpeakerRangeTarget(
+                recordingID: block.recordingID, track: block.track, parts: parts
+            )
+        case let .assign(parts):
+            return SpeakerRangeTarget(
+                recordingID: block.recordingID, track: block.track,
+                parts: parts.map {
+                    SpeakerRangePart(
+                        utteranceID: $0.utteranceID, startSeconds: $0.startSeconds,
+                        endSeconds: $0.endSeconds
+                    )
                 }
+            )
+        }
+    }
+
+    /// Names the whole turn. Every line under the header moves together,
+    /// because the header is the only menu the lines have.
+    private func blockMenu(for block: CombinedLineBlock) -> some View {
+        Menu(block.speakerName) {
+            ForEach(model.knownPeople) { person in
+                Button(person.identity.resolvedName) { model.assignBlock(block, to: person) }
             }
             if !model.knownPeople.isEmpty { Divider() }
-            Button("New person…") { model.beginNamingUtterance(line) }
-            Button("Use this speaker's name") { model.clearUtterance(line) }
+            Button("New person…") { model.beginNamingBlock(block) }
+            Button("Use this speaker's name") { model.clearBlock(block) }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

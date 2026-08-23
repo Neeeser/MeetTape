@@ -150,6 +150,47 @@ public struct UtteranceOverride: Codable, Sendable, Equatable {
     }
 }
 
+/// A line boundary a person put there.
+///
+/// The diarizer prefers splitting a speaker over merging two, but it does run
+/// two people together, and then one line holds a question and its answer. A
+/// cut says a boundary belongs at this moment on this track, and the transcript
+/// is divided there when it is read.
+///
+/// A statement about the audio rather than about a clustering, so it outlives a
+/// re-analysis the way a line correction does, and anchored to a time rather
+/// than to a line identifier because re-assembly moves where turns begin and
+/// end. Who the pieces belong to is a separate record: clearing a name leaves
+/// the words divided, which is still true.
+public struct LineCut: Codable, Sendable, Equatable {
+    public var track: CaptureTrack
+    /// Where the boundary goes, in seconds on this recording's timeline.
+    public var atSeconds: Double
+    /// The chunk the divided line came from. Chunks overlap, so time alone
+    /// cannot tell one line from a near-duplicate of it in the neighbouring
+    /// chunk. Absent on a cut that should apply to whichever line covers the
+    /// moment.
+    public var chunkID: String?
+    public var createdAt: Date
+
+    public init(
+        track: CaptureTrack, atSeconds: Double, chunkID: String? = nil, createdAt: Date
+    ) {
+        self.track = track
+        self.atSeconds = atSeconds
+        self.chunkID = chunkID
+        self.createdAt = createdAt
+    }
+
+    /// Whether this cut falls strictly inside a line, which is the only place
+    /// it divides anything. A cut on a boundary is already satisfied.
+    public func divides(_ utterance: Utterance) -> Bool {
+        guard track == utterance.track else { return false }
+        if let chunkID, chunkID != utterance.chunkID { return false }
+        return atSeconds > utterance.start && atSeconds < utterance.end
+    }
+}
+
 /// `speakers.map.json`: the mutable layers above immutable diarization.
 ///
 /// Two of them. `entries` maps a raw cluster to a name, which is what renaming a
@@ -163,15 +204,19 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public var version: Int
     public var entries: [String: SpeakerAssignment]
     public var utteranceOverrides: [UtteranceOverride]
+    /// Where a person said one line is really two.
+    public var lineCuts: [LineCut]
 
     public init(
         version: Int = SpeakerMap.currentVersion,
         entries: [String: SpeakerAssignment] = [:],
-        utteranceOverrides: [UtteranceOverride] = []
+        utteranceOverrides: [UtteranceOverride] = [],
+        lineCuts: [LineCut] = []
     ) {
         self.version = version
         self.entries = entries
         self.utteranceOverrides = utteranceOverrides
+        self.lineCuts = lineCuts
     }
 
     /// A map written before line-level corrections existed decodes with none of
@@ -182,6 +227,21 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         entries = try container.decodeIfPresent([String: SpeakerAssignment].self, forKey: .entries) ?? [:]
         utteranceOverrides =
             try container.decodeIfPresent([UtteranceOverride].self, forKey: .utteranceOverrides) ?? []
+        lineCuts = try container.decodeIfPresent([LineCut].self, forKey: .lineCuts) ?? []
+    }
+
+    /// Records a boundary, ignoring one that falls where a boundary already is.
+    public mutating func cut(_ cut: LineCut) {
+        guard !lineCuts.contains(where: {
+            $0.track == cut.track && $0.chunkID == cut.chunkID
+                && abs($0.atSeconds - cut.atSeconds) < 0.001
+        }) else { return }
+        lineCuts.append(cut)
+    }
+
+    /// The cuts that divide one line, earliest first.
+    public func cuts(dividing utterance: Utterance) -> [LineCut] {
+        lineCuts.filter { $0.divides(utterance) }.sorted { $0.atSeconds < $1.atSeconds }
     }
 
     public static func withLocalUser(named name: String) -> SpeakerMap {

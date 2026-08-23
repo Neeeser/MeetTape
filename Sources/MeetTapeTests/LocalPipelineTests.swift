@@ -1234,8 +1234,8 @@ enum LocalPipelineTests {
                     settings: AppSettings(),
                     scratchRoot: root.appendingPathComponent("scratch")
                 )
-                _ = try await pipeline.applyUtteranceSpeaker(
-                    "", utteranceID: "u1", meetingID: meeting.metadata.id
+                try await pipeline.applyUtteranceSpeaker(
+                    "", utteranceIDs: ["u1"], meetingID: meeting.metadata.id
                 )
 
                 expect.equal(
@@ -1573,8 +1573,8 @@ enum LocalPipelineTests {
 
                 // Thirty of Alice's sixty seconds go to Bob, which leaves her
                 // below the bar, so her vector goes.
-                _ = try await pipeline.applyUtteranceSpeaker(
-                    "Bob", utteranceID: "u1", meetingID: meeting.metadata.id
+                try await pipeline.applyUtteranceSpeaker(
+                    "Bob", utteranceIDs: ["u1"], meetingID: meeting.metadata.id
                 )
                 expect.equal(
                     try await store.profileStatus(
@@ -1595,8 +1595,8 @@ enum LocalPipelineTests {
                         confirmation: .humanConfirmedCluster, clusterID: key
                     )]
                 ))
-                _ = try await pipeline.applyUtteranceSpeaker(
-                    "", utteranceID: "u1", meetingID: meeting.metadata.id
+                try await pipeline.applyUtteranceSpeaker(
+                    "", utteranceIDs: ["u1"], meetingID: meeting.metadata.id
                 )
                 expect.equal(
                     try await store.profileStatus(

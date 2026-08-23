@@ -152,6 +152,25 @@ public final class SettingsModel {
     }
 }
 
+/// A stretch of one track that is about to change speaker.
+///
+/// In the recording's own coordinates, not the conversation's, because that is
+/// where a boundary is written and a continuation keeps its own timeline.
+public struct SpeakerRangeTarget: Sendable, Equatable {
+    public var recordingID: String
+    public var track: CaptureTrack
+    /// One window per line the reader was pointing at. Chunks overlap, so two
+    /// lines of one turn routinely hold the same second and a single range over
+    /// the track would reach the wrong one.
+    public var parts: [SpeakerRangePart]
+
+    public init(recordingID: String, track: CaptureTrack, parts: [SpeakerRangePart]) {
+        self.recordingID = recordingID
+        self.track = track
+        self.parts = parts
+    }
+}
+
 /// Loads and edits one meeting's files.
 @MainActor
 @Observable
@@ -171,11 +190,12 @@ public final class MeetingReviewModel {
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
     public var participantDraft = ""
-    /// The line waiting for a name that is not in the list yet.
-    public var namingUtterance: Utterance?
-    /// The line waiting for a name, with the recording it belongs to.
-    public var namingLine: CombinedLine?
     public var namingCluster: String?
+    /// The stretch of one track waiting for a name, after a split or a
+    /// selection whose speaker is not in the list yet.
+    public var namingRange: SpeakerRangeTarget?
+    /// The turn waiting for a name.
+    public var namingBlock: CombinedLineBlock?
     public var newPersonDraft = ""
     public var reanalyzeCount = ""
     public var isReanalyzing = false
@@ -294,36 +314,84 @@ public final class MeetingReviewModel {
         runtime.assignSpeaker(name: "", key: clusterID, meetingID: meetingID)
     }
 
-    /// Changes the speaker on one line only. Every other line in the same
-    /// cluster keeps its name.
-    public func assignUtterance(_ line: CombinedLine, to entry: SpeakerDirectoryEntry) {
-        runtime.assignUtteranceSpeaker(
-            name: entry.identity.resolvedName, utteranceID: line.utterance.id,
-            meetingID: line.recordingID, identityID: entry.id
-        )
-        applyLocalOverride(line, name: entry.identity.resolvedName, identityID: entry.id)
+    /// Renames every line of one turn.
+    ///
+    /// The header stands for the whole block, and the lines under it no longer
+    /// carry a menu of their own. Naming only the first would rename the first
+    /// thirty seconds of a three-minute answer and tear the paragraph in two on
+    /// the next reload.
+    public func assignBlock(_ block: CombinedLineBlock, to entry: SpeakerDirectoryEntry) {
+        assignBlock(block, name: entry.identity.resolvedName, identityID: entry.id)
     }
 
-    public func assignUtterance(_ line: CombinedLine, toNewPerson name: String) {
+    public func assignBlock(_ block: CombinedLineBlock, toNewPerson name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        runtime.assignUtteranceSpeaker(
-            name: trimmed, utteranceID: line.utterance.id, meetingID: line.recordingID
-        )
-        applyLocalOverride(line, name: trimmed, identityID: nil)
+        assignBlock(block, name: trimmed, identityID: nil)
     }
 
-    public func clearUtterance(_ line: CombinedLine) {
-        runtime.assignUtteranceSpeaker(
-            name: "", utteranceID: line.utterance.id, meetingID: line.recordingID
+    /// Hands the block back to whatever its cluster says.
+    public func clearBlock(_ block: CombinedLineBlock) {
+        assignBlock(block, name: "", identityID: nil)
+    }
+
+    private func assignBlock(
+        _ block: CombinedLineBlock, name: String, identityID: IdentityID?
+    ) {
+        runtime.assignUtteranceSpeakers(
+            name: name, utteranceIDs: block.lines.map(\.utterance.id),
+            meetingID: block.recordingID, identityID: identityID
         )
-        if line.recordingID == meetingID { speakers.clearOverride(for: line.utterance) }
-        correctedLines.remove(line.id)
-        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
-            combinedLines[index].speakerName = SpeakerMap.fallbackName(
-                for: line.utterance.speakerKey
-            )
+        for line in block.lines {
+            if name.isEmpty {
+                correctedLines.remove(line.id)
+            } else {
+                correctedLines.insert(line.id)
+            }
+            guard let index = combinedLines.firstIndex(where: { $0.id == line.id }) else { continue }
+            combinedLines[index].speakerName = name.isEmpty
+                ? SpeakerMap.fallbackName(for: line.utterance.speakerKey)
+                : name
         }
+    }
+
+    /// Divides a turn and hands the stretch to someone.
+    ///
+    /// No optimistic update: a division changes where the lines are, so the
+    /// panel shows it once the write lands and the reload that follows it
+    /// rebuilds the blocks. Naming a whole line moves one name and can be shown
+    /// straight away; this cannot without rebuilding the same thing twice.
+    public func assignRange(_ target: SpeakerRangeTarget, to entry: SpeakerDirectoryEntry) {
+        runtime.assignSpeakerRange(
+            name: entry.identity.resolvedName, meetingID: target.recordingID,
+            track: target.track, parts: target.parts, identityID: entry.id
+        )
+    }
+
+    public func assignRange(_ target: SpeakerRangeTarget, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runtime.assignSpeakerRange(
+            name: trimmed, meetingID: target.recordingID, track: target.track,
+            parts: target.parts
+        )
+    }
+
+    public func beginNamingRange(_ target: SpeakerRangeTarget) {
+        namingRange = target
+        namingBlock = nil
+        namingCluster = nil
+        newPersonDraft = ""
+    }
+
+    /// Whether anything in the transcript is waiting for a name.
+    public var isNaming: Bool { namingRange != nil || namingBlock != nil }
+
+    public func beginNamingBlock(_ block: CombinedLineBlock) {
+        namingBlock = block
+        namingRange = nil
+        namingCluster = nil
+        newPersonDraft = ""
     }
 
     /// Separates a recording from the conversation it was linked to.
@@ -332,52 +400,25 @@ public final class MeetingReviewModel {
         reload()
     }
 
-    /// Shows the correction straight away.
-    ///
-    /// The write goes through the pipeline actor so it cannot race a resolution
-    /// stage, and re-reading every file for one line would make editing a long
-    /// transcript unusable.
-    private func applyLocalOverride(_ line: CombinedLine, name: String, identityID: IdentityID?) {
-        correctedLines.insert(line.id)
-        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
-            combinedLines[index].speakerName = name
-        }
-        guard line.recordingID == meetingID else { return }
-        let utterance = line.utterance
-        speakers.overrideUtterance(
-            utterance,
-            with: SpeakerAssignment(
-                displayName: name, origin: .human, identityID: identityID,
-                provenance: .human()
-            ),
-            at: Date()
-        )
-    }
-
-    public func beginNamingUtterance(_ line: CombinedLine) {
-        namingLine = line
-        namingUtterance = line.utterance
-        namingCluster = nil
-        newPersonDraft = ""
-    }
-
     public func beginNamingCluster(_ clusterID: String) {
         namingCluster = clusterID
-        namingLine = nil
-        namingUtterance = nil
+        namingRange = nil
+        namingBlock = nil
         newPersonDraft = ""
     }
 
     public func cancelNaming() {
-        namingLine = nil
-        namingUtterance = nil
         namingCluster = nil
+        namingRange = nil
+        namingBlock = nil
         newPersonDraft = ""
     }
 
     public func commitNaming() {
-        if let line = namingLine {
-            assignUtterance(line, toNewPerson: newPersonDraft)
+        if let target = namingRange {
+            assignRange(target, toNewPerson: newPersonDraft)
+        } else if let block = namingBlock {
+            assignBlock(block, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
             assignCluster(cluster, toNewPerson: newPersonDraft)
         }

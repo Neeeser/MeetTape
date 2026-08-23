@@ -10,12 +10,20 @@ code.
 ./scripts/build.sh [debug|release]   # canonical build
 ./scripts/test.sh [--filter X]       # canonical test run
 ./scripts/bundle-app.sh [debug|release]   # assembles dist/MeetTape.app
+./scripts/check-offline.sh           # the suite must download no model
 cd extension && npm test             # browser sensor logic
 ```
 
 Always go through the scripts. They source `scripts/spm-env.sh`, which repairs
 two Command Line Tools defects and exports the flags a bare `swift build` would
 miss. Sourcing it from zsh fails: it reads `BASH_SOURCE`.
+
+`check-offline.sh` runs the ordinary suite and fails if a model fetch started.
+A test that builds a real `MeetTapeRuntime`, `SetupModel` or `LocalModelManager`
+can start an install from a detached Task: the runner neither waits for it nor
+reports it, so the only trace is FluidAudio's own log line and the bytes it
+leaves in the test's temporary directory. Run it after touching a test that
+constructs any of those three.
 
 Four properties of the development environment determine how the project is set
 up:

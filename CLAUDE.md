@@ -97,13 +97,19 @@ bump.
 | Processing reaches a meeting folded into another | `combine` links metadata and moves no audio, so the folded folder is the only copy of the second half of a dropped call |
 | Only the archive listing hides a folded continuation; every operation named by an identifier reaches it | A correction on a line from the second half resolved to nothing and threw, so the panel showed a change nothing had stored |
 | A dropped and rejoined call is one logical meeting over two immutable recordings | Each keeps its own segments, manifest, raw output and speaker map. The combined duration and transcript are derived on read, so separating them again is clearing two fields |
+| A boundary a person puts in the transcript lands on a word, never on a proportion of the text | A correction hands its span to voice memory. A line whose backend reported no word timings therefore divides only at its edges, and a turn keeps its timings only when every segment in it was timed: half a word list deleted the untimed half of the turn the first time anyone split that line |
+| Dividing a corrected line clips the correction to each piece rather than re-anchoring it | A correction's width is what says how much of a line a person vouched for. Stretched to the piece, a name set on a three-second interjection would confirm the whole piece and put the other speaker's audio in that person's profile |
+| A correction carries one window per line, in that line's own coordinates | The lines of a turn are not in time order: the line printed second can begin before the line printed first. One range over the pair put a boundary in the wrong line, and a selection dragged backwards across a seam ended before it began |
+| The opening words of a line that repeat the closing words of the previous one, across a chunk boundary and over shared time, are the overlap tail transcribed twice | 21 of 148 consecutive pairs on a 25-minute meeting repeated 3 to 17 words, 20 of them over shared time. Separate timecodes rendered it as a stutter; one paragraph per speaker renders it as nonsense |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
 decoder settings in `LocalDiarizationTuning`, `LocalTranscriptionTuning` and
 `LocalAlignmentTuning`, and `LocalConfigurationTests` and
 `SpeakerIdentityTests` assert them.
 `VoiceEvidenceTests` covers what a vector was derived from and what may be taken
-back, and `ReconnectTests` covers a call recorded in two halves. A change to any
+back, `ReconnectTests` covers a call recorded in two halves, and
+`TranscriptDivisionTests` and `TranscriptPanelTests` cover the boundaries a
+person puts in a transcript and the paragraph they are put in. A change to any
 of these numbers should fail a test before it reaches a user.
 
 Four rules that an adversarial review found were easy to break by accident, each
@@ -188,10 +194,14 @@ against real hardware and what has not.
   the metadata, and only then deletes the segments. Every failure mode leaves
   at least one verified copy: deletion is strictly after the metadata write,
   and an interrupted deletion resumes on the next launch sweep.
-- Speaker corrections are layers above immutable diarization: a cluster mapping
-  and per-line overrides, both in `speakers.map.json`. A line override is
-  anchored to a moment on the timeline rather than to an utterance identifier,
-  because re-assembly and re-analysis move where turns begin and end.
+- Speaker corrections are layers above immutable diarization: a cluster mapping,
+  per-line overrides and the boundaries a person put in the transcript, all in
+  `speakers.map.json`. A line override is anchored to a moment on the timeline
+  rather than to an utterance identifier, because re-assembly and re-analysis
+  move where turns begin and end. A `LineCut` is anchored the same way and for
+  the same reason, and `MeetingStore.readCanonicalTranscript` applies the cuts
+  on the way out, so every reader sees the same lines and `transcript.json`
+  keeps holding what the assembler produced.
 - Re-analysing speakers appends a diarization run and marks it active. The
   previous one stays on disk.
 - `MeetTapeSpeakers` records what every stored vector was derived from, in

@@ -49,6 +49,10 @@ public final class SetupModel {
     @ObservationIgnored private let keyPresence: @Sendable () async -> Bool
     @ObservationIgnored private var hasStoredKey = false
     @ObservationIgnored private var hasCheckedForStoredKey = false
+    /// Fetches a unit set. Injected so a test can read which units a choice
+    /// asked for without a 2.1 GB download standing in the way of the answer.
+    @ObservationIgnored
+    private let install: @MainActor (MeetTapeRuntime, Set<LocalModelUnit>) async -> Void
 
     public init(
         runtime: MeetTapeRuntime,
@@ -57,11 +61,15 @@ public final class SetupModel {
             // `isKnownAbsent` can block on the keychain's authorisation prompt and
             // must not be asked while holding the main actor.
             await Task.detached { !KeychainAPIKeyStore().isKnownAbsent }.value
+        },
+        install: @escaping @MainActor (MeetTapeRuntime, Set<LocalModelUnit>) async -> Void = {
+            runtime, units in await runtime.installLocalModels(units)
         }
     ) {
         self.runtime = runtime
         self.observer = observer
         self.keyPresence = keyPresence
+        self.install = install
         self.storagePath = runtime.settings.storageRootPath
     }
 
@@ -169,19 +177,33 @@ public final class SetupModel {
         runtime.update(settings: settings)
         // Both paths need local units, and which ones differ, so the download is
         // re-planned the moment the choice changes rather than at the next step.
-        Task { await runtime.installLocalModels() }
+        Task { await install(runtime, requiredUnits) }
         if choice == .openAI { Task { await lookUpStoredKeyIfNeeded() } }
     }
 
-    public func chooseLocalModel(_ model: LocalTranscriptionModel) {
-        var settings = runtime.settings
-        settings.processing.localTranscriptionModel = model
-        runtime.update(settings: settings)
-        Task { await runtime.installLocalModels() }
+    /// Which engine the Speech models step shows as selected. The stored
+    /// setting, so a returning user sees what they already run.
+    public var localModel: LocalTranscriptionModel {
+        runtime.settings.processing.localTranscriptionModel
+    }
+
+    /// The engines the step offers, in the order they are shown.
+    public var localModelChoices: [LocalTranscriptionModel] { LocalTranscriptionModel.allCases }
+
+    /// Picking an engine mid-setup re-targets the pending install at that
+    /// engine's units. A 2.1 GB download arrives because someone chose it here,
+    /// never because a default or an upgrade decided for them.
+    public func chooseLocalModel(_ model: LocalTranscriptionModel) async {
+        await install(runtime, runtime.applyLocalTranscriptionModel(model))
     }
 
     public func startModelDownload() async {
-        await runtime.installLocalModels()
+        await install(runtime, requiredUnits)
+    }
+
+    /// What the current settings need on disk.
+    private var requiredUnits: Set<LocalModelUnit> {
+        LocalModelUnit.required(for: runtime.settings)
     }
 
     /// Whether an unverified key may be accepted.

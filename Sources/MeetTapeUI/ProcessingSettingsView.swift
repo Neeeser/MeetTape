@@ -16,7 +16,12 @@ struct ProcessingSettingsTab: View {
             Section("Transcription") {
                 backendPicker(keyPath: \.transcription)
                 if runtime.settings.processing.usesLocalTranscription {
-                    LocalModelChoicePicker(runtime: runtime)
+                    LocalModelChoicePicker(
+                        selected: runtime.settings.processing.localTranscriptionModel,
+                        select: { choice in
+                            Task { await runtime.chooseLocalTranscriptionModel(choice) }
+                        }
+                    )
                 } else {
                     cloudTranscriptionPicker
                 }
@@ -297,18 +302,13 @@ struct ProcessingSettingsTab: View {
 /// Picking a model that is not on disk starts its download immediately; the
 /// row says what it costs before the click.
 struct LocalModelChoicePicker: View {
-    let runtime: MeetTapeRuntime
+    let selected: LocalTranscriptionModel
+    /// Applied by whoever owns the choice: Settings writes it straight to the
+    /// runtime, the wizard routes it through `SetupModel`.
+    let select: (LocalTranscriptionModel) -> Void
 
     var body: some View {
-        Picker("Model", selection: Binding(
-            get: { runtime.settings.processing.localTranscriptionModel },
-            set: { newValue in
-                var settings = runtime.settings
-                settings.processing.localTranscriptionModel = newValue
-                runtime.update(settings: settings)
-                Task { await runtime.installLocalModels() }
-            }
-        )) {
+        Picker("Model", selection: Binding(get: { selected }, set: select)) {
             choice(
                 .parakeet, "Parakeet TDT v3",
                 "Lowest word error rate of the three: it won all 14 meetings of "

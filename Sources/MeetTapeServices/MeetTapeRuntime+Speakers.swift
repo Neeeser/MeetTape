@@ -78,13 +78,45 @@ extension MeetTapeRuntime {
     /// Downloads and prepares the on-device models. Recording is unaffected
     /// while it runs; a meeting that finishes meanwhile queues.
     public func installLocalModels() async {
+        await installLocalModels(LocalModelUnit.required(for: settings))
+    }
+
+    /// The units the current settings need, handed to the manager as the set to
+    /// judge itself against and as the set to fetch.
+    ///
+    /// Both, in that order, on this one call: `update(settings:)` passes the new
+    /// required set over on an unstructured task, and a download started right
+    /// after a model change raced it, so picking Cohere fetched Parakeet.
+    public func installLocalModels(_ units: Set<LocalModelUnit>) async {
         guard let models else { return }
+        await models.setRequired(units)
         do {
-            _ = try await models.install()
+            _ = try await models.install(units: units)
         } catch {
             Log.app.error("model install failed: \(logSafeDescription(error), privacy: .public)")
         }
         await refreshLocalModelState()
+    }
+
+    /// Records which engine transcribes on this Mac, and answers with the units
+    /// that choice needs.
+    ///
+    /// Separate from the download so a caller that owns the download itself, the
+    /// setup wizard, can start it its own way.
+    @discardableResult
+    public func applyLocalTranscriptionModel(
+        _ model: LocalTranscriptionModel
+    ) -> Set<LocalModelUnit> {
+        var updated = settings
+        updated.processing.localTranscriptionModel = model
+        update(settings: updated)
+        return LocalModelUnit.required(for: updated)
+    }
+
+    /// Picking a model is the consent for its download, so the fetch starts on
+    /// the click rather than at the next meeting.
+    public func chooseLocalTranscriptionModel(_ model: LocalTranscriptionModel) async {
+        await installLocalModels(applyLocalTranscriptionModel(model))
     }
 
     /// Removes one unit's files. The other units stay usable.

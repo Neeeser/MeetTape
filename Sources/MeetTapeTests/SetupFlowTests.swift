@@ -1,5 +1,7 @@
 import Foundation
 import MeetTapeCore
+import MeetTapeServices
+import MeetTapeUI
 import TestKit
 
 /// What first-run setup refuses to finish without.
@@ -225,6 +227,69 @@ enum SetupFlowTests {
                 expect.isTrue(PermissionKind.microphone.isGrantedByPrompt)
             },
 
+
+            test("the Speech models step offers the engine choice at the settings default") { expect in
+                // The step showed whatever the settings default happened to be
+                // and no way to change it, so a fresh install committed to an
+                // engine nobody had been shown.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                let model = await MainActor.run { makeSetupModel(root: root, requested: nil) }
+                await MainActor.run {
+                    expect.equal(model.localModelChoices, LocalTranscriptionModel.allCases)
+                    expect.equal(model.localModel, AppSettings().processing.localTranscriptionModel)
+                    expect.equal(model.localModel, .parakeet)
+                    expect.isTrue(
+                        model.runtime.settings.processing.usesLocalTranscription,
+                        "the default backend is local, which is what shows the picker"
+                    )
+                }
+            },
+
+            test("choosing Cohere in setup downloads Cohere and keeps the choice") { expect in
+                // Picking a model is the consent for its download. The wizard
+                // wrote the setting and started the install as two unordered
+                // tasks, so the install could fetch the engine the user had
+                // just moved away from.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                let requested = RequestedUnits()
+                let model = await MainActor.run { makeSetupModel(root: root, requested: requested) }
+                await model.chooseLocalModel(.cohere)
+
+                expect.equal(
+                    await requested.all, [[.cohere, .ctcAligner, .diarizer]],
+                    "the download is for the chosen engine, with the aligner it needs"
+                )
+                await MainActor.run {
+                    expect.equal(model.localModel, .cohere, "and the step shows what was picked")
+                    model.finish()
+                }
+                expect.equal(
+                    SettingsStore(directory: root).load().processing.localTranscriptionModel,
+                    .cohere,
+                    "finishing setup leaves the engine the user saw selected"
+                )
+            },
+
+            test("leaving the choice alone downloads Parakeet and the diarizer only") { expect in
+                // Nothing in setup may reach for the 2.1 GB engine on its own.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                let requested = RequestedUnits()
+                let model = await MainActor.run { makeSetupModel(root: root, requested: requested) }
+                await model.startModelDownload()
+
+                expect.equal(await requested.all, [[.parakeet, .diarizer]])
+                expect.equal(
+                    SettingsStore(directory: root).load().processing.localTranscriptionModel,
+                    .parakeet
+                )
+            },
+
             test("the illustrated pane names match the panes macOS 27 actually opens") { expect in
                 // Checked against the panes themselves. Accessibility is the one
                 // that moved: its privacy pane is called Device Control and Data
@@ -257,4 +322,22 @@ enum SetupFlowTests {
             },
         ])
     }
+}
+
+/// The unit sets an install was asked for, in the order they were asked.
+actor RequestedUnits {
+    private(set) var all: [Set<LocalModelUnit>] = []
+    func record(_ units: Set<LocalModelUnit>) { all.append(units) }
+}
+
+@MainActor
+private func makeSetupModel(root: URL, requested: RequestedUnits?) -> SetupModel {
+    SetupModel(
+        runtime: MeetTapeRuntime(settingsDirectory: root),
+        // Setup on the local default asks the keychain nothing, and a real
+        // install here would fetch gigabytes to answer a question about which
+        // units were named.
+        keyPresence: { false },
+        install: { _, units in await requested?.record(units) }
+    )
 }

@@ -3,7 +3,7 @@
 
 `meettape-eval bench --out FILE` writes one JSON object per case, holding the
 configuration it ran under and the score it produced. This reads those objects
-and keeps the four numbers the regression rule reads, keyed
+and keeps the five numbers the regression rule reads, keyed
 "<engine>/<diarizer>/<meeting>".
 
     scripts/eval.sh bench --suite ami-core --engine parakeet --diarizer local \
@@ -45,6 +45,8 @@ def main() -> int:
             entries[key] = {
                 "attribution": score["attribution"],
                 "der": score.get("der"),
+                # The repeat budget a later run may not exceed.
+                "repeatedNgrams": score.get("repeatedNgrams", 0),
                 "wer": score["wer"],
                 "werNoFiller": score["werNoFiller"],
             }

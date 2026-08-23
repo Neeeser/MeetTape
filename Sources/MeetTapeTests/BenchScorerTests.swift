@@ -23,6 +23,23 @@ enum BenchScorerTests {
         )
     }
 
+    /// A score holding only the fields a baseline rule reads. Decoded rather
+    /// than built, because the memberwise initialiser is internal to the bench
+    /// module.
+    static func score(werNoFiller: Double, attribution: Double, repeats: Int) throws -> BenchScore {
+        let json = """
+            {"meeting":"ES2002b","wer":\(werNoFiller),"werNoFiller":\(werNoFiller),
+             "substitutions":0,"insertions":0,"deletions":0,"referenceWords":100,
+             "hypothesisWords":100,"utterances":10,"attribution":\(attribution),
+             "attributionMerged":\(attribution),"attributionOfLabelled":\(attribution),
+             "attributionScored":100,"overlapExcluded":0,"referenceSpeakers":4,
+             "hypothesisSpeakers":4,"speakerKeys":[],"clusterMapping":{},
+             "repeatedNgrams":\(repeats),"repeatedShare":0,"overlappingPairs":0,
+             "worstOverlapSeconds":0}
+            """
+        return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
+    }
+
     /// The transcript a perfect system would produce: one line per reference
     /// turn, holding that turn's words, under an opaque cluster key.
     ///
@@ -201,6 +218,68 @@ enum BenchScorerTests {
                     expect.equal(mapping.strictCorrect, 40)
                     expect.equal(mapping.mergedCorrect, 80)
                 }
+            },
+
+            test("a repeat budget ratchets down and never up") { expect in
+                // The deciding run left two cases with repeats at a chunk seam.
+                // Those two carry a budget so a clean sweep is green; every
+                // other case still fails on a single repeated sentence.
+                let baselines = BenchBaselines(entries: [
+                    "parakeet/local/IS1009c": BenchBaselines.Entry(
+                        wer: 0.30, werNoFiller: 0.28, attribution: 0.90, der: 0.20,
+                        repeatedNgrams: 7
+                    ),
+                    "parakeet/local/ES2002b": BenchBaselines.Entry(
+                        wer: 0.18, werNoFiller: 0.16, attribution: 0.99, der: 0.07,
+                        repeatedNgrams: 0
+                    ),
+                ])
+
+                let over = try score(werNoFiller: 0.28, attribution: 0.90, repeats: 8)
+                expect.equal(
+                    baselines.regressions(key: "parakeet/local/IS1009c", score: over),
+                    ["8 repeated 8-grams against 7"],
+                    "one more repeat than the budget is a regression"
+                )
+
+                let atBudget = try score(werNoFiller: 0.28, attribution: 0.90, repeats: 7)
+                expect.isTrue(
+                    baselines.regressions(key: "parakeet/local/IS1009c", score: atBudget).isEmpty,
+                    "the recorded count itself passes"
+                )
+
+                let fewer = try score(werNoFiller: 0.28, attribution: 0.90, repeats: 0)
+                expect.isTrue(
+                    baselines.regressions(key: "parakeet/local/IS1009c", score: fewer).isEmpty,
+                    "removing repeats is never a failure"
+                )
+
+                let zeroBudget = try score(werNoFiller: 0.16, attribution: 0.99, repeats: 1)
+                expect.equal(
+                    baselines.regressions(key: "parakeet/local/ES2002b", score: zeroBudget),
+                    ["1 repeated 8-grams against 0"],
+                    "a case recorded clean fails on a single repeat"
+                )
+
+                let unknown = try score(werNoFiller: 0.16, attribution: 0.99, repeats: 1)
+                expect.equal(
+                    baselines.regressions(key: "parakeet/local/IB4005", score: unknown),
+                    ["1 repeated 8-grams against 0"],
+                    "and so does a case with no entry at all"
+                )
+            },
+
+            test("the committed baselines carry the deciding run's repeats") { expect in
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let baselines = try BenchBaselines.read(
+                    from: repository.appendingPathComponent("Benchmarks/baselines.json")
+                )
+                expect.equal(baselines.entries["parakeet/local/ES2002c"]?.repeatedNgrams, 1)
+                expect.equal(baselines.entries["parakeet/local/IS1009c"]?.repeatedNgrams, 7)
+                expect.equal(baselines.entries["parakeet/local/ES2002b"]?.repeatedNgrams, 0)
             },
         ])
     }

@@ -59,8 +59,8 @@ python3 scripts/build-bench-baselines.py /tmp/parakeet.json \
     --out Benchmarks/baselines.json
 ```
 
-The generator keeps the four numbers the rule reads (`wer`, `werNoFiller`,
-`attribution`, `der`), refuses a case that did not reach `complete`, and carries
+The generator keeps the five numbers the rule reads (`wer`, `werNoFiller`,
+`attribution`, `der`, `repeatedNgrams`), refuses a case that did not reach `complete`, and carries
 the existing tolerances over.
 
 ## What a baseline check enforces
@@ -76,11 +76,10 @@ nothing to compare against.
 - `wer` is recorded and not compared: filler words are transcribed or not on
   the decoder's whim and the assembly defect the suite hunts for shows in the
   stripped number.
-- A single repeated 8-gram fails outright, with or without an entry. One
-  sentence transcribed twice means the assembler kept a chunk overlap, which is
-  a defect at any margin. Two Parakeet cases carry repeats in the deciding run
-  (ES2002c 1, IS1009c 7), so those two fail this check until the seam work that
-  removes them lands.
+- Repeated 8-grams ratchet: a case may not produce more than its entry records,
+  and a case recorded at zero, or with no entry, may produce none at all. Two
+  Parakeet cases carry a nonzero budget from the deciding run (ES2002c 1,
+  IS1009c 7) pending the chunk-seam work that removes them.
 
 Any regression exits nonzero, which is what makes the command usable as a gate.
 

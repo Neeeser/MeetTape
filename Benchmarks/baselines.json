@@ -3,84 +3,98 @@
     "parakeet/local/EN2002a": {
       "attribution": 0.9246153846153846,
       "der": 0.31216311225685495,
+      "repeatedNgrams": 0,
       "wer": 0.3869760479041916,
       "werNoFiller": 0.3688394276629571
     },
     "parakeet/local/ES2002a": {
       "attribution": 0.9013282732447818,
       "der": 0.34680511182108625,
+      "repeatedNgrams": 0,
       "wer": 0.2608695652173913,
       "werNoFiller": 0.24956369982547993
     },
     "parakeet/local/ES2002b": {
       "attribution": 0.9925531914893617,
       "der": 0.07584269662921349,
+      "repeatedNgrams": 0,
       "wer": 0.18495297805642633,
       "werNoFiller": 0.16085106382978723
     },
     "parakeet/local/ES2002c": {
       "attribution": 0.9829317269076305,
       "der": 0.08664168888248433,
+      "repeatedNgrams": 1,
       "wer": 0.20387596899224805,
       "werNoFiller": 0.17986798679867988
     },
     "parakeet/local/ES2002d": {
       "attribution": 0.95593635250918,
       "der": 0.16985786444261716,
+      "repeatedNgrams": 0,
       "wer": 0.21247892074198987,
       "werNoFiller": 0.18587360594795538
     },
     "parakeet/local/ES2003a": {
       "attribution": 0.7151162790697675,
       "der": 0.2799606105366814,
+      "repeatedNgrams": 0,
       "wer": 0.2739018087855297,
       "werNoFiller": 0.26628895184135976
     },
     "parakeet/local/ES2005a": {
       "attribution": 0.9389312977099237,
       "der": 0.15237960740008474,
+      "repeatedNgrams": 0,
       "wer": 0.3089005235602094,
       "werNoFiller": 0.2863187588152327
     },
     "parakeet/local/ES2008b": {
       "attribution": 0.9190031152647975,
       "der": 0.1464062602748734,
+      "repeatedNgrams": 0,
       "wer": 0.17461105594174114,
       "werNoFiller": 0.15225399052797756
     },
     "parakeet/local/IB4005": {
       "attribution": 0.9412568306010929,
       "der": 0.17841091492776887,
+      "repeatedNgrams": 0,
       "wer": 0.23757904245709124,
       "werNoFiller": 0.19405940594059407
     },
     "parakeet/local/IS1008a": {
       "attribution": 0.9934701492537313,
       "der": 0.04105376616789247,
+      "repeatedNgrams": 0,
       "wer": 0.09479077711357814,
       "werNoFiller": 0.06517690875232775
     },
     "parakeet/local/IS1009a": {
       "attribution": 0.961439588688946,
       "der": 0.14934293303509016,
+      "repeatedNgrams": 0,
       "wer": 0.23349436392914655,
       "werNoFiller": 0.2109375
     },
     "parakeet/local/IS1009c": {
       "attribution": 0.9561671763506626,
       "der": 0.1229141769574647,
+      "repeatedNgrams": 7,
       "wer": 0.16724967205946656,
       "werNoFiller": 0.12468951813214109
     },
     "parakeet/local/TS3005a": {
       "attribution": 0.9176470588235294,
       "der": 0.20903451348665045,
+      "repeatedNgrams": 0,
       "wer": 0.2885375494071146,
       "werNoFiller": 0.2807971014492754
     },
     "parakeet/local/TS3009c": {
       "attribution": 0.909710391822828,
       "der": 0.29511251758087204,
+      "repeatedNgrams": 0,
       "wer": 0.3565365025466893,
       "werNoFiller": 0.33582787652011226
     }

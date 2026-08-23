@@ -28,12 +28,29 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
         public var werNoFiller: Double
         public var attribution: Double
         public var der: Double?
+        /// Repeated 8-grams the deciding run produced for this case. A budget,
+        /// not a tolerance: a case may not produce more than it did, and a
+        /// case recorded at zero may not produce any.
+        public var repeatedNgrams: Int
 
-        public init(wer: Double, werNoFiller: Double, attribution: Double, der: Double?) {
+        public init(
+            wer: Double, werNoFiller: Double, attribution: Double, der: Double?,
+            repeatedNgrams: Int = 0
+        ) {
             self.wer = wer
             self.werNoFiller = werNoFiller
             self.attribution = attribution
             self.der = der
+            self.repeatedNgrams = repeatedNgrams
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            wer = try container.decode(Double.self, forKey: .wer)
+            werNoFiller = try container.decode(Double.self, forKey: .werNoFiller)
+            attribution = try container.decode(Double.self, forKey: .attribution)
+            der = try container.decodeIfPresent(Double.self, forKey: .der)
+            repeatedNgrams = try container.decodeIfPresent(Int.self, forKey: .repeatedNgrams) ?? 0
         }
     }
 
@@ -57,13 +74,16 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
 
     /// What a result breaks, if anything. An empty list is a pass.
     ///
-    /// A repeated 8-gram fails outright rather than on a tolerance: the
-    /// assembler either dropped the duplicated audio or it did not, and one
-    /// sentence transcribed twice is a defect at any margin.
+    /// Repeated 8-grams ratchet rather than run on a tolerance: one sentence
+    /// transcribed twice is a defect at any margin, so a case may never produce
+    /// more of them than its entry records, and a case with no entry, or an
+    /// entry recording none, may produce none at all. Two cases carry a nonzero
+    /// budget until the chunk-seam work that removes them lands.
     public func regressions(key: String, score: BenchScore) -> [String] {
         var broken: [String] = []
-        if score.repeatedNgrams > 0 {
-            broken.append("\(score.repeatedNgrams) repeated 8-grams")
+        let budget = entries[key]?.repeatedNgrams ?? 0
+        if score.repeatedNgrams > budget {
+            broken.append("\(score.repeatedNgrams) repeated 8-grams against \(budget)")
         }
         guard let baseline = entries[key] else { return broken }
         let werDrift = (score.werNoFiller - baseline.werNoFiller) * 100

@@ -14,20 +14,17 @@ public struct BenchTruth: Codable, Sendable, Equatable {
         public var text: String
         /// The global AMI speaker identifier.
         public var speaker: String
-        public var agent: String
         /// Cut off mid-word by the speaker. Excluded from the filler-stripped
         /// reference, where a partial word is noise rather than a miss.
         public var truncated: Bool
 
         public init(
-            start: Double, end: Double, text: String, speaker: String,
-            agent: String, truncated: Bool
+            start: Double, end: Double, text: String, speaker: String, truncated: Bool
         ) {
             self.start = start
             self.end = end
             self.text = text
             self.speaker = speaker
-            self.agent = agent
             self.truncated = truncated
         }
     }

@@ -20,13 +20,6 @@ public struct BenchManifest: Codable, Sendable, Equatable {
         public var sha256: String
     }
 
-    public func audioURL(meeting: String) -> String {
-        mirror
-            .replacingOccurrences(of: "{meeting}", with: meeting)
-    }
-
-    public func audioFilename(meeting: String) -> String { "\(meeting).Mix-Headset.wav" }
-
     public static func read(from url: URL) throws -> BenchManifest {
         try JSONDecoder().decode(BenchManifest.self, from: Data(contentsOf: url))
     }
@@ -39,7 +32,6 @@ public struct BenchLayout: Sendable {
     public init(root: URL) { self.root = root }
 
     public var manifest: URL { root.appendingPathComponent("manifest.json") }
-    public var baselines: URL { root.appendingPathComponent("baselines.json") }
     public func truth(meeting: String) -> URL {
         root.appendingPathComponent("ground-truth/\(meeting).json")
     }

@@ -437,14 +437,14 @@ these runs prove the machinery, not the accuracy numbers.
 The following behaviour is implemented but has not been exercised, and should not
 be assumed to work.
 
-- **The transcript when no aligner is available at all.** If the aligner
-  cannot be installed (a cloud `gpt-transcribe` user who is offline), the
-  meeting still completes with each chunk's words at chunk-level timing. Those
-  coarse segments span the chunk's 8-second overlap tail as well, and
-  whole-utterance duplicate detection does not catch a repeat that small
-  inside a segment that large, so the overlap text appears twice at each chunk
-  boundary until the chunk is aligned on a later run. The words are correct;
-  the repeats are visible.
+- **The transcript when the aligner refuses.** A refusal is deterministic, so
+  the chunk keeps whole-chunk timing permanently: one utterance spanning the
+  chunk, attributed whole to whichever speaker overlaps it most, with the
+  8-second overlap tail repeated at the boundary because whole-utterance
+  duplicate detection cannot see a repeat that small inside a segment that
+  large. The words are correct; the attribution and the repeats are not. An
+  aligner that merely could not be *installed* is treated differently: that
+  stage fails and stays retryable rather than completing the meeting.
 - **Alignment on real meeting audio.** Every alignment measurement above is
   against synthetic voices, which are exactly the weak-posterior case. Real
   speech should align better, but no real meeting has been through

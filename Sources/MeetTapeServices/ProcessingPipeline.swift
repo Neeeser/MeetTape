@@ -433,10 +433,20 @@ public actor ProcessingPipeline {
         do {
             try await backends.prepareAligner?()
         } catch {
-            Log.processing.notice(
-                "aligner unavailable, chunks keep chunk-level timing: \(logSafeDescription(error), privacy: .public)"
+            // A model that would not download is not a refusal. Swallowing it
+            // completed the meeting with one five-minute utterance per chunk,
+            // each attributed whole to a single speaker, and nothing revisits
+            // a finished meeting: this stage is the only caller of alignment.
+            // Failing keeps it retryable, and Rebuild Transcript still
+            // produces the coarse reading in the meantime.
+            Log.processing.error(
+                "aligner unavailable: \(logSafeDescription(error), privacy: .public)"
             )
-            return
+            throw ProcessingError.localProcessingFailed(
+                reason: "The timing model could not be downloaded, so the transcript's "
+                    + "word timings are missing. The words are saved.",
+                retryable: true
+            )
         }
 
         let timeline = try store.readTimeline()

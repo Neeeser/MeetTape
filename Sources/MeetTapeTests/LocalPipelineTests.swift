@@ -125,6 +125,7 @@ enum LocalPipelineTests {
         diarizer: StubLocalDiarizer,
         speakers: SpeakerRecognitionService?,
         aligner: (any TranscriptAligner)? = nil,
+        prepareAligner: (@Sendable () async throws -> Void)? = nil,
         settings: AppSettings,
         scratchRoot: URL
     ) -> ProcessingPipeline {
@@ -135,7 +136,8 @@ enum LocalPipelineTests {
                 transcription: { _, _ in transcriber },
                 diarization: { _, _ in diarizer },
                 speakers: speakers,
-                aligner: aligner
+                aligner: aligner,
+                prepareAligner: prepareAligner
             ),
             scratch: ProcessingScratch(root: scratchRoot),
             clock: ManualClock(),
@@ -424,6 +426,55 @@ enum LocalPipelineTests {
                 expect.equal(
                     Set(after.map(\.model)), ["stub-cohere"],
                     "one track's words come from one backend"
+                )
+            },
+
+            test("an aligner that will not install fails the stage, it does not ship coarse timings") { expect in
+                // Distinct from a refusal. A refusal is deterministic and the
+                // chunk keeps whole-chunk timing for good; a model that would
+                // not download is transient, and completing the meeting on
+                // five-minute utterances would be permanent, because nothing
+                // revisits a finished meeting's alignment.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "we ship friday")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: StubAligner(segments: []),
+                    prepareAligner: { throw LocalModelError.installFailed("no network") },
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.notEqual(
+                    metadata.processing.state, .complete,
+                    "a meeting whose words have no timings must not report success"
+                )
+                expect.equal(metadata.processing.state, .failed)
+                expect.isTrue(
+                    metadata.processing.lastFailure?.isRetryable == true,
+                    "and the download can be tried again"
+                )
+
+                // The words are safe, so a retry aligns them rather than
+                // transcribing again.
+                let raw = try meeting.store.readRawTranscript()
+                expect.isTrue(
+                    raw.chunks.contains { $0.text == "we ship friday" },
+                    "the transcription is kept whatever the aligner did"
                 )
             },
 

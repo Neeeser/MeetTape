@@ -84,7 +84,10 @@ let package = Package(
         // the local stack's measured numbers get checked again on real audio.
         .executableTarget(
             name: "MeetTapeEval",
-            dependencies: ["MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers"]
+            dependencies: [
+                "MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers",
+                "MeetTapeBench", "MeetTapeIntegrations", "MeetTapeServices",
+            ]
         ),
 
         // Minimal test harness. XCTest and swift-testing ship with Xcode, which is

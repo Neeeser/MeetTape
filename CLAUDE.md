@@ -277,6 +277,34 @@ runs a manual recording through `MeetTapeRuntime`. `MEETTAPE_LIVE_LONG=1` puts a
 hour of audio through the chunked pipeline; it costs money and takes tens of
 minutes.
 
+## Benchmarks
+
+`meettape-eval bench` runs the real `ProcessingPipeline` over AMI meetings and
+scores the meeting folder that comes out, so a change to transcription or
+diarization is measured rather than argued about:
+
+```bash
+scripts/fetch-bench-audio.sh                    # audio into ~/Library/Caches/meettape-bench
+scripts/eval.sh bench --suite ami-core --engine parakeet --engine cohere \
+    --diarizer local --out /tmp/bench.json
+scripts/eval.sh bench --case ES2002b --engine parakeet --baseline Benchmarks/baselines.json
+```
+
+The reference lives in `Benchmarks/`: ground-truth JSON per case, the pinned
+checksums and the suite rosters. Audio is never committed and never in the
+tree; the harness cuts each excerpt window from the cached recording with
+AVFoundation. `scripts/make-bench-smoke.sh` synthesises a free two-voice
+fixture for the same command via `--truth`, which catches wiring, chunk-seam
+and assembly defects without touching the corpus.
+
+The scorer is `MeetTapeBench`, ported metric for metric from the Python scorer
+the model-path probe validated. `BenchScorerTests` puts three transcripts with
+known answers through it: the reference itself scores 0% WER and 100%
+attribution, the reference with one word in ten deleted scores 10.1% WER, and
+the reference with shuffled labels scores at chance. A wrong meter is worse
+than no meter, which is what those pin.
+
+
 ## Release
 
 `docs/RELEASING.md` documents the full procedure. In summary: tag `vX.Y.Z`, and

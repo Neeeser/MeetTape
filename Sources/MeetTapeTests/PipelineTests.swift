@@ -149,9 +149,9 @@ enum PipelineTests {
                 ).joined(separator: ". ")
                 var caught: ProcessingError?
                 do {
-                    try ProcessingPipeline.requireCoherentTranscript(
+                    _ = try ProcessingPipeline.dropIfLooping(
                         response: TranscriptionOutput(segments: [], text: loop),
-                        chunkID: "remote_chunk_007", purpose: .words
+                        chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: false
                     )
                 } catch let error as ProcessingError {
                     caught = error
@@ -162,19 +162,30 @@ enum PipelineTests {
                 )
                 expect.isTrue(caught?.isRetryable == true, "the stage retries")
 
+                // A decoder that loops deterministically loops again, so the
+                // last attempt records the window as nothing rather than
+                // failing a meeting whose other fifteen chunks are speech.
+                let dropped = try ProcessingPipeline.dropIfLooping(
+                    response: TranscriptionOutput(segments: [], text: loop),
+                    chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: true
+                )
+                expect.isTrue(dropped, "the last attempt drops the chunk instead of failing")
+
                 // Six minutes of ordinary conversation repeats about 2% of its
                 // phrases, so a real transcript of the same length is accepted.
                 let spoken = (0..<120).map { "word\($0)" }.joined(separator: " ")
-                try ProcessingPipeline.requireCoherentTranscript(
+                let keptSpeech = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: spoken),
-                    chunkID: "remote_chunk_008", purpose: .words
+                    chunkID: "remote_chunk_008", purpose: .words, isLastAttempt: true
                 )
+                expect.isFalse(keptSpeech, "speech is kept")
                 // And a chunk asked for speakers rather than words is not
                 // measured on its text at all.
-                try ProcessingPipeline.requireCoherentTranscript(
+                let keptLabels = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: loop),
-                    chunkID: "remote_chunk_009", purpose: .speakers
+                    chunkID: "remote_chunk_009", purpose: .speakers, isLastAttempt: false
                 )
+                expect.isFalse(keptLabels, "a speakers chunk is not measured on its text")
             },
 
             test("each track is placed at its own start on the meeting timeline") { expect in

@@ -629,8 +629,10 @@ public actor ProcessingPipeline {
         try Self.requireTranscribedOrSilent(
             response: output, audio: audio, chunkID: chunkID, purpose: .words
         )
-        try Self.requireCoherentTranscript(
-            response: output, chunkID: chunkID, purpose: .words
+        let looping = try Self.dropIfLooping(
+            response: output, chunkID: chunkID, purpose: .words,
+            isLastAttempt: metadata.processing.attemptCount(for: .transcribing)
+                >= Self.maxAttemptsPerStage
         )
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
@@ -639,8 +641,8 @@ public actor ProcessingPipeline {
             durationSeconds: output.durationSeconds ?? location.seconds,
             model: backend.identifier,
             responseFormat: Self.localResponseFormat(for: backend.timing),
-            segments: output.segments,
-            text: textOnly ? output.text : nil,
+            segments: looping ? [] : output.segments,
+            text: looping || !textOnly ? nil : output.text,
             rawResponseFile: nil
         ))
         try store.writeRawTranscript(raw)
@@ -692,28 +694,35 @@ public actor ProcessingPipeline {
     }
 
     /// Fails a chunk whose response is one phrase repeated for the length of
-    /// the window.
+    /// the window, and on the last attempt records it as nothing.
     ///
     /// A speech model given a window with little speech in it can loop, and the
     /// loop is billed, recorded and assembled like any other answer. Six of
     /// sixteen ES2003a chunks came back with the same fabricated paragraph:
     /// 438 invented words against a 386-word reference, 266 insertions and 193%
     /// DER, with the meeting reporting success. Failing the chunk retries it,
-    /// and a chunk that keeps looping leaves the meeting failed and retryable
-    /// rather than putting sentences nobody said in the transcript.
-    public static func requireCoherentTranscript(
-        response: TranscriptionOutput, chunkID: String, purpose: RawChunkPurpose
-    ) throws {
-        guard purpose == .words else { return }
+    /// which is worth doing because a sampled decoder often comes back with
+    /// speech the second time. A decoder that loops deterministically never
+    /// will, so the last attempt drops the chunk instead: a hole in one window
+    /// costs that window, and failing the stage would cost the whole meeting
+    /// for audio nothing can transcribe.
+    ///
+    /// - Returns: true when the chunk is to be recorded as nothing.
+    public static func dropIfLooping(
+        response: TranscriptionOutput, chunkID: String, purpose: RawChunkPurpose,
+        isLastAttempt: Bool
+    ) throws -> Bool {
+        guard purpose == .words else { return false }
         let text = response.text.isEmpty
             ? response.segments.map(\.text).joined(separator: " ")
             : response.text
         let share = DegenerateTranscriptPolicy.repeatedShare(of: text)
-        guard DegenerateTranscriptPolicy.decide(text: text) == .fail else { return }
+        guard DegenerateTranscriptPolicy.decide(text: text) == .fail else { return false }
         Log.processing.error(
             "looping transcript for chunk \(chunkID, privacy: .public), repeated phrase share \(share, format: .fixed(precision: 2))"
         )
-        throw ProcessingError.degenerateTranscript(chunk: chunkID)
+        guard isLastAttempt else { throw ProcessingError.degenerateTranscript(chunk: chunkID) }
+        return true
     }
 
     /// The recorded format string for a local backend's chunk, by what timing
@@ -1070,6 +1079,10 @@ public actor ProcessingPipeline {
         // await, so three concurrent calls really do run three decodes against
         // one Neural Engine.
         let maxConcurrentUploads = concurrency ?? 3
+        // Read before the group, because the attempt count belongs to the stage
+        // and the group must not reach into the metadata being written here.
+        let lastAttempt = metadata.processing.attemptCount(for: .transcribing)
+            >= Self.maxAttemptsPerStage
         try await withThrowingTaskGroup(of: (PreparedChunk, TranscriptionOutput).self) { group in
             var nextIndex = 0
             while nextIndex < min(maxConcurrentUploads, pending.count) {
@@ -1086,8 +1099,9 @@ public actor ProcessingPipeline {
                     response: response, audio: chunk.audioURL,
                     chunkID: chunk.chunkID, purpose: purpose
                 )
-                try Self.requireCoherentTranscript(
-                    response: response, chunkID: chunk.chunkID, purpose: purpose
+                let looping = try Self.dropIfLooping(
+                    response: response, chunkID: chunk.chunkID, purpose: purpose,
+                    isLastAttempt: lastAttempt
                 )
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,
@@ -1097,8 +1111,8 @@ public actor ProcessingPipeline {
                     model: model,
                     responseFormat: response.segments.contains { $0.speaker != nil }
                         ? "diarized_json" : (textOnly ? "json" : "verbose_json"),
-                    segments: response.segments,
-                    text: textOnly ? response.text : nil,
+                    segments: looping ? [] : response.segments,
+                    text: looping || !textOnly ? nil : response.text,
                     rawResponseFile: response.rawBody == nil ? nil : "api/\(chunk.chunkID).json",
                     purpose: purpose
                 ))

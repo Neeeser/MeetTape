@@ -175,16 +175,19 @@ public struct TranscriptWordSpan: Sendable, Equatable {
     public var length: Int
     public var startSeconds: Double
     public var endSeconds: Double
-    public var lineID: String
+    /// The line this word belongs to. Two lines from neighbouring chunks can
+    /// hold the same second, so a boundary placed by time alone lands in
+    /// whichever of them comes first rather than in the one under the pointer.
+    public var utteranceID: String
 
     public init(
-        location: Int, length: Int, startSeconds: Double, endSeconds: Double, lineID: String
+        location: Int, length: Int, startSeconds: Double, endSeconds: Double, utteranceID: String
     ) {
         self.location = location
         self.length = length
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
-        self.lineID = lineID
+        self.utteranceID = utteranceID
     }
 
     static func spans(
@@ -193,7 +196,7 @@ public struct TranscriptWordSpan: Sendable, Equatable {
         let whole = [TranscriptWordSpan(
             location: offset, length: (lineText as NSString).length,
             startSeconds: line.utterance.start, endSeconds: line.utterance.end,
-            lineID: line.id
+            utteranceID: line.utterance.id
         )]
         guard let words = line.utterance.words, !words.isEmpty else { return whole }
         let text = lineText as NSString
@@ -212,7 +215,8 @@ public struct TranscriptWordSpan: Sendable, Equatable {
             guard range.location != NSNotFound else { return whole }
             found.append(TranscriptWordSpan(
                 location: offset + range.location, length: range.length,
-                startSeconds: word.start, endSeconds: word.end, lineID: line.id
+                startSeconds: word.start, endSeconds: word.end,
+                utteranceID: line.utterance.id
             ))
             cursor = range.location + range.length
         }

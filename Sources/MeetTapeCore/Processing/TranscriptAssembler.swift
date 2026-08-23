@@ -271,7 +271,8 @@ public struct TranscriptAssembler: Sendable {
     ) -> [Utterance] {
         var result: [Utterance] = []
         var current: (
-            start: Double, end: Double, speaker: String?, text: String, words: [RawTranscriptWord]
+            start: Double, end: Double, speaker: String?, text: String,
+            words: [RawTranscriptWord], timed: Bool
         )?
 
         func flush() {
@@ -317,13 +318,20 @@ public struct TranscriptAssembler: Sendable {
                 // On the meeting timeline, like the line's own start and end.
                 // A division of this line is compared against corrections and
                 // diarization intervals, which are all in those coordinates.
-                words: group.words.isEmpty ? nil : group.words.map {
+                //
+                // Present only when every segment in the turn was timed. A
+                // dividing line's text is rebuilt from its words, so a partial
+                // list would delete the untimed half of the turn from the
+                // panel, the markdown and everything derived from them. A
+                // decoder does return a segment with no word alignment, and a
+                // text-only backend's chunk has none at all.
+                words: group.timed ? group.words.map {
                     RawTranscriptWord(
                         start: chunk.timelineOffset + $0.start,
                         end: chunk.timelineOffset + $0.end,
                         text: $0.text, probability: $0.probability
                     )
-                }
+                } : nil
             ))
             current = nil
         }
@@ -342,10 +350,14 @@ public struct TranscriptAssembler: Sendable {
                 group.end = max(group.end, segment.end)
                 group.text += group.text.isEmpty ? text : " \(text)"
                 group.words += segment.words ?? []
+                group.timed = group.timed && !(segment.words ?? []).isEmpty
                 current = group
             } else {
                 flush()
-                current = (segment.start, segment.end, segment.speaker, text, segment.words ?? [])
+                current = (
+                    segment.start, segment.end, segment.speaker, text,
+                    segment.words ?? [], !(segment.words ?? []).isEmpty
+                )
             }
         }
         flush()

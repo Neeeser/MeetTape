@@ -1628,25 +1628,13 @@ public actor ProcessingPipeline {
         try await store.clearOccurrenceIdentity(meetingID: meetingID, clusterID: clusterID)
     }
 
-    /// Changes the speaker on one transcript line.
+    /// Changes the speaker on transcript lines, without touching the cluster
+    /// they belong to.
     ///
-    /// Writes one override. The cluster keeps its name, every other line
-    /// assigned to that cluster keeps its name, the raw diarization is
-    /// untouched, and nothing is transcribed again.
-    @discardableResult
-    public func applyUtteranceSpeaker(
-        _ name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
-    ) async throws -> IdentityID? {
-        try await correctUtterances(
-            name, utteranceIDs: [utteranceID], meetingID: meetingID, identityID: identityID
-        )
-    }
-
-    /// Applies one identity to several lines at once.
-    ///
-    /// Useful where the diarizer put two people in one cluster: the lines that
-    /// belong to the other person move without disturbing the cluster or the
-    /// lines that were right.
+    /// Writes one override per line. The cluster keeps its name, every other
+    /// line assigned to it keeps its name, the raw diarization is untouched,
+    /// and nothing is transcribed again. What a turn's header writes, and what
+    /// a division writes once it knows which pieces changed hands.
     public func applyUtteranceSpeaker(
         _ name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil
     ) async throws {

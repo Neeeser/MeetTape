@@ -6,9 +6,11 @@ import SwiftUI
 /// What the reader asked for by right-clicking a block.
 enum TranscriptParagraphAction: Equatable {
     /// Divide the turn at this moment and give everything after it to someone.
-    case split(atSeconds: Double)
-    /// Give this stretch to someone and leave the words either side alone.
-    case assign(startSeconds: Double, endSeconds: Double)
+    /// The line named is the one the boundary falls in.
+    case split(atSeconds: Double, utteranceID: String)
+    /// Give this stretch to someone and leave the words either side alone,
+    /// across the lines the selection touched.
+    case assign(startSeconds: Double, endSeconds: Double, utteranceIDs: [String])
 }
 
 /// One speaker's turn as a paragraph that can be selected, copied and divided.
@@ -95,13 +97,15 @@ final class TranscriptTextView: NSTextView {
         let action: TranscriptParagraphAction
         let title: String
         if selection.length > 0, let range = selectedSpanRange(selection) {
-            action = .assign(startSeconds: range.start, endSeconds: range.end)
+            action = .assign(
+                startSeconds: range.start, endSeconds: range.end, utteranceIDs: range.lines
+            )
             title = "Assign selection to"
         } else {
             let point = convert(event.locationInWindow, from: nil)
             let index = characterIndexForInsertion(at: point)
             guard let boundary = nearestBoundary(to: index) else { return menu }
-            action = .split(atSeconds: boundary)
+            action = .split(atSeconds: boundary.startSeconds, utteranceID: boundary.utteranceID)
             title = "Split here, and this speaker is"
         }
 
@@ -126,7 +130,7 @@ final class TranscriptTextView: NSTextView {
     ///
     /// Nearest rather than the word under the pointer, because the reader is
     /// aiming at the gap between two words and the gap belongs to both.
-    func nearestBoundary(to index: Int) -> Double? {
+    func nearestBoundary(to index: Int) -> TranscriptWordSpan? {
         // From the second word on: splitting before the first would leave one
         // piece with nothing in it.
         var best: TranscriptWordSpan?
@@ -135,16 +139,20 @@ final class TranscriptTextView: NSTextView {
             distance = abs(span.location - index)
             best = span
         }
-        return best?.startSeconds
+        return best
     }
 
-    /// The moments a selected range covers, from the words it touches.
-    func selectedSpanRange(_ range: NSRange) -> (start: Double, end: Double)? {
+    /// The moments a selected range covers, and the lines it touched.
+    func selectedSpanRange(_ range: NSRange) -> (start: Double, end: Double, lines: [String])? {
         let touched = spans.filter {
             $0.location < range.location + range.length && range.location < $0.location + $0.length
         }
         guard let first = touched.first, let last = touched.last else { return nil }
-        return (first.startSeconds, last.endSeconds)
+        var lines: [String] = []
+        for span in touched where lines.last != span.utteranceID {
+            lines.append(span.utteranceID)
+        }
+        return (first.startSeconds, last.endSeconds, lines)
     }
 }
 

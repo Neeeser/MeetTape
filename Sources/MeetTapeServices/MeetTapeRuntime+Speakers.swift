@@ -321,23 +321,6 @@ extension MeetTapeRuntime {
         return rows
     }
 
-    /// Changes the speaker on one transcript line.
-    public func assignUtteranceSpeaker(
-        name: String, utteranceID: String, meetingID: String, identityID: IdentityID? = nil
-    ) {
-        runProcessing { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try await pipeline.applyUtteranceSpeaker(
-                    name, utteranceID: utteranceID, meetingID: meetingID, identityID: identityID
-                )
-            } catch {
-                Log.app.error("line speaker not saved: \(logSafeDescription(error), privacy: .public)")
-            }
-            onProcessingUpdate?(meetingID)
-        }
-    }
-
     /// Changes the speaker on several selected lines at once.
     public func assignUtteranceSpeakers(
         name: String, utteranceIDs: [String], meetingID: String, identityID: IdentityID? = nil

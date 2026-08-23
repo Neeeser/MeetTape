@@ -314,6 +314,34 @@ enum TranscriptDivisionTests {
                 expect.equal(transcript.utterances[1].text, "is fine by me honestly")
             },
 
+            test("a turn where one segment was not timed carries no words at all") { expect in
+                // A dividing line rebuilds its text from its words, so a list
+                // covering half the turn would delete the other half from the
+                // panel and everything derived from it. A decoder does return
+                // a segment whose word alignment produced nothing.
+                let chunk = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0, durationSeconds: 20,
+                    model: "test", responseFormat: "json",
+                    segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 1.5, text: "hello there", speaker: "A",
+                            words: [word(" hello", 0, 0.6), word(" there", 0.7, 1.4)]
+                        ),
+                        RawTranscriptSegment(
+                            start: 1.6, end: 3, text: "and then we shipped", speaker: "A",
+                            words: []
+                        ),
+                    ]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [chunk]),
+                    micTrackIsLocalUser: false, generatedAt: Date()
+                )
+                let line = try expect.unwrap(transcript.utterances.first)
+                expect.equal(line.text, "hello there and then we shipped", "all of it is there")
+                expect.isNil(line.words, "and none of it can be divided away")
+            },
+
             test("the words behind a line reach the transcript on the meeting clock") { expect in
                 // What a division is measured against. Chunk-relative timings
                 // would put a boundary somewhere else entirely on any chunk

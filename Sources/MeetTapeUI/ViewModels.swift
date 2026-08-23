@@ -282,10 +282,6 @@ public final class MeetingReviewModel {
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
     public var participantDraft = ""
-    /// The line waiting for a name that is not in the list yet.
-    public var namingUtterance: Utterance?
-    /// The line waiting for a name, with the recording it belongs to.
-    public var namingLine: CombinedLine?
     public var namingCluster: String?
     /// The stretch of one track waiting for a name, after a split or a
     /// selection whose speaker is not in the list yet.
@@ -478,54 +474,18 @@ public final class MeetingReviewModel {
     public func beginNamingRange(_ target: SpeakerRangeTarget) {
         namingRange = target
         namingBlock = nil
-        namingLine = nil
-        namingUtterance = nil
         namingCluster = nil
         newPersonDraft = ""
     }
 
     /// Whether anything in the transcript is waiting for a name.
-    public var isNaming: Bool { namingLine != nil || namingRange != nil || namingBlock != nil }
+    public var isNaming: Bool { namingRange != nil || namingBlock != nil }
 
     public func beginNamingBlock(_ block: CombinedLineBlock) {
         namingBlock = block
         namingRange = nil
-        namingLine = nil
-        namingUtterance = nil
         namingCluster = nil
         newPersonDraft = ""
-    }
-
-    /// Changes the speaker on one line only. Every other line in the same
-    /// cluster keeps its name.
-    public func assignUtterance(_ line: CombinedLine, to entry: SpeakerDirectoryEntry) {
-        runtime.assignUtteranceSpeaker(
-            name: entry.identity.resolvedName, utteranceID: line.utterance.id,
-            meetingID: line.recordingID, identityID: entry.id
-        )
-        applyLocalOverride(line, name: entry.identity.resolvedName, identityID: entry.id)
-    }
-
-    public func assignUtterance(_ line: CombinedLine, toNewPerson name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        runtime.assignUtteranceSpeaker(
-            name: trimmed, utteranceID: line.utterance.id, meetingID: line.recordingID
-        )
-        applyLocalOverride(line, name: trimmed, identityID: nil)
-    }
-
-    public func clearUtterance(_ line: CombinedLine) {
-        runtime.assignUtteranceSpeaker(
-            name: "", utteranceID: line.utterance.id, meetingID: line.recordingID
-        )
-        if line.recordingID == meetingID { speakers.clearOverride(for: line.utterance) }
-        correctedLines.remove(line.id)
-        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
-            combinedLines[index].speakerName = SpeakerMap.fallbackName(
-                for: line.utterance.speakerKey
-            )
-        }
     }
 
     /// Separates a recording from the conversation it was linked to.
@@ -534,49 +494,14 @@ public final class MeetingReviewModel {
         reload()
     }
 
-    /// Shows the correction straight away.
-    ///
-    /// The write goes through the pipeline actor so it cannot race a resolution
-    /// stage, and re-reading every file for one line would make editing a long
-    /// transcript unusable.
-    private func applyLocalOverride(_ line: CombinedLine, name: String, identityID: IdentityID?) {
-        correctedLines.insert(line.id)
-        if let index = combinedLines.firstIndex(where: { $0.id == line.id }) {
-            combinedLines[index].speakerName = name
-        }
-        guard line.recordingID == meetingID else { return }
-        let utterance = line.utterance
-        speakers.overrideUtterance(
-            utterance,
-            with: SpeakerAssignment(
-                displayName: name, origin: .human, identityID: identityID,
-                provenance: .human()
-            ),
-            at: Date()
-        )
-    }
-
-    public func beginNamingUtterance(_ line: CombinedLine) {
-        namingLine = line
-        namingUtterance = line.utterance
-        namingCluster = nil
-        namingRange = nil
-        namingBlock = nil
-        newPersonDraft = ""
-    }
-
     public func beginNamingCluster(_ clusterID: String) {
         namingCluster = clusterID
-        namingLine = nil
-        namingUtterance = nil
         namingRange = nil
         namingBlock = nil
         newPersonDraft = ""
     }
 
     public func cancelNaming() {
-        namingLine = nil
-        namingUtterance = nil
         namingCluster = nil
         namingRange = nil
         namingBlock = nil
@@ -588,8 +513,6 @@ public final class MeetingReviewModel {
             assignRange(target, toNewPerson: newPersonDraft)
         } else if let block = namingBlock {
             assignBlock(block, toNewPerson: newPersonDraft)
-        } else if let line = namingLine {
-            assignUtterance(line, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
             assignCluster(cluster, toNewPerson: newPersonDraft)
         }

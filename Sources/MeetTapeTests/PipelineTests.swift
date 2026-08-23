@@ -498,7 +498,7 @@ enum PipelineTests {
                     try meeting.store.readCanonicalTranscript()
                 ).utterances[0]
                 _ = try await pipeline.applyUtteranceSpeaker(
-                    "Sam", utteranceID: first.id, meetingID: meeting.id
+                    "Sam", utteranceIDs: [first.id], meetingID: meeting.id
                 )
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,

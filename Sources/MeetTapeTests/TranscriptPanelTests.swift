@@ -136,20 +136,30 @@ enum TranscriptPanelTests {
                     view.spans = (0..<4).map {
                         TranscriptWordSpan(
                             location: $0 * 5, length: 4, startSeconds: Double($0),
-                            endSeconds: Double($0) + 0.8, lineID: "l1"
+                            endSeconds: Double($0) + 0.8, utteranceID: $0 < 2 ? "l1" : "l2"
                         )
                     }
-                    expect.equal(view.nearestBoundary(to: 6), 1.0, "the gap it was aimed at")
                     expect.equal(
-                        view.nearestBoundary(to: 13), 3.0, "and the nearer of the two around it"
+                        view.nearestBoundary(to: 6)?.startSeconds, 1.0, "the gap it was aimed at"
                     )
                     expect.equal(
-                        view.nearestBoundary(to: 0), 1.0,
+                        view.nearestBoundary(to: 13)?.startSeconds, 3.0,
+                        "and the nearer of the two around it"
+                    )
+                    expect.equal(
+                        view.nearestBoundary(to: 13)?.utteranceID, "l2",
+                        "named with the line it falls in, which time alone cannot say"
+                    )
+                    expect.equal(
+                        view.nearestBoundary(to: 0)?.startSeconds, 1.0,
                         "a click before the first word divides at the second, never at nothing"
                     )
                     let selection = view.selectedSpanRange(NSRange(location: 5, length: 8))
                     expect.equal(selection?.start, 1.0)
                     expect.equal(selection?.end, 2.8, "through the end of the last word touched")
+                    expect.equal(
+                        selection?.lines, ["l1", "l2"], "every line the selection crossed"
+                    )
                 }
             },
 

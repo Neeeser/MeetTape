@@ -375,16 +375,21 @@ public struct MeetingReviewView: View {
         _ action: TranscriptParagraphAction, in block: CombinedLineBlock
     ) -> SpeakerRangeTarget {
         switch action {
-        case let .split(atSeconds):
+        case let .split(atSeconds, utteranceID):
+            // The line the boundary falls in, and the rest of the turn after
+            // it. Not the whole block: two lines of one turn can come from
+            // neighbouring chunks and hold the same second, and the boundary
+            // belongs in the one the reader was pointing at.
             SpeakerRangeTarget(
                 recordingID: block.recordingID, track: block.track,
-                lineIDs: block.lines.map(\.utterance.id),
+                lineIDs: block.lines.map(\.utterance.id)
+                    .drop { $0 != utteranceID }.map { $0 },
                 startSeconds: atSeconds, endSeconds: block.endSeconds
             )
-        case let .assign(startSeconds, endSeconds):
+        case let .assign(startSeconds, endSeconds, utteranceIDs):
             SpeakerRangeTarget(
                 recordingID: block.recordingID, track: block.track,
-                lineIDs: block.lines.map(\.utterance.id),
+                lineIDs: utteranceIDs,
                 startSeconds: startSeconds, endSeconds: endSeconds
             )
         }
@@ -400,21 +405,6 @@ public struct MeetingReviewView: View {
             if !model.knownPeople.isEmpty { Divider() }
             Button("New person…") { model.beginNamingBlock(block) }
             Button("Use this speaker's name") { model.clearBlock(block) }
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
-    private func speakerMenu(for line: CombinedLine, label: String) -> some View {
-        Menu(label) {
-            ForEach(model.knownPeople) { person in
-                Button(person.identity.resolvedName) {
-                    model.assignUtterance(line, to: person)
-                }
-            }
-            if !model.knownPeople.isEmpty { Divider() }
-            Button("New person…") { model.beginNamingUtterance(line) }
-            Button("Use this speaker's name") { model.clearUtterance(line) }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

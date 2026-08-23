@@ -1,0 +1,36 @@
+{
+  "mirror": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{meeting}/audio/{meeting}.Mix-Headset.wav",
+  "annotations": {
+    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+    "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d"
+  },
+  "audio": {
+    "EN2002a": "a15017d0d3c871866971ee178052a0ce3a7e44d6fbf89fc23dcab326511b65f5",
+    "ES2002a": "9c76866990fcc8b84006dc32d273ad99df439090b748ebe72103bb78c3216ee7",
+    "ES2002b": "977fbf6cd473cfb1984b41755762eea4d7ffdad3fb15adcfdebcb8842163ec66",
+    "ES2002c": "8aa5dca8a0d31aaa596ecec8e0d7d8df1646fd4328d2740b287650d8012412df",
+    "ES2002d": "b8e0c2d0df9fccfcfab8e5d148f399a679bd2d90299c2262194b9db941749374",
+    "ES2003a": "41cf861afafc20e70061c6cc82b2cb1c620d630be6d13361da928f04fc00beea",
+    "ES2005a": "ac33e7b18ae72931e65dc279af4b129370ad62ca6ed64299b9e35f356e3f8ed8",
+    "ES2008b": "8aa976aa242e895775857b028db2ca5c5f56a2a2d8a096adc81cc82a9c4b6ba4",
+    "IB4005": "96465a9b66128d50bf6e0ee0ccf6b509e9d743aacb248a38ffaa063cb378e65a",
+    "IS1008a": "75ae8796ca2177fa0c77055de2fe2f95325b412dc7152a9b32c76c9884a3d382",
+    "IS1009a": "6eb5a0ede0d9e72794f976ce7bea5b78133eae969f99b4c5418b43c2468d25b1",
+    "IS1009c": "f317910070db0f2649315decbb34686d648bbe9dc3f7576710184f4d572bdbcc",
+    "TS3005a": "431faf4e85eeeb4653256bc8e4f36aaf06dc71538a58b1b6c1a78f2df81276ea",
+    "TS3009c": "4fe7430b0edc2f414e888eeec32706f2ff67f76a44d88f3a9699fd045a58d465"
+  },
+  "suites": {
+    "ami-core": [
+      "ES2002a", "ES2002b", "ES2002c", "ES2002d", "ES2003a", "ES2005a",
+      "IS1009a", "IS1008a", "TS3005a", "TS3009c", "EN2002a", "IB4005",
+      "ES2008b", "IS1009c"
+    ],
+    "ami-excerpts": [
+      "ES2002a", "ES2002b", "ES2002c", "ES2002d", "ES2003a", "ES2005a",
+      "IS1009a", "IS1008a", "TS3005a", "TS3009c", "EN2002a", "IB4005"
+    ],
+    "ami-long": ["ES2008b", "IS1009c"],
+    "ami-smoke": ["ES2002b"]
+  }
+}

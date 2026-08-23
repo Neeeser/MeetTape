@@ -147,7 +147,7 @@ case "align":
 
 case "diarize":
     guard let audio = arguments.audio.first else { usage() }
-    _ = try await manager.install()
+    _ = try await manager.install(units: [.diarizer])
     let scalings = arguments.acousticScalings.isEmpty
         ? [LocalDiarizationTuning.libraryDefaultWarmStartFa, LocalDiarizationTuning.warmStartFa]
         : arguments.acousticScalings
@@ -218,7 +218,7 @@ case "diarize":
 
 case "identity":
     guard !arguments.audio.isEmpty else { usage() }
-    _ = try await manager.install()
+    _ = try await manager.install(units: [.diarizer])
     // Each file is treated as one speaker, which is what an enrolment clip is.
     var vectors: [(String, [Float])] = []
     for file in arguments.audio {

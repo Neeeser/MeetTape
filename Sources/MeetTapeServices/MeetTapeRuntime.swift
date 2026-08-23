@@ -199,7 +199,12 @@ public final class MeetTapeRuntime {
                     ProcessingBackends.transcriptionBackend(
                         settings: settings, model: model,
                         local: { WhisperTranscriptionBackend(models: modelManager) },
-                        cloud: { OpenAITranscriptionBackend(backend: cloud, model: $0) }
+                        cloud: {
+                            OpenAITranscriptionBackend(
+                                backend: cloud, model: $0,
+                                keywords: settings.models.keywordList
+                            )
+                        }
                     )
                 },
                 diarization: { settings, model in

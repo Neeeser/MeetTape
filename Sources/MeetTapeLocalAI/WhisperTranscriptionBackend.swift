@@ -20,7 +20,9 @@ public struct WhisperTranscriptionBackend: TranscriptionBackend {
     /// None. WhisperKit handles a whole meeting and held timestamps monotonic
     /// over a 65-minute file, so nothing is chunked before it.
     public var limits: BackendAudioLimits { .none }
-    public var producesWordTimestamps: Bool { LocalTranscriptionTuning.wordTimestamps }
+    public var timing: TranscriptTiming {
+        LocalTranscriptionTuning.wordTimestamps ? .words : .segments
+    }
 
     public func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void

@@ -24,6 +24,10 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public var model: String
     public var responseFormat: String
     public var segments: [RawTranscriptSegment]
+    /// The transcript of a chunk whose model returned no timings. The
+    /// alignment stage reads it; every timed chunk leaves it nil and keeps the
+    /// words in `segments`.
+    public var text: String?
     /// The raw response body, kept so a future build can re-derive more from it.
     public var rawResponseFile: String?
     /// Defaulted, so a meeting written before this existed reads as what it was:
@@ -33,7 +37,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public init(
         id: String, track: CaptureTrack, timelineOffset: Double, durationSeconds: Double,
         model: String, responseFormat: String, segments: [RawTranscriptSegment],
-        rawResponseFile: String? = nil, purpose: RawChunkPurpose = .words
+        text: String? = nil, rawResponseFile: String? = nil, purpose: RawChunkPurpose = .words
     ) {
         self.id = id
         self.track = track
@@ -43,6 +47,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
         self.model = model
         self.responseFormat = responseFormat
         self.segments = segments
+        self.text = text
         self.rawResponseFile = rawResponseFile
     }
 
@@ -58,6 +63,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
         model = try container.decode(String.self, forKey: .model)
         responseFormat = try container.decode(String.self, forKey: .responseFormat)
         segments = try container.decode([RawTranscriptSegment].self, forKey: .segments)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
         rawResponseFile = try container.decodeIfPresent(String.self, forKey: .rawResponseFile)
         purpose = try container.decodeIfPresent(RawChunkPurpose.self, forKey: .purpose) ?? .words
     }

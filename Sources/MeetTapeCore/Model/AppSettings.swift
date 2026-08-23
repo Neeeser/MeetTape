@@ -3,29 +3,59 @@ import Foundation
 /// Model identifiers, held as configuration rather than scattered through the
 /// code so a newer model is a settings change, not a rewrite.
 public struct AIModelSettings: Codable, Sendable, Equatable {
-    /// Plain transcription for the local track. `whisper-1` with `verbose_json` is
-    /// the default because it returns the timings a timeline needs; several newer
-    /// models return excellent text with no segments and no words at all.
+    /// Plain transcription. `gpt-transcribe` returns the best words and no
+    /// timings; the local alignment stage supplies those, which is what lets
+    /// the timing-free models be chosen at all.
     public var transcription: String
     /// Speaker-attributed transcription for the remote track.
     public var diarization: String
     /// Reasoning model for speaker resolution, titles and summaries.
     public var metadata: String
+    /// Names and jargon the transcription should expect, comma or newline
+    /// separated. Sent as keyword hints to models that take them, and only to
+    /// them. Empty means nothing extra is sent anywhere.
+    public var vocabularyHints: String
 
     public init(
         transcription: String = "whisper-1",
         diarization: String = "gpt-4o-transcribe-diarize",
-        metadata: String = "gpt-5.6-luna"
+        metadata: String = "gpt-5.6-luna",
+        vocabularyHints: String = ""
     ) {
         self.transcription = transcription
         self.diarization = diarization
         self.metadata = metadata
+        self.vocabularyHints = vocabularyHints
     }
 
-    /// Models known to return the timing structure the canonical timeline needs.
-    public static let timestampCapableTranscription = ["whisper-1"]
-    public static let diarizationCapable = ["gpt-4o-transcribe-diarize"]
+    /// The cloud transcription models Settings offers, best first.
+    public static let transcriptionChoices = [
+        "gpt-transcribe", "gpt-4o-transcribe-diarize", "whisper-1",
+    ]
+    public static let diarizationChoices = ["gpt-4o-transcribe-diarize"]
     public static let metadataChoices = ["gpt-5.6-luna", "gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
+
+    /// What timing structure each cloud transcription model returns.
+    ///
+    /// `whisper-1` is the only OpenAI model with word timings; the diarize
+    /// model returns speaker segments; `gpt-transcribe` returns text alone. An
+    /// unknown identifier is requested as `verbose_json`, which yields
+    /// segments when the model honours it at all.
+    public static func transcriptionTiming(for model: String) -> TranscriptTiming {
+        switch model {
+        case "gpt-transcribe": return .text
+        case "whisper-1": return .words
+        default: return .segments
+        }
+    }
+
+    /// `vocabularyHints` as the list the request field wants.
+    public var keywordList: [String] {
+        vocabularyHints
+            .split(whereSeparator: { $0 == "," || $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 
     /// One missing key must not reset the other two.
     ///
@@ -41,6 +71,9 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
         diarization =
             try container.decodeIfPresent(String.self, forKey: .diarization) ?? defaults.diarization
         metadata = try container.decodeIfPresent(String.self, forKey: .metadata) ?? defaults.metadata
+        vocabularyHints =
+            try container.decodeIfPresent(String.self, forKey: .vocabularyHints)
+            ?? defaults.vocabularyHints
     }
 
     /// Whether the responses endpoint accepts a `reasoning` parameter for this

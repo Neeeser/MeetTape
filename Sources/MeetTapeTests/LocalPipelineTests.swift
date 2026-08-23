@@ -14,7 +14,7 @@ final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var identifier = "stub-whisper"
     var isLocal = true
     var limits = BackendAudioLimits.none
-    var producesWordTimestamps = true
+    var timing = TranscriptTiming.words
     /// The audio handed to this backend, so a test can say which one read it.
     private let state = Mutex<[String]>([])
     var received: [String] { state.withLock { $0 } }

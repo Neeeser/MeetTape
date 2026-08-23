@@ -73,18 +73,39 @@ public struct OpenAIClient: AIBackend {
     // MARK: - audio
 
     public func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {
-        var fields: [(String, String)] = [
-            ("model", request.model),
-            ("response_format", "verbose_json"),
-        ]
-        // Word and segment timings are what the canonical timeline is built from.
-        fields.append(("timestamp_granularities[]", "segment"))
+        var fields: [(String, String)] = [("model", request.model)]
+        let timing = AIModelSettings.transcriptionTiming(for: request.model)
+        if AIModelSettings.diarizationChoices.contains(request.model) {
+            // The diarize model transcribing a single track: same endpoint,
+            // its own format, and the mandatory chunking flag.
+            fields.append(("response_format", "diarized_json"))
+            fields.append(("chunking_strategy", "auto"))
+        } else {
+            switch timing {
+            case .text:
+                // The timing-free models reject verbose_json outright.
+                fields.append(("response_format", "json"))
+                for keyword in request.keywords { fields.append(("keywords[]", keyword)) }
+            case .words:
+                fields.append(("response_format", "verbose_json"))
+                fields.append(("timestamp_granularities[]", "segment"))
+                fields.append(("timestamp_granularities[]", "word"))
+            case .segments:
+                fields.append(("response_format", "verbose_json"))
+                fields.append(("timestamp_granularities[]", "segment"))
+            }
+        }
         if let language = request.language { fields.append(("language", language)) }
-        if let prompt = request.prompt { fields.append(("prompt", prompt)) }
+        // The diarize model rejects prompts; every other transcription model
+        // takes one.
+        if let prompt = request.prompt,
+            !AIModelSettings.diarizationChoices.contains(request.model) {
+            fields.append(("prompt", prompt))
+        }
 
         let body = try await multipartBody(fields: fields, audio: request.audio, extraFiles: [])
         let data = try await postAudio(path: "audio/transcriptions", body: body)
-        return try parseTranscription(data)
+        return try Self.parseTranscription(data, allowTextOnly: timing == .text)
     }
 
     public func diarize(_ request: DiarizationRequest) async throws -> TranscriptionResponse {
@@ -104,7 +125,7 @@ public struct OpenAIClient: AIBackend {
         }
         let body = try await multipartBody(fields: fields, audio: request.audio, extraFiles: [])
         let data = try await postAudio(path: "audio/transcriptions", body: body)
-        return try parseTranscription(data)
+        return try Self.parseTranscription(data, allowTextOnly: false)
     }
 
     // MARK: - reasoning
@@ -360,14 +381,21 @@ public struct OpenAIClient: AIBackend {
         return error["message"] as? String
     }
 
-    /// Both `verbose_json` and `diarized_json` come back as a segment list; only
-    /// the diarized form carries a speaker on each segment.
-    private func parseTranscription(_ data: Data) throws -> TranscriptionResponse {
+    /// `verbose_json` and `diarized_json` both come back as a segment list; only
+    /// the diarized form carries a speaker on each segment, and only whisper-1
+    /// with word granularity adds a flat top-level `words` array. Plain `json`
+    /// is text alone, which is valid exactly when the model was chosen for its
+    /// words rather than its timings — `allowTextOnly` says which.
+    ///
+    /// Static and public so the format handling is testable without a network.
+    public static func parseTranscription(
+        _ data: Data, allowTextOnly: Bool
+    ) throws -> TranscriptionResponse {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ProcessingError.malformedResponse(reason: "not JSON")
         }
         let rawSegments = (object["segments"] as? [[String: Any]]) ?? []
-        let segments: [RawTranscriptSegment] = rawSegments.compactMap { segment in
+        var segments: [RawTranscriptSegment] = rawSegments.compactMap { segment in
             guard let start = segment["start"] as? Double,
                   let end = segment["end"] as? Double,
                   let text = segment["text"] as? String
@@ -376,9 +404,11 @@ public struct OpenAIClient: AIBackend {
                 start: start, end: end, text: text, speaker: segment["speaker"] as? String
             )
         }
+        nest(words: object["words"] as? [[String: Any]] ?? [], into: &segments)
         let text = (object["text"] as? String) ?? segments.map(\.text).joined()
-        if segments.isEmpty, !text.isEmpty {
-            // A model that returns text but no timings cannot feed the timeline.
+        if segments.isEmpty, !text.isEmpty, !allowTextOnly {
+            // A model that promised timings and returned none cannot feed the
+            // timeline, and storing the text would hide the failure.
             throw ProcessingError.malformedResponse(reason: "response carried no segment timings")
         }
         return TranscriptionResponse(
@@ -387,6 +417,22 @@ public struct OpenAIClient: AIBackend {
             durationSeconds: object["duration"] as? Double,
             rawBody: data
         )
+    }
+
+    /// The API returns word timings as one flat list beside the segments; the
+    /// canonical form nests each word in the segment covering its start.
+    private static func nest(words: [[String: Any]], into segments: inout [RawTranscriptSegment]) {
+        guard !words.isEmpty, !segments.isEmpty else { return }
+        for raw in words {
+            guard let text = raw["word"] as? String,
+                  let start = raw["start"] as? Double,
+                  let end = raw["end"] as? Double
+            else { continue }
+            let index = segments.lastIndex { $0.start <= start } ?? 0
+            var nested = segments[index].words ?? []
+            nested.append(RawTranscriptWord(start: start, end: end, text: text))
+            segments[index].words = nested
+        }
     }
 
     private func extractOutputText(from data: Data) throws -> String {

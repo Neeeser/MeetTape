@@ -427,17 +427,29 @@ public actor ProcessingPipeline {
             ))
         }
 
+        let textOnly = output.segments.isEmpty && !output.text.isEmpty
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
             track: track,
             timelineOffset: timeline.leadIn(track: track),
             durationSeconds: output.durationSeconds ?? segments.reduce(0) { $0 + $1.seconds },
             model: backend.identifier,
-            responseFormat: backend.producesWordTimestamps ? "local_words" : "local_segments",
+            responseFormat: Self.localResponseFormat(for: backend.timing),
             segments: output.segments,
+            text: textOnly ? output.text : nil,
             rawResponseFile: nil
         ))
         try store.writeRawTranscript(raw)
+    }
+
+    /// The recorded format string for a local backend's chunk, by what timing
+    /// its output carried.
+    static func localResponseFormat(for timing: TranscriptTiming) -> String {
+        switch timing {
+        case .words: return "local_words"
+        case .segments: return "local_segments"
+        case .text: return "local_text"
+        }
     }
 
     /// Whether the transcription backend supplies the diarized track's words.
@@ -748,6 +760,7 @@ public actor ProcessingPipeline {
                 if let body = response.rawBody {
                     try? store.writeAPIResponse(body, named: "\(chunk.chunkID).json")
                 }
+                let textOnly = response.segments.isEmpty && !response.text.isEmpty
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,
                     track: track,
@@ -755,8 +768,9 @@ public actor ProcessingPipeline {
                     durationSeconds: chunk.plan.duration,
                     model: model,
                     responseFormat: response.segments.contains { $0.speaker != nil }
-                        ? "diarized_json" : "verbose_json",
+                        ? "diarized_json" : (textOnly ? "json" : "verbose_json"),
                     segments: response.segments,
+                    text: textOnly ? response.text : nil,
                     rawResponseFile: response.rawBody == nil ? nil : "api/\(chunk.chunkID).json",
                     purpose: purpose
                 ))

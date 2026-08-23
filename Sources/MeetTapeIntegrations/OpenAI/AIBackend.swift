@@ -15,12 +15,19 @@ public struct TranscriptionRequest: Sendable {
     public var language: String?
     /// Context that improves recognition of names and jargon.
     public var prompt: String?
+    /// Words the model should expect. Only the timing-free transcription
+    /// models take these; the client drops them for every other model.
+    public var keywords: [String]
 
-    public init(audio: URL, model: String, language: String? = nil, prompt: String? = nil) {
+    public init(
+        audio: URL, model: String, language: String? = nil, prompt: String? = nil,
+        keywords: [String] = []
+    ) {
         self.audio = audio
         self.model = model
         self.language = language
         self.prompt = prompt
+        self.keywords = keywords
     }
 }
 

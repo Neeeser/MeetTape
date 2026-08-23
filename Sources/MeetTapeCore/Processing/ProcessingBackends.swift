@@ -123,16 +123,32 @@ public struct DiarizationOutput: Sendable, Equatable {
     public var speakerCount: Int { Set(intervals.map(\.clusterID)).count }
 }
 
-/// Turns audio into words with timings.
+/// What timing structure a transcription backend's output carries.
 ///
-/// Local Whisper and the OpenAI endpoints implement this identically, so which
-/// one runs is a setting rather than a code path.
+/// `.text` is a real capability, not a degenerate `.segments`: the models with
+/// the best words return no timings at all, and their output goes through the
+/// local alignment stage before it can feed the timeline. Keeping the case
+/// explicit means a backend cannot drift into that path by accident.
+public enum TranscriptTiming: String, Sendable, Equatable, Codable {
+    /// Word timings inside each segment.
+    case words
+    /// Segment start and end only.
+    case segments
+    /// Words with no timings; alignment supplies them afterwards.
+    case text
+}
+
+/// Turns audio into words.
+///
+/// Local and cloud engines implement this identically, so which one runs is a
+/// setting rather than a code path. What timing the words arrive with is the
+/// backend's declared capability; the pipeline aligns what needs aligning.
 public protocol TranscriptionBackend: Sendable {
     /// Recorded on every chunk, so a transcript says what produced it.
     var identifier: String { get }
     var isLocal: Bool { get }
     var limits: BackendAudioLimits { get }
-    var producesWordTimestamps: Bool { get }
+    var timing: TranscriptTiming { get }
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void

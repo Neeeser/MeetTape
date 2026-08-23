@@ -36,10 +36,14 @@ public struct ParakeetTranscriptionBackend: TranscriptionBackend {
 
 /// Cohere Transcribe behind the transcription protocol.
 ///
-/// The most accurate local engine on meeting audio, and a text-only one: it
-/// returns no timings, so the alignment stage supplies them per chunk. Chunks
-/// are one model window long, which keeps the library's own window stitching
-/// out of the path and every alignment trellis short.
+/// The strongest raw model on the meeting-audio leaderboard, and a text-only
+/// one: it returns no timings, so the alignment stage supplies them per chunk.
+/// Chunks are one model window long, which keeps the library's own window
+/// stitching out of the path and every alignment trellis short.
+///
+/// End to end it ranks behind Parakeet: 36.0% median filler-stripped WER over
+/// 14 AMI cases against Parakeet's 20.2%, which is why Parakeet is the
+/// default.
 public struct CohereTranscriptionBackend: TranscriptionBackend {
     private let models: LocalModelManager
 

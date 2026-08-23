@@ -432,6 +432,23 @@ these runs prove the machinery, not the accuracy numbers.
   about a second everywhere, which is why it is the shipped aligner. The
   crammed-run spreading pass exists because of this observation.
 
+## Exercised against real meeting audio (2026-08-23)
+
+Both local engines ran the 14 `ami-core` cases through the full pipeline on an
+M2 Pro with local diarization: 12 six-minute excerpts across three AMI recording
+sites plus two whole meetings. The harness is `meettape-eval bench`
+(`Sources/MeetTapeBench`, driven by `scripts/eval.sh`); the ground truth and the
+suite roster are in `Benchmarks/`, and the per-case numbers of this run are
+committed as `Benchmarks/baselines.json`.
+
+- **Parakeet TDT v3.** Median filler-stripped WER 20.2%, attribution 94.0%, DER
+  16.1%, 65.8x realtime, 8 repeated 8-grams over the suite.
+- **Cohere Transcribe.** Median filler-stripped WER 36.0%, attribution 91.2%,
+  DER 24.2%, 5.8x realtime, 244 repeated 8-grams. It lost filler-stripped WER on
+  14 of 14 cases, which is what made Parakeet the default: the 7.0% AMI figure
+  on the public leaderboard is a raw-model number and does not survive chunking,
+  alignment and assembly here.
+
 ## Not verified
 
 The following behaviour is implemented but has not been exercised, and should not
@@ -458,10 +475,6 @@ be assumed to work.
 - **whisper-1 word granularity against the live API.** The parser nests the
   flat `words` array in tests; the live response shape has not been fetched
   since the request changed.
-- **Cohere accuracy on real meetings.** The 7.0% AMI figure is the public
-  leaderboard's; the fixture run above shows the quality direction but is one
-  synthetic file. Warm throughput on long recordings has not been measured
-  under the one-window chunking.
 - **Per-unit installs against a previous install.** The receipt migration from
   `installed.json` has a test; a real upgrade of a machine with the old layout
   has not been performed. The migration is one-way: after this build writes

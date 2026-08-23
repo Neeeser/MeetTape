@@ -3,7 +3,10 @@ import MeetTapeLocalAI
 import MeetTapeServices
 import SwiftUI
 
-/// Where each stage runs, and what the local voice memory is allowed to do.
+/// Where each stage runs, which model it uses, and what is on disk to run it.
+///
+/// One page: picking a model that is not installed starts its download here,
+/// inline on the row, instead of sending the user to a second page.
 struct ProcessingSettingsTab: View {
     let model: SettingsModel
     private var runtime: MeetTapeRuntime { model.runtime }
@@ -11,24 +14,18 @@ struct ProcessingSettingsTab: View {
     var body: some View {
         Form {
             Section("Transcription") {
-                backendPicker(
-                    keyPath: \.transcription,
-                    localLabel: "Local — Whisper Large-v3-Turbo",
-                    cloudLabel: "OpenAI — \(runtime.settings.models.transcription)"
-                )
-                Text(
-                    "Local transcription runs on this Mac and needs no API key. It matches "
-                        + "the cloud model on words and is less consistent about punctuation "
-                        + "and capitalisation between passages."
-                )
-                .font(.caption).foregroundStyle(.secondary)
+                backendPicker(keyPath: \.transcription)
+                if runtime.settings.processing.usesLocalTranscription {
+                    LocalModelChoicePicker(runtime: runtime)
+                } else {
+                    cloudTranscriptionPicker
+                }
             }
             Section("Diarization") {
-                backendPicker(
-                    keyPath: \.diarization,
-                    localLabel: "Local — FluidAudio",
-                    cloudLabel: "OpenAI — \(runtime.settings.models.diarization)"
-                )
+                backendPicker(keyPath: \.diarization)
+                if !runtime.settings.processing.usesLocalDiarization {
+                    cloudDiarizationRow
+                }
                 Text(
                     "Who spoke when. Chosen separately from transcription: either one can "
                         + "run in the cloud without the other."
@@ -47,6 +44,7 @@ struct ProcessingSettingsTab: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
+            modelsOnDiskSection
             if runtime.settings.processing.isFullyLocal {
                 Section {
                     Label(
@@ -59,12 +57,11 @@ struct ProcessingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        .task { await runtime.refreshLocalModelState() }
     }
 
     private func backendPicker(
-        keyPath: WritableKeyPath<ProcessingSettings, ProcessingBackendChoice>,
-        localLabel: String,
-        cloudLabel: String
+        keyPath: WritableKeyPath<ProcessingSettings, ProcessingBackendChoice>
     ) -> some View {
         Picker("Runs on", selection: Binding(
             get: { runtime.settings.processing[keyPath: keyPath] },
@@ -72,12 +69,214 @@ struct ProcessingSettingsTab: View {
                 var settings = runtime.settings
                 settings.processing[keyPath: keyPath] = newValue
                 runtime.update(settings: settings)
+                Task { await runtime.installMissingLocalModels() }
             }
         )) {
-            Text(localLabel).tag(ProcessingBackendChoice.local)
-            Text(cloudLabel).tag(ProcessingBackendChoice.openAI)
+            Text("Cloud — OpenAI").tag(ProcessingBackendChoice.openAI)
+            Text("Local — on this Mac").tag(ProcessingBackendChoice.local)
         }
         .pickerStyle(.radioGroup)
+    }
+
+    /// The sentinel the pickers use for a model identifier typed by hand.
+    private static let customModelTag = "custom"
+
+    private var cloudTranscriptionPicker: some View {
+        let current = runtime.settings.models.transcription
+        let isPreset = AIModelSettings.transcriptionChoices.contains(current)
+        return VStack(alignment: .leading, spacing: 6) {
+            Picker("Model", selection: Binding(
+                get: { isPreset ? current : Self.customModelTag },
+                set: { newValue in
+                    var settings = runtime.settings
+                    settings.models.transcription =
+                        newValue == Self.customModelTag ? "" : newValue
+                    runtime.update(settings: settings)
+                    // gpt-transcribe returns no timings; the aligner that
+                    // supplies them is a local download.
+                    Task { await runtime.installMissingLocalModels() }
+                }
+            )) {
+                cloudChoice(
+                    "gpt-transcribe",
+                    "Most accurate, takes vocabulary hints. Timings are computed on "
+                        + "this Mac by a 160 MB aligner model."
+                )
+                cloudChoice(
+                    "gpt-4o-transcribe-diarize",
+                    "Words and speakers in one request. Nothing to download."
+                )
+                cloudChoice(
+                    "whisper-1",
+                    "The previous generation, word timings from the API."
+                )
+                Text("Custom…").tag(Self.customModelTag)
+            }
+            .pickerStyle(.radioGroup)
+            if !isPreset {
+                TextField("model identifier", text: Binding(
+                    get: { runtime.settings.models.transcription },
+                    set: { newValue in
+                        var settings = runtime.settings
+                        settings.models.transcription = newValue
+                        runtime.update(settings: settings)
+                    }
+                ))
+                .frame(width: 280)
+            }
+            if AIModelSettings.transcriptionTiming(for: current) == .text, isPreset {
+                TextField(
+                    "Vocabulary hints — names and jargon, comma separated",
+                    text: Binding(
+                        get: { runtime.settings.models.vocabularyHints },
+                        set: { newValue in
+                            var settings = runtime.settings
+                            settings.models.vocabularyHints = newValue
+                            runtime.update(settings: settings)
+                        }
+                    )
+                )
+                Text("Sent with each request so the model expects these words.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func cloudChoice(_ id: String, _ blurb: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(id)
+            Text(blurb).font(.caption).foregroundStyle(.secondary)
+        }
+        .tag(id)
+    }
+
+    private var cloudDiarizationRow: some View {
+        let current = runtime.settings.models.diarization
+        let isPreset = AIModelSettings.diarizationChoices.contains(current)
+        return VStack(alignment: .leading, spacing: 6) {
+            Picker("Model", selection: Binding(
+                get: { isPreset ? current : Self.customModelTag },
+                set: { newValue in
+                    var settings = runtime.settings
+                    settings.models.diarization =
+                        newValue == Self.customModelTag ? "" : newValue
+                    runtime.update(settings: settings)
+                }
+            )) {
+                Text("gpt-4o-transcribe-diarize").tag("gpt-4o-transcribe-diarize")
+                Text("Custom…").tag(Self.customModelTag)
+            }
+            .pickerStyle(.radioGroup)
+            if !isPreset {
+                TextField("model identifier", text: Binding(
+                    get: { runtime.settings.models.diarization },
+                    set: { newValue in
+                        var settings = runtime.settings
+                        settings.models.diarization = newValue
+                        runtime.update(settings: settings)
+                    }
+                ))
+                .frame(width: 280)
+            }
+        }
+    }
+
+    /// Everything installed or needed, with the one control set that changes it.
+    private var modelsOnDiskSection: some View {
+        Section("Models on this Mac") {
+            ForEach(visibleUnits, id: \.rawValue) { unit in
+                LabeledContent(Self.unitName(unit)) {
+                    HStack(spacing: 8) {
+                        Text(unitStatus(unit)).foregroundStyle(.secondary)
+                        if installedBytes(unit) != nil {
+                            Button("Delete") {
+                                Task { await runtime.removeLocalModel(unit) }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+            }
+            switch runtime.localModelState {
+            case .downloading(let fraction, let detail):
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: fraction)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).font(.caption)
+                Button("Try Again") { Task { await runtime.installLocalModels() } }
+            case .notInstalled:
+                if !requiredUnits.isEmpty {
+                    Button(downloadLabel) { Task { await runtime.installLocalModels() } }
+                }
+            case .outdated:
+                Label(
+                    "These were downloaded by an older build that pinned different model "
+                        + "revisions. Re-downloading matches the versions this build was "
+                        + "measured against.",
+                    systemImage: "arrow.triangle.2.circlepath"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                Button("Re-download") { Task { await runtime.reinstallLocalModels() } }
+            case .installed:
+                EmptyView()
+            }
+            Text(
+                "Stored in MeetTape's Application Support folder. Recording works while "
+                    + "models download; meetings queue and process when they arrive.\n"
+                    + (runtime.models?.locations.root.path ?? "")
+            )
+            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+    }
+
+    private var requiredUnits: Set<LocalModelUnit> {
+        LocalModelUnit.required(for: runtime.settings)
+    }
+
+    /// Required units first, then anything else still on disk.
+    private var visibleUnits: [LocalModelUnit] {
+        LocalModelUnit.allCases.filter { unit in
+            requiredUnits.contains(unit) || installedBytes(unit) != nil
+        }
+    }
+
+    private func installedBytes(_ unit: LocalModelUnit) -> Int64? {
+        switch runtime.localModelState {
+        case .installed(let snapshot), .outdated(let snapshot): snapshot.bytes(for: unit)
+        case .notInstalled, .downloading, .failed: nil
+        }
+    }
+
+    private func unitStatus(_ unit: LocalModelUnit) -> String {
+        if let bytes = installedBytes(unit) { return "Installed — \(Self.megabytes(bytes))" }
+        if case .downloading = runtime.localModelState { return "Downloading" }
+        return "Not installed — about \(Self.megabytes(unit.approximateBytes))"
+    }
+
+    private var downloadLabel: String {
+        let missing = requiredUnits.reduce(Int64(0)) { total, unit in
+            installedBytes(unit) == nil ? total + unit.approximateBytes : total
+        }
+        return "Download about \(Self.megabytes(missing))"
+    }
+
+    static func unitName(_ unit: LocalModelUnit) -> String {
+        switch unit {
+        case .whisper: "Whisper Large-v3-Turbo"
+        case .parakeet: "Parakeet TDT v3"
+        case .cohere: "Cohere Transcribe"
+        case .ctcAligner: "Timing aligner"
+        case .diarizer: "Speaker models"
+        }
+    }
+
+    static func megabytes(_ bytes: Int64) -> String {
+        bytes >= 1_024 * 1_024 * 1_024
+            ? String(format: "%.1f GB", Double(bytes) / (1_024 * 1_024 * 1_024))
+            : "\(max(1, bytes / 1_048_576)) MB"
     }
 
     private func speakerToggle(
@@ -94,78 +293,48 @@ struct ProcessingSettingsTab: View {
     }
 }
 
-/// What is installed on disk, and the one control that changes it.
-struct LocalModelsSettingsTab: View {
-    let model: SettingsModel
-    private var runtime: MeetTapeRuntime { model.runtime }
+/// The local engine choice, shared between Settings and the setup wizard.
+///
+/// Picking a model that is not on disk starts its download immediately; the
+/// row says what it costs before the click.
+struct LocalModelChoicePicker: View {
+    let runtime: MeetTapeRuntime
 
     var body: some View {
-        Form {
-            Section("Speech models") {
-                LabeledContent("Whisper Large-v3-Turbo") { Text(whisperStatus) }
-                LabeledContent("FluidAudio speaker models") { Text(diarizerStatus) }
-                switch runtime.localModelState {
-                case .downloading(let fraction, let detail):
-                    VStack(alignment: .leading, spacing: 4) {
-                        ProgressView(value: fraction)
-                        Text(detail).font(.caption).foregroundStyle(.secondary)
-                    }
-                case .failed(let message):
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange).font(.caption)
-                    Button("Try Again") { Task { await runtime.installLocalModels() } }
-                case .notInstalled:
-                    Button("Download about 650 MB") {
-                        Task { await runtime.installLocalModels() }
-                    }
-                case .outdated:
-                    Label(
-                        "These were downloaded by an older build that pinned different model "
-                            + "revisions. Re-downloading matches the versions this build was "
-                            + "measured against.",
-                        systemImage: "arrow.triangle.2.circlepath"
-                    )
-                    .font(.caption).foregroundStyle(.secondary)
-                    Button("Re-download") { Task { await runtime.reinstallLocalModels() } }
-                    Button("Delete Models") { Task { await runtime.removeLocalModels() } }
-                case .installed:
-                    Button("Delete Models") { Task { await runtime.removeLocalModels() } }
-                }
-                Text(
-                    "Downloaded once and stored in MeetTape's Application Support folder. "
-                        + "Recording works while they download; meetings queue and process "
-                        + "when they arrive."
-                )
-                .font(.caption).foregroundStyle(.secondary)
+        Picker("Model", selection: Binding(
+            get: { runtime.settings.processing.localTranscriptionModel },
+            set: { newValue in
+                var settings = runtime.settings
+                settings.processing.localTranscriptionModel = newValue
+                runtime.update(settings: settings)
+                Task { await runtime.installMissingLocalModels() }
             }
-            Section("Location") {
-                Text(runtime.models?.locations.root.path ?? "")
-                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
+        )) {
+            choice(
+                .cohere, "Cohere Transcribe",
+                "Most accurate on meeting audio. 2.1 GB plus a 160 MB aligner; the "
+                    + "first use takes a few minutes to prepare."
+            )
+            choice(
+                .parakeet, "Parakeet TDT v3",
+                "Fast, word timings built in, 25 languages. 460 MB."
+            )
+            choice(
+                .whisper, "Whisper Large-v3-Turbo",
+                "The previous engine. 624 MB."
+            )
         }
-        .formStyle(.grouped)
-        .task { await runtime.refreshLocalModelState() }
+        .pickerStyle(.radioGroup)
     }
 
-    private var whisperStatus: String { unitStatus(.whisper) }
-
-    private var diarizerStatus: String { unitStatus(.diarizer) }
-
-    private func unitStatus(_ unit: LocalModelUnit) -> String {
-        switch runtime.localModelState {
-        case .installed(let snapshot), .outdated(let snapshot):
-            if let bytes = snapshot.bytes(for: unit) {
-                return "Installed — \(megabytes(bytes))"
-            }
-            return "Not installed — about \(megabytes(unit.approximateBytes))"
-        case .downloading: return "Downloading"
-        case .notInstalled, .failed:
-            return "Not installed — about \(megabytes(unit.approximateBytes))"
+    private func choice(
+        _ tag: LocalTranscriptionModel, _ title: String, _ blurb: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+            Text(blurb).font(.caption).foregroundStyle(.secondary)
         }
-    }
-
-    private func megabytes(_ bytes: Int64) -> String {
-        "\(max(1, bytes / 1_048_576)) MB"
+        .tag(tag)
     }
 }
 

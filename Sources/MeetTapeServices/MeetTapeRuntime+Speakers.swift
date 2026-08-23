@@ -71,6 +71,24 @@ extension MeetTapeRuntime {
         await refreshLocalModelState()
     }
 
+    /// Fetches whatever the current configuration still misses. What a model
+    /// picker calls after a selection: present units are skipped, so this is
+    /// free when everything is already on disk.
+    public func installMissingLocalModels() async {
+        await installLocalModels()
+    }
+
+    /// Removes one unit's files. The other units stay usable.
+    public func removeLocalModel(_ unit: LocalModelUnit) async {
+        guard let models else { return }
+        do {
+            try await models.remove(unit: unit)
+        } catch {
+            Log.app.error("model removal failed: \(logSafeDescription(error), privacy: .public)")
+        }
+        await refreshLocalModelState()
+    }
+
     /// Fetches the models again even though a usable copy is on disk. What the
     /// Re-download button calls, for an install pinned by an older build.
     public func reinstallLocalModels() async {

@@ -69,6 +69,7 @@ public struct OnboardingView: View {
             subtitle: "Downloaded once. After that, transcription and speaker recognition run on this Mac."
         ) {
             VStack(alignment: .leading, spacing: 10) {
+                LocalModelChoicePicker(runtime: model.runtime)
                 switch model.runtime.localModelState {
                 case .installed:
                     Label("Installed", systemImage: "checkmark.circle.fill")
@@ -84,7 +85,7 @@ public struct OnboardingView: View {
                         .foregroundStyle(.orange).font(.caption)
                     Button("Try Again") { Task { await model.runtime.installLocalModels() } }
                 case .notInstalled:
-                    Button("Download about 650 MB") {
+                    Button("Download the selected model") {
                         Task { await model.runtime.installLocalModels() }
                     }
                 }

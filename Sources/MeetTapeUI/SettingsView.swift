@@ -20,8 +20,6 @@ public struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             ProcessingSettingsTab(model: model)
                 .tabItem { Label("Processing", systemImage: "waveform.badge.magnifyingglass") }
-            LocalModelsSettingsTab(model: model)
-                .tabItem { Label("Local models", systemImage: "cpu") }
             PeopleSettingsTab(model: model)
                 .tabItem { Label("People", systemImage: "person.crop.circle") }
             ProviderSettingsTab(model: model)
@@ -277,9 +275,9 @@ struct OpenAISettingsTab: View {
                     .font(.caption)
             }
             Section("Models") {
-                modelField("Transcription", keyPath: \.transcription, hint: "Needs word or segment timestamps")
-                modelField("Diarization", keyPath: \.diarization, hint: "Speaker-attributed transcription")
                 metadataModelRow()
+                Text("Transcription and diarization models are chosen on the Processing tab.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Enrichment") {
                 enrichmentToggle("Generate a title", keyPath: \.generateTitle)
@@ -332,25 +330,6 @@ struct OpenAISettingsTab: View {
                     .frame(width: 240)
                 }
                 Text("Titles, summaries, speaker suggestions").font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func modelField(
-        _ title: String, keyPath: WritableKeyPath<AIModelSettings, String>, hint: String
-    ) -> some View {
-        LabeledContent(title) {
-            VStack(alignment: .trailing, spacing: 2) {
-                TextField("", text: Binding(
-                    get: { runtime.settings.models[keyPath: keyPath] },
-                    set: { newValue in
-                        var settings = runtime.settings
-                        settings.models[keyPath: keyPath] = newValue
-                        runtime.update(settings: settings)
-                    }
-                ))
-                .frame(width: 240)
-                Text(hint).font(.caption2).foregroundStyle(.secondary)
             }
         }
     }

@@ -204,8 +204,6 @@ enum TranscriptDivisionTests {
                 ])
                 expect.close(block.timelineStart, 60, tolerance: 0.001)
                 expect.close(block.timelineEnd, 68, tolerance: 0.001)
-                expect.close(block.startSeconds, 0, tolerance: 0.001, "the recording's own clock")
-                expect.close(block.endSeconds, 8, tolerance: 0.001)
             },
         ])
     }

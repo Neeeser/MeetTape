@@ -116,9 +116,6 @@ public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
     /// names are only comparable inside one recording's diarization.
     public var recordingID: String { lines[0].recordingID }
     public var track: CaptureTrack { lines[0].utterance.track }
-    /// On the recording's own timeline, which is where a boundary is written.
-    public var startSeconds: Double { lines[0].utterance.start }
-    public var endSeconds: Double { lines.map(\.utterance.end).max() ?? startSeconds }
 
     /// Groups consecutive lines with the same resolved name, in the same
     /// recording and on the same track. Names are only comparable within one

@@ -139,17 +139,25 @@ class AmiReader:
 class IcsiReader:
     """The ICSI core NXT annotations.
 
-    Three differences from AMI decide the code. A word carries its class in `c`
-    rather than a `punc` flag, so punctuation, symbols and quote marks are
-    dropped by class and `TRUNCW` is the truncation marker. The clitics AMI
-    keeps inside a word ("it's", "we're") are separate elements here, so an
-    element whose text opens with an apostrophe is joined back onto the word
-    before it: the scorer keeps apostrophes, and a stray "'s" token is a
-    substitution against every hypothesis. And a word may carry one alignment
-    bound or none, so a missing start takes an even share of the gap after the
-    last timed word, capped at half a second, and a missing end runs to the next
-    start under the same cap. That keeps the text in the reference without
-    inventing speech across a silence.
+    Three differences from AMI decide the code.
+
+    A word carries its class in `c` rather than a `punc` flag, so punctuation,
+    symbols and quote marks are dropped by class and `TRUNCW` is the truncation
+    marker. The clitics AMI keeps inside a word ("it's", "we're") are separate
+    elements here, so an element whose text opens with an apostrophe is joined
+    back onto the word before it: the scorer keeps apostrophes, and a stray
+    "'s" token is a substitution against every hypothesis.
+
+    And a word may carry one alignment bound or none. Around half the words on
+    some channels are unaligned, so filling them from their neighbours alone
+    collapsed them onto a point: 218 words inside 25 seconds on one channel of
+    Bro024, which put the reference's speech time at half its real value and
+    scattered attribution. The segments carry the times instead. A segment
+    names a span and the range of word elements inside it, so an unaligned run
+    takes an even share of the room between the aligned words either side of it
+    within that segment, and the segment's own bounds anchor a run at either
+    end. A word in no segment falls back to its neighbours, capped at half a
+    second, which keeps its text without inventing speech across a silence.
     """
 
     name = "icsi"
@@ -202,8 +210,11 @@ class IcsiReader:
         if raw is None:
             return []
         tree = ET.parse(io.BytesIO(raw))
-        out = []
-        for node in tree.getroot():
+        position, out = {}, []
+        for index, node in enumerate(tree.getroot()):
+            identifier = node.get("{http://nite.sourceforge.net/}id")
+            if identifier:
+                position[identifier] = index
             if not node.tag.endswith("w"):
                 continue  # disfmarker, vocalsound, pause and comment are not words
             text = (node.text or "").strip()
@@ -228,8 +239,76 @@ class IcsiReader:
                 "text": text,
                 "agent": agent,
                 "truncated": kind == "TRUNCW",
+                "position": index,
             })
-        return self._interpolate(out)
+        self._anchor(out, self.segments(meeting, agent), position)
+        out = self._interpolate(out)
+        for word in out:
+            word.pop("position", None)
+        return out
+
+    def segments(self, meeting, agent):
+        """The agent's segments: a span, and the word positions it covers.
+
+        A segment's child is a NITE range, `id(first)..id(last)` over the words
+        file in document order, or a single id.
+        """
+        raw = self.annotations.read("Segments/%s.%s.segs.xml" % (meeting, agent))
+        if raw is None:
+            return []
+        out = []
+        text = raw.decode("latin-1")
+        for block in re.finditer(r"<segment ([^>]*)>(.*?)</segment>", text, re.S):
+            head, body = block.group(1), block.group(2)
+            start = re.search(r'starttime="([^"]*)"', head)
+            end = re.search(r'endtime="([^"]*)"', head)
+            if not (start and end and start.group(1) and end.group(1)):
+                continue
+            children = re.findall(r"id\(([^)]+)\)", body)
+            if not children:
+                continue
+            out.append({
+                "start": float(start.group(1)),
+                "end": float(end.group(1)),
+                "first": children[0],
+                "last": children[-1],
+            })
+        return out
+
+    def _anchor(self, word_list, segments, position):
+        """Spread a segment's unaligned words across the room inside it."""
+        by_position = {word["position"]: word for word in word_list}
+        for segment in segments:
+            first = position.get(segment["first"])
+            last = position.get(segment["last"])
+            if first is None or last is None or last < first:
+                continue
+            inside = [by_position[index] for index in range(first, last + 1) if index in by_position]
+            if not inside:
+                continue
+            run = 0
+            while run < len(inside):
+                if inside[run]["start"] is not None:
+                    run += 1
+                    continue
+                stop = run
+                while stop < len(inside) and inside[stop]["start"] is None:
+                    stop += 1
+                before = inside[run - 1]["end"] if run > 0 else None
+                if before is None and run > 0:
+                    before = inside[run - 1]["start"]
+                if before is None:
+                    before = segment["start"]
+                after = inside[stop]["start"] if stop < len(inside) else segment["end"]
+                if after is None:
+                    after = segment["end"]
+                each = max(after - before, 0.0) / (stop - run)
+                for offset in range(stop - run):
+                    word = inside[run + offset]
+                    word["start"] = before + each * offset
+                    if word["end"] is None or word["end"] < word["start"]:
+                        word["end"] = before + each * (offset + 1)
+                run = stop
 
     def _interpolate(self, word_list):
         """Give every partly timed word a span between the words either side."""

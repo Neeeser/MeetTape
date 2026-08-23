@@ -21,7 +21,7 @@ The reference data `meettape-eval bench` scores against.
 |---|---|---|---|---|
 | `ami-core` | 14 | AMI | 3 to 31% | The shipping configuration's WER, attribution and DER, plus two whole meetings for the chunk seams |
 | `ami-overlap` | 6 | AMI | 38 to 46% | Four people talking over each other, on meetings `ami-core` does not touch |
-| `icsi` | 4 | ICSI | 42 to 53% | The same, with five to seven people in the room, which is what stresses speaker counting |
+| `icsi` | 4 | ICSI | 29 to 39% | The same, with six to nine people in the room, which is what stresses speaker counting |
 
 `ami-excerpts`, `ami-long` and `ami-smoke` are subsets of `ami-core`.
 
@@ -36,10 +36,10 @@ records:
 | IS1003d | 510 to 870 s | 39.1% | 4 | 1385 |
 | IS1006d | 1440 to 1800 s | 38.7% | 4 | 951 |
 | ES2015d | 840 to 1200 s | 38.0% | 4 | 1437 |
-| Bro024 | 4215 to 4575 s | 53.1% | 6 | 1038 |
-| Bmr014 | 2535 to 2895 s | 47.3% | 6 | 1200 |
-| Bmr006 | 4350 to 4710 s | 44.6% | 5 | 1088 |
-| Bmr013 | 2445 to 2805 s | 42.4% | 7 | 1228 |
+| Btr001 | 3480 to 3840 s | 38.6% | 6 | 1830 |
+| Bmr019 | 3225 to 3585 s | 37.9% | 9 | 1989 |
+| Bsr001 | 105 to 465 s | 36.5% | 8 | 2047 |
+| Bed016 | 15 to 375 s | 28.5% | 7 | 1414 |
 
 The `ami-core` windows overlap 3 to 31%, median 12%, so the two new suites move
 the measurement into speech the old roster barely held.
@@ -117,9 +117,14 @@ the top six, which come from six meetings across five series. `icsi` ranks all
 
 Two corpora are read by two readers behind one interface. AMI marks
 punctuation with a `punc` attribute and keeps contractions inside a word; ICSI
-carries a word class in `c`, splits clitics into their own elements, leaves
-some words unaligned, and has no `meetings.xml`, so the speaker a channel
-belongs to comes from the `participant` attribute on its segments. The reader
+carries a word class in `c`, splits clitics into their own elements, and has no
+`meetings.xml`, so the speaker a channel belongs to comes from the
+`participant` attribute on its segments. Around half the words on some ICSI
+channels carry no alignment, and filling them from their neighbours collapsed
+them onto a point: 218 words inside 25 seconds on one channel of Bro024, half
+the reference's speech time missing, and a false-alarm term measuring the
+annotation rather than the diarizer. The segments carry the times, so an
+unaligned run is spread across the room inside its segment. The reader
 docstrings in `scripts/build-bench-truth.py` record what each difference costs.
 
 ## Baselines

@@ -331,7 +331,7 @@ enum BenchScorerTests {
                         let truth = try BenchTruth.read(from: layout.truth(meeting: meeting))
                         let ratio = truth.overlapRatio ?? 0
                         expect.isTrue(
-                            ratio >= 0.35, "\(suite)/\(meeting) overlaps \(ratio), under 0.35"
+                            ratio >= 0.25, "\(suite)/\(meeting) overlaps \(ratio), under 0.25"
                         )
                     }
                 }

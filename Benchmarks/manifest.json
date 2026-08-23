@@ -1,10 +1,10 @@
 {
   "mirror": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{meeting}/audio/{meeting}.Mix-Headset.wav",
   "audioURL": {
-    "Bmr006": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr006.interaction.wav",
-    "Bmr013": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr013.interaction.wav",
-    "Bmr014": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr014.interaction.wav",
-    "Bro024": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bro024.interaction.wav"
+    "Bed016": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bed016.interaction.wav",
+    "Bmr019": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr019.interaction.wav",
+    "Bsr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bsr001.interaction.wav",
+    "Btr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Btr001.interaction.wav"
   },
   "annotations": {
     "ami": {
@@ -17,10 +17,10 @@
     }
   },
   "audio": {
-    "Bmr006": "638b24ee747f5d00b51b40b1ada225bd7058ccdc33807c7ad19537f77556fa4e",
-    "Bmr013": "2aa0b9f72620a96a3f7099383f0f8c5c8dae681fbb814d70d0101f7f0e00f89c",
-    "Bmr014": "fa3d628f12d97c5792940ae38f67b3fde84c31d5079c23a4a2f0dd1767045c78",
-    "Bro024": "5cf33ee0301d4e39bade1f2add08cf6d0e93f95f0c25ef420afc527a8fda42b5",
+    "Bed016": "f5e0ffde1b059e6ba08191617059667a49dd1b9e6f4a5e997f356d07fd1b8729",
+    "Bmr019": "f45aba45583f132960c577fc2c26e7a6e486467320a0f95db3cd2b74d678b176",
+    "Bsr001": "af667bbdc2f26f9e98a99d7a86d214a48c595704b500423a9f7302d0b87b199c",
+    "Btr001": "560451445da33a916be8f13aced3a92f647dc410a0bf0575f9cb03d746791c3e",
     "EN2002a": "a15017d0d3c871866971ee178052a0ce3a7e44d6fbf89fc23dcab326511b65f5",
     "EN2002b": "50e2c8e4737850c4bf3cc24e7087c755e1c733cd91822106afd0df485ba64893",
     "EN2002d": "6aa99d9d71cb695ea699d6be277f78eff68e847c93560031486eba9f18164ebe",
@@ -57,6 +57,6 @@
     "ami-overlap": [
       "EN2002d", "EN2002b", "IN1012", "IS1003d", "IS1006d", "ES2015d"
     ],
-    "icsi": ["Bro024", "Bmr014", "Bmr006", "Bmr013"]
+    "icsi": ["Btr001", "Bmr019", "Bsr001", "Bed016"]
   }
 }

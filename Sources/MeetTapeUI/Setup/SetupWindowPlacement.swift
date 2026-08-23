@@ -2,13 +2,13 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// Keeps the setup window beside System Settings rather than on top of it.
+/// Keeps the setup window beside System Settings rather than behind it.
 ///
-/// The wizard floats above other applications, because an accessory application
-/// cannot win focus back after a permission prompt and a set of instructions is
-/// useless behind the window it describes. The cost of floating is that it also
-/// covers System Settings, which is where the instructions have to be carried
-/// out. Moving aside is what pays that cost back.
+/// The wizard is an ordinary window, so opening System Settings from it puts the
+/// instructions behind the pane they are about. Raising the window level fixes
+/// that and breaks something worse, since it also covers macOS's own permission
+/// prompts. Moving out of the way instead leaves both windows readable and
+/// leaves the system's dialogs on top where they belong.
 public enum SetupWindowPlacement {
     /// Bundle identifier of System Settings.
     public static let systemSettingsBundleID = "com.apple.systempreferences"

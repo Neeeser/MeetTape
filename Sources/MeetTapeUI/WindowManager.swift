@@ -87,20 +87,18 @@ public final class WindowManager {
                 self?.closeSetup()
             })
         )
-        // The one window in MeetTape that stays above other applications.
+        // An ordinary window level, deliberately.
         //
-        // Every other panel is something the user went looking for. This one is
-        // a set of instructions to follow inside System Settings, and it is
-        // useless behind the window it is describing. MeetTape is an accessory
-        // application with no Dock presence, so it cannot win focus back the way
-        // an ordinary application does: dismissing a permission prompt returns
-        // focus to whatever was in front before, and the wizard sinks.
+        // Floating was tried, to stop the wizard sinking behind other
+        // applications after a permission prompt. It also put the wizard above
+        // macOS's own permission prompt, which is the one window that must never
+        // be covered: the user cannot answer a dialog they cannot see. Staying
+        // out of the way of the system beats staying in front of it.
         //
-        // Floating is also what makes the drag work, since the bundle is dragged
-        // out of this window and into the list in System Settings behind it.
-        window.level = .floating
-        // And stays reachable when System Settings is full screen.
-        window.collectionBehavior.insert(.fullScreenAuxiliary)
+        // What is left of the problem is handled without a window level: the
+        // wizard asks for focus back when a prompt closes, and steps aside when
+        // System Settings comes forward, so it is beside the pane rather than
+        // lost behind it.
         window.collectionBehavior.insert(.moveToActiveSpace)
         model.onNeedsFocus = { [weak window] in
             guard let window else { return }

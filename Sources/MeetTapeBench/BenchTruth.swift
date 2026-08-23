@@ -49,6 +49,10 @@ public struct BenchTruth: Codable, Sendable, Equatable {
     public var windowStart: Double?
     /// How long the scored span is. DER counts frames across it.
     public var windowSeconds: Double
+    /// Share of the window's speech time carrying two or more voices at once.
+    /// Reported alongside the scores because it is what separates one case's
+    /// difficulty from another's.
+    public var overlapRatio: Double?
     public var speakers: [String]
     public var agentToSpeaker: [String: String]
     public var words: [Word]
@@ -57,7 +61,7 @@ public struct BenchTruth: Codable, Sendable, Equatable {
     public init(
         meeting: String, source: String, windowStart: Double?, windowSeconds: Double,
         speakers: [String], agentToSpeaker: [String: String],
-        words: [Word], turns: [Turn]
+        words: [Word], turns: [Turn], overlapRatio: Double? = nil
     ) {
         self.meeting = meeting
         self.source = source
@@ -67,6 +71,7 @@ public struct BenchTruth: Codable, Sendable, Equatable {
         self.agentToSpeaker = agentToSpeaker
         self.words = words
         self.turns = turns
+        self.overlapRatio = overlapRatio
     }
 
     public static func read(from url: URL) throws -> BenchTruth {

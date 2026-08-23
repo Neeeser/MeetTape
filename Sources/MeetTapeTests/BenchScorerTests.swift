@@ -455,6 +455,84 @@ enum BenchScorerTests {
                 expect.equal(baselines.entries["parakeet/local/ES2002b"]?.repeatedNgrams, 0)
             },
 
+            test("every suite in the committed manifest names data that is there") { expect in
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let benchmarks = repository.appendingPathComponent("Benchmarks")
+                let layout = BenchLayout(root: benchmarks)
+                // The harness reads this file with `try?` and carries on
+                // without checksums when it fails to decode, so a manifest
+                // that stopped decoding would cost verification silently.
+                let manifest = try BenchManifest.read(from: layout.manifest)
+                expect.equal(manifest.annotations["ami"]?.sha256.count, 64)
+                expect.equal(manifest.annotations["icsi"]?.sha256.count, 64)
+                for (suite, roster) in manifest.suites {
+                    expect.isTrue(!roster.isEmpty, "\(suite) is empty")
+                    for meeting in roster {
+                        let truth = try BenchTruth.read(from: layout.truth(meeting: meeting))
+                        expect.equal(truth.meeting, meeting, "\(suite): truth names \(truth.meeting)")
+                        expect.equal(
+                            manifest.audio[meeting]?.count, 64,
+                            "\(suite): no checksum for \(meeting)"
+                        )
+                        // The fetch script names the downloaded file after the
+                        // last path component of its URL, and the truth's
+                        // `source` is what the harness then looks for.
+                        let url = manifest.audioURL?[meeting]
+                            ?? manifest.mirror.replacingOccurrences(of: "{meeting}", with: meeting)
+                        expect.equal(
+                            URL(string: url)?.lastPathComponent, truth.source,
+                            "\(suite): \(meeting) downloads under another name"
+                        )
+                    }
+                }
+            },
+
+            test("the overlap suites share no meeting with the core suite") { expect in
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let layout = BenchLayout(root: repository.appendingPathComponent("Benchmarks"))
+                let manifest = try BenchManifest.read(from: layout.manifest)
+                // The exclusion is a flag on the generator command
+                // (`--exclude-suite ami-core`), so forgetting it puts a meeting
+                // the core suite already measures into the overlap roster and
+                // the two numbers stop being independent.
+                let core = Set(manifest.suites["ami-core"] ?? [])
+                expect.isTrue(!core.isEmpty, "ami-core is empty")
+                for suite in ["ami-overlap", "icsi"] {
+                    let roster = Set(manifest.suites[suite] ?? [])
+                    expect.isTrue(!roster.isEmpty, "\(suite) is empty")
+                    expect.equal(
+                        roster.intersection(core).sorted(), [],
+                        "\(suite) repeats meetings from ami-core"
+                    )
+                }
+            },
+
+            test("the overlap suites are harder than the core suite") { expect in
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let layout = BenchLayout(root: repository.appendingPathComponent("Benchmarks"))
+                let manifest = try BenchManifest.read(from: layout.manifest)
+                // What the two new suites exist for. A regenerated truth that
+                // lost the overlap ranking would still score, and score easy.
+                for suite in ["ami-overlap", "icsi"] {
+                    for meeting in manifest.suites[suite] ?? [] {
+                        let truth = try BenchTruth.read(from: layout.truth(meeting: meeting))
+                        let ratio = truth.overlapRatio ?? 0
+                        expect.isTrue(
+                            ratio >= 0.25, "\(suite)/\(meeting) overlaps \(ratio), under 0.25"
+                        )
+                    }
+                }
+            },
+
             test("repeated runs decide on the mean, and on the worst repeats") { expect in
                 let runs = [
                     try run(wer: 0.20, attribution: 0.80, der: 0.30, repeats: 0, deletions: 11),

@@ -37,3 +37,4 @@ node_modules/
 
 # Extension build output
 extension/dist/
+__pycache__/

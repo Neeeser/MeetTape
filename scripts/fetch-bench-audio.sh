@@ -1,53 +1,61 @@
 #!/bin/bash
-# Downloads the AMI recordings the benchmark suite scores against.
+# Downloads the recordings the benchmark suites score against.
 #
 # The audio is never committed: CI fails the build on any audio file in the
-# tree, and the AMI corpus is published under CC BY 4.0 from Edinburgh. Each
-# file is verified against the SHA-256 pinned in Benchmarks/manifest.json, so a
+# tree, and both corpora are published under CC BY 4.0 from Edinburgh. Each file
+# is verified against the SHA-256 pinned in Benchmarks/manifest.json, so a
 # mirror serving a re-encoded copy is caught rather than silently measured.
 #
 # Usage: scripts/fetch-bench-audio.sh [suite] [--audio-dir DIR]
-#        scripts/fetch-bench-audio.sh --annotations   # the manual annotations zip
+#        scripts/fetch-bench-audio.sh --annotations [ami|icsi]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO_ROOT/Benchmarks/manifest.json"
 AUDIO_DIR="$HOME/Library/Caches/meettape-bench"
 SUITE="ami-core"
-WANT_ANNOTATIONS=0
+ANNOTATIONS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --audio-dir) AUDIO_DIR="$2"; shift 2 ;;
-        --annotations) WANT_ANNOTATIONS=1; shift ;;
-        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        --annotations)
+            ANNOTATIONS="ami"
+            if [ $# -gt 1 ] && [ "${2#-}" = "$2" ]; then ANNOTATIONS="$2"; shift; fi
+            shift ;;
+        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
         *) SUITE="$1"; shift ;;
     esac
 done
 
 mkdir -p "$AUDIO_DIR"
 
+# One line per file: url, sha256, local name. The manifest holds a mirror
+# template for AMI and a full URL for anything published elsewhere, and the
+# local name is always the last path component, which is what the ground truth
+# names as its source.
 read_manifest() {
     python3 -c '
-import json, sys
+import json, sys, posixpath
 manifest = json.load(open(sys.argv[1]))
-print(manifest["mirror"])
-print(manifest["annotations"]["url"])
-print(manifest["annotations"]["sha256"])
-suite = sys.argv[2]
-if suite not in manifest["suites"]:
-    sys.exit("no suite named %s" % suite)
-for meeting in manifest["suites"][suite]:
-    print("%s %s" % (meeting, manifest["audio"][meeting]))
-' "$MANIFEST" "$SUITE"
+what = sys.argv[2]
+if what.startswith("annotations:"):
+    corpus = what.split(":", 1)[1]
+    archives = manifest["annotations"]
+    if corpus not in archives:
+        sys.exit("no annotations for %s" % corpus)
+    url = archives[corpus]["url"]
+    print("%s %s %s" % (url, archives[corpus]["sha256"], posixpath.basename(url)))
+    sys.exit(0)
+if what not in manifest["suites"]:
+    sys.exit("no suite named %s" % what)
+for meeting in manifest["suites"][what]:
+    url = manifest.get("audioURL", {}).get(meeting)
+    if url is None:
+        url = manifest["mirror"].replace("{meeting}", meeting)
+    print("%s %s %s" % (url, manifest["audio"][meeting], posixpath.basename(url)))
+' "$MANIFEST" "$1"
 }
-
-# Read into an array the long way: macOS ships bash 3.2, which has no mapfile.
-LINES=()
-while IFS= read -r line; do LINES+=("$line"); done < <(read_manifest)
-MIRROR="${LINES[0]}"
-ANNOTATIONS_URL="${LINES[1]}"
-ANNOTATIONS_SHA="${LINES[2]}"
 
 verify() {
     local path="$1" expected="$2"
@@ -73,17 +81,30 @@ fetch() {
     mv "$path.partial" "$path"
 }
 
-if [ "$WANT_ANNOTATIONS" = 1 ]; then
-    fetch "$ANNOTATIONS_URL" "$AUDIO_DIR/ami_public_manual_1.6.2.zip" "$ANNOTATIONS_SHA"
-    echo "annotations in $AUDIO_DIR"
-    exit 0
+# Read into an array the long way: macOS ships bash 3.2, which has no mapfile.
+LINES=()
+if [ -n "$ANNOTATIONS" ]; then
+    while IFS= read -r line; do LINES+=("$line"); done < <(read_manifest "annotations:$ANNOTATIONS")
+else
+    while IFS= read -r line; do LINES+=("$line"); done < <(read_manifest "$SUITE")
 fi
 
-for line in "${LINES[@]:3}"; do
-    meeting="${line%% *}"
-    sha="${line##* }"
-    url="${MIRROR//\{meeting\}/$meeting}"
-    fetch "$url" "$AUDIO_DIR/$meeting.Mix-Headset.wav" "$sha"
+# A bad suite or corpus name leaves the array empty, and bash 3.2 under `set -u`
+# expands an empty array as an unbound variable rather than as nothing.
+if [ ${#LINES[@]} -eq 0 ]; then
+    echo "nothing to fetch: the manifest named no files" >&2
+    exit 1
+fi
+
+for line in "${LINES[@]}"; do
+    url="$(echo "$line" | cut -d' ' -f1)"
+    sha="$(echo "$line" | cut -d' ' -f2)"
+    name="$(echo "$line" | cut -d' ' -f3)"
+    fetch "$url" "$AUDIO_DIR/$name" "$sha"
 done
 
-echo "suite $SUITE ready in $AUDIO_DIR"
+if [ -n "$ANNOTATIONS" ]; then
+    echo "$ANNOTATIONS annotations in $AUDIO_DIR"
+else
+    echo "suite $SUITE ready in $AUDIO_DIR"
+fi

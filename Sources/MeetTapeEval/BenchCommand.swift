@@ -64,6 +64,9 @@ enum BenchCommand {
         var state: String
         var transcriptionModels: [String]
         var diarizationBackends: [String]
+        /// What the truth records for the scored window, carried into the
+        /// output so a row explains how hard its case was.
+        var overlapRatio: Double?
         /// Which run of `--repeats` this row is, from 1. Every run is written
         /// to `--out`, so the spread in the table can be checked against the
         /// rows it came from.
@@ -435,6 +438,7 @@ enum BenchCommand {
             state: final.processing.state.rawValue,
             transcriptionModels: Array(Set((raw?.chunks ?? []).map(\.model))).sorted(),
             diarizationBackends: Array(Set(runs.map(\.backend))).sorted(),
+            overlapRatio: benchCase.truth.overlapRatio,
             run: run,
             scratch: kept?.path
         )
@@ -442,9 +446,10 @@ enum BenchCommand {
 
     static func report(_ row: Row, of repeats: Int = 1) {
         let score = row.score
+        let overlap = row.overlapRatio.map { String(format: "  overlap %.0f%%", $0 * 100) } ?? ""
         print("")
         let label = repeats > 1 ? "  run \(row.run)/\(repeats)" : ""
-        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]\(label)")
+        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]\(overlap)\(label)")
         print(String(format: "  WER                 %5.1f%%   (no filler %.1f%%, conversational %.1f%%)",
                      score.wer * 100, score.werNoFiller * 100, score.werConversational * 100))
         print(String(format: "  ordering floor      %5.1f%%   (at least %.1f%% of WER is not ordering)",

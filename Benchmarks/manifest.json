@@ -1,11 +1,29 @@
 {
   "mirror": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{meeting}/audio/{meeting}.Mix-Headset.wav",
+  "audioURL": {
+    "Bed016": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bed016.interaction.wav",
+    "Bmr019": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr019.interaction.wav",
+    "Bsr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bsr001.interaction.wav",
+    "Btr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Btr001.interaction.wav"
+  },
   "annotations": {
-    "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
-    "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d"
+    "ami": {
+      "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+      "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d"
+    },
+    "icsi": {
+      "url": "https://groups.inf.ed.ac.uk/ami/ICSICorpusAnnotations/ICSI_core_NXT.zip",
+      "sha256": "cf4860245b9ca9c9ed11a66e5a74cfea2a99a686a52f7580aa0a6bc2225895a9"
+    }
   },
   "audio": {
+    "Bed016": "f5e0ffde1b059e6ba08191617059667a49dd1b9e6f4a5e997f356d07fd1b8729",
+    "Bmr019": "f45aba45583f132960c577fc2c26e7a6e486467320a0f95db3cd2b74d678b176",
+    "Bsr001": "af667bbdc2f26f9e98a99d7a86d214a48c595704b500423a9f7302d0b87b199c",
+    "Btr001": "560451445da33a916be8f13aced3a92f647dc410a0bf0575f9cb03d746791c3e",
     "EN2002a": "a15017d0d3c871866971ee178052a0ce3a7e44d6fbf89fc23dcab326511b65f5",
+    "EN2002b": "50e2c8e4737850c4bf3cc24e7087c755e1c733cd91822106afd0df485ba64893",
+    "EN2002d": "6aa99d9d71cb695ea699d6be277f78eff68e847c93560031486eba9f18164ebe",
     "ES2002a": "9c76866990fcc8b84006dc32d273ad99df439090b748ebe72103bb78c3216ee7",
     "ES2002b": "977fbf6cd473cfb1984b41755762eea4d7ffdad3fb15adcfdebcb8842163ec66",
     "ES2002c": "8aa5dca8a0d31aaa596ecec8e0d7d8df1646fd4328d2740b287650d8012412df",
@@ -13,7 +31,11 @@
     "ES2003a": "41cf861afafc20e70061c6cc82b2cb1c620d630be6d13361da928f04fc00beea",
     "ES2005a": "ac33e7b18ae72931e65dc279af4b129370ad62ca6ed64299b9e35f356e3f8ed8",
     "ES2008b": "8aa976aa242e895775857b028db2ca5c5f56a2a2d8a096adc81cc82a9c4b6ba4",
+    "ES2015d": "0e7a2c371f73c461bfca6244f491760fa76047f7b64dc74cbecfff67af921222",
     "IB4005": "96465a9b66128d50bf6e0ee0ccf6b509e9d743aacb248a38ffaa063cb378e65a",
+    "IN1012": "cc121921d743a3c88f53e60eabd1824f6f34f802b3c9679af20b32067ca44300",
+    "IS1003d": "bfeffddd293aa952be24a28eb54e69124760c432015cc361f858fca82ad6e64a",
+    "IS1006d": "cee3f73b16051893a90f68f681af470a8682cd6858c64f021776baf5bc02800f",
     "IS1008a": "75ae8796ca2177fa0c77055de2fe2f95325b412dc7152a9b32c76c9884a3d382",
     "IS1009a": "6eb5a0ede0d9e72794f976ce7bea5b78133eae969f99b4c5418b43c2468d25b1",
     "IS1009c": "f317910070db0f2649315decbb34686d648bbe9dc3f7576710184f4d572bdbcc",
@@ -31,6 +53,10 @@
       "IS1009a", "IS1008a", "TS3005a", "TS3009c", "EN2002a", "IB4005"
     ],
     "ami-long": ["ES2008b", "IS1009c"],
-    "ami-single": ["ES2002b"]
+    "ami-single": ["ES2002b"],
+    "ami-overlap": [
+      "EN2002d", "EN2002b", "IN1012", "IS1003d", "IS1006d", "ES2015d"
+    ],
+    "icsi": ["Btr001", "Bmr019", "Bsr001", "Bed016"]
   }
 }

@@ -447,7 +447,7 @@ enum BenchCommand {
         print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]\(label)")
         print(String(format: "  WER                 %5.1f%%   (no filler %.1f%%, conversational %.1f%%)",
                      score.wer * 100, score.werNoFiller * 100, score.werConversational * 100))
-        print(String(format: "  ordering floor      %5.1f%%   (net of floor %.1f%%)",
+        print(String(format: "  ordering floor      %5.1f%%   (at least %.1f%% of WER is not ordering)",
                      score.orderingFloorWer * 100, score.netOfFloorWer * 100))
         print(String(format: "  words               %5d ref / %d hyp   (%.0f/min, %.0f%% of the window is speech)",
                      score.referenceWords, score.hypothesisWords,
@@ -499,35 +499,19 @@ enum BenchCommand {
         fflush(stdout)
     }
 
-    /// The score the baseline check reads when a case ran more than once.
-    ///
-    /// The averaged fields are the ones the rule compares. Repeated 8-grams
-    /// take the worst of the runs rather than the mean, because that rule is a
-    /// budget and a defect seen once is a defect. Everything else keeps the
-    /// first run's value: the counts and the mapping describe a particular
-    /// transcript, and an average of two mappings is not a mapping.
+    /// The score the baseline check reads when a case ran more than once. The
+    /// rule itself is `BenchAggregate.deciding`, where a test can reach it.
     static func mean(of runs: [Row]) -> BenchScore? {
-        guard var score = runs.first?.score else { return nil }
-        guard runs.count > 1 else { return score }
-        score.wer = mean(runs.map(\.score.wer))
-        score.werNoFiller = mean(runs.map(\.score.werNoFiller))
-        score.werConversational = mean(runs.map(\.score.werConversational))
-        score.attribution = mean(runs.map(\.score.attribution))
-        score.attributionMerged = mean(runs.map(\.score.attributionMerged))
-        score.attributionOfLabelled = mean(runs.map(\.score.attributionOfLabelled))
-        let ders = runs.compactMap(\.score.der)
-        score.der = ders.isEmpty ? nil : mean(ders)
-        let strict = runs.compactMap(\.score.derStrict)
-        score.derStrict = strict.isEmpty ? nil : mean(strict)
-        score.repeatedNgrams = runs.map(\.score.repeatedNgrams).max() ?? score.repeatedNgrams
-        return score
+        BenchAggregate.deciding(over: runs.map(\.score))
     }
 
     static func summarise(_ rows: [Row], repeats: Int = 1) {
         guard rows.count > 1 else { return }
         print("")
-        print("  Net is WER with the case's ordering floor taken off: the floor is what an")
-        print("  oracle transcript pays for reading turns in one stream. Coverage is the share")
+        print("  Net is WER with the case's ordering floor taken off, which is a lower bound on")
+        print("  the share of WER that is not ordering, not a split of one from the other: the")
+        print("  floor is what an oracle transcript pays for reading turns in one stream, and")
+        print("  an engine's own errors fall on the same words. Coverage is the share")
         print("  of reference words attribution asked about; the rest overlap another speaker.")
         print("  DER is on the merged mapping, strict on the injective one, and above 100% is")
         print("  arithmetic rather than a defect: false alarm has no upper bound.")
@@ -576,10 +560,7 @@ enum BenchCommand {
         fflush(stdout)
     }
 
-    static func mean(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        return values.reduce(0, +) / Double(values.count)
-    }
+    static func mean(_ values: [Double]) -> Double { BenchAggregate.mean(values) }
 
     static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }

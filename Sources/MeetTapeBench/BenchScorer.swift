@@ -17,7 +17,12 @@ public struct BenchScore: Codable, Sendable, Equatable {
     /// still a word it got right.
     public var werConversational: Double
     /// Word error rate of an oracle transcript holding every reference word in
-    /// chronological order, which is the floor `wer` cannot go below.
+    /// chronological order.
+    ///
+    /// This is one particular ordering, not a bound: edit distance is a metric
+    /// over the turn-grouped reference, and a hypothesis that groups a passage
+    /// by utterance can score below the chronological oracle. `netOfFloorWer`
+    /// clamps at zero for that reason.
     ///
     /// The reference stream is grouped by turn and a transcript is a stream of
     /// utterances, so overlapping speech interleaves in one and not the other.
@@ -81,6 +86,11 @@ public struct BenchScore: Codable, Sendable, Equatable {
     /// The same under the injective mapping, where a leftover cluster keeps its
     /// own key and every frame it covers is confusion. Reported, never decided
     /// on.
+    ///
+    /// An unmapped key is compared against reference speaker names directly, so
+    /// a cluster keyed with a reference speaker's own name would score as
+    /// correct on those frames. Generated keys are `c0`, `speaker_1` and the
+    /// like, so it does not arise today.
     public var derStrict: Double?
     public var derMissed: Double?
     public var derFalseAlarm: Double?
@@ -98,6 +108,12 @@ public struct BenchScore: Codable, Sendable, Equatable {
     public var wordsPerMinute: Double
 
     /// `wer` with the ordering floor taken off, clamped at zero.
+    ///
+    /// A directional lower bound on the share of `wer` that is not ordering,
+    /// never a split of one into the other. The two overlap: an edit an engine
+    /// pays for a missing word is often an edit the oracle pays for reading
+    /// turns in one stream, and ES2002b scores 18.5% against an 18.1% floor
+    /// while holding at least 10.1 points of deletions of its own.
     ///
     /// The clamp exists because the floor is one particular oracle ordering
     /// and a hypothesis can order a passage more cheaply than it does; below

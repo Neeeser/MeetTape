@@ -42,6 +42,29 @@ enum BenchScorerTests {
         return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
     }
 
+    /// One run of a case, with the fields the deciding aggregation touches and
+    /// two it must leave alone: `deletions` counts a particular transcript and
+    /// `clusterMapping` describes a particular set of clusters.
+    static func run(
+        wer: Double, attribution: Double, der: Double?, repeats: Int, deletions: Int
+    ) throws -> BenchScore {
+        let json = """
+            {"meeting":"ES2002b","wer":\(wer),"werNoFiller":\(wer / 2),
+             "werConversational":\(wer / 4),"orderingFloorWer":0.1,
+             "substitutions":0,"insertions":0,"deletions":\(deletions),
+             "referenceWords":100,"hypothesisWords":100,"utterances":10,
+             "attribution":\(attribution),"attributionMerged":\(attribution + 0.05),
+             "attributionOfLabelled":\(attribution + 0.02),"attributionScored":100,
+             "overlapExcluded":0,"attributionCoverage":1,"referenceSpeakers":4,
+             "hypothesisSpeakers":4,"speakerKeys":["c\(deletions)"],
+             "clusterMapping":{"c\(deletions)":"A"},"repeatedNgrams":\(repeats),
+             "repeatedShare":0,"overlappingPairs":0,"worstOverlapSeconds":0,
+             \(der.map { "\"der\":\($0),\"derStrict\":\($0 + 0.1)," } ?? "")
+             "speechCoverage":0.9,"wordsPerMinute":150}
+            """
+        return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
+    }
+
     /// The transcript a perfect system would produce: one line per reference
     /// turn, holding that turn's words, under an opaque cluster key.
     ///
@@ -228,16 +251,17 @@ enum BenchScorerTests {
 
             test("interleaved speech costs an oracle transcript word order") { expect in
                 // One long turn with a backchannel dropped into the middle of
-                // it. Read by turn the reference ends "four five yeah"; read by
-                // the clock the "yeah" falls after "three", so a transcript
-                // that gets every word right still pays two edits.
+                // it. Read by turn the reference ends "five yeah"; read by the
+                // clock the "yeah" falls between "four" and "five", so a
+                // transcript that gets every word right still pays two edits,
+                // which the DP takes as two substitutions over that pair.
                 let interleaved = made([
                     ("A", 0, ["one", "two", "three", "four", "five"]),
                     ("B", 3.5, ["yeah"]),
                 ], seconds: 10)
                 expect.close(
                     BenchScorer.orderingFloor(interleaved), 2.0 / 6.0, tolerance: 0.0001,
-                    "one interleaved word is an insertion and a deletion"
+                    "one interleaved word costs two edits out of six words"
                 )
 
                 let sequential = made([
@@ -429,6 +453,49 @@ enum BenchScorerTests {
                 expect.equal(baselines.entries["parakeet/local/ES2002c"]?.repeatedNgrams, 1)
                 expect.equal(baselines.entries["parakeet/local/IS1009c"]?.repeatedNgrams, 7)
                 expect.equal(baselines.entries["parakeet/local/ES2002b"]?.repeatedNgrams, 0)
+            },
+
+            test("repeated runs decide on the mean, and on the worst repeats") { expect in
+                let runs = [
+                    try run(wer: 0.20, attribution: 0.80, der: 0.30, repeats: 0, deletions: 11),
+                    try run(wer: 0.30, attribution: 0.90, der: 0.50, repeats: 7, deletions: 22),
+                    try run(wer: 0.40, attribution: 0.70, der: 0.40, repeats: 2, deletions: 33),
+                ]
+                let deciding = try expect.unwrap(BenchAggregate.deciding(over: runs))
+                expect.close(deciding.wer, 0.30, tolerance: 0.0001)
+                expect.close(deciding.werNoFiller, 0.15, tolerance: 0.0001)
+                expect.close(deciding.werConversational, 0.075, tolerance: 0.0001)
+                expect.close(deciding.attribution, 0.80, tolerance: 0.0001)
+                expect.close(deciding.attributionMerged, 0.85, tolerance: 0.0001)
+                expect.close(deciding.attributionOfLabelled, 0.82, tolerance: 0.0001)
+                expect.close(try expect.unwrap(deciding.der), 0.40, tolerance: 0.0001)
+                expect.close(try expect.unwrap(deciding.derStrict), 0.50, tolerance: 0.0001)
+                expect.equal(
+                    deciding.repeatedNgrams, 7,
+                    "the repeat budget is worst of the runs, because a defect seen once is one"
+                )
+                expect.equal(
+                    deciding.deletions, 11,
+                    "a count describes one transcript and keeps the first run's value"
+                )
+                expect.equal(deciding.clusterMapping, ["c11": "A"])
+                expect.close(deciding.orderingFloorWer, 0.1, tolerance: 0.0001)
+
+                let alone = try expect.unwrap(BenchAggregate.deciding(over: [runs[1]]))
+                expect.equal(alone, runs[1], "one run decides as itself")
+                expect.isTrue(
+                    BenchAggregate.deciding(over: []) == nil, "no runs decide nothing"
+                )
+            },
+
+            test("a run with no DER leaves the aggregate without one") { expect in
+                let runs = [
+                    try run(wer: 0.2, attribution: 0.8, der: nil, repeats: 0, deletions: 1),
+                    try run(wer: 0.4, attribution: 0.6, der: nil, repeats: 0, deletions: 2),
+                ]
+                let deciding = try expect.unwrap(BenchAggregate.deciding(over: runs))
+                expect.isTrue(deciding.der == nil, "no run measured DER")
+                expect.close(deciding.wer, 0.30, tolerance: 0.0001)
             },
         ])
     }

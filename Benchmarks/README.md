@@ -52,6 +52,10 @@ scripts/eval.sh bench --suite ami-core --engine parakeet --diarizer local \
 - `--repeats N` runs each case N times, prints the mean and the min-to-max
   spread per case, writes every run to `--out` with its run number, and
   compares the mean against the baseline. The default is 1.
+  `scripts/build-bench-baselines.py` folds those runs the same way, so a
+  baseline built from an `--out` file written under repeats records the mean of
+  the runs and the worst of their repeated 8-gram counts, which is what the
+  gate will compare against.
 - `--keep-scratch` writes each run's meeting folder beside `--out`, or into
   `bench-scratch/` when there is no `--out`, named `<case>-<engine>-<diarizer>`
   and `-runN` under repeats,
@@ -148,7 +152,10 @@ harness prints each next to the qualifier it needs.
   order and nothing else, still scores 6.2% to 33.1% WER per case, mean 15.5%.
   That floor is `orderingFloorWer`, `wer` minus it is the `net` column, and on
   an overlap-heavy case the difference between two engines is mostly floor.
-  `wer` itself is unchanged and is still what the baselines record.
+  Net is a lower bound on the share of `wer` that is not ordering, not a split
+  of one from the other: the two coincide on the same words, and ES2002b scores
+  18.5% against an 18.1% floor while holding at least 10.1 points of deletions
+  of its own. `wer` itself is unchanged and is still what the baselines record.
 - **Attribution coverage.** Attribution does not ask about a word spoken across
   another speaker's turn, because one stream of utterances cannot be right
   about both. That is 22.7% of the suite's words, 50.1% of EN2002a's and 49.8%

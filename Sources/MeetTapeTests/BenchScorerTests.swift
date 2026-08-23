@@ -35,7 +35,9 @@ enum BenchScorerTests {
              "attributionScored":100,"overlapExcluded":0,"referenceSpeakers":4,
              "hypothesisSpeakers":4,"speakerKeys":[],"clusterMapping":{},
              "repeatedNgrams":\(repeats),"repeatedShare":0,"overlappingPairs":0,
-             "worstOverlapSeconds":0}
+             "worstOverlapSeconds":0,"werConversational":\(werNoFiller),
+             "orderingFloorWer":0,"attributionCoverage":1,
+             "speechCoverage":0.9,"wordsPerMinute":150}
             """
         return try JSONDecoder().decode(BenchScore.self, from: Data(json.utf8))
     }
@@ -107,6 +109,32 @@ enum BenchScorerTests {
             speakers: speakers, agentToSpeaker: [:], words: words, turns: turns
         )
         return (truth, utterances)
+    }
+
+    /// A truth built from turns, each holding evenly spaced one-second words.
+    static func made(
+        _ turns: [(speaker: String, start: Double, words: [String])], seconds: Double
+    ) -> BenchTruth {
+        var words: [BenchTruth.Word] = []
+        var spans: [BenchTruth.Turn] = []
+        for turn in turns {
+            for (step, text) in turn.words.enumerated() {
+                let start = turn.start + Double(step)
+                words.append(BenchTruth.Word(
+                    start: start, end: start + 0.5, text: text,
+                    speaker: turn.speaker, truncated: false
+                ))
+            }
+            spans.append(BenchTruth.Turn(
+                speaker: turn.speaker, start: turn.start,
+                end: turn.start + Double(turn.words.count)
+            ))
+        }
+        return BenchTruth(
+            meeting: "made", source: "none.wav", windowStart: nil, windowSeconds: seconds,
+            speakers: Array(Set(turns.map(\.speaker))).sorted(), agentToSpeaker: [:],
+            words: words, turns: spans
+        )
     }
 
     /// Eight clusters, four speakers, ten words each: every count ties.
@@ -196,6 +224,127 @@ enum BenchScorerTests {
                 // Folding c4 onto A and c5 onto B recovers the other 160.
                 expect.close(score.attributionMerged, 1.0, tolerance: 0.0001)
                 expect.close(score.attributionOfLabelled, 0.8, tolerance: 0.0001)
+            },
+
+            test("interleaved speech costs an oracle transcript word order") { expect in
+                // One long turn with a backchannel dropped into the middle of
+                // it. Read by turn the reference ends "four five yeah"; read by
+                // the clock the "yeah" falls after "three", so a transcript
+                // that gets every word right still pays two edits.
+                let interleaved = made([
+                    ("A", 0, ["one", "two", "three", "four", "five"]),
+                    ("B", 3.5, ["yeah"]),
+                ], seconds: 10)
+                expect.close(
+                    BenchScorer.orderingFloor(interleaved), 2.0 / 6.0, tolerance: 0.0001,
+                    "one interleaved word is an insertion and a deletion"
+                )
+
+                let sequential = made([
+                    ("A", 0, ["one", "two", "three"]),
+                    ("B", 4, ["four", "five", "six"]),
+                    ("A", 8, ["seven", "eight"]),
+                ], seconds: 12)
+                expect.close(
+                    BenchScorer.orderingFloor(sequential), 0, tolerance: 0.0001,
+                    "turns that do not interleave read the same both ways"
+                )
+
+                // The floor comes off wer and never takes it below zero.
+                let score = BenchScorer.score(
+                    truth: sequential,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 12, text: "one two three four five six seven eight",
+                        speakerKey: "c0"
+                    )]
+                )
+                expect.close(score.orderingFloorWer, 0, tolerance: 0.0001)
+                expect.close(score.netOfFloorWer, score.wer, tolerance: 0.0001)
+            },
+
+            test("attribution reports the share of words it asked about") { expect in
+                // Sixteen words. The first eight are spoken alone, the last
+                // eight across each other, so attribution is asked about half
+                // the meeting and says so.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 4, ["b1", "b2", "b3", "b4"]),
+                    ("A", 8, ["a5", "a6", "a7", "a8"]),
+                    ("B", 8, ["b5", "b6", "b7", "b8"]),
+                ], seconds: 12)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [
+                        BenchUtterance(start: 0, end: 4, text: "a1 a2 a3 a4", speakerKey: "c0"),
+                        BenchUtterance(start: 4, end: 8, text: "b1 b2 b3 b4", speakerKey: "c1"),
+                        BenchUtterance(start: 8, end: 12, text: "a5 a6 a7 a8", speakerKey: "c0"),
+                    ]
+                )
+                expect.equal(score.overlapExcluded, 8, "the overlapping half is not asked")
+                expect.equal(score.attributionScored, 8)
+                expect.close(
+                    score.attributionCoverage, 0.5, tolerance: 0.0001,
+                    "half the reference words reached the question"
+                )
+                expect.close(score.attribution, 1.0, tolerance: 0.0001)
+            },
+
+            test("the conversational variant drops backchannels and the plain one does not") {
+                expect in
+                // "um" is hesitation, "okay" is a backchannel, and an engine
+                // that writes neither is charged for one, both or nothing
+                // depending on which number is read.
+                let truth = made([("A", 0, ["okay", "um", "the", "budget", "is", "fine"])], seconds: 8)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 6, text: "the budget is fine", speakerKey: "c0"
+                    )]
+                )
+                expect.close(score.wer, 2.0 / 6.0, tolerance: 0.0001, "both are missing words")
+                expect.close(
+                    score.werNoFiller, 1.0 / 5.0, tolerance: 0.0001,
+                    "the filler set covers um and leaves okay charged"
+                )
+                expect.close(
+                    score.werConversational, 0, tolerance: 0.0001,
+                    "the backchannel set covers okay as well"
+                )
+            },
+
+            test("DER is reported under both mappings") { expect in
+                // Six clusters over four speakers. Merged folds the two extra
+                // clusters onto the voices they cover and scores clean; strict
+                // leaves them holding their own keys, which is the last 40
+                // seconds of A's turn and of B's, 80 of 400 seconds.
+                let split = splitCase()
+                let score = BenchScorer.score(truth: split.truth, utterances: split.utterances)
+                let merged = try expect.unwrap(score.der)
+                let strict = try expect.unwrap(score.derStrict)
+                expect.close(merged, 0, tolerance: 0.01, "the merged mapping covers every voice")
+                expect.close(
+                    strict, 0.2, tolerance: 0.01,
+                    "the two leftover clusters are 80 of 400 seconds"
+                )
+            },
+
+            test("a case reports how densely its window is spoken") { expect in
+                // Eight seconds of speech in a twenty second window, twelve
+                // words in it.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 6, ["b1", "b2", "b3", "b4"]),
+                    ("A", 6, ["a5", "a6", "a7", "a8"]),
+                ], seconds: 20)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(start: 0, end: 4, text: "a1", speakerKey: "c0")]
+                )
+                expect.close(
+                    score.speechCoverage, 0.4, tolerance: 0.0001,
+                    "two speakers over the same four seconds are four seconds of speech"
+                )
+                expect.close(score.wordsPerMinute, 36, tolerance: 0.01)
             },
 
             test("the greedy branch decides its ties by name") { expect in

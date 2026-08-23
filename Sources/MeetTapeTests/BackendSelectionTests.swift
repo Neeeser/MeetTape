@@ -169,6 +169,23 @@ enum BackendSelectionTests {
                 )
             },
 
+            test("a stored local engine is never migrated to another one") { expect in
+                // Every value round-trips, including the two the default has
+                // moved away from. A machine that has Cohere on disk keeps
+                // decoding to Cohere, or an upgrade silently changes both the
+                // transcript and the 2.1 GB of models on the machine.
+                for stored in ["cohere", "whisper", "parakeet"] {
+                    let file = #"""
+                        {"processing":{"transcription":"local","localTranscriptionModel":"\#(stored)"}}
+                        """#
+                    let settings = try JSONDecoder().decode(AppSettings.self, from: Data(file.utf8))
+                    expect.equal(
+                        settings.processing.localTranscriptionModel.rawValue, stored,
+                        "kept the engine the file names"
+                    )
+                }
+            },
+
             test("the units a configuration needs follow the models it chose") { expect in
                 var settings = AppSettings()
                 settings.processing.localTranscriptionModel = .cohere

@@ -361,6 +361,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
         } else if version < 2 {
             processing = ProcessingSettings(transcription: .openAI, diarization: .openAI)
         } else {
+            // Version 2 is the version that added the block, and nothing
+            // encodes the struct selectively, so every file a build with
+            // processing settings wrote carries one. A version 2 or 3 file
+            // without the key is therefore hand-edited or truncated, not an
+            // older install, and the fresh defaults are the right answer for
+            // it. The absent-key path inside the block is the one that carries
+            // the upgrade rule.
             processing = defaults.processing
         }
         enrichment =

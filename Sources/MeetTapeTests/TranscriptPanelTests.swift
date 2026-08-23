@@ -54,6 +54,7 @@ enum TranscriptPanelTests {
     }
 
     /// Every text view in a laid-out panel, in the order they appear.
+    @MainActor
     static func paragraphs(in view: NSView) -> [TranscriptTextView] {
         if let paragraph = view as? TranscriptTextView { return [paragraph] }
         return view.subviews.flatMap(paragraphs(in:))

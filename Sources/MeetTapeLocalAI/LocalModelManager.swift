@@ -31,6 +31,8 @@ public actor LocalModelManager {
     private var cohereModels: CoherePipeline.LoadedModels?
     private var alignerModels: (models: CtcModels, tokenizer: CtcTokenizer)?
     private var installTask: Task<LocalModelSnapshot, Error>?
+    /// Identifies which call owns `installTask`; see `install`.
+    private var installGeneration: UInt64 = 0
     /// Segmentation and embeddings for the meeting most recently diarized, so
     /// "re-analyze speakers" re-clusters instead of starting again.
     ///
@@ -85,9 +87,7 @@ public actor LocalModelManager {
             filesPresent(unit, locations: locations, receipt: receipt)
         }
         let snapshot = LocalModelSnapshot(receipts: present)
-        guard required.allSatisfy({ present[$0] != nil }) else {
-            return required.isEmpty && !present.isEmpty ? .installed(snapshot) : .notInstalled
-        }
+        guard required.allSatisfy({ present[$0] != nil }) else { return .notInstalled }
         let outdated = required.contains { present[$0]?.matchesCurrentBuild(for: $0) == false }
         return outdated ? .outdated(snapshot) : .installed(snapshot)
     }
@@ -161,7 +161,6 @@ public actor LocalModelManager {
         }
         if missing.isEmpty {
             refreshState()
-            if case .failed(let message) = state { throw LocalModelError.installFailed(message) }
             return LocalModelSnapshot(receipts: receipts)
         }
 
@@ -194,23 +193,35 @@ public actor LocalModelManager {
             )
             return snapshot
         }
+        // A generation, because `Task` is a value type and two callers can
+        // each register one: whoever finishes clears the slot only if it is
+        // still holding their own task. Clearing it unconditionally released
+        // a slot another install was still running in, which dropped its
+        // progress, let a third caller start a duplicate, and made Delete
+        // Models cancel nothing.
+        installGeneration += 1
+        let generation = installGeneration
         installTask = task
         publish(.downloading(fraction: 0, detail: "Preparing"))
-        defer {
-            installTask = nil
-            refreshState()
-        }
+        defer { if installGeneration == generation { installTask = nil } }
         do {
-            return try await task.value
+            let snapshot = try await task.value
+            if installGeneration == generation { refreshState() }
+            return snapshot
         } catch {
             // Keep whatever survived: a failure on the third unit must not
-            // discard the two that installed, and the reason the install
-            // failed may be that a folder went away underneath it.
-            receipts = fallback.merging(receipts) { _, new in new }
-            try? receiptStore.write(receipts)
+            // discard the two that installed. A cancellation is a delete,
+            // though, and restoring the receipts it just cleared would leave
+            // units.json claiming deleted models are installed.
+            if !(error is CancellationError) {
+                receipts = fallback.merging(receipts) { _, new in new }
+                try? receiptStore.write(receipts)
+            }
             let message = Self.message(for: error)
             let usable = Self.computeState(receipts: receipts, required: required, locations: locations)
-            installTask = nil
+            // Published last, and after the slot is released, so nothing
+            // recomputes a plain state over the reason the user needs to see.
+            if installGeneration == generation { installTask = nil }
             publish(usable.isUsable ? usable : .failed(message))
             throw error
         }
@@ -309,7 +320,7 @@ public actor LocalModelManager {
     }
 
     /// Removes one unit's files and receipt.
-    public func remove(unit: LocalModelUnit) throws {
+    public func remove(unit: LocalModelUnit) {
         installTask?.cancel()
         installTask = nil
         unload(unit)
@@ -362,9 +373,10 @@ public actor LocalModelManager {
 
     /// The loaded Whisper transcriber.
     ///
-    /// Reached only through this actor, which is what serialises it: every
-    /// heavy local job runs one at a time, so transcription, alignment and
-    /// diarization cannot contend for the Neural Engine.
+    /// The actor owns the loaded handles, so nothing else can load a second
+    /// copy. It does not serialise the work itself: an actor yields at every
+    /// await, so a caller that wants one decode at a time asks for one
+    /// (`runChunks` does, for a local engine).
     internal func loadedWhisper() async throws -> LoadedWhisper {
         if let whisper { return whisper }
         guard let receipt = receipts[.whisper],

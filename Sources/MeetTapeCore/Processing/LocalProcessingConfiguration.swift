@@ -15,9 +15,6 @@ public enum LocalSpeechStack {
     public static let diarizerBackendIdentifier = "fluidaudio-offline-0.15.6"
     public static let whisperBackendIdentifier = "whisperkit-large-v3-turbo"
 
-    /// Roughly what a first run downloads: 624 MB of Whisper plus about 21 MB
-    /// of diarizer models.
-    public static let approximateDownloadBytes: Int64 = 650 * 1_024 * 1_024
     public static let approximateWhisperBytes: Int64 = 624 * 1_024 * 1_024
     public static let approximateDiarizerBytes: Int64 = 21 * 1_024 * 1_024
 
@@ -76,10 +73,14 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
     /// in every configuration. The aligner is required by any chosen
     /// transcription model that returns text without timings.
     public static func required(for settings: AppSettings) -> Set<LocalModelUnit> {
-        var units: Set<LocalModelUnit> = []
-        if settings.processing.usesLocalDiarization { units.insert(.diarizer) }
+        // Always. Local diarization needs it outright, and voice memory embeds
+        // a cloud diarizer's intervals with the same models, so a cloud-only
+        // configuration needs it too. Leaving it out of that set made
+        // `ensureInstalled` report success for a machine with no models at
+        // all, and the embedding extractor then threw from inside a stage
+        // instead of the meeting skipping voice memory.
+        var units: Set<LocalModelUnit> = [.diarizer]
         if settings.processing.usesLocalTranscription {
-            units.insert(.diarizer)
             switch settings.processing.localTranscriptionModel {
             case .cohere:
                 units.insert(.cohere)

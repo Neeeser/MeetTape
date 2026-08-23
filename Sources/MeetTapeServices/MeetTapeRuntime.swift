@@ -231,6 +231,7 @@ public final class MeetTapeRuntime {
                 },
                 requireLocalModels: { try await modelManager.ensureInstalled() },
                 aligner: CtcTranscriptAligner(models: modelManager),
+                prepareAligner: { _ = try await modelManager.install(units: [.ctcAligner]) },
                 singleSpeakerEmbedding: { url in
                     try await modelManager.embedSingleSpeaker(audio: url)
                 },

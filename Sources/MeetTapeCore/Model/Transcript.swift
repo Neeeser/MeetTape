@@ -125,13 +125,30 @@ public struct ChunkAlignment: Codable, Sendable, Equatable {
     /// Which aligner produced the timings, as provenance.
     public var aligner: String
     public var alignedAt: Date
-    /// Chunk-relative, in the same shape a timed backend returns.
+    /// Chunk-relative, in the same shape a timed backend returns. Empty when
+    /// the aligner refused.
     public var segments: [RawTranscriptSegment]
+    /// The aligner found no path through this chunk. Recorded so the attempt
+    /// is not repeated on every run, and so a later build can tell a refusal
+    /// from real timings and try again. Decodes false for files written
+    /// before it existed, which all carried timings.
+    public var refused: Bool
 
-    public init(aligner: String, alignedAt: Date, segments: [RawTranscriptSegment]) {
+    public init(
+        aligner: String, alignedAt: Date, segments: [RawTranscriptSegment], refused: Bool = false
+    ) {
         self.aligner = aligner
         self.alignedAt = alignedAt
         self.segments = segments
+        self.refused = refused
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        aligner = try container.decode(String.self, forKey: .aligner)
+        alignedAt = try container.decode(Date.self, forKey: .alignedAt)
+        segments = try container.decode([RawTranscriptSegment].self, forKey: .segments)
+        refused = try container.decodeIfPresent(Bool.self, forKey: .refused) ?? false
     }
 }
 

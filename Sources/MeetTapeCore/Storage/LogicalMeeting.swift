@@ -99,14 +99,16 @@ public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
     public var id: String { lines[0].id }
     public var speakerName: String { lines[0].speakerName }
 
-    /// Groups consecutive lines with the same resolved name in the same
-    /// recording. Names are only comparable within one recording: the two
-    /// halves of a dropped call can both show "Speaker 1" and mean different
-    /// people, so a block never crosses a recording boundary.
+    /// Groups consecutive lines with the same resolved name, in the same
+    /// recording and on the same track. Names are only comparable within one
+    /// recording: the two halves of a dropped call can both show "Speaker 1"
+    /// and mean different people. Track matters for the same reason, since the
+    /// microphone and the far end are diarized separately.
     public static func blocks(from lines: [CombinedLine]) -> [CombinedLineBlock] {
         var out: [CombinedLineBlock] = []
         for line in lines {
             if let last = out.last, last.lines[0].recordingID == line.recordingID,
+                last.lines[0].utterance.track == line.utterance.track,
                 last.speakerName == line.speakerName {
                 out[out.count - 1].lines.append(line)
             } else {

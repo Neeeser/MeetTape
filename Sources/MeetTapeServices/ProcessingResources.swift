@@ -30,6 +30,10 @@ public struct ProcessingBackends: Sendable {
     /// in cloud-only test configurations; the pipeline then falls back to
     /// chunk-level timing.
     public var aligner: (any TranscriptAligner)?
+    /// Installs the aligner specifically, rather than whatever the current
+    /// settings need. The chunks being aligned were written by whichever
+    /// model was chosen at the time, and the settings may have moved since.
+    public var prepareAligner: (@Sendable () async throws -> Void)?
     /// Extracts one vector for a track known to hold a single speaker, used for
     /// the microphone track where the speaker is the local user by construction.
     public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)?
@@ -46,6 +50,7 @@ public struct ProcessingBackends: Sendable {
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
         aligner: (any TranscriptAligner)? = nil,
+        prepareAligner: (@Sendable () async throws -> Void)? = nil,
         singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         reanalyzeDiarization: (@Sendable (String, URL, Int?) async throws -> DiarizationOutput)? = nil
     ) {
@@ -56,6 +61,7 @@ public struct ProcessingBackends: Sendable {
         self.prepareLocalModels = prepareLocalModels
         self.requireLocalModels = requireLocalModels
         self.aligner = aligner
+        self.prepareAligner = prepareAligner
         self.singleSpeakerEmbedding = singleSpeakerEmbedding
         self.reanalyzeDiarization = reanalyzeDiarization
     }

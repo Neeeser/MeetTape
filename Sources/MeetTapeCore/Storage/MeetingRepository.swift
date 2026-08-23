@@ -162,7 +162,7 @@ public struct MeetingStore: Sendable {
         for index in raw.chunks.indices {
             let chunk = raw.chunks[index]
             guard let text = chunk.text, chunk.segments.isEmpty else { continue }
-            if let alignment = readAlignment(chunkID: chunk.id) {
+            if let alignment = readAlignment(chunkID: chunk.id), !alignment.segments.isEmpty {
                 raw.chunks[index].segments = alignment.segments
             } else {
                 raw.chunks[index].segments = [RawTranscriptSegment(

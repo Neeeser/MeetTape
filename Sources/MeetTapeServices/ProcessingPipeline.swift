@@ -381,7 +381,12 @@ public actor ProcessingPipeline {
                 try await runChunks(
                     store: store, metadata: &metadata, track: track, segments: segments,
                     model: transcriber.identifier,
-                    configuration: ChunkPlanner.Configuration.fitting(transcriber.limits)
+                    configuration: ChunkPlanner.Configuration.fitting(
+                        transcriber.limits, timing: transcriber.timing
+                    ),
+                    // A local engine is one process on one Neural Engine, so
+                    // its chunks go one at a time; the cloud takes three.
+                    concurrency: transcriber.isLocal ? 1 : nil
                 ) { url, _ in
                     let output = try await transcriber.transcribe(audio: url, progress: { _ in })
                     return output
@@ -421,9 +426,18 @@ public actor ProcessingPipeline {
             )
             return
         }
-        // The chosen model is what makes the aligner required, so installing
-        // it here is the same consent as the model choice itself.
-        try await backends.prepareLocalModels?()
+        // The aligner specifically, not whatever the current settings need:
+        // these chunks were written by whichever model was chosen at the time,
+        // and a switch since then would install the wrong unit and leave the
+        // stage throwing.
+        do {
+            try await backends.prepareAligner?()
+        } catch {
+            Log.processing.notice(
+                "aligner unavailable, chunks keep chunk-level timing: \(logSafeDescription(error), privacy: .public)"
+            )
+            return
+        }
 
         let timeline = try store.readTimeline()
         let exporter = ChunkExporter()
@@ -437,7 +451,7 @@ public actor ProcessingPipeline {
 
         for (index, chunk) in pending.enumerated() {
             report(
-                metadata, chunks: (index, pending.count),
+                metadata, chunks: (index + 1, pending.count),
                 detail: "Aligning transcript timings"
             )
             guard let text = chunk.text else { continue }
@@ -467,17 +481,25 @@ public actor ProcessingPipeline {
                     chunkID: chunk.id
                 )
             } catch let refusal as TranscriptAlignmentRefused {
+                // Recorded as a refusal rather than as timings, so a later
+                // build with a better aligner can tell the difference and try
+                // again. Assembly falls back to whole-chunk timing either way.
                 Log.processing.notice(
                     "alignment refused for one chunk, keeping chunk-level timing: \(refusal.reason, privacy: .public)"
                 )
                 try store.writeAlignment(
                     ChunkAlignment(
                         aligner: aligner.identifier, alignedAt: clock.now,
-                        segments: [RawTranscriptSegment(
-                            start: 0, end: chunk.durationSeconds, text: text, speaker: nil
-                        )]
+                        segments: [], refused: true
                     ),
                     chunkID: chunk.id
+                )
+            } catch {
+                // Something broke rather than refused: a missing model, an
+                // unreadable export. Nothing is written, so the next run tries
+                // again, and assembly meanwhile reads the chunk as untimed.
+                Log.processing.notice(
+                    "alignment failed for one chunk: \(logSafeDescription(error), privacy: .public)"
                 )
             }
         }
@@ -777,6 +799,7 @@ public actor ProcessingPipeline {
         model: String,
         purpose: RawChunkPurpose = .words,
         configuration: ChunkPlanner.Configuration? = nil,
+        concurrency: Int? = nil,
         send: @Sendable @escaping (URL, String) async throws -> TranscriptionOutput
     ) async throws {
         let exporter = ChunkExporter()
@@ -838,7 +861,10 @@ public actor ProcessingPipeline {
         // concurrency limits. Each result is committed to disk as it arrives, in
         // completion order; the assembler orders utterances by timeline offset,
         // and an interrupted run still resumes at the chunks that never landed.
-        let maxConcurrentUploads = 3
+        // A local engine overrides it to one: an actor releases itself at every
+        // await, so three concurrent calls really do run three decodes against
+        // one Neural Engine.
+        let maxConcurrentUploads = concurrency ?? 3
         try await withThrowingTaskGroup(of: (PreparedChunk, TranscriptionOutput).self) { group in
             var nextIndex = 0
             while nextIndex < min(maxConcurrentUploads, pending.count) {
@@ -905,10 +931,17 @@ public actor ProcessingPipeline {
         }
         try store.writeSpeakerMap(speakers)
 
-        try await recognizeVoices(store: store, metadata: &metadata, settings: settings)
         // Voice memory is a side effect of the meeting, not part of it. A
         // deleted model folder or an unreadable track must not take the whole
-        // stage down and retry it three times.
+        // stage down and retry it three times, and must not stop the meeting
+        // reaching the stage that writes the markdown and the mixdown.
+        do {
+            try await recognizeVoices(store: store, metadata: &metadata, settings: settings)
+        } catch {
+            Log.processing.notice(
+                "voice recognition skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
         do {
             try await learnLocalUserVoice(store: store, metadata: metadata, settings: settings)
         } catch {

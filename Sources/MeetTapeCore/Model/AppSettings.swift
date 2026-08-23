@@ -333,14 +333,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showNotifications =
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
+        // Deliberately not migrated to the newer default. `gpt-transcribe`
+        // returns no timings, so choosing it commits the machine to a 600 MB
+        // aligner download, and an upgrade that starts one mid-meeting is the
+        // thing the processing block below refuses to do for local models.
+        // An existing installation keeps the model it was configured with and
+        // is offered the newer one in Settings, where the size is on the row.
         models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
-        // whisper-1 was the shipped default before version 3, so a stored
-        // whisper-1 in an older file is the default nobody touched and moves
-        // with it. Any other identifier was typed in and stays, and a file
-        // already at version 3 that names whisper-1 named it on purpose.
-        if version < 3, models.transcription == "whisper-1" {
-            models.transcription = "gpt-transcribe"
-        }
         // An existing installation keeps the backend it was configured with. A
         // settings file written before local processing existed described a
         // machine that transcribed in the cloud, and switching it over on the

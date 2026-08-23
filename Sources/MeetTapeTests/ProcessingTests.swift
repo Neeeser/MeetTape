@@ -142,6 +142,26 @@ enum ProcessingTests {
                 )
             },
 
+            test("a text-only backend is chunked for the aligner, not for its own limit") { expect in
+                // gpt-transcribe may send 1400 seconds, but the words come back
+                // without timings and the alignment trellis is frames times
+                // tokens. At the API's own limit the trellis exceeded its cap,
+                // alignment refused, and a nineteen-minute chunk became one
+                // utterance on one speaker.
+                let configuration = try expect.unwrap(
+                    ChunkPlanner.Configuration.fitting(BackendAudioLimits.openAI, timing: .text)
+                )
+                let plans = ChunkPlanner(configuration: configuration)
+                    .plan(durationSeconds: 3_600)
+                expect.isTrue(plans.count >= 12, "got \(plans.count) chunks for an hour")
+                for plan in plans {
+                    expect.isTrue(
+                        plan.duration <= LocalAlignmentTuning.chunkSeconds + 0.001,
+                        "chunk \(plan.index) is \(plan.duration)s, past the alignment window"
+                    )
+                }
+            },
+
             test("a long recording is chunked under the model limit with overlap") { expect in
                 // Two hours, which is four to seven requests.
                 let plans = ChunkPlanner().plan(durationSeconds: 7_200)

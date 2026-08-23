@@ -61,8 +61,8 @@ enum BackendSelectionTests {
                 expect.equal(settings.localUserName, "Andrew")
                 expect.equal(settings.storageRootPath, "/tmp/meetings")
                 expect.equal(
-                    settings.models.transcription, "gpt-transcribe",
-                    "stored whisper-1 was the old default, and the old default upgrades"
+                    settings.models.transcription, "whisper-1",
+                    "the one key that was present survives, models are never migrated"
                 )
                 expect.equal(
                     settings.models.diarization, AIModelSettings().diarization,
@@ -97,24 +97,21 @@ enum BackendSelectionTests {
                 )
             },
 
-            test("an old default cloud model upgrades; a chosen one survives") { expect in
-                // whisper-1 was the shipped default, so a stored whisper-1 is
-                // almost always the default nobody touched; anything else was
-                // typed in and stays. A meeting already transcribed keeps its
-                // words either way: one track's words come from one backend.
-                let oldDefault = #"{"version": 2, "models": {"transcription": "whisper-1"}}"#
-                let upgraded = try JSONDecoder().decode(AppSettings.self, from: Data(oldDefault.utf8))
-                expect.equal(upgraded.models.transcription, "gpt-transcribe")
-                expect.equal(upgraded.version, AppSettings.currentVersion, "the migration sticks")
-
-                let custom = #"{"version": 2, "models": {"transcription": "my-finetune"}}"#
-                let kept = try JSONDecoder().decode(AppSettings.self, from: Data(custom.utf8))
-                expect.equal(kept.models.transcription, "my-finetune")
-
-                // A version 3 file that says whisper-1 said it on purpose.
-                let deliberate = #"{"version": 3, "models": {"transcription": "whisper-1"}}"#
-                let chosen = try JSONDecoder().decode(AppSettings.self, from: Data(deliberate.utf8))
-                expect.equal(chosen.models.transcription, "whisper-1")
+            test("an upgrade never moves a cloud model, only a fresh install picks one") { expect in
+                // gpt-transcribe returns no timings, so choosing it commits the
+                // machine to a 600 MB aligner download. An upgrade that starts
+                // one is exactly what the processing block refuses to do for
+                // local models, and the cloud model is no different.
+                for stored in ["whisper-1", "gpt-4o-transcribe-diarize", "my-finetune"] {
+                    let file = #"{"version": 2, "models": {"transcription": "\#(stored)"}}"#
+                    let settings = try JSONDecoder().decode(AppSettings.self, from: Data(file.utf8))
+                    expect.equal(settings.models.transcription, stored, "kept what it had")
+                    expect.equal(settings.version, AppSettings.currentVersion, "and is current schema")
+                }
+                expect.equal(
+                    AppSettings().models.transcription, "gpt-transcribe",
+                    "a machine with no settings file starts on the accurate default"
+                )
             },
 
             test("an existing local install keeps Whisper; a fresh one gets Cohere") { expect in
@@ -156,10 +153,15 @@ enum BackendSelectionTests {
                     "a self-contained cloud model needs nothing but the diarizer"
                 )
 
+                // The diarizer is in every set, cloud-only included: voice
+                // memory embeds a cloud diarizer's intervals with those same
+                // models. Leaving it out made `ensureInstalled` report success
+                // on a machine with nothing installed, and the embedding
+                // extractor then threw from inside a stage.
                 settings.processing.diarization = .openAI
                 expect.equal(
-                    LocalModelUnit.required(for: settings), [],
-                    "a fully cloud configuration downloads nothing"
+                    LocalModelUnit.required(for: settings), [.diarizer],
+                    "voice memory needs the diarizer whatever produced the labels"
                 )
             },
 

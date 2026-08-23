@@ -144,6 +144,29 @@ enum LocalConfigurationTests {
                 expect.isFalse(state.isBusy)
             },
 
+            test("a cloud-only configuration still refuses when no models are installed") { expect in
+                // The wiring, not the closure a test hands in: `required(for:)`
+                // decides what `ensureInstalled` checks, and when it answered
+                // with an empty set for a cloud/cloud machine, ensureInstalled
+                // reported success with nothing on disk. Voice memory then
+                // reached the embedding extractor and threw from inside the
+                // speaker stage, which is not retryable, so the meeting never
+                // reached the stage that writes the markdown and the mixdown.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.processing.diarization = .openAI
+                let manager = LocalModelManager(
+                    applicationSupport: root, required: LocalModelUnit.required(for: settings)
+                )
+                await expect.throwsError(
+                    { try await manager.ensureInstalled() },
+                    "a machine with no models must say so, whatever the backends are"
+                )
+                expect.isFalse(await manager.isInstalled)
+            },
+
             test("a receipt from a different pinned revision is not treated as current") { expect in
                 let stale = LocalUnitReceipt(
                     revision: "openai_whisper-small @ argmax-oss-swift 0.9.0",

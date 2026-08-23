@@ -263,11 +263,13 @@ confirm both the key and access to that model.
 
 Model identifiers are settings rather than constants:
 
-- transcription defaults to `gpt-transcribe`, OpenAI's most accurate
-  transcription model. It returns text with no timings, so the local CTC
-  aligner recovers them, the same way it does for local Cohere.
+- transcription defaults to `gpt-transcribe` on a new installation, OpenAI's
+  most accurate transcription model. It returns text with no timings, so the
+  local CTC aligner recovers them, the same way it does for local Cohere.
   `gpt-4o-transcribe-diarize` is the self-contained option with nothing to
-  download, and `whisper-1` remains for word timings straight from the API;
+  download, and `whisper-1` remains for word timings straight from the API. An
+  existing installation keeps whichever model it was configured with: picking
+  one is what consents to any download it needs;
 - diarization defaults to `gpt-4o-transcribe-diarize`;
 - metadata defaults to `gpt-5.6-luna`, selectable from a dropdown or entered by
   hand. Metadata requests run at low reasoning effort, because titles, summaries

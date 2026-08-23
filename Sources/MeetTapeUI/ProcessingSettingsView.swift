@@ -69,7 +69,7 @@ struct ProcessingSettingsTab: View {
                 var settings = runtime.settings
                 settings.processing[keyPath: keyPath] = newValue
                 runtime.update(settings: settings)
-                Task { await runtime.installMissingLocalModels() }
+                Task { await runtime.installLocalModels() }
             }
         )) {
             Text("Cloud — OpenAI").tag(ProcessingBackendChoice.openAI)
@@ -94,7 +94,7 @@ struct ProcessingSettingsTab: View {
                     runtime.update(settings: settings)
                     // gpt-transcribe returns no timings; the aligner that
                     // supplies them is a local download.
-                    Task { await runtime.installMissingLocalModels() }
+                    Task { await runtime.installLocalModels() }
                 }
             )) {
                 cloudChoice(
@@ -307,7 +307,7 @@ struct LocalModelChoicePicker: View {
                 var settings = runtime.settings
                 settings.processing.localTranscriptionModel = newValue
                 runtime.update(settings: settings)
-                Task { await runtime.installMissingLocalModels() }
+                Task { await runtime.installLocalModels() }
             }
         )) {
             choice(

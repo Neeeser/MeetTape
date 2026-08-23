@@ -68,12 +68,27 @@ public struct ChunkPlanner: Sendable {
         /// sits below the limit by the overlap; the target sits under that by
         /// the same margin the default keeps (1140 in 1300), and the search
         /// window never exceeds the room between minimum and target.
-        public static func fitting(_ limits: BackendAudioLimits) -> Configuration? {
-            guard let maximum = limits.maximumSeconds,
+        /// A text-only backend is additionally capped at
+        /// `LocalAlignmentTuning.chunkSeconds`, whatever its own limit allows:
+        /// the words come back without timings, and the alignment pass that
+        /// supplies them builds a trellis of frames times tokens. A cloud
+        /// chunk at the API's own 1400-second limit exceeded the trellis cap,
+        /// so alignment refused and a nineteen-minute chunk became one
+        /// utterance.
+        public static func fitting(
+            _ limits: BackendAudioLimits, timing: TranscriptTiming = .words
+        ) -> Configuration? {
+            let ceilings = [
+                limits.maximumSeconds,
+                timing == .text ? LocalAlignmentTuning.chunkSeconds : nil,
+            ].compactMap { $0 }
+            guard let maximum = ceilings.min(),
                 maximum < Configuration.openAIDiarization.maxChunkSeconds
             else { return nil }
             let overlap = 8.0
-            let ceiling = maximum - overlap
+            // A hair under, because a boundary can land exactly on the ceiling
+            // and a model window is an inclusive limit at best.
+            let ceiling = maximum - overlap - 0.01
             let target = ceiling * 1_140 / 1_300
             let minimum = min(60, target / 2)
             return Configuration(

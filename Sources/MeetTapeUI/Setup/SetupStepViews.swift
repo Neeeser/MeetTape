@@ -282,7 +282,13 @@ struct PermissionStep: View {
                 SettingsPaneIllustration(kind: kind)
                     .frame(maxWidth: 420)
 
-                if status.state == .grantedButNotEffective, let advice = status.advice {
+                // Shown for a plain denial too, not only the granted-but-not-
+                // effective state. A list pane keeps its old entry when a build is
+                // re-signed, and switching that stale row on does nothing for the
+                // running binary: it has to be removed with the minus button and
+                // added again. Without the advice here that is a dead end the user
+                // has to work out alone.
+                if let advice = status.advice, status.state != .notDetermined {
                     Label(advice, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)

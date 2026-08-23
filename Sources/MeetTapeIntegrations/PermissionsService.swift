@@ -10,6 +10,10 @@ import UserNotifications
 /// Reports the effective state of each permission by probing it, since a System
 /// Settings toggle can be enabled while the running build has no access.
 public struct PermissionsService: Sendable {
+    /// One store for the calendar probe. A fresh `EKEventStore` per poll would
+    /// reconnect to the calendar daemon every 1.5 seconds.
+    private static let calendarProbe = CalendarService()
+
     public init() {}
 
     public func status(for kind: PermissionKind) async -> PermissionStatus {
@@ -21,10 +25,15 @@ public struct PermissionsService: Sendable {
         case .accessibility:
             return PermissionStatus(kind: kind, state: accessibilityState())
         case .calendar:
-            return PermissionStatus(kind: kind, state: calendarState())
+            return PermissionStatus(kind: kind, state: await calendarState())
         case .notifications:
             return PermissionStatus(kind: kind, state: await notificationState())
         }
+    }
+
+    /// One line describing every permission, for the log.
+    public static func summary(of statuses: [PermissionStatus]) -> String {
+        statuses.map { "\($0.kind.rawValue)=\($0.state.rawValue)" }.joined(separator: " ")
     }
 
     public func allStatuses() async -> [PermissionStatus] {
@@ -32,11 +41,6 @@ public struct PermissionsService: Sendable {
         for kind in PermissionKind.allCases {
             statuses.append(await status(for: kind))
         }
-        // The effective state of each permission, which is what the panel shows.
-        // Reported because a permission that reads granted in System Settings and
-        // is not usable by the running build is otherwise invisible.
-        let summary = statuses.map { "\($0.kind.rawValue)=\($0.state.rawValue)" }.joined(separator: " ")
-        Log.app.info("permissions: \(summary, privacy: .public)")
         return statuses
     }
 
@@ -55,12 +59,34 @@ public struct PermissionsService: Sendable {
         return TCCRecordProbe.hasStaleAccessibilityRecord() ? .grantedButNotEffective : .denied
     }
 
-    private func calendarState() -> PermissionState {
-        switch EKEventStore.authorizationStatus(for: .event) {
-        case .fullAccess: .granted
-        case .denied, .restricted, .writeOnly: .denied
-        case .notDetermined: .notDetermined
-        @unknown default: .notDetermined
+    private func calendarState() async -> PermissionState {
+        let reported = EKEventStore.authorizationStatus(for: .event)
+        guard reported == .notDetermined else {
+            return Self.calendarState(reported: reported, canReadCalendars: false)
+        }
+        // The only case the probe can change, and the only one worth the cost of
+        // asking the calendar daemon on every poll.
+        return Self.calendarState(
+            reported: reported, canReadCalendars: await Self.calendarProbe.hasUsableAccess()
+        )
+    }
+
+    /// The reported status and a functional probe, resolved to one state.
+    ///
+    /// Separated from the probe so the rule is testable: the whole point is that
+    /// `notDetermined` is not trustworthy in the process that asked for access,
+    /// and a store that can read calendars overrides it.
+    public static func calendarState(
+        reported: EKAuthorizationStatus, canReadCalendars: Bool
+    ) -> PermissionState {
+        switch reported {
+        case .fullAccess: return .granted
+        case .denied, .restricted, .writeOnly: return .denied
+        case .notDetermined:
+            // EventKit reports notDetermined for the life of the process that was
+            // granted access. The probe is what catches it.
+            return canReadCalendars ? .granted : .notDetermined
+        @unknown default: return canReadCalendars ? .granted : .notDetermined
         }
     }
 
@@ -85,7 +111,9 @@ public struct PermissionsService: Sendable {
         case .microphone:
             _ = await AVCaptureDevice.requestAccess(for: .audio)
         case .calendar:
-            let granted = await CalendarService().requestAccess()
+            // The same store the probe reads from, so the grant and the check
+            // are not on two different connections to the calendar daemon.
+            let granted = await Self.calendarProbe.requestAccess()
             Log.app.info(
                 "calendar request returned \(granted, privacy: .public), status now \(EKEventStore.authorizationStatus(for: .event).rawValue, privacy: .public)"
             )

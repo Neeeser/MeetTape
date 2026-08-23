@@ -86,6 +86,26 @@ public final class WindowManager {
                 self?.closeSetup()
             })
         )
+        // The one window in MeetTape that stays above other applications.
+        //
+        // Every other panel is something the user went looking for. This one is
+        // a set of instructions to follow inside System Settings, and it is
+        // useless behind the window it is describing. MeetTape is an accessory
+        // application with no Dock presence, so it cannot win focus back the way
+        // an ordinary application does: dismissing a permission prompt returns
+        // focus to whatever was in front before, and the wizard sinks.
+        //
+        // Floating is also what makes the drag work, since the bundle is dragged
+        // out of this window and into the list in System Settings behind it.
+        window.level = .floating
+        // And stays reachable when System Settings is full screen.
+        window.collectionBehavior.insert(.fullScreenAuxiliary)
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        model.onNeedsFocus = { [weak window] in
+            guard let window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
         setupWindow = window
         present(window)
     }

@@ -35,6 +35,13 @@ public final class SetupModel {
     public var hostStatus: NativeMessagingInstaller.Status?
     public var storagePath = ""
 
+    /// Called when the wizard has to come back in front of the user.
+    ///
+    /// A permission prompt is a separate window owned by another process, and
+    /// dismissing it hands focus back to whatever was in front before rather
+    /// than to an accessory application with no Dock icon.
+    @ObservationIgnored public var onNeedsFocus: (() -> Void)?
+
     @ObservationIgnored public let runtime: MeetTapeRuntime
     @ObservationIgnored private let observer: PermissionObserver
     @ObservationIgnored private var hasStoredKey = false
@@ -126,6 +133,11 @@ public final class SetupModel {
         // opening the pane straight after it lands on a row that exists.
         if !status.isUsable, !kind.isGrantedByPrompt {
             runtime.permissions.openSettings(for: kind)
+        } else {
+            // The prompt has just closed. Focus went back to whatever was in
+            // front of MeetTape before it opened, which leaves the next
+            // instruction behind another application.
+            onNeedsFocus?()
         }
         Log.ui.info(
             "requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"

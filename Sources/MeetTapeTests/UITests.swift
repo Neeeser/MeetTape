@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import Foundation
 import UniformTypeIdentifiers
 import MeetTapeAudio
@@ -72,6 +73,43 @@ enum UITests {
                     }
                 }
                 expect.equal(loaded, bundle, "and it resolves back to the bundle")
+            },
+
+            test("calendar access is believed over EventKit's own status") { expect in
+                // Observed on macOS 27: requestFullAccessToEvents called back with
+                // granted = true, System Settings listed MeetTape under Calendars
+                // with Full Access, and EKEventStore.authorizationStatus went on
+                // reporting notDetermined for the rest of the process's life. The
+                // wizard step never went green, and events(around:) returned
+                // nothing, so a meeting recorded in that session got no calendar
+                // title and no attendees.
+                expect.equal(
+                    PermissionsService.calendarState(reported: .notDetermined, canReadCalendars: true),
+                    .granted,
+                    "a store that can read calendars settles it"
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .notDetermined, canReadCalendars: false),
+                    .notDetermined,
+                    "and one that cannot has genuinely not been asked"
+                )
+
+                // A refusal is a refusal. The probe never overrides it, or a
+                // denied permission would read as granted off an empty answer.
+                expect.equal(
+                    PermissionsService.calendarState(reported: .denied, canReadCalendars: true),
+                    .denied
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .writeOnly, canReadCalendars: true),
+                    .denied,
+                    "write-only cannot read the events the matcher needs"
+                )
+                expect.equal(
+                    PermissionsService.calendarState(reported: .fullAccess, canReadCalendars: false),
+                    .granted,
+                    "and the supported answer is trusted when it is positive"
+                )
             },
 
             test("the review panel handles a meeting with nothing processed yet") { expect in

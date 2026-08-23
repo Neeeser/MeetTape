@@ -31,6 +31,7 @@ public final class PermissionObserver: NSObject {
     private var timer: DispatchSourceTimer?
     private var onChange: (([PermissionStatus]) -> Void)?
     private var isRefreshing = false
+    private var reported: [PermissionStatus]?
 
     /// The name the system posts when the Accessibility list changes.
     static let accessibilityChanged = Notification.Name("com.apple.accessibility.api")
@@ -78,6 +79,7 @@ public final class PermissionObserver: NSObject {
     }
 
     public func stop() {
+        reported = nil
         guard onChange != nil || timer != nil else { return }
         distributed.removeObserver(self, name: Self.accessibilityChanged, object: nil)
         if let workspaceToken { workspace.removeObserver(workspaceToken) }
@@ -102,7 +104,16 @@ public final class PermissionObserver: NSObject {
         isRefreshing = true
         Task { @MainActor in
             defer { isRefreshing = false }
-            onChange(await service.allStatuses())
+            let statuses = await service.allStatuses()
+            // Nothing downstream wants to hear the same answer every 1.5 seconds:
+            // reporting unconditionally invalidated the whole wizard forty times a
+            // minute and wrote a log line each time.
+            guard statuses != reported else { return }
+            reported = statuses
+            Log.app.info(
+                "permissions: \(PermissionsService.summary(of: statuses), privacy: .public)"
+            )
+            onChange(statuses)
         }
     }
 }

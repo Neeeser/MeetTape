@@ -29,6 +29,30 @@ public final class CalendarService: @unchecked Sendable {
         authorizationStatus == .fullAccess
     }
 
+    /// Whether the store can actually read calendars.
+    ///
+    /// `EKEventStore.authorizationStatus` is not reliable in the process that
+    /// asked for access. Observed on macOS 27: `requestFullAccessToEvents`
+    /// called back with `granted = true`, System Settings listed MeetTape under
+    /// Calendars with Full Access, and the class method went on reporting
+    /// `notDetermined` for the rest of the process's life. Everything gated on
+    /// it therefore did nothing until the next launch, which for `events(around:)`
+    /// means a meeting recorded in that session never got its calendar title or
+    /// its attendees.
+    ///
+    /// Asking the store for calendars is not cached and answers what the next
+    /// fetch will actually do. A user with access and no event calendars at all
+    /// reads as no access, which is the same answer the status already gives, so
+    /// nothing is made worse by the ambiguity.
+    public func hasUsableAccess() async -> Bool {
+        if Self.isAuthorized { return true }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: !self.store.calendars(for: .event).isEmpty)
+            }
+        }
+    }
+
     public func requestAccess() async -> Bool {
         await withCheckedContinuation { continuation in
             queue.async {
@@ -44,7 +68,7 @@ public final class CalendarService: @unchecked Sendable {
     /// Asynchronous because the store can take seconds when cold, and blocking a
     /// cooperative-pool thread on it stalls unrelated work.
     public func events(around date: Date, window: TimeInterval = 45 * 60) async -> [EKEvent] {
-        guard Self.isAuthorized else { return [] }
+        guard await hasUsableAccess() else { return [] }
         return await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.fetchEvents(around: date, window: window))

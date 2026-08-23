@@ -136,6 +136,47 @@ enum PipelineTests {
                 expect.isTrue(caught?.isRetryable == true, "the stage retries")
             },
 
+            test("a chunk that loops one phrase fails retryably") { expect in
+                // A speech model given a window with little speech in it can
+                // repeat one phrase for the length of the window. Six of
+                // sixteen ES2003a chunks came back with the same fabricated
+                // paragraph: 438 invented words against a 386-word reference,
+                // 266 insertions, 153 repeated 8-grams and 193% DER, with the
+                // meeting reporting success.
+                let loop = Array(repeating:
+                    "The world is a very important part of the world and I think that is what we need to do",
+                    count: 6
+                ).joined(separator: ". ")
+                var caught: ProcessingError?
+                do {
+                    try ProcessingPipeline.requireCoherentTranscript(
+                        response: TranscriptionOutput(segments: [], text: loop),
+                        chunkID: "remote_chunk_007", purpose: .words
+                    )
+                } catch let error as ProcessingError {
+                    caught = error
+                }
+                expect.equal(
+                    caught, .degenerateTranscript(chunk: "remote_chunk_007"),
+                    "a looping chunk is a failed chunk"
+                )
+                expect.isTrue(caught?.isRetryable == true, "the stage retries")
+
+                // Six minutes of ordinary conversation repeats about 2% of its
+                // phrases, so a real transcript of the same length is accepted.
+                let spoken = (0..<120).map { "word\($0)" }.joined(separator: " ")
+                try ProcessingPipeline.requireCoherentTranscript(
+                    response: TranscriptionOutput(segments: [], text: spoken),
+                    chunkID: "remote_chunk_008", purpose: .words
+                )
+                // And a chunk asked for speakers rather than words is not
+                // measured on its text at all.
+                try ProcessingPipeline.requireCoherentTranscript(
+                    response: TranscriptionOutput(segments: [], text: loop),
+                    chunkID: "remote_chunk_009", purpose: .speakers
+                )
+            },
+
             test("each track is placed at its own start on the meeting timeline") { expect in
                 // The remote writer opens on the first packet from the meeting
                 // application, which here is 12 s after the microphone started. A

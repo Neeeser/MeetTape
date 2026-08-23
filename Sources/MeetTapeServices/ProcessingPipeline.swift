@@ -629,6 +629,9 @@ public actor ProcessingPipeline {
         try Self.requireTranscribedOrSilent(
             response: output, audio: audio, chunkID: chunkID, purpose: .words
         )
+        try Self.requireCoherentTranscript(
+            response: output, chunkID: chunkID, purpose: .words
+        )
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
             track: track,
@@ -686,6 +689,31 @@ public actor ProcessingPipeline {
             "empty transcript for audible audio: peak \(level.peakDBFS, format: .fixed(precision: 1)) dBFS"
         )
         throw ProcessingError.emptyTranscript(chunk: chunkID)
+    }
+
+    /// Fails a chunk whose response is one phrase repeated for the length of
+    /// the window.
+    ///
+    /// A speech model given a window with little speech in it can loop, and the
+    /// loop is billed, recorded and assembled like any other answer. Six of
+    /// sixteen ES2003a chunks came back with the same fabricated paragraph:
+    /// 438 invented words against a 386-word reference, 266 insertions and 193%
+    /// DER, with the meeting reporting success. Failing the chunk retries it,
+    /// and a chunk that keeps looping leaves the meeting failed and retryable
+    /// rather than putting sentences nobody said in the transcript.
+    public static func requireCoherentTranscript(
+        response: TranscriptionOutput, chunkID: String, purpose: RawChunkPurpose
+    ) throws {
+        guard purpose == .words else { return }
+        let text = response.text.isEmpty
+            ? response.segments.map(\.text).joined(separator: " ")
+            : response.text
+        let share = DegenerateTranscriptPolicy.repeatedShare(of: text)
+        guard DegenerateTranscriptPolicy.decide(text: text) == .fail else { return }
+        Log.processing.error(
+            "looping transcript for chunk \(chunkID, privacy: .public), repeated phrase share \(share, format: .fixed(precision: 2))"
+        )
+        throw ProcessingError.degenerateTranscript(chunk: chunkID)
     }
 
     /// The recorded format string for a local backend's chunk, by what timing
@@ -1057,6 +1085,9 @@ public actor ProcessingPipeline {
                 try Self.requireTranscribedOrSilent(
                     response: response, audio: chunk.audioURL,
                     chunkID: chunk.chunkID, purpose: purpose
+                )
+                try Self.requireCoherentTranscript(
+                    response: response, chunkID: chunk.chunkID, purpose: purpose
                 )
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,

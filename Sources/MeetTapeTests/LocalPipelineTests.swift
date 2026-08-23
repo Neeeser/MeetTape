@@ -332,7 +332,12 @@ enum LocalPipelineTests {
                 await pipeline.process(meetingID: meeting.metadata.id)
 
                 expect.equal(try meeting.store.readMetadata().processing.state, .complete)
-                expect.isTrue(transcriber.received.count > 1, "the local engine really chunked")
+                let words = try meeting.store.readRawTranscript()
+                    .chunks(track: .remote, purpose: .words)
+                expect.isTrue(
+                    words.count > 1 && words.contains { $0.id == "remote_chunk_001" },
+                    "the local engine chunked the far end under the diarizer's own naming"
+                )
                 expect.isTrue(
                     backend.calls.contains { $0.kind == "diarize" },
                     "the diarizer was actually asked, not skipped as already done"
@@ -347,6 +352,78 @@ enum LocalPipelineTests {
                 expect.isFalse(
                     remote.allSatisfy { $0.speakerKey == SpeakerLabel.unattributed(track: .remote) },
                     "the far end must not collapse into one unattributed speaker"
+                )
+            },
+
+            test("switching to cloud transcription later still diarizes the far end") { expect in
+                // The other route into the same collision. A local engine has
+                // already chunked the far end; the user switches transcription
+                // to Cloud and the meeting resumes at diarization. The cloud
+                // diarizer's words are no longer wanted — the local ones are
+                // already on disk and own the track — so it must ask for
+                // labels alone rather than claiming the same purpose and the
+                // same chunk names.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // What the interrupted local pass left behind.
+                var raw = try meeting.store.readRawTranscript()
+                raw.chunks.append(RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 6, model: "stub-cohere", responseFormat: "local_text",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 2, text: "we ship friday", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.4, text: " we"),
+                            RawTranscriptWord(start: 0.5, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.2, text: " friday"),
+                        ]
+                    )],
+                    purpose: .words
+                ))
+                try meeting.store.writeRawTranscript(raw)
+
+                let backend = FakeAIBackend()
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 1.5, text: "Theirs.", speaker: "A"),
+                ]
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.processing.diarization = .openAI
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    backends: ProcessingBackends.openAIOnly(backend),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { resolved },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                expect.isTrue(
+                    backend.calls.contains { $0.kind == "diarize" },
+                    "the diarizer was asked, not skipped as already done"
+                )
+                let diarization = try meeting.store.readRawDiarization()
+                expect.isFalse(
+                    try expect.unwrap(diarization.activeRun(track: .remote)).intervals.isEmpty
+                )
+
+                // And the local words still own the track: the cloud pass took
+                // labels only, so nothing is transcribed twice.
+                let after = try meeting.store.readRawTranscript()
+                    .chunks(track: .remote, purpose: .words)
+                expect.equal(
+                    Set(after.map(\.model)), ["stub-cohere"],
+                    "one track's words come from one backend"
                 )
             },
 

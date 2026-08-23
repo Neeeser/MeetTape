@@ -334,6 +334,7 @@ public actor LocalModelManager {
             installGeneration += 1
             installTask?.cancel()
             installTask = nil
+            installing = []
         }
         unload(unit)
         try? FileManager.default.removeItem(at: locations.containerDirectory(for: unit))

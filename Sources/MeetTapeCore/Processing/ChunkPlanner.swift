@@ -85,7 +85,9 @@ public struct ChunkPlanner: Sendable {
             guard let maximum = ceilings.min(),
                 maximum < Configuration.openAIDiarization.maxChunkSeconds
             else { return nil }
-            let overlap = 8.0
+            // Never more than a quarter of the window, so a small limit still
+            // produces a sane plan rather than a negative ceiling.
+            let overlap = min(8.0, maximum / 4)
             // A hair under, because a boundary can land exactly on the ceiling
             // and a model window is an inclusive limit at best.
             let ceiling = maximum - overlap - 0.01

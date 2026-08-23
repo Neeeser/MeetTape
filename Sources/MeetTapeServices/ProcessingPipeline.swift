@@ -623,11 +623,20 @@ public actor ProcessingPipeline {
         // the chunks holding words and half holding labels: the assembler takes
         // one kind, so the other half of the far end would vanish permanently.
         // Only the first pass decides.
-        let existing = try store.readRawTranscript()
-            .chunks(track: track)
-            .first { $0.model == backend.identifier }
+        let raw = try store.readRawTranscript()
+        let existing = raw.chunks(track: track).first { $0.model == backend.identifier }
+        // Another backend's words are already on this track, so it owns them
+        // whatever the transcription setting says now, and this pass asks for
+        // labels alone. Without it, switching to cloud transcription after a
+        // local engine had already chunked the track made this pass claim the
+        // same purpose and the same chunk names, so every plan was skipped as
+        // done, nothing was diarized, and the far end came back unattributed.
+        // The mirror of the `foreign` guard `runTranscription` applies from
+        // the other side.
+        let foreignWords = raw.chunks(track: track, purpose: .words)
+            .contains { $0.model != backend.identifier }
         let purpose = existing?.purpose
-            ?? (transcriberOwnsWords(settings) ? .speakers : .words)
+            ?? (transcriberOwnsWords(settings) || foreignWords ? .speakers : .words)
 
         try await runChunks(
             store: store, metadata: &metadata, track: track, segments: segments,
@@ -639,10 +648,12 @@ public actor ProcessingPipeline {
             )
         }
 
-        let raw = try store.readRawTranscript()
+        // Re-read: the chunks this pass just wrote are not in the snapshot the
+        // purpose was decided from.
+        let written = try store.readRawTranscript()
         var intervals: [DiarizationInterval] = []
         var speech: [String: Double] = [:]
-        for chunk in raw.chunks(track: track, purpose: purpose) {
+        for chunk in written.chunks(track: track, purpose: purpose) {
             for segment in chunk.segments {
                 guard let speaker = segment.speaker else { continue }
                 // Namespaced the same way the transcript's own keys are, so the
@@ -916,7 +927,7 @@ public actor ProcessingPipeline {
                     purpose: purpose
                 ))
                 try store.writeRawTranscript(raw)
-                report(metadata, chunks: (raw.chunks(track: track).count, plans.count))
+                report(metadata, chunks: (raw.chunks(track: track, purpose: purpose).count, plans.count))
                 try? FileManager.default.removeItem(at: chunk.audioURL)
                 if nextIndex < pending.count {
                     let next = pending[nextIndex]

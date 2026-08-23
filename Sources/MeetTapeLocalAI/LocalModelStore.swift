@@ -214,11 +214,6 @@ public struct LocalModelReceiptStore: Sendable {
         try? FileManager.default.removeItem(at: locations.legacyReceipt)
     }
 
-    public func clear() {
-        try? FileManager.default.removeItem(at: locations.inventory)
-        try? FileManager.default.removeItem(at: locations.legacyReceipt)
-    }
-
     private static var decoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601

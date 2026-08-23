@@ -231,6 +231,54 @@ enum UITests {
                 }
             },
 
+            test("a speaker who never speaks is not offered for naming") { expect in
+                // A cloud-diarized meeting listed eleven speakers, six of them
+                // showing 0s: labels the diarizer emitted that own no words.
+                // There is nothing a user can do with those rows.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let archive = root.appendingPathComponent("Meetings")
+                let repository = MeetingRepository(root: archive)
+                let started = Date(timeIntervalSince1970: 1_787_070_000)
+                let created = try repository.createMeeting(
+                    source: .inPerson, provider: .unknown, startedAt: started,
+                    titles: TitleCandidates(provider: "Workshop", timestampFallback: "f"),
+                    now: started
+                )
+                func utterance(key: String, start: Double, end: Double) -> Utterance {
+                    Utterance(
+                        id: Utterance.identifier(
+                            chunkID: "mic_chunk_001", track: .mic, start: start, end: end
+                        ),
+                        start: start, end: end, track: .mic,
+                        rawSpeakerLabel: key, speakerKey: key, text: "Morning.",
+                        chunkID: "mic_chunk_001", model: "test"
+                    )
+                }
+                try created.store.writeCanonicalTranscript(CanonicalTranscript(
+                    generatedAt: started,
+                    utterances: [
+                        utterance(key: "mic_chunk_001_speaker_00", start: 0, end: 6),
+                        utterance(key: "mic_chunk_001_speaker_01", start: 7, end: 7),
+                    ]
+                ))
+
+                let model = await MainActor.run { () -> MeetingReviewModel in
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = archive.path
+                    runtime.update(settings: settings)
+                    return MeetingReviewModel(runtime: runtime, meetingID: created.metadata.id)
+                }
+                await model.reloadSpeakers()
+                await MainActor.run {
+                    expect.equal(model.speakerRows.count, 1, "the silent cluster is not a row")
+                    expect.equal(model.speakerRows[0].clusterID, "mic_chunk_001_speaker_00")
+                    // Hidden for display only: the transcript still holds it.
+                    expect.equal(model.speakerKeys.count, 2)
+                }
+            },
+
             test("closing the panel does not overwrite a note added elsewhere") { expect in
                 // The menu bar appends a quick note straight to the file. The
                 // panel holds whatever it read when it opened, and writes the

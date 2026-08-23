@@ -17,6 +17,20 @@ public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
 
     public var id: String { clusterID }
 
+    /// Whether this row is worth putting in front of a reader.
+    ///
+    /// A diarizer can emit a label that ends up owning no transcript time: one
+    /// cloud-diarized meeting listed eleven speakers, six of them showing 0s.
+    /// There is nothing a user can do with a speaker who never says anything,
+    /// so the review panel leaves them out. A cluster somebody has already
+    /// named stays visible whatever it owns, because hiding it would hide their
+    /// own work. This is display only; the cluster still resolves anywhere an
+    /// operation names it.
+    public var hasSpeechToShow: Bool {
+        // Half a second is where the panel's own rounding puts a row at "0s".
+        speechSeconds >= 0.5 || origin == .human
+    }
+
     public init(
         clusterID: String, displayName: String, band: SpeakerConfidenceBand,
         origin: SpeakerAssignmentOrigin, identity: Identity?, speechSeconds: Double,

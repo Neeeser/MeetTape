@@ -271,7 +271,7 @@ public final class MeetingReviewModel {
 
     /// The parts that need the identity store, which the file read does not.
     public func reloadSpeakers() async {
-        speakerRows = await runtime.speakers(inMeeting: meetingID)
+        speakerRows = await runtime.speakers(inMeeting: meetingID).filter(\.hasSpeechToShow)
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 

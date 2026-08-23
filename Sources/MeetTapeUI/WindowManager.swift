@@ -10,8 +10,8 @@ public final class WindowManager {
     private let runtime: MeetTapeRuntime
     private var settingsWindow: NSWindow?
     private var settingsModel: SettingsModel?
-    private var onboardingWindow: NSWindow?
-    private var onboardingModel: OnboardingModel?
+    private var setupWindow: NSWindow?
+    private var setupModel: SetupModel?
     private var reviewWindows: [String: NSWindow] = [:]
     private var reviewModels: [String: MeetingReviewModel] = [:]
     private var provisionalWindow: NSWindow?
@@ -55,27 +55,48 @@ public final class WindowManager {
         present(window)
     }
 
-    public func showOnboarding() {
-        if let window = onboardingWindow {
+    /// Opens setup at launch when it has never been finished, or when a
+    /// permission MeetTape cannot record without has gone away since.
+    ///
+    /// The permission read is asynchronous, so this cannot be answered before
+    /// the application finishes launching.
+    public func showSetupIfNeeded() async {
+        var snapshot = SetupSnapshot(settings: runtime.settings)
+        snapshot.permissions = Dictionary(
+            uniqueKeysWithValues: await runtime.permissions.allStatuses().map { ($0.kind, $0.state) }
+        )
+        guard SetupFlow.shouldOpenAtLaunch(snapshot) else { return }
+        Log.ui.info(
+            "opening setup at launch: completed=\(snapshot.settings.hasCompletedOnboarding, privacy: .public) requiredGranted=\(SetupFlow.requiredPermissionsGranted(snapshot), privacy: .public)"
+        )
+        showSetup()
+    }
+
+    public func showSetup() {
+        if let window = setupWindow {
             present(window)
             return
         }
-        let model = OnboardingModel(runtime: runtime)
-        onboardingModel = model
+        let model = SetupModel(runtime: runtime)
+        setupModel = model
         let window = makeWindow(
-            title: "Welcome to MeetTape",
-            size: NSSize(width: 620, height: 560),
-            content: OnboardingView(model: model, onFinish: { [weak self] in
-                self?.closeOnboarding()
+            title: "MeetTape Setup",
+            size: NSSize(width: 760, height: 580),
+            content: SetupWizardView(model: model, onFinish: { [weak self] in
+                self?.closeSetup()
             })
         )
-        onboardingWindow = window
+        setupWindow = window
         present(window)
     }
 
-    public func closeOnboarding() {
-        onboardingWindow?.close()
-        onboardingWindow = nil
+    public func closeSetup() {
+        // The observer polls while the window is up, so closing it by any route
+        // has to stop that, not only pressing Done.
+        setupModel?.end()
+        setupWindow?.close()
+        setupWindow = nil
+        setupModel = nil
     }
 
     /// The post-meeting panel. It never steals focus and never blocks processing.

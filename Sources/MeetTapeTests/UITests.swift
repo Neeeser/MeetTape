@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 import MeetTapeAudio
 import MeetTapeCore
 import MeetTapeIntegrations
@@ -34,13 +35,43 @@ enum UITests {
                     settings.storageRootPath = root.appendingPathComponent("Meetings").path
                     runtime.update(settings: settings)
 
-                    // Onboarding on a machine with no permissions granted yet.
-                    render(OnboardingView(model: OnboardingModel(runtime: runtime), onFinish: {}))
+                    // Every setup step, on a machine with no permissions granted
+                    // and no models on disk. Rendered one at a time because the
+                    // wizard only builds the step it is showing, so a trap in a
+                    // later step would otherwise never be reached here.
+                    let setup = SetupModel(runtime: runtime)
+                    for step in SetupStepID.allCases {
+                        setup.jump(to: step)
+                        render(SetupWizardView(model: setup, onFinish: {}))
+                    }
                     // Settings, including the tabs that read live audio state.
                     render(SettingsView(model: SettingsModel(runtime: runtime)))
                     expect.isTrue(true, "the panels built without trapping")
                 }
                 try? FileManager.default.removeItem(at: root)
+            },
+
+            test("the dragged application is offered as a file URL") { expect in
+                // The drag adds MeetTape to the Accessibility and Screen Recording
+                // lists, which is the fast route into panes that have no prompt.
+                // Built with NSItemProvider(contentsOf:) it registered nothing
+                // usable, because that wants a readable file and an application is
+                // a directory: the drag picked up, dropped, and did nothing.
+                let bundle = URL(fileURLWithPath: "/Applications/Safari.app")
+                let provider = ApplicationIdentity.dragItemProvider(for: bundle)
+                expect.isTrue(
+                    provider.registeredTypeIdentifiers.contains(UTType.fileURL.identifier),
+                    "a drop target that takes files sees nothing without public.file-url: "
+                        + "\(provider.registeredTypeIdentifiers)"
+                )
+                expect.equal(provider.suggestedName, "Safari.app")
+
+                let loaded: URL? = await withCheckedContinuation { continuation in
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                        continuation.resume(returning: url)
+                    }
+                }
+                expect.equal(loaded, bundle, "and it resolves back to the bundle")
             },
 
             test("the review panel handles a meeting with nothing processed yet") { expect in

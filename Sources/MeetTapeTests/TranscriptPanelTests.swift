@@ -103,6 +103,32 @@ enum TranscriptPanelTests {
                 }
             },
 
+            test("the header names every line of the turn") { expect in
+                // The header is the only menu the lines have now. Naming just
+                // the first would rename thirty seconds of a four-minute
+                // answer and tear the paragraph in two on the next reload.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meetingID = try makeMeeting(root: root)
+
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    var settings = runtime.settings
+                    settings.storageRootPath = root.appendingPathComponent("Meetings").path
+                    runtime.update(settings: settings)
+                    let model = MeetingReviewModel(runtime: runtime, meetingID: meetingID)
+                    guard let block = CombinedLineBlock.blocks(from: model.combinedLines).first
+                    else { return expect.fail("no block") }
+                    expect.equal(block.lines.count, 8)
+                    model.assignBlock(block, toNewPerson: "Dana")
+                    expect.equal(
+                        Set(model.combinedLines.map(\.speakerName)), ["Dana"],
+                        "every line of the turn, not only the first"
+                    )
+                    expect.equal(model.correctedLines.count, 8)
+                }
+            },
+
             test("a right-click resolves to the word gap nearest it") { expect in
                 await MainActor.run {
                     // "we ship on friday", one word per second.

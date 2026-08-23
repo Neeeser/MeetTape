@@ -1670,27 +1670,45 @@ public actor ProcessingPipeline {
     /// which is a state the panel can show and the user can finish. Writing the
     /// names first would leave a correction covering words that were never
     /// separated from the ones around them.
+    /// - Parameter lineIDs: the lines the reader was looking at. Chunks overlap
+    ///   by eight seconds and a near-duplicate is only dropped above a
+    ///   similarity bar, so two lines on one track routinely contain the same
+    ///   second. Time alone would put the boundary in whichever of them sorts
+    ///   first and hand the words of the other one, which is a different
+    ///   speaker, to the person being named.
     @discardableResult
     public func applySpeakerRange(
-        _ name: String, meetingID: String, track: CaptureTrack,
+        _ name: String, meetingID: String, track: CaptureTrack, lineIDs: [String],
         startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
     ) async throws -> IdentityID? {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
-        try divide(store: found.store, track: track, at: [startSeconds, endSeconds])
-        guard let transcript = try found.store.readCanonicalTranscript() else {
-            throw ProcessingError.utteranceNotFound(id: "")
+        guard let before = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
         }
-        // By the middle of each piece, so a boundary landing a hair inside a
-        // neighbour cannot hand it over. The pieces are what the reader
-        // selected, and their edges are the boundaries just written.
-        let selected = transcript.utterances.filter { utterance in
-            guard utterance.track == track else { return false }
-            let middle = (utterance.start + utterance.end) / 2
+        let targets = before.utterances.filter { lineIDs.contains($0.id) && $0.track == track }
+        guard !targets.isEmpty else {
+            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+        }
+        try divide(store: found.store, lines: targets, at: [startSeconds, endSeconds])
+
+        guard let after = try found.store.readCanonicalTranscript() else {
+            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+        }
+        // A piece of a line the reader named, by the middle of it: a boundary
+        // landing a hair inside the neighbouring piece cannot hand that piece
+        // over.
+        let selected = after.utterances.filter { piece in
+            guard piece.track == track, targets.contains(where: {
+                $0.chunkID == piece.chunkID && piece.start >= $0.start && piece.end <= $0.end
+            }) else { return false }
+            let middle = (piece.start + piece.end) / 2
             return middle >= startSeconds && middle <= endSeconds
         }
-        guard !selected.isEmpty else { throw ProcessingError.utteranceNotFound(id: "") }
+        guard !selected.isEmpty else {
+            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+        }
         return try await correctUtterances(
             name, utteranceIDs: selected.map(\.id), meetingID: meetingID, identityID: identityID
         )
@@ -1701,20 +1719,26 @@ public actor ProcessingPipeline {
     ///
     /// Both pieces of a corrected line sit inside the correction's span, so a
     /// later correction on one of them would take the wide override off both.
-    /// Splitting the override with the line keeps the piece nobody touched
+    /// Dividing the correction with the line keeps the piece nobody touched
     /// reading as the person it was corrected to.
-    private func divide(store: MeetingStore, track: CaptureTrack, at moments: [Double]) throws {
-        guard let transcript = try store.readCanonicalTranscript() else { return }
+    ///
+    /// Divided rather than re-anchored: a correction keeps the seconds it was
+    /// made on, clipped to the piece it now belongs to. Re-anchoring it to the
+    /// whole piece would widen it, and a correction's width is what says how
+    /// much of a line a person actually vouched for. A name set on a
+    /// three-second interjection displays across the turn it was merged into
+    /// and confirms none of it; stretched to the piece, it would confirm all of
+    /// it and put the other speaker's audio in that person's voice profile.
+    private func divide(store: MeetingStore, lines targets: [Utterance], at moments: [Double]) throws {
         var speakers = try store.readSpeakerMap()
-        var lines = transcript.utterances
+        var lines = targets
         var changed = false
         for moment in moments {
-            guard let line = lines.first(where: {
-                $0.track == track && moment > $0.start && moment < $0.end
-            }) else { continue }
+            guard let line = lines.first(where: { moment > $0.start && moment < $0.end })
+            else { continue }
             guard let boundary = LineDivision.boundary(in: line, near: moment) else { continue }
             let cut = LineCut(
-                track: track, atSeconds: boundary, chunkID: line.chunkID, createdAt: clock.now
+                track: line.track, atSeconds: boundary, chunkID: line.chunkID, createdAt: clock.now
             )
             let before = speakers.lineCuts.count
             speakers.cut(cut)
@@ -1723,12 +1747,17 @@ public actor ProcessingPipeline {
             let pieces = LineDivision.divide(line, at: [cut])
             if pieces.count > 1, let override = speakers.override(for: line) {
                 speakers.utteranceOverrides.removeAll { $0 == override }
+                let start = override.startSeconds ?? line.start
+                let end = override.endSeconds ?? line.end
                 for piece in pieces {
+                    let clippedStart = max(start, piece.start)
+                    let clippedEnd = min(end, piece.end)
+                    guard clippedEnd > clippedStart else { continue }
                     speakers.utteranceOverrides.append(UtteranceOverride(
                         track: piece.track,
-                        anchorSeconds: (piece.start + piece.end) / 2,
-                        startSeconds: piece.start,
-                        endSeconds: max(piece.end, piece.start + 0.001),
+                        anchorSeconds: (clippedStart + clippedEnd) / 2,
+                        startSeconds: clippedStart,
+                        endSeconds: clippedEnd,
                         assignment: override.assignment,
                         createdAt: override.createdAt,
                         utteranceID: piece.id,

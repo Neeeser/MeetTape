@@ -358,14 +358,14 @@ extension MeetTapeRuntime {
     /// Divides the transcript at a word and gives the stretch that follows, or
     /// a phrase inside a turn, to one speaker.
     public func assignSpeakerRange(
-        name: String, meetingID: String, track: CaptureTrack,
+        name: String, meetingID: String, track: CaptureTrack, lineIDs: [String],
         startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
     ) {
         runProcessing { [weak self] in
             guard let self else { return }
             do {
                 _ = try await pipeline.applySpeakerRange(
-                    name, meetingID: meetingID, track: track,
+                    name, meetingID: meetingID, track: track, lineIDs: lineIDs,
                     startSeconds: startSeconds, endSeconds: endSeconds, identityID: identityID
                 )
             } catch {

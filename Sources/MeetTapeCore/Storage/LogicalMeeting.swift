@@ -97,6 +97,9 @@ public struct CombinedLineBlock: Sendable, Equatable, Identifiable {
     public var lines: [CombinedLine]
 
     public init(lines: [CombinedLine]) {
+        // Every accessor reads the first line, so an empty block is not a
+        // block. Caught here rather than at whichever property is read first.
+        precondition(!lines.isEmpty, "a block holds at least one line")
         self.lines = lines
     }
 

@@ -382,17 +382,18 @@ public struct TranscriptAssembler: Sendable {
     /// begins with one and then carries on is the common case and used to be
     /// kept intact. Measured on a 25-minute meeting: 21 of 148 consecutive
     /// pairs repeated between 3 and 17 words, every one of them across a chunk
-    /// boundary. Separate timecodes rendered that as a stutter. One paragraph
-    /// per speaker renders it as nonsense.
+    /// boundary and 20 of them over shared time. Separate timecodes rendered
+    /// that as a stutter. One paragraph per speaker renders it as nonsense.
     ///
-    /// Three words minimum, and only where the two lines really share time, so
-    /// a speaker who ends on "that's fine" and opens the next turn the same way
-    /// keeps both.
+    /// Three words minimum, and only where the two lines really share time. The
+    /// overlap tail is audio the earlier chunk already covered, so a genuine
+    /// seam repeat is always spoken at a moment the previous line still holds.
+    /// Two lines that follow one another in time are two different pieces of
+    /// audio, and a speaker who ends on "that makes sense to me" and opens the
+    /// next turn the same way keeps both.
     private func trimmingSeamRepeat(_ candidate: Utterance, after previous: Utterance?) -> Utterance? {
         guard let previous, previous.chunkID != candidate.chunkID else { return candidate }
-        guard rangesOverlap(previous, candidate)
-            || candidate.start - previous.end <= configuration.duplicateSearchSeconds
-        else { return candidate }
+        guard rangesOverlap(previous, candidate) else { return candidate }
         let before = units(of: previous)
         let after = units(of: candidate)
         var repeated = 0

@@ -134,9 +134,8 @@ public struct MeetingStore: Sendable {
         return transcript
     }
 
-    /// What the assembler wrote, undivided. Only re-assembly and re-analysis
-    /// want this.
-    public func readAssembledTranscript() throws -> CanonicalTranscript? {
+    /// What the assembler wrote, before any boundary a person put in it.
+    private func readAssembledTranscript() throws -> CanonicalTranscript? {
         guard FileManager.default.fileExists(atPath: layout.canonicalTranscript.path) else { return nil }
         let data = try read(layout.canonicalTranscript)
         return try ArchiveCoding.decode(CanonicalTranscript.self, from: data, path: layout.canonicalTranscript.path)

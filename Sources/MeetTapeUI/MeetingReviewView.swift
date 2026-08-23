@@ -280,7 +280,7 @@ public struct MeetingReviewView: View {
                         blockView(block)
                     }
                 }
-                if model.namingLine != nil || model.namingRange != nil { namingField }
+                if model.isNaming { namingField }
             } else {
                 HStack(spacing: 8) {
                     if model.metadata?.processing.state != .failed {
@@ -334,7 +334,7 @@ public struct MeetingReviewView: View {
         let paragraph = block.paragraph()
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                speakerMenu(for: block.lines[0], label: block.speakerName)
+                blockMenu(for: block)
                     .font(.callout.weight(.semibold))
                 Text(range(of: block))
                     .font(.caption2)
@@ -378,14 +378,31 @@ public struct MeetingReviewView: View {
         case let .split(atSeconds):
             SpeakerRangeTarget(
                 recordingID: block.recordingID, track: block.track,
+                lineIDs: block.lines.map(\.utterance.id),
                 startSeconds: atSeconds, endSeconds: block.endSeconds
             )
         case let .assign(startSeconds, endSeconds):
             SpeakerRangeTarget(
                 recordingID: block.recordingID, track: block.track,
+                lineIDs: block.lines.map(\.utterance.id),
                 startSeconds: startSeconds, endSeconds: endSeconds
             )
         }
+    }
+
+    /// Names the whole turn. Every line under the header moves together,
+    /// because the header is the only menu the lines have.
+    private func blockMenu(for block: CombinedLineBlock) -> some View {
+        Menu(block.speakerName) {
+            ForEach(model.knownPeople) { person in
+                Button(person.identity.resolvedName) { model.assignBlock(block, to: person) }
+            }
+            if !model.knownPeople.isEmpty { Divider() }
+            Button("New person…") { model.beginNamingBlock(block) }
+            Button("Use this speaker's name") { model.clearBlock(block) }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     private func speakerMenu(for line: CombinedLine, label: String) -> some View {

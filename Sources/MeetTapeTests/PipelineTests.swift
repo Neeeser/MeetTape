@@ -431,6 +431,7 @@ enum PipelineTests {
                 // boundary, so it records one cut and not two.
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
                     startSeconds: 5, endSeconds: 11
                 )
 
@@ -469,6 +470,7 @@ enum PipelineTests {
 
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
                     startSeconds: 5, endSeconds: 7
                 )
 
@@ -500,6 +502,7 @@ enum PipelineTests {
                 )
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
                     startSeconds: 5, endSeconds: 11
                 )
 
@@ -508,6 +511,103 @@ enum PipelineTests {
                     try meeting.store.readCanonicalTranscript()
                 ).utterances
                 expect.equal(lines.map { map.resolvedName(for: $0) }, ["Sam", "Dana"])
+            },
+
+            test("splitting a line keeps a narrow correction narrow") { expect in
+                // A name set on a short interjection displays across the turn
+                // it was merged into and confirms none of it. Stretching that
+                // correction to the piece it lands in would confirm the whole
+                // piece, and the words before the interjection are somebody
+                // else's voice going into that person's profile.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                // Confirmed on "what do" alone, two seconds of an 11 s line.
+                var speakers = try meeting.store.readSpeakerMap()
+                speakers.utteranceOverrides.append(UtteranceOverride(
+                    track: .remote, anchorSeconds: 2, startSeconds: 1, endSeconds: 3,
+                    assignment: SpeakerAssignment(displayName: "Sam", origin: .human),
+                    createdAt: Date(), chunkID: "c1"
+                ))
+                try meeting.store.writeSpeakerMap(speakers)
+
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
+                    startSeconds: 5, endSeconds: 11
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let sam = try expect.unwrap(
+                    map.utteranceOverrides.first { $0.assignment.displayName == "Sam" }
+                )
+                expect.close(
+                    sam.startSeconds ?? 0, 1, tolerance: 0.001,
+                    "the correction still starts where the person put it"
+                )
+                expect.close(
+                    sam.endSeconds ?? 0, 3, tolerance: 0.001,
+                    "and still ends there, rather than growing to the piece"
+                )
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                expect.equal(lines.count, 2)
+                expect.equal(map.resolvedName(for: lines[0]), "Sam", "it still names its line")
+                expect.isFalse(
+                    map.confirms(lines[0]),
+                    "and still confirms none of it, so the other four seconds of that "
+                        + "piece cannot reach Sam's voice profile"
+                )
+            },
+
+            test("a split reaches the line the reader clicked, not an overlapping twin") { expect in
+                // Chunks overlap by eight seconds and a near-duplicate is only
+                // dropped above a similarity bar, so two lines on one track
+                // routinely hold the same second. Placed by time alone the
+                // boundary went into whichever sorted first, and the other
+                // speaker's words were handed to the person being named.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root, withOverlappingTwin: true)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                // The reader clicked the second chunk's line, which sorts after
+                // the first line and sits entirely inside its span.
+                let all = try expect.unwrap(try meeting.store.readCanonicalTranscript()).utterances
+                let clicked = try expect.unwrap(all.first { $0.chunkID == "c2" })
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote, lineIDs: [clicked.id],
+                    startSeconds: 6, endSeconds: 10
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                expect.equal(
+                    map.lineCuts.first?.chunkID, "c2", "the boundary went in the line clicked"
+                )
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                let untouched = try expect.unwrap(lines.first { $0.chunkID == "c1" })
+                expect.close(
+                    untouched.end - untouched.start, 11, tolerance: 0.001,
+                    "the other chunk's line was not divided"
+                )
+                expect.equal(
+                    map.resolvedName(for: untouched), "Priya",
+                    "and did not change hands"
+                )
+                expect.equal(map.utteranceOverrides.count, 1, "one piece changed hands")
+                expect.equal(
+                    lines.filter { $0.chunkID == "c2" }.map(\.text),
+                    ["the other", "chunk heard this too"]
+                )
             },
 
             test("a boundary is kept when the transcript is assembled again") { expect in
@@ -521,6 +621,7 @@ enum PipelineTests {
                 )
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
+                    lineIDs: try lineIDs(of: meeting.store),
                     startSeconds: 5, endSeconds: 11
                 )
                 // Whatever else re-assembly does, the boundary and the name it
@@ -533,10 +634,15 @@ enum PipelineTests {
         ])
     }
 
+    /// Every line the panel would be showing.
+    static func lineIDs(of store: MeetingStore) throws -> [String] {
+        (try store.readCanonicalTranscript())?.utterances.map(\.id) ?? []
+    }
+
     /// A meeting with one transcript line: a question and its answer run
     /// together on one speaker, with word timings a second apart.
     static func makeTranscribedMeeting(
-        root: URL
+        root: URL, withOverlappingTwin: Bool = false
     ) throws -> (id: String, store: MeetingStore, repository: MeetingRepository) {
         let repository = MeetingRepository(root: root)
         let started = Date(timeIntervalSince1970: 1_787_070_000)
@@ -551,15 +657,31 @@ enum PipelineTests {
                 start: Double($0.offset), end: Double($0.offset) + 0.7, text: " \($0.element)"
             )
         }
-        try created.store.writeCanonicalTranscript(CanonicalTranscript(
-            generatedAt: started,
-            utterances: [Utterance(
-                id: Utterance.identifier(chunkID: "c1", track: .remote, start: 0, end: 11),
-                start: 0, end: 11, track: .remote, rawSpeakerLabel: "remote-001_speaker_00",
-                speakerKey: "remote-001_speaker_00", text: texts.joined(separator: " "),
-                chunkID: "c1", model: "m", words: words
-            )]
-        ))
+        var utterances = [Utterance(
+            id: Utterance.identifier(chunkID: "c1", track: .remote, start: 0, end: 11),
+            start: 0, end: 11, track: .remote, rawSpeakerLabel: "remote-001_speaker_00",
+            speakerKey: "remote-001_speaker_00", text: texts.joined(separator: " "),
+            chunkID: "c1", model: "m", words: words
+        )]
+        if withOverlappingTwin {
+            // The next chunk's own transcription of the same audio, segmented
+            // differently and kept because it is not similar enough to drop.
+            let twinWords = ["the", "other", "chunk", "heard", "this", "too"].enumerated().map {
+                RawTranscriptWord(
+                    start: 4 + Double($0.offset), end: 4 + Double($0.offset) + 0.7,
+                    text: " \($0.element)"
+                )
+            }
+            utterances.append(Utterance(
+                id: Utterance.identifier(chunkID: "c2", track: .remote, start: 4, end: 10),
+                start: 4, end: 10, track: .remote, rawSpeakerLabel: "remote-001_speaker_00",
+                speakerKey: "remote-001_speaker_00", text: "the other chunk heard this too",
+                chunkID: "c2", model: "m", words: twinWords
+            ))
+        }
+        try created.store.writeCanonicalTranscript(
+            CanonicalTranscript(generatedAt: started, utterances: utterances)
+        )
         var map = SpeakerMap()
         map.assign("Priya", to: "remote-001_speaker_00")
         try created.store.writeSpeakerMap(map)

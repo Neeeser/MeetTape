@@ -244,12 +244,20 @@ public final class SettingsModel {
 public struct SpeakerRangeTarget: Sendable, Equatable {
     public var recordingID: String
     public var track: CaptureTrack
+    /// The lines the reader was looking at. Chunks overlap, so two lines on one
+    /// track routinely hold the same second and time alone would reach the
+    /// wrong one.
+    public var lineIDs: [String]
     public var startSeconds: Double
     public var endSeconds: Double
 
-    public init(recordingID: String, track: CaptureTrack, startSeconds: Double, endSeconds: Double) {
+    public init(
+        recordingID: String, track: CaptureTrack, lineIDs: [String],
+        startSeconds: Double, endSeconds: Double
+    ) {
         self.recordingID = recordingID
         self.track = track
+        self.lineIDs = lineIDs
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
     }
@@ -282,6 +290,8 @@ public final class MeetingReviewModel {
     /// The stretch of one track waiting for a name, after a split or a
     /// selection whose speaker is not in the list yet.
     public var namingRange: SpeakerRangeTarget?
+    /// The turn waiting for a name.
+    public var namingBlock: CombinedLineBlock?
     public var newPersonDraft = ""
     public var reanalyzeCount = ""
     public var isReanalyzing = false
@@ -400,6 +410,47 @@ public final class MeetingReviewModel {
         runtime.assignSpeaker(name: "", key: clusterID, meetingID: meetingID)
     }
 
+    /// Renames every line of one turn.
+    ///
+    /// The header stands for the whole block, and the lines under it no longer
+    /// carry a menu of their own. Naming only the first would rename the first
+    /// thirty seconds of a three-minute answer and tear the paragraph in two on
+    /// the next reload.
+    public func assignBlock(_ block: CombinedLineBlock, to entry: SpeakerDirectoryEntry) {
+        assignBlock(block, name: entry.identity.resolvedName, identityID: entry.id)
+    }
+
+    public func assignBlock(_ block: CombinedLineBlock, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        assignBlock(block, name: trimmed, identityID: nil)
+    }
+
+    /// Hands the block back to whatever its cluster says.
+    public func clearBlock(_ block: CombinedLineBlock) {
+        assignBlock(block, name: "", identityID: nil)
+    }
+
+    private func assignBlock(
+        _ block: CombinedLineBlock, name: String, identityID: IdentityID?
+    ) {
+        runtime.assignUtteranceSpeakers(
+            name: name, utteranceIDs: block.lines.map(\.utterance.id),
+            meetingID: block.recordingID, identityID: identityID
+        )
+        for line in block.lines {
+            if name.isEmpty {
+                correctedLines.remove(line.id)
+            } else {
+                correctedLines.insert(line.id)
+            }
+            guard let index = combinedLines.firstIndex(where: { $0.id == line.id }) else { continue }
+            combinedLines[index].speakerName = name.isEmpty
+                ? SpeakerMap.fallbackName(for: line.utterance.speakerKey)
+                : name
+        }
+    }
+
     /// Divides a turn and hands the stretch to someone.
     ///
     /// No optimistic update: a division changes where the lines are, so the
@@ -409,7 +460,7 @@ public final class MeetingReviewModel {
     public func assignRange(_ target: SpeakerRangeTarget, to entry: SpeakerDirectoryEntry) {
         runtime.assignSpeakerRange(
             name: entry.identity.resolvedName, meetingID: target.recordingID,
-            track: target.track, startSeconds: target.startSeconds,
+            track: target.track, lineIDs: target.lineIDs, startSeconds: target.startSeconds,
             endSeconds: target.endSeconds, identityID: entry.id
         )
     }
@@ -419,12 +470,26 @@ public final class MeetingReviewModel {
         guard !trimmed.isEmpty else { return }
         runtime.assignSpeakerRange(
             name: trimmed, meetingID: target.recordingID, track: target.track,
-            startSeconds: target.startSeconds, endSeconds: target.endSeconds
+            lineIDs: target.lineIDs, startSeconds: target.startSeconds,
+            endSeconds: target.endSeconds
         )
     }
 
     public func beginNamingRange(_ target: SpeakerRangeTarget) {
         namingRange = target
+        namingBlock = nil
+        namingLine = nil
+        namingUtterance = nil
+        namingCluster = nil
+        newPersonDraft = ""
+    }
+
+    /// Whether anything in the transcript is waiting for a name.
+    public var isNaming: Bool { namingLine != nil || namingRange != nil || namingBlock != nil }
+
+    public func beginNamingBlock(_ block: CombinedLineBlock) {
+        namingBlock = block
+        namingRange = nil
         namingLine = nil
         namingUtterance = nil
         namingCluster = nil
@@ -496,6 +561,7 @@ public final class MeetingReviewModel {
         namingUtterance = line.utterance
         namingCluster = nil
         namingRange = nil
+        namingBlock = nil
         newPersonDraft = ""
     }
 
@@ -504,6 +570,7 @@ public final class MeetingReviewModel {
         namingLine = nil
         namingUtterance = nil
         namingRange = nil
+        namingBlock = nil
         newPersonDraft = ""
     }
 
@@ -512,12 +579,15 @@ public final class MeetingReviewModel {
         namingUtterance = nil
         namingCluster = nil
         namingRange = nil
+        namingBlock = nil
         newPersonDraft = ""
     }
 
     public func commitNaming() {
         if let target = namingRange {
             assignRange(target, toNewPerson: newPersonDraft)
+        } else if let block = namingBlock {
+            assignBlock(block, toNewPerson: newPersonDraft)
         } else if let line = namingLine {
             assignUtterance(line, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {

@@ -10,6 +10,8 @@ public final class WindowManager {
     private let runtime: MeetTapeRuntime
     private var settingsWindow: NSWindow?
     private var settingsModel: SettingsModel?
+    private var peopleWindow: NSWindow?
+    private var peopleModel: PeopleDirectoryModel?
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
     private var setupPlacementToken: NSObjectProtocol?
@@ -48,6 +50,7 @@ public final class WindowManager {
             return
         }
         let model = SettingsModel(runtime: runtime)
+        model.onOpenPeople = { [weak self] in self?.showPeople() }
         settingsModel = model
         let window = makeWindow(
             title: "MeetTape Settings",
@@ -56,6 +59,31 @@ public final class WindowManager {
         )
         window.setFrameAutosaveName("MeetTapeSettings")
         settingsWindow = window
+        present(window)
+    }
+
+    /// The people directory.
+    ///
+    /// Its own window rather than a settings tab: the two-pane layout needs more
+    /// width than the settings window has, and a directory that grows to
+    /// hundreds of voices is not a setting.
+    public func showPeople() {
+        if let window = peopleWindow {
+            // Reloaded on every open, because meetings recorded since the last
+            // one have named new voices.
+            if let peopleModel { Task { @MainActor in await peopleModel.reload() } }
+            present(window)
+            return
+        }
+        let model = PeopleDirectoryModel(runtime: runtime)
+        peopleModel = model
+        let window = makeWindow(
+            title: "People",
+            size: NSSize(width: 900, height: 600),
+            content: PeopleDirectoryView(model: model)
+        )
+        window.setFrameAutosaveName("MeetTapePeople")
+        peopleWindow = window
         present(window)
     }
 

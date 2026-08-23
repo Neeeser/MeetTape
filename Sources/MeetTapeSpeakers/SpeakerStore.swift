@@ -67,7 +67,8 @@ public actor SpeakerStore {
     private static let identityColumns = """
         identity.id, identity.kind, identity.display_name, identity.anonymous_number,
         identity.organization, identity.is_local_user, identity.state, identity.merged_into,
-        identity.created_at, identity.updated_at, identity.last_seen_at
+        identity.created_at, identity.updated_at, identity.last_seen_at, identity.notes,
+        EXISTS(SELECT 1 FROM identity_avatar WHERE identity_avatar.identity_id = identity.id)
         """
 
     private func identity(from row: SpeakerDatabase.Row) -> Identity {
@@ -78,6 +79,9 @@ public actor SpeakerStore {
             anonymousNumber: row.optionalInt64(3).map(Int.init),
             aliases: [],
             organization: row.optionalText(4),
+            notes: row.optionalText(11),
+            badges: [],
+            hasAvatar: row.bool(12),
             isLocalUser: row.bool(5),
             state: IdentityState(rawValue: row.text(6)) ?? .persistent,
             mergedInto: row.optionalInt64(7).map(IdentityID.init),
@@ -95,6 +99,7 @@ public actor SpeakerStore {
         ) { found = self.identity(from: $0) }
         guard var identity = found else { return nil }
         identity.aliases = try aliases(of: id)
+        identity.badges = try badges(of: id)
         return identity
     }
 
@@ -138,6 +143,7 @@ public actor SpeakerStore {
         return try out.map {
             var identity = $0
             identity.aliases = try aliases(of: identity.id)
+            identity.badges = try badges(of: identity.id)
             return identity
         }
     }
@@ -311,6 +317,100 @@ public actor SpeakerStore {
             "INSERT OR IGNORE INTO identity_alias(identity_id, alias) VALUES(?, ?)",
             [.int64(id.rawValue), .text(trimmed)]
         )
+    }
+
+    private func badges(of id: IdentityID) throws -> [PersonBadge] {
+        var out: [PersonBadge] = []
+        try database.query(
+            "SELECT platform FROM identity_badge WHERE identity_id = ? ORDER BY platform",
+            [.int64(id.rawValue)]
+        ) { row in
+            // A row this build cannot name is dropped rather than shown. The
+            // column is a closed set on the Swift side and the badge exists to
+            // be drawn, so a platform with no icon has nothing to render.
+            if let badge = PersonBadge(rawValue: row.text(0)) { out.append(badge) }
+        }
+        return out
+    }
+
+    // MARK: - what a person keeps about somebody
+
+    /// Free text about a person, written into the participant block of every
+    /// transcript they appear in. Empty clears it, so the block does not carry a
+    /// blank line for somebody whose notes were deleted.
+    public func setNotes(_ notes: String?, on id: IdentityID, now: Date = Date()) throws {
+        let trimmed = notes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try database.run(
+            "UPDATE identity SET notes = ?, updated_at = ? WHERE id = ?",
+            [
+                .optionalText((trimmed?.isEmpty ?? true) ? nil : trimmed),
+                .date(now), .int64(id.rawValue),
+            ]
+        )
+    }
+
+    /// Replaces the whole badge set, because that is how the picker edits it:
+    /// the user sees every platform at once and toggles the ones that apply.
+    public func setBadges(_ badges: [PersonBadge], on id: IdentityID, now: Date = Date()) throws {
+        try database.transaction {
+            try database.run(
+                "DELETE FROM identity_badge WHERE identity_id = ?", [.int64(id.rawValue)]
+            )
+            for badge in Set(badges) {
+                try database.run(
+                    "INSERT INTO identity_badge(identity_id, platform) VALUES(?, ?)",
+                    [.int64(id.rawValue), .text(badge.rawValue)]
+                )
+            }
+            try database.run(
+                "UPDATE identity SET updated_at = ? WHERE id = ?",
+                [.date(now), .int64(id.rawValue)]
+            )
+        }
+    }
+
+    /// Sets the organization on several people at once.
+    ///
+    /// A directory of a few hundred voices accumulates a department at a time,
+    /// and doing it row by row is the same edit typed thirty times.
+    public func setOrganization(
+        _ organization: String?, on ids: [IdentityID], now: Date = Date()
+    ) throws {
+        guard !ids.isEmpty else { return }
+        let trimmed = organization?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        try database.run(
+            "UPDATE identity SET organization = ?, updated_at = ? WHERE id IN (\(placeholders))",
+            [
+                .optionalText((trimmed?.isEmpty ?? true) ? nil : trimmed), .date(now),
+            ] + ids.map { SQLValue.int64($0.rawValue) }
+        )
+    }
+
+    /// The picture, fetched when something is about to draw it. `nil` clears it.
+    public func setAvatar(_ png: Data?, on id: IdentityID, now: Date = Date()) throws {
+        guard let png, !png.isEmpty else {
+            try database.run(
+                "DELETE FROM identity_avatar WHERE identity_id = ?", [.int64(id.rawValue)]
+            )
+            return
+        }
+        try database.run(
+            """
+            INSERT INTO identity_avatar(identity_id, image, updated_at) VALUES(?, ?, ?)
+            ON CONFLICT(identity_id) DO UPDATE SET image = excluded.image,
+                                                   updated_at = excluded.updated_at
+            """,
+            [.int64(id.rawValue), .blob(png), .date(now)]
+        )
+    }
+
+    public func avatar(of id: IdentityID) throws -> Data? {
+        var found: Data?
+        try database.query(
+            "SELECT image FROM identity_avatar WHERE identity_id = ?", [.int64(id.rawValue)]
+        ) { found = $0.blob(0) }
+        return found
     }
 
     public func setLocalUser(_ id: IdentityID, now: Date = Date()) throws {
@@ -1307,8 +1407,8 @@ public actor SpeakerStore {
             """,
             [.text(model.rawValue)]
         ) { row in
-            guard let centroid = row.vector(11) else { return }
-            rows.append((self.identity(from: row), centroid, row.int(12), row.int(13), row.double(14)))
+            guard let centroid = row.vector(13) else { return }
+            rows.append((self.identity(from: row), centroid, row.int(14), row.int(15), row.double(16)))
         }
         return rows.map {
             SpeakerProfile(

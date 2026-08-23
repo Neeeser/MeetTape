@@ -183,7 +183,10 @@ struct ModelsStep: View {
             )
 
             if runtime.settings.processing.usesLocalTranscription {
-                LocalModelChoicePicker(runtime: runtime)
+                LocalModelChoicePicker(
+                    selected: model.localModel,
+                    select: { choice in Task { await model.chooseLocalModel(choice) } }
+                )
             }
 
             VStack(alignment: .leading, spacing: 6) {

@@ -53,7 +53,7 @@
       "IS1009a", "IS1008a", "TS3005a", "TS3009c", "EN2002a", "IB4005"
     ],
     "ami-long": ["ES2008b", "IS1009c"],
-    "ami-smoke": ["ES2002b"],
+    "ami-single": ["ES2002b"],
     "ami-overlap": [
       "EN2002d", "EN2002b", "IN1012", "IS1003d", "IS1006d", "ES2015d"
     ],

@@ -1,6 +1,7 @@
 # Local investigation material — read but never committed
 /plans/
 /probes/
+/.claude/specs/
 
 # Secrets
 .env
@@ -31,6 +32,7 @@ node_modules/
 
 # Local scratch
 /tmp/
+/bench-scratch/
 *.log
 
 # Extension build output

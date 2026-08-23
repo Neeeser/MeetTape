@@ -583,9 +583,12 @@ def build(reader, meeting, window, start=None, people=None, collected=None):
     # against, so the count is printed: a regeneration that reintroduced them
     # shows here rather than in a benchmark number months later.
     flat = sum(1 for word in reference if word["end"] <= word["start"])
-    print("%-8s %-22s overlap %5.1f%%  words %5d  zero-duration %3d  %s  (%d kB)" % (
-        meeting, kind, ratio * 100, len(reference), flat, per_speaker,
-        os.path.getsize(path) // 1024))
+    coverage, per_minute = density(truth["turns"], seconds, len(reference))
+    print("%-8s %-22s overlap %5.1f%%  words %5d  zero-duration %3d"
+          "  %3.0f%% speech  %3.0f words/min  %s  (%d kB)" % (
+              meeting, kind, ratio * 100, len(reference), flat,
+              coverage * 100, per_minute, per_speaker,
+              os.path.getsize(path) // 1024))
 
 
 def rank_by_overlap(reader, meetings, window, min_speakers, min_density, keep):
@@ -626,6 +629,28 @@ def suite_roster(name):
     if name not in manifest["suites"]:
         raise SystemExit("no suite named %s in the manifest" % name)
     return manifest["suites"][name]
+
+
+def density(turns, seconds, word_count):
+    """Speech as a share of the window, and words per minute of it.
+
+    Printed rather than written into the JSON: the harness derives the same two
+    numbers from the turns it already reads, and adding fields would rewrite
+    every committed truth file for something computable from its contents. The
+    window picker has no density floor, so this is how a sparse case is spotted
+    when the truth is regenerated: ES2003a comes out at 31% and 64 words/min
+    against 78% to 99% and 146 to 217 for the rest.
+    """
+    if seconds <= 0:
+        return 0.0, 0.0
+    spoken = 0.0
+    reach = float("-inf")
+    for turn in sorted(turns, key=lambda t: t["start"]):
+        begin = max(turn["start"], reach)
+        if turn["end"] > begin:
+            spoken += turn["end"] - begin
+        reach = max(reach, turn["end"])
+    return spoken / seconds, word_count / (seconds / 60)
 
 
 def main():

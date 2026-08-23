@@ -27,6 +27,25 @@ enum BenchCommand {
         var out: URL?
         var baseline: URL?
         var applicationSupport: URL
+        /// How many times each case runs. A local decode varies run to run, by
+        /// 6.6 points on one observed case, because an alignment refusal
+        /// happens or does not; one sample cannot tell that apart from a
+        /// change in the code.
+        var repeats = 1
+        /// Keep each run's meeting folder instead of deleting it. A failed case
+        /// is unreadable without the transcript, the manifest and the raw
+        /// output it produced.
+        var keepScratch = false
+    }
+
+    /// Where a kept scratch directory goes: beside `--out` when there is one,
+    /// otherwise `bench-scratch` in the working directory, which is the
+    /// repository root under `scripts/eval.sh` and is gitignored under that
+    /// name.
+    static func keepDirectory(_ options: Options) -> URL {
+        if let out = options.out { return out.deletingLastPathComponent() }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("bench-scratch", isDirectory: true)
     }
 
     /// One case, one configuration.
@@ -45,6 +64,13 @@ enum BenchCommand {
         var state: String
         var transcriptionModels: [String]
         var diarizationBackends: [String]
+        /// Which run of `--repeats` this row is, from 1. Every run is written
+        /// to `--out`, so the spread in the table can be checked against the
+        /// rows it came from.
+        var run: Int = 1
+        /// The meeting folder this row was scored from, when `--keep-scratch`
+        /// preserved it.
+        var scratch: String?
     }
 
     /// Which backend an --engine value names.
@@ -266,24 +292,35 @@ enum BenchCommand {
                         continue
                     }
                 }
-                do {
-                    let row = try await runOne(
-                        benchCase, engine: engine, options: options, backends: backends
-                    )
-                    rows.append(row)
-                    report(row)
-                    if let baselines {
-                        let key = BenchBaselines.key(
-                            engine: engine.name, diarizer: options.diarizer,
-                            meeting: benchCase.truth.meeting
+                var runs: [Row] = []
+                for run in 1...max(1, options.repeats) {
+                    do {
+                        var row = try await runOne(
+                            benchCase, engine: engine, options: options,
+                            backends: backends, run: run
                         )
-                        let broken = baselines.regressions(key: key, score: row.score)
-                        for entry in broken { note("regression \(key): \(entry)") }
-                        failures.append(contentsOf: broken.map { "\(key): \($0)" })
+                        row.run = run
+                        runs.append(row)
+                        rows.append(row)
+                        report(row, of: max(1, options.repeats))
+                    } catch {
+                        note("\(benchCase.truth.meeting) on \(engine.name) failed: \(error)")
+                        failures.append("\(benchCase.truth.meeting) on \(engine.name)")
                     }
-                } catch {
-                    note("\(benchCase.truth.meeting) on \(engine.name) failed: \(error)")
-                    failures.append("\(benchCase.truth.meeting) on \(engine.name)")
+                }
+                guard let deciding = mean(of: runs) else { continue }
+                if runs.count > 1 { reportSpread(runs) }
+                if let baselines {
+                    let key = BenchBaselines.key(
+                        engine: engine.name, diarizer: options.diarizer,
+                        meeting: benchCase.truth.meeting
+                    )
+                    // The mean decides, so one unlucky alignment refusal in
+                    // three runs neither fails the gate on its own nor hides
+                    // behind a lucky one.
+                    let broken = baselines.regressions(key: key, score: deciding)
+                    for entry in broken { note("regression \(key): \(entry)") }
+                    failures.append(contentsOf: broken.map { "\(key): \($0)" })
                 }
             }
         }
@@ -294,7 +331,7 @@ enum BenchCommand {
             if let data = try? encoder.encode(rows) { try? data.write(to: out) }
             note("wrote \(rows.count) results to \(out.path)")
         }
-        summarise(rows)
+        summarise(rows, repeats: max(1, options.repeats))
         if !failures.isEmpty {
             note("")
             note("\(failures.count) case(s) failed: \(failures.joined(separator: "; "))")
@@ -304,12 +341,29 @@ enum BenchCommand {
     }
 
     static func runOne(
-        _ benchCase: Case, engine: Engine, options: Options, backends: ProcessingBackends
+        _ benchCase: Case, engine: Engine, options: Options, backends: ProcessingBackends,
+        run: Int = 1
     ) async throws -> Row {
-        let scratchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("meettape-bench-\(UUID().uuidString)", isDirectory: true)
+        // Kept scratch is written where it is wanted from the start rather than
+        // copied at the end: a case that throws is exactly the one worth
+        // reading, and it never reaches the end.
+        var kept: URL?
+        let scratchRoot: URL
+        if options.keepScratch {
+            var name = "\(benchCase.truth.meeting)-\(engine.name)-\(options.diarizer)"
+            if options.repeats > 1 { name += "-run\(run)" }
+            let destination = keepDirectory(options).appendingPathComponent(name, isDirectory: true)
+            try? FileManager.default.removeItem(at: destination)
+            scratchRoot = destination
+            kept = destination
+        } else {
+            scratchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("meettape-bench-\(UUID().uuidString)", isDirectory: true)
+        }
         try FileManager.default.createDirectory(at: scratchRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: scratchRoot) }
+        defer {
+            if kept == nil { try? FileManager.default.removeItem(at: scratchRoot) }
+        }
 
         // The truth names a window on the recording, so the harness cuts it.
         // A case with no window scores the whole file, which is what puts the
@@ -380,26 +434,39 @@ enum BenchCommand {
             audioSeconds: imported.durationSeconds,
             state: final.processing.state.rawValue,
             transcriptionModels: Array(Set((raw?.chunks ?? []).map(\.model))).sorted(),
-            diarizationBackends: Array(Set(runs.map(\.backend))).sorted()
+            diarizationBackends: Array(Set(runs.map(\.backend))).sorted(),
+            run: run,
+            scratch: kept?.path
         )
     }
 
-    static func report(_ row: Row) {
+    static func report(_ row: Row, of repeats: Int = 1) {
         let score = row.score
         print("")
-        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]")
-        print(String(format: "  WER                 %5.1f%%   (no filler %.1f%%)",
-                     score.wer * 100, score.werNoFiller * 100))
-        print(String(format: "  words               %5d ref / %d hyp",
-                     score.referenceWords, score.hypothesisWords))
+        let label = repeats > 1 ? "  run \(row.run)/\(repeats)" : ""
+        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]\(label)")
+        print(String(format: "  WER                 %5.1f%%   (no filler %.1f%%, conversational %.1f%%)",
+                     score.wer * 100, score.werNoFiller * 100, score.werConversational * 100))
+        print(String(format: "  ordering floor      %5.1f%%   (net of floor %.1f%%)",
+                     score.orderingFloorWer * 100, score.netOfFloorWer * 100))
+        print(String(format: "  words               %5d ref / %d hyp   (%.0f/min, %.0f%% of the window is speech)",
+                     score.referenceWords, score.hypothesisWords,
+                     score.wordsPerMinute, score.speechCoverage * 100))
         print(String(format: "  attribution         %5.1f%%   (of labelled %.1f%%, merged %.1f%%)",
                      score.attribution * 100, score.attributionOfLabelled * 100,
                      score.attributionMerged * 100))
+        print(String(format: "  coverage            %5.1f%%   (%d of %d words asked about)",
+                     score.attributionCoverage * 100, score.attributionScored,
+                     score.attributionScored + score.overlapExcluded))
         print("  speakers            \(score.hypothesisSpeakers) found / \(score.referenceSpeakers) true")
         if let der = score.der {
             print(String(format: "  DER                 %5.1f%%   (miss %.1f  FA %.1f  conf %.1f)",
                          der * 100, (score.derMissed ?? 0) * 100,
                          (score.derFalseAlarm ?? 0) * 100, (score.derConfusion ?? 0) * 100))
+            if let strict = score.derStrict {
+                print(String(format: "  DER strict          %5.1f%%   (injective mapping, no cluster merging)",
+                             strict * 100))
+            }
         }
         print(String(format: "  repeated 8-grams    %5d     (%.2f%% of the stream)",
                      score.repeatedNgrams, score.repeatedShare * 100))
@@ -408,29 +475,107 @@ enum BenchCommand {
         print(String(format: "  RTFx                %5.1f     (%.0fs audio in %.0fs)",
                      row.audioSeconds / max(row.processingSeconds, 0.001),
                      row.audioSeconds, row.processingSeconds))
+        if let scratch = row.scratch { print("  scratch             \(scratch)") }
+        // Redirected output is block-buffered, so a run of fourteen cases shows
+        // nothing for half an hour and reads as hung.
+        fflush(stdout)
     }
 
-    static func summarise(_ rows: [Row]) {
+    /// What repeated runs of one case did and did not agree on.
+    static func reportSpread(_ runs: [Row]) {
+        print(String(format: "  over %d runs        WER %.1f%% (%.1f to %.1f)  attribution %.1f%% (%.1f to %.1f)",
+                     runs.count,
+                     mean(runs.map(\.score.wer)) * 100,
+                     (runs.map(\.score.wer).min() ?? 0) * 100,
+                     (runs.map(\.score.wer).max() ?? 0) * 100,
+                     mean(runs.map(\.score.attribution)) * 100,
+                     (runs.map(\.score.attribution).min() ?? 0) * 100,
+                     (runs.map(\.score.attribution).max() ?? 0) * 100))
+        let ders = runs.compactMap(\.score.der)
+        if !ders.isEmpty {
+            print(String(format: "                      DER %.1f%% (%.1f to %.1f)",
+                         mean(ders) * 100, (ders.min() ?? 0) * 100, (ders.max() ?? 0) * 100))
+        }
+        fflush(stdout)
+    }
+
+    /// The score the baseline check reads when a case ran more than once.
+    ///
+    /// The averaged fields are the ones the rule compares. Repeated 8-grams
+    /// take the worst of the runs rather than the mean, because that rule is a
+    /// budget and a defect seen once is a defect. Everything else keeps the
+    /// first run's value: the counts and the mapping describe a particular
+    /// transcript, and an average of two mappings is not a mapping.
+    static func mean(of runs: [Row]) -> BenchScore? {
+        guard var score = runs.first?.score else { return nil }
+        guard runs.count > 1 else { return score }
+        score.wer = mean(runs.map(\.score.wer))
+        score.werNoFiller = mean(runs.map(\.score.werNoFiller))
+        score.werConversational = mean(runs.map(\.score.werConversational))
+        score.attribution = mean(runs.map(\.score.attribution))
+        score.attributionMerged = mean(runs.map(\.score.attributionMerged))
+        score.attributionOfLabelled = mean(runs.map(\.score.attributionOfLabelled))
+        let ders = runs.compactMap(\.score.der)
+        score.der = ders.isEmpty ? nil : mean(ders)
+        let strict = runs.compactMap(\.score.derStrict)
+        score.derStrict = strict.isEmpty ? nil : mean(strict)
+        score.repeatedNgrams = runs.map(\.score.repeatedNgrams).max() ?? score.repeatedNgrams
+        return score
+    }
+
+    static func summarise(_ rows: [Row], repeats: Int = 1) {
         guard rows.count > 1 else { return }
         print("")
-        print("  engine      cases   WER   no filler   attribution   merged   DER   repeats")
+        print("  Net is WER with the case's ordering floor taken off: the floor is what an")
+        print("  oracle transcript pays for reading turns in one stream. Coverage is the share")
+        print("  of reference words attribution asked about; the rest overlap another speaker.")
+        print("  DER is on the merged mapping, strict on the injective one, and above 100% is")
+        print("  arithmetic rather than a defect: false alarm has no upper bound.")
+        print("")
+        var header = "  engine      cases   WER   floor     net   no filler   conv"
+        header += "   attribution   coverage   merged     DER   strict   repeats"
+        if repeats > 1 { header += "   WER spread" }
+        print(header)
         for engine in Array(Set(rows.map(\.engine))).sorted() {
             let group = rows.filter { $0.engine == engine }
             let ders = group.compactMap(\.score.der)
+            let strict = group.compactMap(\.score.derStrict)
             let padded = engine.padding(
                 toLength: max(engine.count, 10), withPad: " ", startingAt: 0
             )
-            print(padded.prefix(10) + String(
-                format: " %5d  %5.1f%%     %5.1f%%        %5.1f%%   %5.1f%%  %5.1f%%   %d",
+            var line = padded.prefix(10) + String(
+                format: " %5d  %5.1f%%  %5.1f%%  %5.1f%%     %5.1f%%  %5.1f%%        %5.1f%%     %5.1f%%   %5.1f%%  %5.1f%%   %5.1f%%   %d",
                 group.count,
                 median(group.map(\.score.wer)) * 100,
+                median(group.map(\.score.orderingFloorWer)) * 100,
+                median(group.map(\.score.netOfFloorWer)) * 100,
                 median(group.map(\.score.werNoFiller)) * 100,
+                median(group.map(\.score.werConversational)) * 100,
                 median(group.map(\.score.attribution)) * 100,
+                median(group.map(\.score.attributionCoverage)) * 100,
                 median(group.map(\.score.attributionMerged)) * 100,
                 ders.isEmpty ? 0 : median(ders) * 100,
+                strict.isEmpty ? 0 : median(strict) * 100,
                 group.reduce(0) { $0 + $1.score.repeatedNgrams }
-            ))
+            )
+            if repeats > 1 {
+                // The widest a single case moved between its own runs, which
+                // is the number a tolerance has to clear.
+                var widest = 0.0
+                for meeting in Set(group.map(\.score.meeting)) {
+                    let wers = group.filter { $0.score.meeting == meeting }.map(\.score.wer)
+                    widest = max(widest, (wers.max() ?? 0) - (wers.min() ?? 0))
+                }
+                line += String(format: "   %5.1f points worst case", widest * 100)
+            }
+            print(line)
         }
+        fflush(stdout)
+    }
+
+    static func mean(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        return values.reduce(0, +) / Double(values.count)
     }
 
     static func median(_ values: [Double]) -> Double {

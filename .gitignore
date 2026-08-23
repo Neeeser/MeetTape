@@ -32,6 +32,7 @@ node_modules/
 
 # Local scratch
 /tmp/
+/bench-scratch/
 *.log
 
 # Extension build output

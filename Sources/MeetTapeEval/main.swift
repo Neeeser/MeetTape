@@ -38,6 +38,13 @@ struct Arguments {
         while index < raw.count {
             let flag = raw[index]
             index += 1
+            // Flags that take no value, read before the value is demanded: a
+            // trailing --keep-scratch would otherwise fall off the end and be
+            // dropped without a word.
+            if flag == "--keep-scratch" {
+                benchOptions.keepScratch = true
+                continue
+            }
             guard index < raw.count else { break }
             let value = raw[index]
             index += 1
@@ -56,6 +63,7 @@ struct Arguments {
             case "--audio-dir": benchOptions.audioDirectory = URL(fileURLWithPath: value)
             case "--out": benchOptions.out = URL(fileURLWithPath: value)
             case "--baseline": benchOptions.baseline = URL(fileURLWithPath: value)
+            case "--repeats": benchOptions.repeats = max(1, Int(value) ?? 1)
             default: break
             }
         }
@@ -100,7 +108,7 @@ func usage() -> Never {
           meettape-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
                                  [--diarizer local|cloud] [--out FILE] [--baseline FILE]
-                                 [--audio-dir DIR]
+                                 [--audio-dir DIR] [--repeats N] [--keep-scratch]
         """)
     exit(2)
 }

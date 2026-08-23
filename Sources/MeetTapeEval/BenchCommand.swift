@@ -45,6 +45,9 @@ enum BenchCommand {
         var state: String
         var transcriptionModels: [String]
         var diarizationBackends: [String]
+        /// What the truth records for the scored window, carried into the
+        /// output so a row explains how hard its case was.
+        var overlapRatio: Double?
     }
 
     /// Which backend an --engine value names.
@@ -380,14 +383,16 @@ enum BenchCommand {
             audioSeconds: imported.durationSeconds,
             state: final.processing.state.rawValue,
             transcriptionModels: Array(Set((raw?.chunks ?? []).map(\.model))).sorted(),
-            diarizationBackends: Array(Set(runs.map(\.backend))).sorted()
+            diarizationBackends: Array(Set(runs.map(\.backend))).sorted(),
+            overlapRatio: benchCase.truth.overlapRatio
         )
     }
 
     static func report(_ row: Row) {
         let score = row.score
+        let overlap = row.overlapRatio.map { String(format: "  overlap %.0f%%", $0 * 100) } ?? ""
         print("")
-        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]")
+        print("\(score.meeting)  \(row.engine) + \(row.diarizer) diarization  [\(row.state)]\(overlap)")
         print(String(format: "  WER                 %5.1f%%   (no filler %.1f%%)",
                      score.wer * 100, score.werNoFiller * 100))
         print(String(format: "  words               %5d ref / %d hyp",

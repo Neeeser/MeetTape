@@ -6,10 +6,14 @@ import Foundation
 /// One file, read by `scripts/fetch-bench-audio.sh` and by the harness, because
 /// two copies of a checksum list drift.
 public struct BenchManifest: Codable, Sendable, Equatable {
-    /// Printf-style template taking the meeting identifier twice.
+    /// The AMI mirror template, taking the meeting identifier twice.
     public var mirror: String
-    /// The annotations archive the truth is generated from.
-    public var annotations: Archive
+    /// Full download URL for a recording the mirror template does not name,
+    /// which is every ICSI meeting: the two corpora publish under different
+    /// paths and under different file names.
+    public var audioURL: [String: String]?
+    /// Corpus name to the annotations archive its truth is generated from.
+    public var annotations: [String: Archive]
     /// Meeting identifier to SHA-256 of its Mix-Headset recording.
     public var audio: [String: String]
     /// Suite name to the meetings it runs, in order.

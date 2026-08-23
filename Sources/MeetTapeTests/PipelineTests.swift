@@ -10,7 +10,7 @@ enum PipelineTests {
     /// Builds a finished two-track recording on disk, ready for processing.
     static func makeRecordedMeeting(
         root: URL, source: MeetingSource = .googleMeet, seconds: Double = 6,
-        remoteStartOffset: Double = 0
+        remoteStartOffset: Double = 0, amplitude: Float = 0.5
     ) throws -> (metadata: MeetingMetadata, store: MeetingStore, repository: MeetingRepository) {
         let repository = MeetingRepository(root: root)
         let started = Date(timeIntervalSince1970: 1_787_070_000)
@@ -31,7 +31,8 @@ enum PipelineTests {
             format: format, segmentSeconds: 30
         )
         micWriter.enqueueSynchronously(AudioBufferPacket(
-            buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000), hostTime: 100
+            buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000, amplitude: amplitude),
+            hostTime: 100
         ))
         micWriter.finish(reason: "test")
 
@@ -41,7 +42,9 @@ enum PipelineTests {
                 format: format, segmentSeconds: 30
             )
             remoteWriter.enqueueSynchronously(AudioBufferPacket(
-                buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000, frequency: 220),
+                buffer: AudioTests.makeTone(
+                    seconds: seconds, sampleRate: 48_000, frequency: 220, amplitude: amplitude
+                ),
                 hostTime: 100 + remoteStartOffset
             ))
             remoteWriter.finish(reason: "test")
@@ -74,6 +77,65 @@ enum PipelineTests {
 
     static var suite: Suite {
         Suite("ProcessingPipeline", [
+            test("a chunk that came back with words is accepted without reading its audio") { expect in
+                // The level only separates silence from a lost transcript, so
+                // decoding on the success path costs a full converter pass per
+                // chunk and turns audio that has become unreadable into a
+                // permanent failure for a transcript already in hand.
+                final class Counter: @unchecked Sendable { var reads = 0 }
+                let counter = Counter()
+                let measure: (URL) throws -> AudioLevel = { _ in
+                    counter.reads += 1
+                    return AudioLevel(peakDBFS: 0, rmsDBFS: 0)
+                }
+                let withSegments = TranscriptionOutput(
+                    segments: [RawTranscriptSegment(start: 0, end: 1, text: "Hello.", speaker: nil)],
+                    text: ""
+                )
+                try ProcessingPipeline.requireTranscribedOrSilent(
+                    response: withSegments, audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                    chunkID: "mic_0", purpose: .words, level: measure
+                )
+                let textOnly = TranscriptionOutput(segments: [], text: "Hello.")
+                try ProcessingPipeline.requireTranscribedOrSilent(
+                    response: textOnly, audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                    chunkID: "mic_1", purpose: .words, level: measure
+                )
+                expect.equal(counter.reads, 0, "a non-empty response never reads the audio")
+
+                var failed = false
+                do {
+                    try ProcessingPipeline.requireTranscribedOrSilent(
+                        response: TranscriptionOutput(segments: [], text: ""),
+                        audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                        chunkID: "mic_2", purpose: .words, level: measure
+                    )
+                } catch {
+                    failed = true
+                }
+                expect.equal(counter.reads, 1, "an empty response reads the audio")
+                expect.isTrue(failed, "an empty response for audible audio fails")
+            },
+
+            test("an empty response whose audio cannot be read fails retryably") { expect in
+                // Nothing proves the audio was silent, so the chunk cannot be
+                // accepted, and a non-retryable failure would strand the
+                // meeting on a scratch file that a retry may well read.
+                struct Unreadable: Error {}
+                var caught: ProcessingError?
+                do {
+                    try ProcessingPipeline.requireTranscribedOrSilent(
+                        response: TranscriptionOutput(segments: [], text: ""),
+                        audio: URL(fileURLWithPath: "/nonexistent.caf"),
+                        chunkID: "mic_0", purpose: .words, level: { _ in throw Unreadable() }
+                    )
+                } catch let error as ProcessingError {
+                    caught = error
+                }
+                expect.equal(caught, .emptyTranscript(chunk: "mic_0"), "fails as an empty transcript")
+                expect.isTrue(caught?.isRetryable == true, "the stage retries")
+            },
+
             test("each track is placed at its own start on the meeting timeline") { expect in
                 // The remote writer opens on the first packet from the meeting
                 // application, which here is 12 s after the microphone started. A
@@ -404,6 +466,53 @@ enum PipelineTests {
                     backend.peakInFlight >= 2,
                     "chunk requests overlap instead of running one at a time"
                 )
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+            },
+
+            test("an empty transcript for audible audio fails the meeting") { expect in
+                // A 168-second chunk of ordinary speech came back as
+                // {"text":""} with HTTP 200, was billed, and was recorded as a
+                // finished chunk: the meeting reported complete with 47% of its
+                // words missing. An empty answer for audio that carries signal
+                // is a failure, not a result.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = []
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let status = try meeting.store.readMetadata().processing
+                expect.equal(status.state, .failed, "an empty transcript must not report success")
+                let failure = try expect.unwrap(status.lastFailure)
+                expect.isTrue(failure.isRetryable, "the meeting can be retried")
+                let raw = try meeting.store.readRawTranscript()
+                expect.equal(
+                    raw.chunks(track: .mic, purpose: .words).count, 0,
+                    "no empty chunk is filed as done"
+                )
+            },
+
+            test("an empty transcript for silent audio is accepted") { expect in
+                // A muted microphone transcribes to nothing legitimately, and
+                // must not leave a meeting failing forever.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, amplitude: 0)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = []
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
                 expect.equal(try meeting.store.readMetadata().processing.state, .complete)
             },
 

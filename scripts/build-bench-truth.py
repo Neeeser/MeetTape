@@ -166,6 +166,15 @@ class IcsiReader:
 
     WORD_CLASSES = {"W", "LET", "ABBR", "TRUNCW", "APOSS"}
     MAX_INTERPOLATED = 0.5
+    # A run of unaligned words whose segment leaves it no room, because the
+    # segment ends at or before the last aligned word, would land every word on
+    # one instant: Bsr001 alone carried 64 zero-duration words, two runs of 18
+    # among them. A zero-length reference word matches nothing and costs the
+    # speech time it stands for, so each such word takes 40 ms, shorter than
+    # any spoken syllable and small enough that a whole 18-word run occupies
+    # 0.72 s. The floor never crosses the next segment on that channel, so it
+    # cannot reach into a time the annotation already gives to speech.
+    MIN_WORD = 0.04
 
     def __init__(self, annotations):
         self.annotations = annotations
@@ -276,8 +285,17 @@ class IcsiReader:
         return out
 
     def _anchor(self, word_list, segments, position):
-        """Spread a segment's unaligned words across the room inside it."""
+        """Spread a segment's unaligned words across the room inside it.
+
+        `position` maps every element's id to its document index, clitics
+        included, while a joined clitic keeps its host's index on the merged
+        word. A segment that ends on a clitic therefore still covers its host,
+        whose index is lower, and one that begins on a clitic names an index no
+        merged word holds, so that word falls to `_interpolate` instead.
+        """
         by_position = {word["position"]: word for word in word_list}
+        # Where the channel next holds speech, for the floor below to stop at.
+        starts = sorted(segment["start"] for segment in segments)
         for segment in segments:
             first = position.get(segment["first"])
             last = position.get(segment["last"])
@@ -302,8 +320,16 @@ class IcsiReader:
                 after = inside[stop]["start"] if stop < len(inside) else segment["end"]
                 if after is None:
                     after = segment["end"]
-                each = max(after - before, 0.0) / (stop - run)
-                for offset in range(stop - run):
+                count = stop - run
+                each = max(after - before, 0.0) / count
+                if each < self.MIN_WORD:
+                    # No room: spread the run over its floor instead of onto a
+                    # point, stopping at the next segment on this channel so
+                    # the invented span stays inside the silence after this one.
+                    later = starts[bisect.bisect_right(starts, before):]
+                    limit = later[0] if later else before + count * self.MIN_WORD
+                    each = max(each, min(self.MIN_WORD, max(limit - before, 0.0) / count))
+                for offset in range(count):
                     word = inside[run + offset]
                     word["start"] = before + each * offset
                     if word["end"] is None or word["end"] < word["start"]:
@@ -329,18 +355,19 @@ class IcsiReader:
                 return []
             count = run - index
             room = 0.0 if before is None or after is None else max(after - before, 0.0)
-            each = min(room / count, self.MAX_INTERPOLATED)
+            each = min(max(room / count, self.MIN_WORD), self.MAX_INTERPOLATED)
             for offset in range(count):
                 word_list[index + offset]["start"] = anchor + each * offset
             index = run
         for position, word in enumerate(word_list):
-            if word["end"] is not None and word["end"] >= word["start"]:
+            if word["end"] is not None and word["end"] > word["start"]:
                 continue
             following = word_list[position + 1]["start"] if position + 1 < len(word_list) else None
             limit = word["start"] + self.MAX_INTERPOLATED
             if following is not None:
                 limit = min(limit, max(following, word["start"]))
-            word["end"] = limit
+            # Never a point: the floor applies to an invented end as well.
+            word["end"] = max(limit, word["start"] + self.MIN_WORD)
         return word_list
 
 
@@ -552,8 +579,12 @@ def build(reader, meeting, window, start=None, people=None, collected=None):
     for word in reference:
         per_speaker[word["speaker"]] = per_speaker.get(word["speaker"], 0) + 1
     kind = "window %.0f-%.0fs" % (start, start + seconds) if window else "whole %.0fs" % seconds
-    print("%-8s %-22s overlap %5.1f%%  words %5d  %s  (%d kB)" % (
-        meeting, kind, ratio * 100, len(reference), per_speaker,
+    # A word the reference gives no duration matches nothing the scorer aligns
+    # against, so the count is printed: a regeneration that reintroduced them
+    # shows here rather than in a benchmark number months later.
+    flat = sum(1 for word in reference if word["end"] <= word["start"])
+    print("%-8s %-22s overlap %5.1f%%  words %5d  zero-duration %3d  %s  (%d kB)" % (
+        meeting, kind, ratio * 100, len(reference), flat, per_speaker,
         os.path.getsize(path) // 1024))
 
 

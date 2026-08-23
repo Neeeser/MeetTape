@@ -26,10 +26,15 @@ public enum LocalSpeechStack {
     public static let approximateParakeetBytes: Int64 = 460 * 1_024 * 1_024
 
     /// Cohere Transcribe 03-2026 through FluidAudio, the INT8 hybrid build.
-    /// The most accurate local model on meeting audio (7.0% AMI WER), around
-    /// 8x realtime warm, with a one-time ANE compile of several minutes on
-    /// first load. Returns text with no timings; the CTC aligner supplies
-    /// them.
+    /// The most accurate local model on meeting audio as a raw model (7.0% AMI
+    /// WER), around 8x realtime warm, with a one-time ANE compile of several
+    /// minutes on first load. Returns text with no timings; the CTC aligner
+    /// supplies them.
+    ///
+    /// End to end that ranking reverses. Through this pipeline, chunked,
+    /// aligned and assembled, it measured 36.0% median filler-stripped WER
+    /// over 14 AMI cases against Parakeet's 20.2%, and lost every one of the
+    /// 14, which is why Parakeet is the default.
     public static let cohereBackendIdentifier = "fluidaudio-cohere-transcribe-03-2026-q8"
     public static let approximateCohereBytes: Int64 = 2_100 * 1_024 * 1_024
 
@@ -111,7 +116,9 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
 
 /// Which engine transcribes when transcription runs on this Mac.
 public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
-    /// Most accurate on meeting audio; text only, aligned locally.
+    /// The strongest raw model on the meeting-audio leaderboard, and behind
+    /// Parakeet through this pipeline: 36.0% median filler-stripped WER over
+    /// 14 AMI cases against Parakeet's 20.2%. Text only, aligned locally.
     case cohere
     /// Fast, word timings of its own, 25 languages.
     case parakeet

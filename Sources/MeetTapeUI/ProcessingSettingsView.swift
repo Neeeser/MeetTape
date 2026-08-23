@@ -310,13 +310,17 @@ struct LocalModelChoicePicker: View {
             }
         )) {
             choice(
-                .cohere, "Cohere Transcribe",
-                "Most accurate on meeting audio. 2.1 GB plus a 600 MB aligner; the "
-                    + "first use takes a few minutes to prepare."
+                .parakeet, "Parakeet TDT v3",
+                "Lowest word error rate of the three: it won all 14 meetings of "
+                    + "the benchmark. Word timings built in, 25 languages, over "
+                    + "100x realtime. 460 MB."
             )
             choice(
-                .parakeet, "Parakeet TDT v3",
-                "Fast, word timings built in, 25 languages. 460 MB."
+                .cohere, "Cohere Transcribe",
+                "Ranks higher than Parakeet on published leaderboards and "
+                    + "scored worse over the same 14 meetings. Around 8x "
+                    + "realtime. 2.1 GB plus a 600 MB aligner for word timings; "
+                    + "the first use takes a few minutes to prepare."
             )
             choice(
                 .whisper, "Whisper Large-v3-Turbo",

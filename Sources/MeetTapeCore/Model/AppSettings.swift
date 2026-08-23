@@ -208,7 +208,7 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
-        localTranscriptionModel: LocalTranscriptionModel = .cohere,
+        localTranscriptionModel: LocalTranscriptionModel = .parakeet,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
         localUserIdentityID: IdentityID? = nil
     ) {
@@ -235,8 +235,9 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
             ?? defaults.diarization
         // The key's absence means the file predates the model choice, which is
-        // an install with Whisper on disk. The fresh default is Cohere, but a
-        // 2.1 GB download must follow a person picking it, not an upgrade.
+        // an install with Whisper on disk. The fresh default is Parakeet, but
+        // no stored value is migrated: a download must follow a person picking
+        // a model, not an upgrade.
         localTranscriptionModel =
             try container.decodeIfPresent(LocalTranscriptionModel.self, forKey: .localTranscriptionModel)
             ?? .whisper
@@ -360,6 +361,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
         } else if version < 2 {
             processing = ProcessingSettings(transcription: .openAI, diarization: .openAI)
         } else {
+            // Version 2 is the version that added the block, and nothing
+            // encodes the struct selectively, so every file a build with
+            // processing settings wrote carries one. A version 2 or 3 file
+            // without the key is therefore hand-edited or truncated, not an
+            // older install, and the fresh defaults are the right answer for
+            // it. The absent-key path inside the block is the one that carries
+            // the upgrade rule.
             processing = defaults.processing
         }
         enrichment =

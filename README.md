@@ -30,7 +30,7 @@ confirmed.
 | Manual recording | Started from the menu bar and unaffected by provider state |
 | In-person meeting | Microphone only, diarized |
 | Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation |
-| Transcription | Cohere Transcribe, Parakeet or Whisper on device, or OpenAI |
+| Transcription | Parakeet, Cohere Transcribe or Whisper on device, or OpenAI |
 | Speaker separation | FluidAudio on device, or OpenAI |
 | Speaker recognition | Local voice profiles, named people and recurring unnamed voices |
 | Speaker names | Editable per speaker and per transcript line |
@@ -47,7 +47,7 @@ state, the same path Firefox uses without the extension.
 ```
 meeting ends
       ↓
-transcription        Cohere Transcribe, Parakeet or Whisper, on this Mac
+transcription        Parakeet, Cohere Transcribe or Whisper, on this Mac
       ↓
 timing alignment     for a model that returns text alone, on this Mac
       ↓
@@ -61,7 +61,7 @@ enrichment           optional: titles, summaries and notes from a cloud model
 ```
 
 Nothing before the last step needs an API key or a network connection. The first
-run downloads about 650 MB of speech models into MeetTape's Application Support
+run downloads about 481 MB of speech models into MeetTape's Application Support
 folder; recording works while that happens and meetings queue until it finishes.
 
 Transcription and speaker separation are chosen independently in Settings, and
@@ -74,15 +74,17 @@ peaking under 1 GB and under two of ten cores, with no thermal throttling.
 Capture always outranks processing: a job waits between stages while a recording
 is live, and one meeting is processed at a time.
 
-Three local engines are offered, picked on the Processing page. Cohere
-Transcribe is the default: the strongest open model on meeting audio, and one
-that returns text with no timings, so a small CTC aligner forces the words
-against the audio afterwards to recover them. Parakeet TDT v3 is the fast
-tier, with word timings of its own. Whisper Large-v3-Turbo remains for
-installs that already have it; it matches `whisper-1` on words and is less
-consistent about punctuation between passages. Word timings, which speaker
-attribution depends on, are protected in every configuration: native from
-Parakeet and Whisper, aligned for Cohere.
+Three local engines are offered, picked on the Processing page. Parakeet TDT v3
+is the default: fast, with word timings of its own and 25 languages, about
+460 MB. It won filler-stripped word error rate on 14 of 14 AMI meetings run
+through MeetTape's own pipeline, at a median of 20.2% against Cohere's 36.0%.
+Cohere Transcribe is still offered, and is the strongest raw model on published
+meeting-audio leaderboards; it costs 2.1 GB plus the 600 MB aligner, returns
+text with no timings, and scored worse end to end through this pipeline. Whisper
+Large-v3-Turbo remains for installs that already have it; it matches `whisper-1`
+on words and is less consistent about punctuation between passages. Word
+timings, which speaker attribution depends on, are protected in every
+configuration: native from Parakeet and Whisper, aligned for Cohere.
 
 ## Speaker recognition
 

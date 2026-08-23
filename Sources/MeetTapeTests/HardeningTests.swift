@@ -533,6 +533,91 @@ enum HardeningTests {
 
     static var sessionSuite: Suite {
         Suite("SessionHardening", [
+            test("a ban saved against a helper is read back as its application") { expect in
+                // Bans written before the identifier was normalised are on disk
+                // as whichever helper the prompt named, and covered only their
+                // own descendants.
+                let json = Data(
+                    #"{"neverRecordApplications":["com.hnc.Discord.helper.Renderer"]}"#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                expect.equal(settings.neverRecordApplications, ["com.hnc.Discord"])
+            },
+
+            test("one application banned under three helpers is one entry") { expect in
+                // Which is how the bug that prompted this arrived: the prompt came
+                // back twice and was answered each time, naming a different helper
+                // each time. Settings lists the application once.
+                let json = Data(
+                    #"""
+                    {"neverRecordApplications":[
+                        "com.hnc.Discord.helper",
+                        "com.hnc.Discord.helper.Renderer",
+                        "com.hnc.Discord.helper.GPU",
+                        "com.example.videochat"
+                    ]}
+                    """#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                expect.equal(
+                    settings.neverRecordApplications, ["com.hnc.Discord", "com.example.videochat"],
+                    "collapsed to the application, in the order they were banned"
+                )
+            },
+
+            test("an always-record entry saved against a helper still preapproves") { expect in
+                // What is saved and what the detector looks up have to name the
+                // same thing. Resolving the process to its application on one
+                // side only leaves a saved entry matching nothing at all, which
+                // is silent: the application simply waits out the dwell again.
+                let json = Data(
+                    #"{"alwaysRecordApplications":["com.openai.chat.helper.Renderer"]}"#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                var detector = GenericCallDetector(
+                    configuration: settings.genericDetectorConfiguration
+                )
+                let events = detector.update(
+                    states: [
+                        ApplicationAudioState(
+                            bundleIdentifier: "com.openai.chat.helper.GPU", processID: 1,
+                            holdsMicrophone: true, producesOutput: false,
+                            isFrontmost: true, windowTitle: nil
+                        ),
+                    ],
+                    at: 100
+                )
+                guard case .callLikely(let candidate) = events.first else {
+                    expect.fail("expected an immediate candidate, got \(events)")
+                    return
+                }
+                expect.isTrue(candidate.isPreapproved)
+            },
+
+            test("banning an application from the prompt records the application") { expect in
+                // The prompt names the process CoreAudio reported, which for an
+                // Electron application is a helper. Stored verbatim, the ban was
+                // one entry per helper and covered none of the others.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                await MainActor.run {
+                    let runtime = MeetTapeRuntime(settingsDirectory: root)
+                    runtime.neverRecord(applicationBundleID: "com.openai.chat.helper.Renderer")
+                    expect.equal(runtime.settings.neverRecordApplications, ["com.openai.chat"])
+                    runtime.neverRecord(applicationBundleID: "com.openai.chat.helper.GPU")
+                    expect.equal(
+                        runtime.settings.neverRecordApplications, ["com.openai.chat"],
+                        "the same application twice is one ban"
+                    )
+
+                    // The other list is written the same way, and the two of them
+                    // hold the same kind of name, so a choice reverses cleanly.
+                    runtime.alwaysRecord(applicationBundleID: "com.openai.chat.helper")
+                    expect.equal(runtime.settings.alwaysRecordApplications, ["com.openai.chat"])
+                    expect.equal(runtime.settings.neverRecordApplications, [])
+                }
+            },
+
             test("a provider set to never record does not suppress another one") { expect in
                 var policies = ProviderPolicies()
                 policies.zoom = ProviderPolicy(autoStart: .never, autoStop: true)

@@ -427,27 +427,32 @@ public final class MeetTapeRuntime {
         guard provisionalPrompt != nil else { return }
         provisionalPrompt = nil
         let actions = sessionController.resolveProvisional(
-            keep: keep, reason: keep ? "kept" : "user_discarded"
+            keep: keep, reason: keep ? "kept" : "user_discarded", now: clock.monotonicSeconds
         )
         syncStatusFromSession()
         enqueue { [weak self] in await self?.perform(actions) }
     }
 
     public func alwaysRecord(applicationBundleID: String) {
+        let application = MicrophoneIgnoreList.applicationIdentifier(for: applicationBundleID)
         var updated = settings
-        if !updated.alwaysRecordApplications.contains(applicationBundleID) {
-            updated.alwaysRecordApplications.append(applicationBundleID)
+        if !updated.alwaysRecordApplications.contains(application) {
+            updated.alwaysRecordApplications.append(application)
         }
-        updated.neverRecordApplications.removeAll { $0 == applicationBundleID }
+        updated.neverRecordApplications.removeAll { $0 == application }
         update(settings: updated)
     }
 
     public func neverRecord(applicationBundleID: String) {
+        // The prompt names the process that opened the microphone, which for an
+        // Electron application is one of several helpers. The user answered about
+        // the application, so that is what is stored.
+        let application = MicrophoneIgnoreList.applicationIdentifier(for: applicationBundleID)
         var updated = settings
-        if !updated.neverRecordApplications.contains(applicationBundleID) {
-            updated.neverRecordApplications.append(applicationBundleID)
+        if !updated.neverRecordApplications.contains(application) {
+            updated.neverRecordApplications.append(application)
         }
-        updated.alwaysRecordApplications.removeAll { $0 == applicationBundleID }
+        updated.alwaysRecordApplications.removeAll { $0 == application }
         update(settings: updated)
     }
 
@@ -928,10 +933,16 @@ public final class MeetTapeRuntime {
         }
     }
 
+    /// The name to show for a process that opened the microphone.
+    ///
+    /// Helpers are not registered with LaunchServices, so asking for the name of
+    /// `com.hnc.Discord.helper.Renderer` gets that string back and the prompt
+    /// read as an identifier rather than an application.
     private func applicationName(for bundleIdentifier: String) -> String {
-        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        let application = MicrophoneIgnoreList.applicationIdentifier(for: bundleIdentifier)
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: application)
             .map { FileManager.default.displayName(atPath: $0.path) }
-            ?? bundleIdentifier
+            ?? application
     }
 
     func apply(_ progress: ProcessingPipeline.Progress) {

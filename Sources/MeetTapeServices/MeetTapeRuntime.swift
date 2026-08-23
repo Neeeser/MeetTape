@@ -514,9 +514,15 @@ public final class MeetTapeRuntime {
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)
         status.detectionPaused = newSettings.providers.detectionPaused
-        // A different model choice changes which units count as installed.
+        // A different model choice changes which units count as installed. On
+        // the ordered chain rather than a bare task: two quick changes as
+        // unordered tasks could land the older set last, leaving the manager
+        // judging itself against an engine nobody chose. The Cloud tab's custom
+        // model field is the one control that changes the required set and
+        // starts no download, so this write is what keeps it right.
         if let models {
-            Task { await models.setRequired(LocalModelUnit.required(for: newSettings)) }
+            let units = LocalModelUnit.required(for: newSettings)
+            enqueue { await models.setRequired(units) }
         }
         onStatusChange?()
     }

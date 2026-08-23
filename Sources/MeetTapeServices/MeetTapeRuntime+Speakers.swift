@@ -84,9 +84,9 @@ extension MeetTapeRuntime {
     /// The units the current settings need, handed to the manager as the set to
     /// judge itself against and as the set to fetch.
     ///
-    /// Both, in that order, on this one call: `update(settings:)` passes the new
-    /// required set over on an unstructured task, and a download started right
-    /// after a model change raced it, so picking Cohere fetched Parakeet.
+    /// Both, in that order, on this one call: a download started right after a
+    /// model change used to race the settings write that names the units, so
+    /// picking Cohere fetched Parakeet.
     public func installLocalModels(_ units: Set<LocalModelUnit>) async {
         guard let models else { return }
         await models.setRequired(units)

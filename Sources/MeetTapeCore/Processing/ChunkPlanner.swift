@@ -61,6 +61,26 @@ public struct ChunkPlanner: Sendable {
 
         /// Measured limits: 1400 s per diarization request, 25 MiB per request body.
         public static let openAIDiarization = Configuration()
+
+        /// A configuration sized to a backend's own duration limit, when that
+        /// limit is tighter than the default plan. The target sits under the
+        /// ceiling by the same margin the default keeps (1140 in 1300), and
+        /// the search window never exceeds the room between minimum and
+        /// target.
+        public static func fitting(_ limits: BackendAudioLimits) -> Configuration? {
+            guard let maximum = limits.maximumSeconds,
+                maximum < Configuration.openAIDiarization.maxChunkSeconds
+            else { return nil }
+            let target = maximum * 1_140 / 1_300
+            let minimum = min(60, target / 2)
+            return Configuration(
+                targetChunkSeconds: target,
+                maxChunkSeconds: maximum,
+                minChunkSeconds: minimum,
+                searchWindowSeconds: min(60, (target - minimum) / 2),
+                overlapSeconds: 8
+            )
+        }
     }
 
     public let configuration: Configuration

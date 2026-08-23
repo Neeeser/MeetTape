@@ -6,7 +6,8 @@ import MeetTapeCore
 /// WhisperKit defaults to `~/Documents/huggingface`, which puts 624 MB into the
 /// user's Documents folder where it shows up in Finder and syncs to iCloud
 /// Drive. Everything goes under Application Support instead, in one directory
-/// MeetTape owns and can report on, delete and re-download.
+/// MeetTape owns and can report on, delete and re-download, one subdirectory
+/// per install unit.
 public struct LocalModelLocations: Sendable, Equatable {
     public let root: URL
 
@@ -32,49 +33,80 @@ public struct LocalModelLocations: Sendable, Equatable {
         root.appendingPathComponent("Diarizer", isDirectory: true)
     }
 
-    /// Written after a full install, so "is it there" does not need the network.
-    public var receipt: URL { root.appendingPathComponent("installed.json") }
+    public var parakeetDirectory: URL {
+        root.appendingPathComponent("Parakeet", isDirectory: true)
+    }
+
+    public var cohereDirectory: URL {
+        root.appendingPathComponent("Cohere", isDirectory: true)
+    }
+
+    public var alignerDirectory: URL {
+        root.appendingPathComponent("Aligner", isDirectory: true)
+    }
+
+    /// The directory a unit installs into and is deleted from.
+    public func directory(for unit: LocalModelUnit) -> URL {
+        switch unit {
+        case .whisper: whisperBase
+        case .parakeet: parakeetDirectory
+        case .cohere: cohereDirectory
+        case .ctcAligner: alignerDirectory
+        case .diarizer: diarizerDirectory
+        }
+    }
+
+    /// One receipt per installed unit, written after each unit completes.
+    public var inventory: URL { root.appendingPathComponent("units.json") }
+
+    /// The single-receipt file builds before per-unit installs wrote. Read for
+    /// migration, never written again.
+    public var legacyReceipt: URL { root.appendingPathComponent("installed.json") }
 }
 
-/// What a successful install left behind.
-public struct LocalModelReceipt: Codable, Sendable, Equatable {
-    public var whisperVariant: String
-    public var whisperFolderPath: String
-    public var whisperBytes: Int64
-    public var diarizerBytes: Int64
+/// What one unit's successful install left behind.
+public struct LocalUnitReceipt: Codable, Sendable, Equatable {
+    /// The pinned revision the files came from, compared against
+    /// `LocalSpeechStack.revision(for:)` so a dependency bump is visible as a
+    /// stale receipt rather than as strange results.
+    public var revision: String
+    public var bytes: Int64
     public var installedAt: Date
-    /// The package revisions the files came from, so a dependency bump is
-    /// visible as a stale receipt rather than as strange results.
-    public var whisperPackage: String
-    public var diarizerPackage: String
+    /// Unit-specific: Whisper records the resolved model folder path here.
+    public var detail: String?
 
-    public init(
-        whisperVariant: String, whisperFolderPath: String, whisperBytes: Int64,
-        diarizerBytes: Int64, installedAt: Date, whisperPackage: String, diarizerPackage: String
-    ) {
-        self.whisperVariant = whisperVariant
-        self.whisperFolderPath = whisperFolderPath
-        self.whisperBytes = whisperBytes
-        self.diarizerBytes = diarizerBytes
+    public init(revision: String, bytes: Int64, installedAt: Date, detail: String? = nil) {
+        self.revision = revision
+        self.bytes = bytes
         self.installedAt = installedAt
-        self.whisperPackage = whisperPackage
-        self.diarizerPackage = diarizerPackage
+        self.detail = detail
     }
 
-    public var matchesCurrentBuild: Bool {
-        whisperVariant == LocalSpeechStack.whisperModel
-            && whisperPackage == LocalSpeechStack.whisperPackage
-            && diarizerPackage == LocalSpeechStack.diarizerPackage
+    public func matchesCurrentBuild(for unit: LocalModelUnit) -> Bool {
+        revision == LocalSpeechStack.revision(for: unit)
     }
 }
 
-/// Whether the local stack can run right now.
+/// Every unit that is installed right now.
+public struct LocalModelSnapshot: Sendable, Equatable {
+    public var receipts: [LocalModelUnit: LocalUnitReceipt]
+
+    public init(receipts: [LocalModelUnit: LocalUnitReceipt] = [:]) {
+        self.receipts = receipts
+    }
+
+    public var totalBytes: Int64 { receipts.values.reduce(0) { $0 + $1.bytes } }
+    public var units: Set<LocalModelUnit> { Set(receipts.keys) }
+    public func bytes(for unit: LocalModelUnit) -> Int64? { receipts[unit]?.bytes }
+}
+
+/// Whether the units the current configuration needs can run right now.
 public enum LocalModelState: Sendable, Equatable {
     case notInstalled
     case downloading(fraction: Double, detail: String)
-    case installed(LocalModelReceipt)
-    /// Installed by a build that pinned different model revisions.
-    case outdated(LocalModelReceipt)
+    case installed(LocalModelSnapshot)
+    /// Present, but installed by a build that pinned different revisions.
+    case outdated(LocalModelSnapshot)
     case failed(String)
 
     public var isUsable: Bool {
@@ -90,27 +122,79 @@ public enum LocalModelState: Sendable, Equatable {
     }
 }
 
-/// Reads and writes the install receipt.
-struct LocalModelReceiptStore: Sendable {
-    let locations: LocalModelLocations
+/// Reads and writes the per-unit receipts, migrating the single-receipt file
+/// a previous build wrote.
+public struct LocalModelReceiptStore: Sendable {
+    public let locations: LocalModelLocations
 
-    func read() -> LocalModelReceipt? {
-        guard let data = try? Data(contentsOf: locations.receipt) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(LocalModelReceipt.self, from: data)
+    public init(locations: LocalModelLocations) {
+        self.locations = locations
     }
 
-    func write(_ receipt: LocalModelReceipt) throws {
+    public func read() -> [LocalModelUnit: LocalUnitReceipt] {
+        if let data = try? Data(contentsOf: locations.inventory),
+            let stored = try? Self.decoder.decode([String: LocalUnitReceipt].self, from: data) {
+            var receipts: [LocalModelUnit: LocalUnitReceipt] = [:]
+            for (key, receipt) in stored {
+                guard let unit = LocalModelUnit(rawValue: key) else { continue }
+                receipts[unit] = receipt
+            }
+            return receipts
+        }
+        return migratedLegacyReceipts()
+    }
+
+    /// A pre-unit install was always Whisper plus the diarizer. The legacy
+    /// receipt names the packages it was built against, which carry over so an
+    /// install pinned by an older build still reads as outdated, not current.
+    private func migratedLegacyReceipts() -> [LocalModelUnit: LocalUnitReceipt] {
+        guard let data = try? Data(contentsOf: locations.legacyReceipt),
+            let legacy = try? Self.decoder.decode(LegacyReceipt.self, from: data)
+        else { return [:] }
+        return [
+            .whisper: LocalUnitReceipt(
+                revision: "\(legacy.whisperVariant) @ \(legacy.whisperPackage)",
+                bytes: legacy.whisperBytes,
+                installedAt: legacy.installedAt,
+                detail: legacy.whisperFolderPath
+            ),
+            .diarizer: LocalUnitReceipt(
+                revision: legacy.diarizerPackage,
+                bytes: legacy.diarizerBytes,
+                installedAt: legacy.installedAt
+            ),
+        ]
+    }
+
+    public func write(_ receipts: [LocalModelUnit: LocalUnitReceipt]) throws {
         try FileManager.default.createDirectory(at: locations.root, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(receipt).write(to: locations.receipt, options: .atomic)
+        let stored = Dictionary(uniqueKeysWithValues: receipts.map { ($0.key.rawValue, $0.value) })
+        try encoder.encode(stored).write(to: locations.inventory, options: .atomic)
+        try? FileManager.default.removeItem(at: locations.legacyReceipt)
     }
 
-    func clear() {
-        try? FileManager.default.removeItem(at: locations.receipt)
+    public func clear() {
+        try? FileManager.default.removeItem(at: locations.inventory)
+        try? FileManager.default.removeItem(at: locations.legacyReceipt)
+    }
+
+    private static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    private struct LegacyReceipt: Codable {
+        var whisperVariant: String
+        var whisperFolderPath: String
+        var whisperBytes: Int64
+        var diarizerBytes: Int64
+        var installedAt: Date
+        var whisperPackage: String
+        var diarizerPackage: String
     }
 }
 

@@ -38,17 +38,20 @@ enum LocalModelTests {
             test("the models install into MeetTape's own directory and load") { expect in
                 let (support, _) = try requireModels()
                 let manager = LocalModelManager(applicationSupport: support)
-                let receipt = try await manager.install()
-                expect.equal(receipt.whisperVariant, LocalSpeechStack.whisperModel)
+                let snapshot = try await manager.install()
+                let whisper = try expect.unwrap(snapshot.receipts[.whisper])
+                expect.equal(whisper.revision, LocalSpeechStack.revision(for: .whisper))
+                let folder = try expect.unwrap(whisper.detail)
                 expect.isTrue(
-                    receipt.whisperFolderPath.contains("Application Support/MeetTape/Models/Whisper"),
-                    "got \(receipt.whisperFolderPath)"
+                    folder.contains("Application Support/MeetTape/Models/Whisper"),
+                    "got \(folder)"
                 )
-                expect.isFalse(receipt.whisperFolderPath.contains("/Documents/"))
+                expect.isFalse(folder.contains("/Documents/"))
                 expect.isTrue(
-                    receipt.whisperBytes > 300_000_000,
-                    "the model is about 624 MB, got \(receipt.whisperBytes)"
+                    whisper.bytes > 300_000_000,
+                    "the model is about 624 MB, got \(whisper.bytes)"
                 )
+                expect.isTrue(snapshot.receipts[.diarizer] != nil, "the diarizer installs with it")
                 expect.isTrue(await manager.isInstalled)
             },
 

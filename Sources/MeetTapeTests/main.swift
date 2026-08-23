@@ -21,6 +21,7 @@ suites.append(ReconnectTests.suite)
 suites += SpeakerCorrectionTests.all
 suites += BackendSelectionTests.all
 suites.append(CloudModelTests.suite)
+suites += AlignmentTests.all
 suites += ProcessingTests.all
 suites.append(PipelineTests.suite)
 suites.append(LocalPipelineTests.suite)

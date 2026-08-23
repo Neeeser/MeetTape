@@ -20,6 +20,120 @@ public enum LocalSpeechStack {
     public static let approximateDownloadBytes: Int64 = 650 * 1_024 * 1_024
     public static let approximateWhisperBytes: Int64 = 624 * 1_024 * 1_024
     public static let approximateDiarizerBytes: Int64 = 21 * 1_024 * 1_024
+
+    /// Parakeet TDT v3 through FluidAudio. 25 languages, word timings, over
+    /// 100x realtime on Apple Silicon, 9.4% WER on AMI meeting audio against
+    /// Whisper Turbo's 13.9% (Open ASR leaderboard, cleaned references,
+    /// 2026-08).
+    public static let parakeetBackendIdentifier = "fluidaudio-parakeet-tdt-v3"
+    public static let approximateParakeetBytes: Int64 = 460 * 1_024 * 1_024
+
+    /// Cohere Transcribe 03-2026 through FluidAudio, the INT8 hybrid build.
+    /// The most accurate local model on meeting audio (7.0% AMI WER), around
+    /// 8x realtime warm, with a one-time ANE compile of several minutes on
+    /// first load. Returns text with no timings; the CTC aligner supplies
+    /// them.
+    public static let cohereBackendIdentifier = "fluidaudio-cohere-transcribe-03-2026-q8"
+    public static let approximateCohereBytes: Int64 = 2_100 * 1_024 * 1_024
+
+    /// Parakeet CTC 110M, the forced-alignment model. Recorded as alignment
+    /// provenance on every aligned chunk.
+    public static let alignerIdentifier = "fluidaudio-parakeet-ctc-110m"
+    public static let approximateAlignerBytes: Int64 = 160 * 1_024 * 1_024
+
+    /// What each unit's files came from, written into its receipt so a
+    /// dependency or variant bump reads as a stale install rather than as
+    /// strange results.
+    public static func revision(for unit: LocalModelUnit) -> String {
+        switch unit {
+        case .whisper: "\(whisperModel) @ \(whisperPackage)"
+        case .parakeet: "parakeet-tdt-0.6b-v3-int8 @ \(diarizerPackage)"
+        case .cohere: "cohere-transcribe-03-2026-q8 @ \(diarizerPackage)"
+        case .ctcAligner: "parakeet-ctc-110m @ \(diarizerPackage)"
+        case .diarizer: diarizerPackage
+        }
+    }
+}
+
+/// One independently installable set of model files.
+///
+/// Which units a configuration needs is a pure decision made here; how each is
+/// fetched and loaded lives with the implementations.
+public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
+    case whisper
+    case parakeet
+    case cohere
+    case ctcAligner = "ctc-aligner"
+    case diarizer
+
+    /// The units the given settings actually use.
+    ///
+    /// The diarizer is always in the set when anything local runs: local
+    /// diarization needs it outright, and voice memory embeds with its models
+    /// in every configuration. The aligner is required by any chosen
+    /// transcription model that returns text without timings.
+    public static func required(for settings: AppSettings) -> Set<LocalModelUnit> {
+        var units: Set<LocalModelUnit> = []
+        if settings.processing.usesLocalDiarization { units.insert(.diarizer) }
+        if settings.processing.usesLocalTranscription {
+            units.insert(.diarizer)
+            switch settings.processing.localTranscriptionModel {
+            case .cohere:
+                units.insert(.cohere)
+                units.insert(.ctcAligner)
+            case .parakeet:
+                units.insert(.parakeet)
+            case .whisper:
+                units.insert(.whisper)
+            }
+        }
+        if !settings.processing.usesLocalTranscription,
+            AIModelSettings.transcriptionTiming(for: settings.models.transcription) == .text {
+            units.insert(.ctcAligner)
+        }
+        return units
+    }
+
+    public var approximateBytes: Int64 {
+        switch self {
+        case .whisper: LocalSpeechStack.approximateWhisperBytes
+        case .parakeet: LocalSpeechStack.approximateParakeetBytes
+        case .cohere: LocalSpeechStack.approximateCohereBytes
+        case .ctcAligner: LocalSpeechStack.approximateAlignerBytes
+        case .diarizer: LocalSpeechStack.approximateDiarizerBytes
+        }
+    }
+}
+
+/// Which engine transcribes when transcription runs on this Mac.
+public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
+    /// Most accurate on meeting audio; text only, aligned locally.
+    case cohere
+    /// Fast, word timings of its own, 25 languages.
+    case parakeet
+    /// The original local engine, kept for installs that already have it.
+    case whisper
+
+    public var backendIdentifier: String {
+        switch self {
+        case .cohere: LocalSpeechStack.cohereBackendIdentifier
+        case .parakeet: LocalSpeechStack.parakeetBackendIdentifier
+        case .whisper: LocalSpeechStack.whisperBackendIdentifier
+        }
+    }
+}
+
+/// The forced-alignment settings MeetTape depends on.
+public enum LocalAlignmentTuning {
+    /// Aligned words group into segments at pauses past this, before the
+    /// assembler applies its own tuned utterance thresholds.
+    public static let segmentPauseSeconds: Double = 1.0
+    /// And never longer than this, so duplicate detection over chunk overlaps
+    /// keeps something to compare.
+    public static let segmentMaximumSeconds: Double = 30
+    /// A text-only backend is chunked to this length so every chunk's Viterbi
+    /// trellis stays small; the planner still moves boundaries to silence.
+    public static let chunkSeconds: Double = 300
 }
 
 /// The offline diarizer settings MeetTape overrides, and why.

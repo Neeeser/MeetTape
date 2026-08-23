@@ -52,10 +52,10 @@ enum CloudModelTests {
                 let response = try OpenAIClient.parseTranscription(body, allowTextOnly: false)
                 expect.equal(response.segments.count, 2)
                 expect.equal(
-                    response.segments.first?.words?.map(\.text), ["hello", "there"],
-                    "words land in the segment covering their start"
+                    response.segments.first?.words?.map(\.text), [" hello", " there"],
+                    "words land in their segment, spaced the way the assembler joins"
                 )
-                expect.equal(response.segments.last?.words?.map(\.text), ["general"])
+                expect.equal(response.segments.last?.words?.map(\.text), [" general"])
             },
 
             test("a text-only response is valid for a model without timings") { expect in

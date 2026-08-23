@@ -25,6 +25,9 @@ public struct MeetingLayout: Sendable, Equatable {
     public var mixedAudio: URL { root.appendingPathComponent("mixed.caf") }
     /// Raw API responses, kept verbatim as ground truth for what the model said.
     public var apiResponses: URL { root.appendingPathComponent("api", isDirectory: true) }
+    /// Derived timings for chunks whose model returned text alone. Regenerable
+    /// from the segments and the raw transcript, like every derived file.
+    public var alignments: URL { root.appendingPathComponent("alignments", isDirectory: true) }
     /// Imported originals live here untouched.
     public var originals: URL { root.appendingPathComponent("original", isDirectory: true) }
 
@@ -38,6 +41,10 @@ public struct MeetingLayout: Sendable, Equatable {
 
     public func apiResponseFile(named name: String) -> URL {
         apiResponses.appendingPathComponent(name)
+    }
+
+    public func alignmentFile(chunkID: String) -> URL {
+        alignments.appendingPathComponent("\(chunkID).json")
     }
 }
 

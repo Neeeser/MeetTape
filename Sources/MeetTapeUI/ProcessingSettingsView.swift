@@ -147,21 +147,20 @@ struct LocalModelsSettingsTab: View {
         .task { await runtime.refreshLocalModelState() }
     }
 
-    private var whisperStatus: String {
-        switch runtime.localModelState {
-        case .installed(let receipt), .outdated(let receipt):
-            "Installed — \(megabytes(receipt.whisperBytes))"
-        case .downloading: "Downloading"
-        case .notInstalled, .failed: "Not installed — about 624 MB"
-        }
-    }
+    private var whisperStatus: String { unitStatus(.whisper) }
 
-    private var diarizerStatus: String {
+    private var diarizerStatus: String { unitStatus(.diarizer) }
+
+    private func unitStatus(_ unit: LocalModelUnit) -> String {
         switch runtime.localModelState {
-        case .installed(let receipt), .outdated(let receipt):
-            "Installed — \(megabytes(receipt.diarizerBytes))"
-        case .downloading: "Downloading"
-        case .notInstalled, .failed: "Not installed — about 21 MB"
+        case .installed(let snapshot), .outdated(let snapshot):
+            if let bytes = snapshot.bytes(for: unit) {
+                return "Installed — \(megabytes(bytes))"
+            }
+            return "Not installed — about \(megabytes(unit.approximateBytes))"
+        case .downloading: return "Downloading"
+        case .notInstalled, .failed:
+            return "Not installed — about \(megabytes(unit.approximateBytes))"
         }
     }
 

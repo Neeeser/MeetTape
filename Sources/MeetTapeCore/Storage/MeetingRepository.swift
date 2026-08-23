@@ -129,6 +129,50 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(data, to: layout.apiResponseFile(named: name))
     }
 
+    // MARK: alignments
+
+    public func hasAlignment(chunkID: String) -> Bool {
+        FileManager.default.fileExists(atPath: layout.alignmentFile(chunkID: chunkID).path)
+    }
+
+    public func readAlignment(chunkID: String) -> ChunkAlignment? {
+        guard let data = try? read(layout.alignmentFile(chunkID: chunkID)) else { return nil }
+        return try? ArchiveCoding.decode(
+            ChunkAlignment.self, from: data, path: layout.alignmentFile(chunkID: chunkID).path
+        )
+    }
+
+    public func writeAlignment(_ alignment: ChunkAlignment, chunkID: String) throws {
+        try FileManager.default.createDirectory(
+            at: layout.alignments, withIntermediateDirectories: true
+        )
+        try AtomicFile.write(
+            try ArchiveCoding.encode(alignment), to: layout.alignmentFile(chunkID: chunkID)
+        )
+    }
+
+    /// The raw transcript with every text-only chunk's segments filled in.
+    ///
+    /// An aligned chunk gets its aligned segments; one that was never aligned
+    /// gets a single segment spanning the chunk, so the words still reach the
+    /// timeline at chunk precision instead of vanishing. The raw file itself
+    /// is never rewritten.
+    public func readRawTranscriptForAssembly() throws -> RawTranscript {
+        var raw = try readRawTranscript()
+        for index in raw.chunks.indices {
+            let chunk = raw.chunks[index]
+            guard let text = chunk.text, chunk.segments.isEmpty else { continue }
+            if let alignment = readAlignment(chunkID: chunk.id) {
+                raw.chunks[index].segments = alignment.segments
+            } else {
+                raw.chunks[index].segments = [RawTranscriptSegment(
+                    start: 0, end: chunk.durationSeconds, text: text, speaker: nil
+                )]
+            }
+        }
+        return raw
+    }
+
     // MARK: timeline
 
     public func readTimeline() throws -> RecordingTimeline {

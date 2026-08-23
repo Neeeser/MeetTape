@@ -26,6 +26,10 @@ public struct ProcessingBackends: Sendable {
     /// running and refuses rather than starting one, so a cloud-only setup never
     /// downloads models it was not asked for.
     public var requireLocalModels: (@Sendable () async throws -> Void)?
+    /// Recovers timings for chunks whose backend returned text alone. Absent
+    /// in cloud-only test configurations; the pipeline then falls back to
+    /// chunk-level timing.
+    public var aligner: (any TranscriptAligner)?
     /// Extracts one vector for a track known to hold a single speaker, used for
     /// the microphone track where the speaker is the local user by construction.
     public var singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)?
@@ -41,6 +45,7 @@ public struct ProcessingBackends: Sendable {
         speakers: SpeakerRecognitionService? = nil,
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
+        aligner: (any TranscriptAligner)? = nil,
         singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         reanalyzeDiarization: (@Sendable (String, URL, Int?) async throws -> DiarizationOutput)? = nil
     ) {
@@ -50,6 +55,7 @@ public struct ProcessingBackends: Sendable {
         self.speakers = speakers
         self.prepareLocalModels = prepareLocalModels
         self.requireLocalModels = requireLocalModels
+        self.aligner = aligner
         self.singleSpeakerEmbedding = singleSpeakerEmbedding
         self.reanalyzeDiarization = reanalyzeDiarization
     }
@@ -64,10 +70,12 @@ public struct ProcessingBackends: Sendable {
     /// whole suite still green.
     public static func transcriptionBackend(
         settings: AppSettings, model: String,
-        local: @Sendable () -> any TranscriptionBackend,
+        local: @Sendable (LocalTranscriptionModel) -> any TranscriptionBackend,
         cloud: @Sendable (String) -> any TranscriptionBackend
     ) -> any TranscriptionBackend {
-        settings.processing.usesLocalTranscription ? local() : cloud(model)
+        settings.processing.usesLocalTranscription
+            ? local(settings.processing.localTranscriptionModel)
+            : cloud(model)
     }
 
     public static func diarizationBackend(

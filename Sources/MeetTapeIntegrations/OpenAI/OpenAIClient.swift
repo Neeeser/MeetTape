@@ -430,7 +430,12 @@ public struct OpenAIClient: AIBackend {
             else { continue }
             let index = segments.lastIndex { $0.start <= start } ?? 0
             var nested = segments[index].words ?? []
-            nested.append(RawTranscriptWord(start: start, end: end, text: text))
+            // The API returns bare words; the canonical convention is
+            // Whisper's, a leading space per word, which is what the
+            // assembler concatenates by.
+            nested.append(RawTranscriptWord(
+                start: start, end: end, text: text.hasPrefix(" ") ? text : " " + text
+            ))
             segments[index].words = nested
         }
     }

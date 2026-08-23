@@ -59,6 +59,37 @@ struct StubLocalDiarizer: DiarizationBackend, @unchecked Sendable {
     }
 }
 
+/// A transcription backend that returns the best words and no timings, the
+/// shape gpt-transcribe and local Cohere produce.
+final class StubTextTranscriber: TranscriptionBackend, @unchecked Sendable {
+    var text: String
+    var identifier = "stub-cohere"
+    var isLocal = true
+    var limits = BackendAudioLimits.none
+    var timing = TranscriptTiming.text
+
+    init(text: String) { self.text = text }
+
+    func transcribe(
+        audio: URL, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> TranscriptionOutput {
+        progress(1)
+        return TranscriptionOutput(segments: [], text: text, durationSeconds: 6)
+    }
+}
+
+/// An aligner with a fixed answer, or a refusal.
+struct StubAligner: TranscriptAligner, @unchecked Sendable {
+    var identifier = "stub-aligner"
+    var segments: [RawTranscriptSegment]
+    var refuses = false
+
+    func align(audio: URL, text: String) async throws -> [RawTranscriptSegment] {
+        if refuses { throw TranscriptAlignmentRefused(reason: "stub refusal") }
+        return segments
+    }
+}
+
 /// Stands in for the embedding extractor on a machine with no models installed.
 struct RefusingEmbeddingExtractor: SpeakerEmbeddingExtractor {
     var model: EmbeddingModelIdentifier { .fluidAudioOffline }
@@ -83,9 +114,10 @@ enum LocalPipelineTests {
     static func makePipeline(
         repository: MeetingRepository,
         backend: FakeAIBackend,
-        transcriber: StubLocalTranscriber,
+        transcriber: any TranscriptionBackend,
         diarizer: StubLocalDiarizer,
         speakers: SpeakerRecognitionService?,
+        aligner: (any TranscriptAligner)? = nil,
         settings: AppSettings,
         scratchRoot: URL
     ) -> ProcessingPipeline {
@@ -95,7 +127,8 @@ enum LocalPipelineTests {
             backends: ProcessingBackends(
                 transcription: { _, _ in transcriber },
                 diarization: { _, _ in diarizer },
-                speakers: speakers
+                speakers: speakers,
+                aligner: aligner
             ),
             scratch: ProcessingScratch(root: scratchRoot),
             clock: ManualClock(),
@@ -168,6 +201,101 @@ enum LocalPipelineTests {
                 expect.equal(remote[0].text, "we ship friday")
                 expect.equal(remote[1].text, "no we do not")
                 expect.notEqual(remote[0].speakerKey, remote[1].speakerKey)
+            },
+
+            test("a text-only backend's words reach the timeline through the aligner") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "we ship friday no we do not")
+                let aligner = StubAligner(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 4.2, text: "we ship friday no we do not", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.3, text: " we"),
+                            RawTranscriptWord(start: 0.4, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.4, text: " friday"),
+                            RawTranscriptWord(start: 3.0, end: 3.2, text: " no"),
+                            RawTranscriptWord(start: 3.3, end: 3.5, text: " we"),
+                            RawTranscriptWord(start: 3.6, end: 3.8, text: " do"),
+                            RawTranscriptWord(start: 3.9, end: 4.2, text: " not"),
+                        ]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [
+                        DiarizationInterval(start: 0, end: 2, clusterID: "S1"),
+                        DiarizationInterval(start: 2.9, end: 4.5, clusterID: "S2"),
+                    ],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 31, spans: [(0, 2)])
+                        + embeddings(cluster: "S2", seed: 32, spans: [(2.9, 4.5)])
+                )
+
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: aligner,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+
+                // The raw chunk stays what the model returned: text, no timings.
+                let raw = try meeting.store.readRawTranscript()
+                let chunk = try expect.unwrap(raw.chunks.first { $0.track == .remote })
+                expect.equal(chunk.text, "we ship friday no we do not")
+                expect.equal(chunk.segments.count, 0, "no timings are invented into the raw record")
+                expect.equal(chunk.responseFormat, "local_text")
+
+                // The alignment is its own derived file, with provenance.
+                let alignment = try expect.unwrap(meeting.store.readAlignment(chunkID: chunk.id))
+                expect.equal(alignment.aligner, "stub-aligner")
+
+                // And assembly consumes the aligned words: split where the
+                // speaker changed, exactly as a word-timed backend would be.
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let remote = transcript.utterances.filter { $0.track == .remote }
+                expect.equal(remote.count, 2, "attribution worked on aligned words")
+                expect.equal(remote.first?.text, "we ship friday")
+                expect.equal(remote.last?.text, "no we do not")
+            },
+
+            test("an aligner refusal keeps the words at chunk precision") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "nothing aligned here")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 33, spans: [(0, 5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: StubAligner(segments: [], refuses: true),
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                expect.isTrue(
+                    transcript.utterances.contains { $0.text.contains("nothing aligned here") },
+                    "the words survive at chunk-level timing instead of vanishing"
+                )
             },
 
             test("rebuilding the transcript keeps every speaker") { expect in

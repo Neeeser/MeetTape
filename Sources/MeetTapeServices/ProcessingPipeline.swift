@@ -380,7 +380,8 @@ public actor ProcessingPipeline {
             if transcriber.limits.requiresChunking {
                 try await runChunks(
                     store: store, metadata: &metadata, track: track, segments: segments,
-                    model: transcriber.identifier
+                    model: transcriber.identifier,
+                    configuration: ChunkPlanner.Configuration.fitting(transcriber.limits)
                 ) { url, _ in
                     let output = try await transcriber.transcribe(audio: url, progress: { _ in })
                     return output
@@ -389,6 +390,94 @@ public actor ProcessingPipeline {
                 try await runWholeTrack(
                     store: store, metadata: &metadata, track: track,
                     segments: segments, timeline: timeline, backend: transcriber
+                )
+            }
+        }
+
+        // A text-only backend's words cannot reach the timeline until they
+        // carry timings; recover them now, while this stage's retry semantics
+        // still apply.
+        try await alignTextChunks(store: store, metadata: &metadata)
+    }
+
+    /// Forces timings onto every chunk whose model returned text alone.
+    ///
+    /// Idempotent: a chunk with an alignment on disk is skipped, so a resumed
+    /// run aligns only what the interruption left. A chunk the aligner refuses
+    /// (no monotonic path) gets a coarse whole-chunk alignment written instead:
+    /// the words still reach the timeline at chunk precision, and the refusal
+    /// does not fail a meeting whose words are already safe on disk.
+    private func alignTextChunks(
+        store: MeetingStore, metadata: inout MeetingMetadata
+    ) async throws {
+        let raw = try store.readRawTranscript()
+        let pending = raw.chunks.filter {
+            $0.text != nil && $0.purpose == .words && !store.hasAlignment(chunkID: $0.id)
+        }
+        guard !pending.isEmpty else { return }
+        guard let aligner = backends.aligner else {
+            Log.processing.notice(
+                "no aligner configured; \(pending.count, privacy: .public) text chunks keep chunk-level timing"
+            )
+            return
+        }
+        // The chosen model is what makes the aligner required, so installing
+        // it here is the same consent as the model choice itself.
+        try await backends.prepareLocalModels?()
+
+        let timeline = try store.readTimeline()
+        let exporter = ChunkExporter()
+        let workingDirectory = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: store.layout.root,
+            create: true
+        )
+        defer { try? FileManager.default.removeItem(at: workingDirectory) }
+
+        for (index, chunk) in pending.enumerated() {
+            report(
+                metadata, chunks: (index, pending.count),
+                detail: "Aligning transcript timings"
+            )
+            guard let text = chunk.text else { continue }
+            // The chunk's audio span, re-exported from the immutable segments
+            // exactly as the transcription export cut it.
+            let leadIn = timeline.leadIn(track: chunk.track)
+            let plan = ChunkPlan(
+                index: index + 1,
+                start: chunk.timelineOffset - leadIn,
+                end: chunk.timelineOffset - leadIn + chunk.durationSeconds,
+                overlapEnd: 0
+            )
+            let audioURL = workingDirectory.appendingPathComponent("\(chunk.id).m4a")
+            let frames = try exporter.export(
+                plan: plan,
+                segments: timeline.segments(track: chunk.track),
+                segmentsDirectory: store.layout.segments,
+                to: audioURL
+            )
+            defer { try? FileManager.default.removeItem(at: audioURL) }
+            guard frames > 0 else { continue }
+
+            do {
+                let segments = try await aligner.align(audio: audioURL, text: text)
+                try store.writeAlignment(
+                    ChunkAlignment(aligner: aligner.identifier, alignedAt: clock.now, segments: segments),
+                    chunkID: chunk.id
+                )
+            } catch let refusal as TranscriptAlignmentRefused {
+                Log.processing.notice(
+                    "alignment refused for one chunk, keeping chunk-level timing: \(refusal.reason, privacy: .public)"
+                )
+                try store.writeAlignment(
+                    ChunkAlignment(
+                        aligner: aligner.identifier, alignedAt: clock.now,
+                        segments: [RawTranscriptSegment(
+                            start: 0, end: chunk.durationSeconds, text: text, speaker: nil
+                        )]
+                    ),
+                    chunkID: chunk.id
                 )
             }
         }
@@ -687,6 +776,7 @@ public actor ProcessingPipeline {
         segments: [RecordedSegment],
         model: String,
         purpose: RawChunkPurpose = .words,
+        configuration: ChunkPlanner.Configuration? = nil,
         send: @Sendable @escaping (URL, String) async throws -> TranscriptionOutput
     ) async throws {
         let exporter = ChunkExporter()
@@ -700,7 +790,7 @@ public actor ProcessingPipeline {
 
         // A pause-aware boundary needs an energy profile; skip the pass entirely
         // for recordings short enough to send in one request.
-        let planner = ChunkPlanner(configuration: chunking)
+        let planner = ChunkPlanner(configuration: configuration ?? chunking)
         let energy: EnergyProfile = duration > planner.configuration.maxChunkSeconds
             ? ((try? EnergyProfile.compute(stream: stream)) ?? .empty)
             : .empty
@@ -789,7 +879,7 @@ public actor ProcessingPipeline {
     private func runSpeakerResolution(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
-        let raw = try store.readRawTranscript()
+        let raw = try store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         let diarization = try store.readRawDiarization()
 
@@ -1259,7 +1349,7 @@ public actor ProcessingPipeline {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
-        let raw = try found.store.readRawTranscript()
+        let raw = try found.store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         // The diarization has to come with the words. Without it a locally
         // processed meeting re-assembles with every speaker collapsed into one
@@ -1631,7 +1721,7 @@ public actor ProcessingPipeline {
         // previous clustering follows them. Line-level corrections do: they are
         // anchored to a moment rather than to a cluster.
         var metadataCopy = metadata
-        let raw = try store.readRawTranscript()
+        let raw = try store.readRawTranscriptForAssembly()
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now

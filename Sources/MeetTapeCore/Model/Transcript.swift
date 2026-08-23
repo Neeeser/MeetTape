@@ -116,6 +116,25 @@ public struct RawTranscriptSegment: Codable, Sendable, Equatable {
     }
 }
 
+/// Derived timings for one text-only chunk, stored beside the raw transcript.
+///
+/// The words are the transcription model's; the timings were forced against
+/// the chunk's audio by the named aligner. Regenerable, so a better aligner
+/// can rewrite it without touching what the model said.
+public struct ChunkAlignment: Codable, Sendable, Equatable {
+    /// Which aligner produced the timings, as provenance.
+    public var aligner: String
+    public var alignedAt: Date
+    /// Chunk-relative, in the same shape a timed backend returns.
+    public var segments: [RawTranscriptSegment]
+
+    public init(aligner: String, alignedAt: Date, segments: [RawTranscriptSegment]) {
+        self.aligner = aligner
+        self.alignedAt = alignedAt
+        self.segments = segments
+    }
+}
+
 public struct RawTranscript: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 

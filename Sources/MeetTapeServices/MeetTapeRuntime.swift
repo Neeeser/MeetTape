@@ -172,6 +172,7 @@ public final class MeetTapeRuntime {
         let cloud = OpenAIClient(keyProvider: keyStore)
         let modelManager = LocalModelManager(
             applicationSupport: settingsDirectory,
+            required: LocalModelUnit.required(for: loaded),
             onStateChange: { [weak relay] state in
                 Task { @MainActor in relay?.runtimeForCallbacks?.localModelState = state }
             }
@@ -198,7 +199,13 @@ public final class MeetTapeRuntime {
                 transcription: { settings, model in
                     ProcessingBackends.transcriptionBackend(
                         settings: settings, model: model,
-                        local: { WhisperTranscriptionBackend(models: modelManager) },
+                        local: { choice in
+                            switch choice {
+                            case .cohere: CohereTranscriptionBackend(models: modelManager)
+                            case .parakeet: ParakeetTranscriptionBackend(models: modelManager)
+                            case .whisper: WhisperTranscriptionBackend(models: modelManager)
+                            }
+                        },
                         cloud: {
                             OpenAITranscriptionBackend(
                                 backend: cloud, model: $0,
@@ -216,8 +223,14 @@ public final class MeetTapeRuntime {
                 },
                 embeddings: FluidAudioEmbeddingExtractor(models: modelManager),
                 speakers: recognition,
-                prepareLocalModels: { _ = try await modelManager.install() },
+                prepareLocalModels: { [snapshot = settingsSnapshot] in
+                    let current = snapshot.withLock { $0 }
+                    _ = try await modelManager.install(
+                        units: LocalModelUnit.required(for: current)
+                    )
+                },
                 requireLocalModels: { try await modelManager.ensureInstalled() },
+                aligner: CtcTranscriptAligner(models: modelManager),
                 singleSpeakerEmbedding: { url in
                     try await modelManager.embedSingleSpeaker(audio: url)
                 },
@@ -461,6 +474,10 @@ public final class MeetTapeRuntime {
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)
         status.detectionPaused = newSettings.providers.detectionPaused
+        // A different model choice changes which units count as installed.
+        if let models {
+            Task { await models.setRequired(LocalModelUnit.required(for: newSettings)) }
+        }
         onStatusChange?()
     }
 

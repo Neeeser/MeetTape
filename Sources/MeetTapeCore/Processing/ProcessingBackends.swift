@@ -174,6 +174,32 @@ public protocol DiarizationBackend: Sendable {
     ) async throws -> DiarizationOutput
 }
 
+/// Recovers timings for a transcript whose backend returned none.
+///
+/// The words are the backend's; only the timings are synthesised, by forcing
+/// the known text against the audio. What comes back is segments in the same
+/// shape every timed backend produces, so nothing downstream knows the
+/// difference.
+public protocol TranscriptAligner: Sendable {
+    /// Recorded as provenance on every alignment it writes.
+    var identifier: String { get }
+
+    func align(audio: URL, text: String) async throws -> [RawTranscriptSegment]
+}
+
+/// The aligner found no monotonic path between this text and this audio.
+///
+/// Distinct from an infrastructure failure on purpose: a refusal is answered
+/// with coarse chunk-level timing, while a missing model or unreadable file
+/// propagates and fails the stage.
+public struct TranscriptAlignmentRefused: Error, Sendable {
+    public let reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
+}
+
 /// Extracts speaker vectors for intervals somebody else decided.
 ///
 /// This is the seam that keeps voice memory local when diarization is not:

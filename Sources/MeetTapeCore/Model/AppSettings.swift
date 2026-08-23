@@ -17,7 +17,7 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
     public var vocabularyHints: String
 
     public init(
-        transcription: String = "whisper-1",
+        transcription: String = "gpt-transcribe",
         diarization: String = "gpt-4o-transcribe-diarize",
         metadata: String = "gpt-5.6-luna",
         vocabularyHints: String = ""
@@ -199,6 +199,8 @@ public struct SpeakerRecognitionSettings: Codable, Sendable, Equatable {
 public struct ProcessingSettings: Codable, Sendable, Equatable {
     public var transcription: ProcessingBackendChoice
     public var diarization: ProcessingBackendChoice
+    /// Which engine runs when transcription is local.
+    public var localTranscriptionModel: LocalTranscriptionModel
     public var speakers: SpeakerRecognitionSettings
     /// The identity that represents the person using this Mac.
     public var localUserIdentityID: IdentityID?
@@ -206,11 +208,13 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
+        localTranscriptionModel: LocalTranscriptionModel = .cohere,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
         localUserIdentityID: IdentityID? = nil
     ) {
         self.transcription = transcription
         self.diarization = diarization
+        self.localTranscriptionModel = localTranscriptionModel
         self.speakers = speakers
         self.localUserIdentityID = localUserIdentityID
     }
@@ -230,6 +234,12 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
         diarization =
             try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
             ?? defaults.diarization
+        // The key's absence means the file predates the model choice, which is
+        // an install with Whisper on disk. The fresh default is Cohere, but a
+        // 2.1 GB download must follow a person picking it, not an upgrade.
+        localTranscriptionModel =
+            try container.decodeIfPresent(LocalTranscriptionModel.self, forKey: .localTranscriptionModel)
+            ?? .whisper
         speakers =
             try container.decodeIfPresent(SpeakerRecognitionSettings.self, forKey: .speakers)
             ?? defaults.speakers
@@ -241,10 +251,11 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
 /// is readable and portable, with the API key deliberately absent: that lives in
 /// the keychain and nowhere else.
 public struct AppSettings: Codable, Sendable, Equatable {
-    /// 2 added the processing backends. The number is read on decode, because a
-    /// file written before it existed was configured under a different default
-    /// and must not be moved off it silently.
-    public static let currentVersion = 2
+    /// 2 added the processing backends; 3 added the cloud model migration and
+    /// the local model choice. The number is read on decode, because a file
+    /// written before it existed was configured under a different default and
+    /// must not be moved off it silently.
+    public static let currentVersion = 3
 
     public var version: Int
     public var storageRootPath: String
@@ -323,6 +334,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
         models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
+        // whisper-1 was the shipped default before version 3, so a stored
+        // whisper-1 in an older file is the default nobody touched and moves
+        // with it. Any other identifier was typed in and stays, and a file
+        // already at version 3 that names whisper-1 named it on purpose.
+        if version < 3, models.transcription == "whisper-1" {
+            models.transcription = "gpt-transcribe"
+        }
         // An existing installation keeps the backend it was configured with. A
         // settings file written before local processing existed described a
         // machine that transcribed in the cloud, and switching it over on the
@@ -365,6 +383,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
         echoCancellation =
             try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
             ?? defaults.echoCancellation
+        // The stored number gated the migrations above; the decoded struct is
+        // current-schema, and writing it back as such is what stops a
+        // migration from re-running against a value the user has since chosen.
+        version = Self.currentVersion
     }
 
     public var storageRoot: URL { URL(fileURLWithPath: storageRootPath) }

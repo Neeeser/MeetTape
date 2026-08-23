@@ -89,6 +89,13 @@ else
     while IFS= read -r line; do LINES+=("$line"); done < <(read_manifest "$SUITE")
 fi
 
+# A bad suite or corpus name leaves the array empty, and bash 3.2 under `set -u`
+# expands an empty array as an unbound variable rather than as nothing.
+if [ ${#LINES[@]} -eq 0 ]; then
+    echo "nothing to fetch: the manifest named no files" >&2
+    exit 1
+fi
+
 for line in "${LINES[@]}"; do
     url="$(echo "$line" | cut -d' ' -f1)"
     sha="$(echo "$line" | cut -d' ' -f2)"

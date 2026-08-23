@@ -21,7 +21,7 @@ The reference data `meettape-eval bench` scores against.
 |---|---|---|---|---|
 | `ami-core` | 14 | AMI | 3 to 31% | The shipping configuration's WER, attribution and DER, plus two whole meetings for the chunk seams |
 | `ami-overlap` | 6 | AMI | 38 to 46% | Four people talking over each other, on meetings `ami-core` does not touch |
-| `icsi` | 4 | ICSI | 29 to 39% | The same, with six to nine people in the room, which is what stresses speaker counting |
+| `icsi` | 4 | ICSI | 28 to 39% | The same, with six to nine people in the room, which is what stresses speaker counting |
 
 `ami-excerpts`, `ami-long` and `ami-smoke` are subsets of `ami-core`.
 
@@ -38,11 +38,24 @@ records:
 | ES2015d | 840 to 1200 s | 38.0% | 4 | 1437 |
 | Btr001 | 3480 to 3840 s | 38.6% | 6 | 1830 |
 | Bmr019 | 3225 to 3585 s | 37.9% | 9 | 1989 |
-| Bsr001 | 105 to 465 s | 36.5% | 8 | 2047 |
+| Bsr001 | 105 to 465 s | 36.6% | 8 | 2047 |
 | Bed016 | 15 to 375 s | 28.5% | 7 | 1414 |
 
 The `ami-core` windows overlap 3 to 31%, median 12%, so the two new suites move
 the measurement into speech the old roster barely held.
+
+## A duplicated passage in Bsr001
+
+ICSI's own annotation of Bsr001 channel A repeats a stretch of transcript
+verbatim: four adjacent blocks of 24, 21, 6 and 5 words between 293 and 362 s,
+56 words in all, written twice where the audio holds them once. The second copy
+carries almost no alignment, which is how it survived into the published file.
+Every one of those words is inside the scored window, so a transcriber that
+gets the audio exactly right still scores 56 deletions against 2047 reference
+words: about 2.7 points of WER that no decoder can remove, 1.2 of them from the
+24-word block alone. Remember it when `icsi` gains baseline entries. Bsr001's
+WER will sit that much above the other three cases, and the gap is the
+annotation rather than the engine.
 
 ## Which channel ICSI is scored on
 
@@ -124,7 +137,9 @@ channels carry no alignment, and filling them from their neighbours collapsed
 them onto a point: 218 words inside 25 seconds on one channel of Bro024, half
 the reference's speech time missing, and a false-alarm term measuring the
 annotation rather than the diarizer. The segments carry the times, so an
-unaligned run is spread across the room inside its segment. The reader
+unaligned run is spread across the room inside its segment, and a run whose
+segment leaves it no room takes 40 ms a word rather than a single instant,
+stopping at the next segment on that channel. The reader
 docstrings in `scripts/build-bench-truth.py` record what each difference costs.
 
 ## Baselines

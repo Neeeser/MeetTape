@@ -317,6 +317,29 @@ enum BenchScorerTests {
                 }
             },
 
+            test("the overlap suites share no meeting with the core suite") { expect in
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let layout = BenchLayout(root: repository.appendingPathComponent("Benchmarks"))
+                let manifest = try BenchManifest.read(from: layout.manifest)
+                // The exclusion is a flag on the generator command
+                // (`--exclude-suite ami-core`), so forgetting it puts a meeting
+                // the core suite already measures into the overlap roster and
+                // the two numbers stop being independent.
+                let core = Set(manifest.suites["ami-core"] ?? [])
+                expect.isTrue(!core.isEmpty, "ami-core is empty")
+                for suite in ["ami-overlap", "icsi"] {
+                    let roster = Set(manifest.suites[suite] ?? [])
+                    expect.isTrue(!roster.isEmpty, "\(suite) is empty")
+                    expect.equal(
+                        roster.intersection(core).sorted(), [],
+                        "\(suite) repeats meetings from ami-core"
+                    )
+                }
+            },
+
             test("the overlap suites are harder than the core suite") { expect in
                 let repository = URL(fileURLWithPath: #filePath)
                     .deletingLastPathComponent()

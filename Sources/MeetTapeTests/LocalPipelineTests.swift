@@ -387,6 +387,11 @@ enum LocalPipelineTests {
                 try meeting.store.writeRawTranscript(raw)
 
                 let backend = FakeAIBackend()
+                // The microphone track is transcribed in the cloud on this
+                // route; an empty answer for audible audio is a failure now.
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Mine.", speaker: nil),
+                ]
                 backend.diarizationSegments = [
                     RawTranscriptSegment(start: 0, end: 1.5, text: "Theirs.", speaker: "A"),
                 ]

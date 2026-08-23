@@ -10,7 +10,7 @@ enum PipelineTests {
     /// Builds a finished two-track recording on disk, ready for processing.
     static func makeRecordedMeeting(
         root: URL, source: MeetingSource = .googleMeet, seconds: Double = 6,
-        remoteStartOffset: Double = 0
+        remoteStartOffset: Double = 0, amplitude: Float = 0.5
     ) throws -> (metadata: MeetingMetadata, store: MeetingStore, repository: MeetingRepository) {
         let repository = MeetingRepository(root: root)
         let started = Date(timeIntervalSince1970: 1_787_070_000)
@@ -31,7 +31,8 @@ enum PipelineTests {
             format: format, segmentSeconds: 30
         )
         micWriter.enqueueSynchronously(AudioBufferPacket(
-            buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000), hostTime: 100
+            buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000, amplitude: amplitude),
+            hostTime: 100
         ))
         micWriter.finish(reason: "test")
 
@@ -41,7 +42,9 @@ enum PipelineTests {
                 format: format, segmentSeconds: 30
             )
             remoteWriter.enqueueSynchronously(AudioBufferPacket(
-                buffer: AudioTests.makeTone(seconds: seconds, sampleRate: 48_000, frequency: 220),
+                buffer: AudioTests.makeTone(
+                    seconds: seconds, sampleRate: 48_000, frequency: 220, amplitude: amplitude
+                ),
                 hostTime: 100 + remoteStartOffset
             ))
             remoteWriter.finish(reason: "test")
@@ -404,6 +407,53 @@ enum PipelineTests {
                     backend.peakInFlight >= 2,
                     "chunk requests overlap instead of running one at a time"
                 )
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+            },
+
+            test("an empty transcript for audible audio fails the meeting") { expect in
+                // A 168-second chunk of ordinary speech came back as
+                // {"text":""} with HTTP 200, was billed, and was recorded as a
+                // finished chunk: the meeting reported complete with 47% of its
+                // words missing. An empty answer for audio that carries signal
+                // is a failure, not a result.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = []
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let status = try meeting.store.readMetadata().processing
+                expect.equal(status.state, .failed, "an empty transcript must not report success")
+                let failure = try expect.unwrap(status.lastFailure)
+                expect.isTrue(failure.isRetryable, "the meeting can be retried")
+                let raw = try meeting.store.readRawTranscript()
+                expect.equal(
+                    raw.chunks(track: .mic, purpose: .words).count, 0,
+                    "no empty chunk is filed as done"
+                )
+            },
+
+            test("an empty transcript for silent audio is accepted") { expect in
+                // A muted microphone transcribes to nothing legitimately, and
+                // must not leave a meeting failing forever.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, amplitude: 0)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = []
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Theirs.", speaker: "A"),
+                ]
+                let pipeline = makePipeline(repository: meeting.repository, backend: backend)
+                await pipeline.process(meetingID: meeting.metadata.id)
+
                 expect.equal(try meeting.store.readMetadata().processing.state, .complete)
             },
 

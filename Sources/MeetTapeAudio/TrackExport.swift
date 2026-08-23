@@ -133,4 +133,32 @@ public enum MonoAudioDecoder {
         }
         return samples
     }
+
+    /// The peak and mean level of a file, in dBFS.
+    ///
+    /// Read by the transcription stage to tell audio that holds no speech from
+    /// a backend that returned nothing for audio that does.
+    public static func level(_ url: URL) throws -> AudioLevel {
+        let samples = try loadMono16k(url)
+        guard !samples.isEmpty else {
+            return AudioLevel(
+                peakDBFS: EmptyTranscriptPolicy.silenceFloorDBFS,
+                rmsDBFS: EmptyTranscriptPolicy.silenceFloorDBFS
+            )
+        }
+        var peak: Double = 0
+        var sumOfSquares: Double = 0
+        for sample in samples {
+            let magnitude = Double(abs(sample))
+            if magnitude > peak { peak = magnitude }
+            sumOfSquares += magnitude * magnitude
+        }
+        let mean = (sumOfSquares / Double(samples.count)).squareRoot()
+        return AudioLevel(peakDBFS: decibels(peak), rmsDBFS: decibels(mean))
+    }
+
+    private static func decibels(_ amplitude: Double) -> Double {
+        guard amplitude > 0 else { return EmptyTranscriptPolicy.silenceFloorDBFS }
+        return max(EmptyTranscriptPolicy.silenceFloorDBFS, 20 * log10(amplitude))
+    }
 }

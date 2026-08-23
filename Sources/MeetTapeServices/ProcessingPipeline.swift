@@ -626,6 +626,9 @@ public actor ProcessingPipeline {
         }
 
         let textOnly = output.segments.isEmpty && !output.text.isEmpty
+        try Self.requireTranscribedOrSilent(
+            response: output, audio: audio, chunkID: chunkID, purpose: .words
+        )
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
             track: track,
@@ -638,6 +641,42 @@ public actor ProcessingPipeline {
             rawResponseFile: nil
         ))
         try store.writeRawTranscript(raw)
+    }
+
+    /// Fails a chunk whose response carried neither segments nor text, unless
+    /// the audio behind it holds no speech.
+    ///
+    /// A transcription backend can answer HTTP 200 with an empty transcript for
+    /// ordinary conversation. Recording that as a finished chunk lost 47% of one
+    /// meeting's words and still reported `complete`, so an empty answer for
+    /// audible audio fails the stage instead: the stage retries, and a meeting
+    /// that keeps coming back empty is left failed and retryable. A muted
+    /// microphone transcribes to nothing legitimately and must not fail forever,
+    /// so the level of the audio that was sent decides between the two.
+    static func requireTranscribedOrSilent(
+        response: TranscriptionOutput, audio: URL, chunkID: String, purpose: RawChunkPurpose
+    ) throws {
+        // A speakers chunk is asked for intervals, not words; an empty
+        // transcript there is not a loss.
+        guard purpose == .words else { return }
+        let level: AudioLevel
+        do {
+            level = try MonoAudioDecoder.level(audio)
+        } catch {
+            // Unreadable chunk audio is its own failure, and treating it as
+            // silence would restore exactly the bug this guards.
+            throw ProcessingError.audioUnreadable(path: audio.lastPathComponent)
+        }
+        let decision = EmptyTranscriptPolicy.decide(
+            hasSegments: !response.segments.isEmpty,
+            hasText: !response.text.isEmpty,
+            level: level
+        )
+        guard decision == .fail else { return }
+        Log.processing.error(
+            "empty transcript for audible audio: peak \(level.peakDBFS, format: .fixed(precision: 1)) dBFS"
+        )
+        throw ProcessingError.emptyTranscript(chunk: chunkID)
     }
 
     /// The recorded format string for a local backend's chunk, by what timing
@@ -1001,6 +1040,10 @@ public actor ProcessingPipeline {
                     try? store.writeAPIResponse(body, named: "\(chunk.chunkID).json")
                 }
                 let textOnly = response.segments.isEmpty && !response.text.isEmpty
+                try Self.requireTranscribedOrSilent(
+                    response: response, audio: chunk.audioURL,
+                    chunkID: chunk.chunkID, purpose: purpose
+                )
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,
                     track: track,

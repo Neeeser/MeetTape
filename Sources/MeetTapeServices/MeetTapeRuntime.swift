@@ -98,6 +98,9 @@ public final class MeetTapeRuntime {
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
     @ObservationIgnored public let permissions = PermissionsService()
+    /// The OpenAI key, read from the keychain once and held for the process.
+    /// Exposed so saving a rotated key updates it without a relaunch.
+    @ObservationIgnored public let apiKeys: CachingAPIKeyStore
     /// The on-device speech models, and the local voice memory. Both exist
     /// whichever backends are selected: choosing the cloud diarizer costs the
     /// vectors it would have returned, not the ability to remember a voice.
@@ -169,7 +172,12 @@ public final class MeetTapeRuntime {
         #else
         let keyStore: any APIKeyProviding = KeychainAPIKeyStore()
         #endif
-        let cloud = OpenAIClient(keyProvider: keyStore)
+        // Read once per process. Every request reading for itself meant a
+        // keychain prompt per request on a build the item's access control no
+        // longer trusts.
+        let cachedKeys = CachingAPIKeyStore(keyStore)
+        apiKeys = cachedKeys
+        let cloud = OpenAIClient(keyProvider: cachedKeys)
         let modelManager = LocalModelManager(
             applicationSupport: settingsDirectory,
             required: LocalModelUnit.required(for: loaded),

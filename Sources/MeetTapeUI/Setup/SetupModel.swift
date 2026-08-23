@@ -221,15 +221,21 @@ public final class SetupModel {
         acceptedUnverifiedKey = false
         let store = KeychainAPIKeyStore()
         if !apiKey.isEmpty {
-            guard store.save(apiKey) else {
+            let typed = apiKey
+            guard store.save(typed) else {
                 keyState = .rejected("Could not write to the keychain")
                 return
             }
+            // Handed straight to the process-wide store, so checking the key
+            // does not read back what was just written and raise a second
+            // keychain prompt to do it.
+            runtime.apiKeys.adopt(typed)
             apiKey = ""
             hasStoredKey = true
+            hasCheckedForStoredKey = true
         }
         do {
-            try await OpenAIClient(keyProvider: store)
+            try await OpenAIClient(keyProvider: runtime.apiKeys)
                 .verifyCredentials(model: runtime.settings.models.diarization)
             keyState = .verified
         } catch let error as ProcessingError {

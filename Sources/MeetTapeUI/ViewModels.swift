@@ -123,13 +123,18 @@ public final class SettingsModel {
     }
 
     public func saveKey() {
-        hasStoredKey = KeychainAPIKeyStore().save(apiKey)
+        let saved = apiKey
+        hasStoredKey = KeychainAPIKeyStore().save(saved)
+        // The runtime holds the key for the process, so a rotated one has to be
+        // handed over rather than waiting for a relaunch.
+        if hasStoredKey { runtime.apiKeys.adopt(saved) }
         apiKey = ""
         testState = .idle
     }
 
     public func removeKey() {
         _ = KeychainAPIKeyStore().delete()
+        runtime.apiKeys.invalidateCachedKey()
         hasStoredKey = false
         testState = .idle
     }
@@ -138,7 +143,7 @@ public final class SettingsModel {
         testState = .testing
         if !apiKey.isEmpty { saveKey() }
         do {
-            try await OpenAIClient(keyProvider: KeychainAPIKeyStore())
+            try await OpenAIClient(keyProvider: runtime.apiKeys)
                 .verifyCredentials(model: runtime.settings.models.diarization)
             testState = .success
         } catch let error as ProcessingError {

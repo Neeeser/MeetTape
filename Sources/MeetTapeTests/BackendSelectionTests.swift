@@ -12,6 +12,46 @@ enum BackendSelectionTests {
 
     static var settingsSuite: Suite {
         Suite("BackendSettings", [
+            test("the key is read once per process, not once per request") { expect in
+                // macOS raises a login-keychain prompt whenever the running
+                // binary is not the one that created the item, which every
+                // unsigned rebuild produces. Reading per request turned that into
+                // a prompt per request: enrichment alone makes one for the title,
+                // the description, the notes, the summary and the speakers, so a
+                // single resumed meeting asked five times.
+                final class CountingStore: APIKeyProviding, @unchecked Sendable {
+                    let lock = NSLock()
+                    var reads = 0
+                    var value = "sk-first"
+                    func apiKey() throws -> String {
+                        lock.lock(); reads += 1; let v = value; lock.unlock()
+                        return v
+                    }
+                    var isKnownAbsent: Bool { false }
+                }
+
+                let source = CountingStore()
+                let cache = CachingAPIKeyStore(source)
+                for _ in 0..<5 { _ = try cache.apiKey() }
+                expect.equal(source.reads, 1, "five requests, one keychain read")
+
+                // A rotated key must not wait for a relaunch.
+                source.value = "sk-second"
+                expect.equal(try cache.apiKey(), "sk-first", "still serving what it holds")
+                cache.adopt("sk-second")
+                expect.equal(try cache.apiKey(), "sk-second", "saving a key hands it over")
+                expect.equal(source.reads, 1, "and does not read the keychain to do it")
+
+                // A key the API refuses is dropped, or it would be handed to
+                // every later request in the process.
+                cache.invalidateCachedKey()
+                expect.equal(try cache.apiKey(), "sk-second", "back to the source")
+                expect.equal(source.reads, 2)
+
+                // Holding a key answers presence without touching the keychain.
+                expect.isFalse(cache.isKnownAbsent)
+            },
+
             test("a fresh installation is local and needs no API key") { expect in
                 let settings = AppSettings()
                 expect.equal(settings.processing.transcription, .local)

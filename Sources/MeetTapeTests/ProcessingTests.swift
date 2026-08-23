@@ -476,6 +476,272 @@ enum ProcessingTests {
                 expect.equal(words.count, vocabulary.count, "every word appears exactly once")
             },
 
+            test("a seam keeps the words the later chunk never transcribed") { expect in
+                // Cutting the shared span at its midpoint assumed both chunks
+                // had transcribed it. Where the later chunk's alignment starts
+                // past the cut, which the 35 s Cohere windows do routinely, the
+                // earlier chunk's words past the cut were deleted with nothing
+                // to replace them: six minutes of ES2002b lost about 230 spoken
+                // words over ten seams, 316 deletions becoming 470.
+                let spoken = (0..<40).map { "alpha\($0)" }
+                let later = (0..<8).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                func segment(_ words: [RawTranscriptWord], speaker: String) -> RawTranscriptSegment {
+                    RawTranscriptSegment(
+                        start: words[0].start, end: words[words.count - 1].end,
+                        text: words.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                        speaker: speaker, words: words
+                    )
+                }
+                // One chunk says everything from 0 to 19.9 s.
+                let first = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [segment(
+                        spoken.enumerated().map { word($1, at: Double($0) * 0.5, offset: 0) },
+                        speaker: "A"
+                    )]
+                )
+                // The next one starts at 12 s and hears one word of the eight
+                // seconds they share, then nothing until 22 s.
+                let second = RawTranscriptChunk(
+                    id: "remote_chunk_002", track: .remote, timelineOffset: 12,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [
+                        segment([word("alpha36", at: 18, offset: 12)], speaker: "B"),
+                        segment(
+                            later.enumerated().map { word($1, at: 22 + Double($0) * 0.5, offset: 12) },
+                            speaker: "B"
+                        ),
+                    ]
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                let missing = (spoken + later).filter { !words.contains($0) }
+                expect.isTrue(missing.isEmpty, "words the later chunk never heard were dropped: \(missing)")
+                // And the one word both chunks did hear is written once.
+                expect.equal(words.filter { $0 == "alpha36" }.count, 1, "got \(words)")
+                expect.equal(words.count, spoken.count + later.count, "got \(words)")
+            },
+
+            test("a chunk is deduplicated against every chunk it overlaps") { expect in
+                // Trimming consecutive pairs only left chunk N and chunk N+2
+                // repeating whatever they share: the deciding ES2003a run came
+                // back with 153 repeated 8-grams that way.
+                let spoken = (0..<40).map { "alpha\($0)" }
+                let fresh = (0..<8).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                func chunk(
+                    _ id: String, offset: Double, words: [RawTranscriptWord], speaker: String
+                ) -> RawTranscriptChunk {
+                    RawTranscriptChunk(
+                        id: id, track: .remote, timelineOffset: offset,
+                        durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                        segments: [RawTranscriptSegment(
+                            start: words[0].start, end: words[words.count - 1].end,
+                            text: words.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                            speaker: speaker, words: words
+                        )]
+                    )
+                }
+                func timed(_ range: Range<Int>, offset: Double) -> [RawTranscriptWord] {
+                    range.map { word(spoken[$0], at: Double($0) * 0.5, offset: offset) }
+                }
+                // 0 to 19.9 s, then 4 to 7.9 s, then 8 s onwards: the third
+                // chunk shares twelve seconds with the first and none of them
+                // with the second.
+                let first = chunk("remote_chunk_001", offset: 0, words: timed(0..<40, offset: 0), speaker: "A")
+                let second = chunk("remote_chunk_002", offset: 4, words: timed(8..<16, offset: 4), speaker: "B")
+                // The third chunk opens on two words of its own, so the repeat
+                // it then carries is not the prefix of a turn and the seam-repeat
+                // trim above cannot see it.
+                let third = chunk(
+                    "remote_chunk_003", offset: 8,
+                    words: [word("delta0", at: 7.6, offset: 8), word("delta1", at: 7.8, offset: 8)]
+                        + timed(16..<40, offset: 8)
+                        + fresh.enumerated().map { word($1, at: 20 + Double($0) * 0.5, offset: 8) },
+                    speaker: "C"
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second, third]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                var seen = Set<String>()
+                var repeated: [String] = []
+                if words.count >= 8 {
+                    for start in 0...(words.count - 8) {
+                        let gram = words[start..<(start + 8)].joined(separator: " ")
+                        if !seen.insert(gram).inserted { repeated.append(gram) }
+                    }
+                }
+                expect.isTrue(repeated.isEmpty, "repeated 8-grams: \(repeated)")
+                expect.equal(words.count, spoken.count + fresh.count + 2, "got \(words)")
+            },
+
+            test("an overlap squeezed onto one timestamp is still recognised") { expect in
+                // ES2003a's Cohere run put whole phrases on a single timestamp,
+                // and 193% DER with 266 insertions followed. A word matches by
+                // what it says inside a band either side of when the other
+                // chunk says it, so a squeezed phrase is deduplicated rather
+                // than doubled, and the seconds around it survive.
+                let spoken = (0..<40).map { "alpha\($0)" }
+                let fresh = (0..<8).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                func segment(_ words: [RawTranscriptWord], speaker: String) -> RawTranscriptSegment {
+                    RawTranscriptSegment(
+                        start: words[0].start, end: words[words.count - 1].end,
+                        text: words.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                        speaker: speaker, words: words
+                    )
+                }
+                let first = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [segment(
+                        spoken.enumerated().map { word($1, at: Double($0) * 0.5, offset: 0) },
+                        speaker: "A"
+                    )]
+                )
+                // The same eight words the first chunk spreads over 12 to 15.5 s,
+                // all reported at 13 s, and then a gap until 20.5 s.
+                let second = RawTranscriptChunk(
+                    id: "remote_chunk_002", track: .remote, timelineOffset: 12,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [
+                        segment((24..<32).map { word(spoken[$0], at: 13, offset: 12) }, speaker: "B"),
+                        segment(
+                            fresh.enumerated().map { word($1, at: 20.5 + Double($0) * 0.5, offset: 12) },
+                            speaker: "B"
+                        ),
+                    ]
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                let missing = (spoken + fresh).filter { !words.contains($0) }
+                expect.isTrue(missing.isEmpty, "words lost at the seam: \(missing)")
+                expect.equal(words.count, spoken.count + fresh.count, "got \(words)")
+            },
+
+            test("a refused alignment keeps its words as the later side of a seam") { expect in
+                // An alignment that refuses leaves one segment holding the whole
+                // chunk's text and no timings, starting where the chunk starts.
+                // The midpoint cut read that start, decided the segment belonged
+                // before the cut, and dropped every word in it: 2 of 16 chunks
+                // refused on one ES2002b Cohere run and took 118 transcribed
+                // words with them, which is most of why that engine swung 6.6
+                // WER points on identical audio.
+                let spoken = (0..<40).map { "alpha\($0)" }
+                let continued = (0..<54).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                // Aligned words for the first twenty seconds.
+                let aligned = spoken.enumerated().map { word($1, at: Double($0) * 0.5, offset: 0) }
+                let first = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: aligned[0].start, end: aligned[aligned.count - 1].end,
+                        text: spoken.joined(separator: " "), speaker: "A", words: aligned
+                    )]
+                )
+                // The next chunk covers 12 s to 47 s and its alignment refused:
+                // one wordless segment over the whole chunk, opening on the
+                // eight seconds it shares with the chunk before it.
+                let refusedText = (Array(spoken[24...]) + continued).joined(separator: " ")
+                let second = RawTranscriptChunk(
+                    id: "remote_chunk_002", track: .remote, timelineOffset: 12,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_text",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 35, text: refusedText, speaker: nil, words: nil
+                    )]
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                let missing = (spoken + continued).filter { !words.contains($0) }
+                expect.isTrue(missing.isEmpty, "the refused chunk was discarded: \(missing)")
+                expect.equal(words.count, spoken.count + continued.count, "got \(words)")
+            },
+
+            test("a refused alignment does not swallow the chunk after it") { expect in
+                // The same segment as the earlier side of a seam: it starts
+                // before any cut, so it was kept whole and spilled across it
+                // while the chunk after it lost everything it heard before the
+                // cut, including the words the refused chunk never carried.
+                let spoken = (0..<70).map { "alpha\($0)" }
+                let continued = (0..<10).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                let first = RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_text",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 35, text: spoken.joined(separator: " "),
+                        speaker: nil, words: nil
+                    )]
+                )
+                // Aligned words from 23 s, so twelve seconds of what the refused
+                // chunk already carries arrive again with timings on them, and
+                // two words it missed arrive with them.
+                let aligned = [word("delta0", at: 23.6, offset: 23), word("delta1", at: 23.8, offset: 23)]
+                    + (48..<70).map { word(spoken[$0], at: Double($0) * 0.5, offset: 23) }
+                    + continued.enumerated().map { word($1, at: 35 + Double($0) * 0.5, offset: 23) }
+                let second = RawTranscriptChunk(
+                    id: "remote_chunk_002", track: .remote, timelineOffset: 23,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: aligned[0].start, end: aligned[aligned.count - 1].end,
+                        text: aligned.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                        speaker: "B", words: aligned
+                    )]
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                var seen = Set<String>()
+                var repeated: [String] = []
+                if words.count >= 8 {
+                    for start in 0...(words.count - 8) {
+                        let gram = words[start..<(start + 8)].joined(separator: " ")
+                        if !seen.insert(gram).inserted { repeated.append(gram) }
+                    }
+                }
+                expect.isTrue(repeated.isEmpty, "repeated 8-grams: \(repeated)")
+                let missing = (spoken + continued + ["delta0", "delta1"])
+                    .filter { !words.contains($0) }
+                expect.isTrue(missing.isEmpty, "words lost at the seam: \(missing)")
+                expect.equal(words.count, spoken.count + continued.count + 2, "got \(words)")
+            },
+
             test("the diarizer the user chose beats labels embedded in the words") { expect in
                 // Cloud transcription with diarization set to Local ran the
                 // local diarizer, wrote an active run with the right four

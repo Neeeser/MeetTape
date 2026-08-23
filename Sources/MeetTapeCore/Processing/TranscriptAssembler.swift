@@ -57,17 +57,25 @@ public struct TranscriptAssembler: Sendable {
         /// the gap rule alone chained a real recording into one 219-second
         /// utterance that pushed every reply after the whole block.
         public var maxUtteranceSeconds: Double
+        /// How far apart two chunks may time the same word and still be talking
+        /// about the same moment. Both chunks were aligned against the same
+        /// audio, so agreement is usually within tenths of a second; the band is
+        /// wider because an aligner that squeezes a phrase onto one timestamp
+        /// moves its words by seconds.
+        public var overlapMatchSeconds: Double
 
         public init(
             utteranceGapSeconds: Double = 1.2,
             duplicateSimilarity: Double = 0.62,
             duplicateSearchSeconds: Double = 12,
-            maxUtteranceSeconds: Double = 30
+            maxUtteranceSeconds: Double = 30,
+            overlapMatchSeconds: Double = 3
         ) {
             self.utteranceGapSeconds = utteranceGapSeconds
             self.duplicateSimilarity = duplicateSimilarity
             self.duplicateSearchSeconds = duplicateSearchSeconds
             self.maxUtteranceSeconds = maxUtteranceSeconds
+            self.overlapMatchSeconds = overlapMatchSeconds
         }
     }
 
@@ -260,66 +268,269 @@ public struct TranscriptAssembler: Sendable {
         return pieces.isEmpty ? [segment] : pieces
     }
 
-    /// Cuts the deliberate overlap between consecutive chunks at one instant, so
-    /// the seconds each pair shares are transcribed by exactly one of them.
+    /// One word of a chunk on the meeting timeline, and how it compares.
     ///
-    /// The near-duplicate merge below compares whole turns, and a turn is not a
-    /// unit either chunk agrees on: a 35-second Cohere chunk grouped an 8-second
-    /// shared span inside a 31-second segment, which is nowhere near a duplicate
-    /// of the other chunk's rendering of the same words. One 6-minute recording
-    /// came out with 35 repeated 8-grams and utterance pairs overlapping by up
-    /// to 8.6 seconds, the same sentence given to two speakers. Every path has
-    /// word timings by the time the assembler runs, aligned or native, so the
-    /// overlap is cut by time instead: the earlier chunk keeps what starts
-    /// before the middle of the shared span, the later chunk keeps the rest.
-    private func trimOverlaps(_ chunks: [RawTranscriptChunk]) -> [RawTranscriptChunk] {
+    /// A chunk whose alignment refused carries one segment holding the whole
+    /// chunk's text and no timings at all. Its words are still words, so they
+    /// take part here with a nominal position spread across the segment and
+    /// `timed` false, which is what keeps a refused chunk from being deleted
+    /// wholesale at one seam and duplicated at the other.
+    private struct Token {
+        var address: TokenAddress
+        var start: Double
+        var end: Double
+        var key: String
+        var timed: Bool
+    }
+
+    private struct TokenAddress: Hashable {
+        var segment: Int
+        var index: Int
+    }
+
+    /// A token already kept, and the chunk it came from.
+    private struct KeptToken {
+        var chunk: Int
+        var token: Token
+    }
+
+    /// Removes, from the seconds two chunks share, the words both of them
+    /// transcribed, and only those.
+    ///
+    /// Adjacent chunks overlap by eight seconds so a sentence on the boundary
+    /// lands whole in one of them, and the model transcribes that overlap
+    /// twice. Cutting the shared span at its midpoint and handing each half to
+    /// one chunk removed the repeats and took real speech with them. Where the
+    /// later chunk's transcription or alignment starts past the cut, which the
+    /// 35-second Cohere windows do routinely, the earlier chunk's words past
+    /// the cut went with nothing to replace them: six minutes of ES2002b gave
+    /// 1,041 hypothesis words and 316 deletions before the cut existed and 809
+    /// with 470 after it. Worse at a refused alignment, whose one wordless
+    /// segment starts at the chunk and so lost the whole chunk whenever it was
+    /// the later side of a seam: 2 of 16 chunks refused on one ES2002b run and
+    /// 118 transcribed words went with them, which is most of why that engine
+    /// swung 6.6 WER points on identical audio.
+    ///
+    /// So the shared span is settled on content. The two sides' words inside it
+    /// are aligned on normalised text, the copy the seam does not need is
+    /// dropped, and whatever only one side heard stays. Timings decide the
+    /// alignment where both sides have them and where only one does the side
+    /// that has them keeps its words, so a refusal costs precision and never
+    /// text. Each chunk is compared with every earlier chunk that still reaches
+    /// it rather than with its neighbour alone: a chunk whose content runs past
+    /// the next boundary overlaps chunk N+2 as well. Matching is confined to
+    /// the span the chunks actually share, so two distant chunks that say the
+    /// same thing are two chunks that said it, not a seam.
+    private func deduplicateOverlaps(_ chunks: [RawTranscriptChunk]) -> [RawTranscriptChunk] {
         let ordered = chunks.sorted { $0.timelineOffset < $1.timelineOffset }
         guard ordered.count > 1 else { return ordered }
-        var result = ordered
-        for index in 0..<(result.count - 1) {
-            let earlier = result[index]
-            let later = result[index + 1]
-            // Measured from the words themselves rather than the declared
-            // chunk lengths: a chunk's duration is the audio that was sent,
-            // which runs past the last thing said in it.
-            guard let earlierEnd = contentEnd(earlier), let laterStart = contentStart(later),
-                  laterStart < earlierEnd
-            else { continue }
-            let cut = (laterStart + earlierEnd) / 2
-            result[index] = keep(earlier) { $0 < cut }
-            result[index + 1] = keep(later) { $0 >= cut }
+        let tolerance = configuration.overlapMatchSeconds
+        var dropped: [Int: Set<TokenAddress>] = [:]
+        // Every token kept so far, in time order, so the comparison reaches
+        // back past the previous chunk.
+        var kept: [KeptToken] = []
+        var covered = -Double.infinity
+        for (index, chunk) in ordered.enumerated() {
+            // Nothing that ends before this chunk can start is reachable, and
+            // chunks arrive in offset order.
+            kept.removeAll { $0.token.end < chunk.timelineOffset - tolerance }
+            let tokens = timelineTokens(of: chunk)
+            let candidates = tokens.filter { $0.start < covered }
+            if let first = candidates.first, let last = candidates.last {
+                let window = kept.filter {
+                    $0.token.start >= first.start - tolerance
+                        && $0.token.start <= last.start + tolerance
+                }
+                for (earlier, later) in matches(
+                    earlier: window.map(\.token), later: candidates, tolerance: tolerance
+                ) {
+                    let earlierToken = window[earlier]
+                    let laterToken = candidates[later]
+                    if laterToken.timed, !earlierToken.token.timed {
+                        dropped[earlierToken.chunk, default: []].insert(earlierToken.token.address)
+                        kept.removeAll {
+                            $0.chunk == earlierToken.chunk
+                                && $0.token.address == earlierToken.token.address
+                        }
+                    } else {
+                        dropped[index, default: []].insert(laterToken.address)
+                    }
+                }
+            }
+            let gone = dropped[index] ?? []
+            kept.append(contentsOf: tokens
+                .filter { !gone.contains($0.address) }
+                .map { KeptToken(chunk: index, token: $0) })
+            kept.sort { $0.token.start < $1.token.start }
+            // The audio a chunk covers, whether or not its words survived it.
+            covered = max(covered, tokens.map(\.end).max() ?? -.infinity)
         }
-        return result
+        return ordered.enumerated().map { index, chunk in
+            guard let gone = dropped[index], !gone.isEmpty else { return chunk }
+            return removing(gone, from: chunk)
+        }
     }
 
-    /// The first and last moments, on the meeting timeline, that a chunk has
-    /// anything to say.
-    private func contentStart(_ chunk: RawTranscriptChunk) -> Double? {
-        chunk.segments.map { chunk.timelineOffset + $0.start }.min()
+    /// A chunk's words on the meeting timeline, in the order they are spoken.
+    ///
+    /// Ties are broken by position in the chunk, because an aligner that
+    /// squeezes a phrase onto one timestamp would otherwise have its words
+    /// reordered by an unstable sort and stop matching the same phrase read
+    /// from the chunk beside it.
+    private func timelineTokens(of chunk: RawTranscriptChunk) -> [Token] {
+        var tokens: [Token] = []
+        for (segmentIndex, segment) in chunk.segments.enumerated() {
+            if let words = segment.words, !words.isEmpty {
+                for (wordIndex, word) in words.enumerated() {
+                    tokens.append(Token(
+                        address: TokenAddress(segment: segmentIndex, index: wordIndex),
+                        start: chunk.timelineOffset + word.start,
+                        end: chunk.timelineOffset + word.end,
+                        key: normalisedUnit(word.text),
+                        timed: true
+                    ))
+                }
+                continue
+            }
+            // An unaligned segment says what was said and not when. Its words
+            // are laid evenly across it so they sort and window with the rest;
+            // the spacing is a guess, which is why they never match on time.
+            let texts = segment.text
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+            guard !texts.isEmpty else { continue }
+            let span = max(segment.end - segment.start, 0)
+            let step = span / Double(texts.count)
+            for (textIndex, text) in texts.enumerated() {
+                let start = chunk.timelineOffset + segment.start + step * Double(textIndex)
+                tokens.append(Token(
+                    address: TokenAddress(segment: segmentIndex, index: textIndex),
+                    start: start, end: start + step,
+                    key: normalisedUnit(text),
+                    timed: false
+                ))
+            }
+        }
+        tokens.sort { lhs, rhs in
+            if lhs.start != rhs.start { return lhs.start < rhs.start }
+            if lhs.address.segment != rhs.address.segment {
+                return lhs.address.segment < rhs.address.segment
+            }
+            return lhs.address.index < rhs.address.index
+        }
+        return tokens
     }
 
-    private func contentEnd(_ chunk: RawTranscriptChunk) -> Double? {
-        chunk.segments.map { chunk.timelineOffset + $0.end }.max()
+    /// The pairs of positions the two sides agree on: a longest common
+    /// subsequence over normalised text where two timed words may only match if
+    /// the chunks timed them within `tolerance` of each other. Order is part of
+    /// the test, so a filler word cannot pair with a twin several sentences
+    /// away.
+    private func matches(
+        earlier: [Token], later: [Token], tolerance: Double
+    ) -> [(Int, Int)] {
+        guard !earlier.isEmpty, !later.isEmpty else { return [] }
+        let rows = earlier.count
+        let columns = later.count
+        var table = [Int](repeating: 0, count: (rows + 1) * (columns + 1))
+        func index(_ row: Int, _ column: Int) -> Int { row * (columns + 1) + column }
+        for row in stride(from: rows - 1, through: 0, by: -1) {
+            for column in stride(from: columns - 1, through: 0, by: -1) {
+                if pairs(earlier[row], later[column], tolerance: tolerance) {
+                    table[index(row, column)] = table[index(row + 1, column + 1)] + 1
+                } else {
+                    table[index(row, column)] = max(
+                        table[index(row + 1, column)], table[index(row, column + 1)]
+                    )
+                }
+            }
+        }
+        var matched: [(Int, Int)] = []
+        var row = 0
+        var column = 0
+        while row < rows, column < columns {
+            if pairs(earlier[row], later[column], tolerance: tolerance) {
+                matched.append((row, column))
+                row += 1
+                column += 1
+            } else if table[index(row + 1, column)] >= table[index(row, column + 1)] {
+                row += 1
+            } else {
+                column += 1
+            }
+        }
+        return matched
     }
 
-    /// One chunk with only the content whose start, on the meeting timeline,
-    /// satisfies `include`.
-    private func keep(
-        _ chunk: RawTranscriptChunk, where include: (Double) -> Bool
+    /// Two renderings of one spoken word: the same text, or one transcription
+    /// error apart on a word long enough for that to mean something, at a
+    /// moment both chunks agree on. A side with no timings is placed by the
+    /// order of what it says, so only the shared span and that order hold it.
+    private func pairs(_ lhs: Token, _ rhs: Token, tolerance: Double) -> Bool {
+        if lhs.timed, rhs.timed, abs(lhs.start - rhs.start) > tolerance { return false }
+        if lhs.key == rhs.key { return true }
+        return withinOneEdit(lhs.key, rhs.key)
+    }
+
+    private func withinOneEdit(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.count >= 5, rhs.count >= 5, abs(lhs.count - rhs.count) <= 1 else { return false }
+        let left = Array(lhs)
+        let right = Array(rhs)
+        var leftIndex = 0
+        var rightIndex = 0
+        var edits = 0
+        while leftIndex < left.count, rightIndex < right.count {
+            if left[leftIndex] == right[rightIndex] {
+                leftIndex += 1
+                rightIndex += 1
+                continue
+            }
+            edits += 1
+            if edits > 1 { return false }
+            if left.count == right.count {
+                leftIndex += 1
+                rightIndex += 1
+            } else if left.count > right.count {
+                leftIndex += 1
+            } else {
+                rightIndex += 1
+            }
+        }
+        return edits + (left.count - leftIndex) + (right.count - rightIndex) <= 1
+    }
+
+    /// One chunk without the named words, and without a segment they emptied.
+    /// An unaligned segment keeps the span it was given, because nothing in it
+    /// says where the words that remain begin.
+    private func removing(
+        _ dropped: Set<TokenAddress>, from chunk: RawTranscriptChunk
     ) -> RawTranscriptChunk {
         var trimmed = chunk
-        trimmed.segments = chunk.segments.compactMap { segment in
-            guard let words = segment.words, !words.isEmpty else {
-                return include(chunk.timelineOffset + segment.start) ? segment : nil
+        trimmed.segments = chunk.segments.enumerated().compactMap { index, segment in
+            if let words = segment.words, !words.isEmpty {
+                let kept = words.enumerated()
+                    .filter { !dropped.contains(TokenAddress(segment: index, index: $0.offset)) }
+                    .map(\.element)
+                if kept.count == words.count { return segment }
+                guard let first = kept.first, let last = kept.last else { return nil }
+                let text = kept.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { return nil }
+                return RawTranscriptSegment(
+                    start: first.start, end: last.end, text: text,
+                    speaker: segment.speaker, words: kept
+                )
             }
-            let kept = words.filter { include(chunk.timelineOffset + $0.start) }
-            if kept.count == words.count { return segment }
-            guard let first = kept.first, let last = kept.last else { return nil }
-            let text = kept.map(\.text).joined().trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty else { return nil }
+            let texts = segment.text
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+            let kept = texts.enumerated()
+                .filter { !dropped.contains(TokenAddress(segment: index, index: $0.offset)) }
+                .map(\.element)
+            if kept.count == texts.count { return segment }
+            guard !kept.isEmpty else { return nil }
             return RawTranscriptSegment(
-                start: first.start, end: last.end, text: text,
-                speaker: segment.speaker, words: kept
+                start: segment.start, end: segment.end,
+                text: kept.joined(separator: " "), speaker: segment.speaker, words: nil
             )
         }
         return trimmed
@@ -329,7 +540,7 @@ public struct TranscriptAssembler: Sendable {
         _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance]
     ) -> [Utterance] {
         var accepted: [Utterance] = []
-        for chunk in trimOverlaps(chunks) {
+        for chunk in deduplicateOverlaps(chunks) {
             let candidates = utterances(
                 from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference
             )
@@ -500,6 +711,9 @@ public struct TranscriptAssembler: Sendable {
     /// Words already repeated once are speech, not overlap, below this.
     private var minimumSeamWords: Int { 3 }
 
+    /// Shortest line the whole-turn duplicate check will delete.
+    private var minimumDuplicateWords: Int { 4 }
+
     /// One line's words as they compare: the timed words where the backend
     /// reported them, and whitespace-separated text where it did not. Both
     /// sides normalise the same way, so a line with timings compares against
@@ -555,6 +769,13 @@ public struct TranscriptAssembler: Sendable {
 
     /// An utterance in the overlap region that repeats something already accepted.
     private func isDuplicate(_ candidate: Utterance, of accepted: [Utterance]) -> Bool {
+        // A backchannel is not a duplicate of the next backchannel. "Yeah"
+        // scores 1.0 against any other "Yeah" inside the search window, and the
+        // seconds two chunks share are now settled word by word before this
+        // runs, so a short line that survived that is a line somebody said.
+        guard TextSimilarity.normalise(candidate.text).count >= minimumDuplicateWords else {
+            return false
+        }
         for existing in accepted.reversed() {
             if candidate.start - existing.end > configuration.duplicateSearchSeconds { break }
             // Repeats inside one chunk are speech, not overlap. A speaker who says

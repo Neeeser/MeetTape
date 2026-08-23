@@ -142,9 +142,23 @@ public struct TranscriptAssembler: Sendable {
             // run nothing read: the panel showed the cloud's original speakers
             // however many times it was pressed.
             let reanalysed = diarization.runs.filter { $0.track == track }.count > 1
-            let attributed = (treatAsLocalUser || (carriesSpeakers && !reanalysed))
+            // A run produced by something other than whatever wrote the words
+            // is the diarizer the user chose, and it wins from the first pass.
+            // Deciding on re-analysis alone meant that transcription in the
+            // cloud with diarization set to Local ran the local diarizer, found
+            // the right speakers, wrote an active run, and then assembled the
+            // transcriber's own chunk-scoped labels anyway: four speakers on
+            // disk, ten in the transcript, and Re-analyze speakers as the only
+            // way to see the ones that had already been computed. Cloud words
+            // with a cloud diarizer still keep their embedded labels, because
+            // there the run carries the same producer as the words.
+            let activeRun = diarization.activeRun(track: track)
+            let separateDiarizer = activeRun.map { run in
+                !chunks.contains { $0.model == run.backend }
+            } ?? false
+            let attributed = (treatAsLocalUser || (carriesSpeakers && !reanalysed && !separateDiarizer))
                 ? chunks
-                : attribute(chunks, using: diarization.activeRun(track: track))
+                : attribute(chunks, using: activeRun)
             let assembled = assembleTrack(
                 attributed,
                 treatAsLocalUser: treatAsLocalUser,

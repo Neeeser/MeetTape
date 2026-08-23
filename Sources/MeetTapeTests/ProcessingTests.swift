@@ -388,6 +388,51 @@ enum ProcessingTests {
                 expect.equal(transcript.utterances[2].speakerKey, "remote_chunk_001_speaker_01")
             },
 
+            test("the diarizer the user chose beats labels embedded in the words") { expect in
+                // Cloud transcription with diarization set to Local ran the
+                // local diarizer, wrote an active run with the right four
+                // speakers, and then assembled the transcriber's own ten
+                // chunk-scoped labels anyway. The run comes from a different
+                // producer than the words, so it is the answer the user asked
+                // for and it wins on the first pass.
+                var words = chunk(id: "mic_chunk_001", track: .mic, offset: 0, segments: [
+                    RawTranscriptSegment(start: 0, end: 4, text: "One two.", speaker: "spk_0"),
+                    RawTranscriptSegment(start: 6, end: 9, text: "Three four.", speaker: "spk_1"),
+                ])
+                words.model = "gpt-4o-transcribe-diarize"
+                func run(backend: String) -> RawDiarization {
+                    RawDiarization(runs: [DiarizationRun(
+                        id: "run-local", track: .mic, backend: backend,
+                        producedAt: Date(timeIntervalSince1970: 0), timelineOffset: 0,
+                        intervals: [
+                            DiarizationInterval(start: 0, end: 5, clusterID: "S1"),
+                            DiarizationInterval(start: 5, end: 10, clusterID: "S2"),
+                        ]
+                    )])
+                }
+
+                let local = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [words]),
+                    diarization: run(backend: "fluidaudio-offline-0.15.6"),
+                    micTrackIsLocalUser: false,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(local.utterances.count, 2)
+                expect.equal(local.utterances[0].speakerKey, "run-local_speaker_00")
+                expect.equal(local.utterances[1].speakerKey, "run-local_speaker_01")
+
+                // Cloud words with a cloud diarizer: the run carries the same
+                // producer as the words, so the embedded labels stand.
+                let cloud = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [words]),
+                    diarization: run(backend: "gpt-4o-transcribe-diarize"),
+                    micTrackIsLocalUser: false,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(cloud.utterances[0].speakerKey, "mic_chunk_001_speaker_spk_0")
+                expect.equal(cloud.utterances[1].speakerKey, "mic_chunk_001_speaker_spk_1")
+            },
+
             test("an in-person recording keeps the raw labels on its only track") { expect in
                 let mic = chunk(id: "mic_chunk_001", track: .mic, offset: 0, segments: [
                     RawTranscriptSegment(start: 1, end: 3, text: "Morning.", speaker: "A"),

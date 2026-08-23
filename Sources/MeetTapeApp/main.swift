@@ -3,7 +3,8 @@ import MeetTapeCore
 import MeetTapeServices
 import MeetTapeUI
 
-/// MeetTape runs as a menu-bar utility with no Dock presence and no main window.
+/// MeetTape runs as a menu-bar utility with no main window. Whether it also
+/// takes a Dock slot is a setting; the menu bar item is there either way.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var runtime: MeetTapeRuntime!
@@ -14,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         runtime = MeetTapeRuntime()
+        // Applied from the loaded settings rather than hardcoded, and again on
+        // every settings change through the menu bar controller's observer.
+        DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
         windows = WindowManager(runtime: runtime)
         menuBar = MenuBarController(runtime: runtime, windows: windows)
         notificationRouter = NotificationRouter(runtime: runtime, windows: windows)
@@ -52,5 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate
+// The stored preference is read once the runtime has loaded settings, in
+// applicationDidFinishLaunching. Until then the app stays out of the Dock, so a
+// menu bar install never flashes an icon on launch.
 application.setActivationPolicy(.accessory)
 application.run()

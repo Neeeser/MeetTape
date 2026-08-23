@@ -47,6 +47,11 @@ struct GeneralSettingsTab: View {
             Section {
                 Toggle("Launch at login", isOn: model.binding(\.launchAtLogin))
                 Toggle("Show notifications", isOn: model.binding(\.showNotifications))
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Show in Dock", isOn: model.binding(\.showsDockIcon))
+                    Text("The menu bar item stays either way.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle(
                     "Pause automatic detection",
                     isOn: Binding(

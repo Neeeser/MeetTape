@@ -261,6 +261,11 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var storageRootPath: String
     public var launchAtLogin: Bool
     public var showNotifications: Bool
+    /// Show a Dock icon and appear in the app switcher, rather than running
+    /// from the menu bar alone. Off by default: a utility that takes a Dock
+    /// slot on upgrade is a visible change nobody asked for. The menu bar item
+    /// is there either way, so the app is always reachable.
+    public var showsDockIcon: Bool
     public var models: AIModelSettings
     public var processing: ProcessingSettings
     public var enrichment: EnrichmentSettings
@@ -287,6 +292,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         storageRootPath: String = MeetingArchiveLayout.defaultRoot.path,
         launchAtLogin: Bool = false,
         showNotifications: Bool = true,
+        showsDockIcon: Bool = false,
         models: AIModelSettings = AIModelSettings(),
         processing: ProcessingSettings = ProcessingSettings(),
         enrichment: EnrichmentSettings = EnrichmentSettings(),
@@ -303,6 +309,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.version = version
         self.storageRootPath = storageRootPath
         self.launchAtLogin = launchAtLogin
+        self.showsDockIcon = showsDockIcon
         self.showNotifications = showNotifications
         self.models = models
         self.processing = processing
@@ -333,6 +340,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showNotifications =
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
+        showsDockIcon =
+            try container.decodeIfPresent(Bool.self, forKey: .showsDockIcon) ?? defaults.showsDockIcon
         // Deliberately not migrated to the newer default. `gpt-transcribe`
         // returns no timings, so choosing it commits the machine to a 600 MB
         // aligner download, and an upgrade that starts one mid-meeting is the

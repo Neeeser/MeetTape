@@ -414,6 +414,21 @@ enum UITests {
                 expect.isFalse(raw.lowercased().contains("sk-"))
             },
 
+            test("the Dock icon is off unless a settings file asks for it") { expect in
+                // A menu-bar utility that takes a Dock slot on upgrade is a
+                // visible change nobody asked for, so an absent key reads as
+                // off rather than as the platform default for an app.
+                let older = #"{"version": 3, "localUserName": "Andrew"}"#
+                let settings = try JSONDecoder().decode(AppSettings.self, from: Data(older.utf8))
+                expect.isFalse(settings.showsDockIcon)
+                expect.equal(settings.localUserName, "Andrew", "the fields beside it are untouched")
+                expect.isFalse(AppSettings().showsDockIcon, "and a fresh install is menu bar only")
+
+                let chosen = #"{"version": 3, "showsDockIcon": true}"#
+                let enabled = try JSONDecoder().decode(AppSettings.self, from: Data(chosen.utf8))
+                expect.isTrue(enabled.showsDockIcon)
+            },
+
             test("a settings file from an older build keeps its values when a field is added") { expect in
                 // Synthesized Codable throws on a missing key, and load() falls
                 // back to defaults, so adding one field silently reset every

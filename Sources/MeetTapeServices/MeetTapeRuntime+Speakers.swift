@@ -19,6 +19,24 @@ public struct SpeakerDirectoryEntry: Sendable, Equatable, Identifiable {
     }
 }
 
+/// One line of a turn, and the stretch of it a person named.
+///
+/// In the line's own coordinates. A turn's lines are not in time order, so a
+/// window belongs to a line rather than to the track: chunks overlap by eight
+/// seconds and a near-duplicate is only dropped above a similarity bar, so the
+/// line printed second can begin before the line printed first.
+public struct SpeakerRangePart: Sendable, Equatable {
+    public var utteranceID: String
+    public var startSeconds: Double
+    public var endSeconds: Double
+
+    public init(utteranceID: String, startSeconds: Double, endSeconds: Double) {
+        self.utteranceID = utteranceID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+    }
+}
+
 /// One speaker in one meeting, as the review panel shows them.
 public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     public var clusterID: String
@@ -341,15 +359,15 @@ extension MeetTapeRuntime {
     /// Divides the transcript at a word and gives the stretch that follows, or
     /// a phrase inside a turn, to one speaker.
     public func assignSpeakerRange(
-        name: String, meetingID: String, track: CaptureTrack, lineIDs: [String],
-        startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
+        name: String, meetingID: String, track: CaptureTrack, parts: [SpeakerRangePart],
+        identityID: IdentityID? = nil
     ) {
         runProcessing { [weak self] in
             guard let self else { return }
             do {
                 _ = try await pipeline.applySpeakerRange(
-                    name, meetingID: meetingID, track: track, lineIDs: lineIDs,
-                    startSeconds: startSeconds, endSeconds: endSeconds, identityID: identityID
+                    name, meetingID: meetingID, track: track, parts: parts,
+                    identityID: identityID
                 )
             } catch {
                 Log.app.error("range speaker not saved: \(logSafeDescription(error), privacy: .public)")

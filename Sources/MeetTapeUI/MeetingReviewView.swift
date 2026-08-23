@@ -368,29 +368,38 @@ public struct MeetingReviewView: View {
         return start == end ? start : "\(start) – \(end)"
     }
 
-    /// Where a right-click lands, in the recording's own seconds. A split runs
-    /// to the end of the turn, because everything after the boundary is what
-    /// the other speaker said.
+    /// Where a right-click lands, in the recording's own seconds, one window
+    /// per line it covers.
+    ///
+    /// A split runs to the end of the turn as the reader sees it: the rest of
+    /// the line the boundary fell in, and the whole of every line printed after
+    /// it. Not the rest of the turn by the clock, because a line printed later
+    /// can have started earlier.
     private func target(
         _ action: TranscriptParagraphAction, in block: CombinedLineBlock
     ) -> SpeakerRangeTarget {
         switch action {
         case let .split(atSeconds, utteranceID):
-            // The line the boundary falls in, and the rest of the turn after
-            // it. Not the whole block: two lines of one turn can come from
-            // neighbouring chunks and hold the same second, and the boundary
-            // belongs in the one the reader was pointing at.
-            SpeakerRangeTarget(
-                recordingID: block.recordingID, track: block.track,
-                lineIDs: block.lines.map(\.utterance.id)
-                    .drop { $0 != utteranceID }.map { $0 },
-                startSeconds: atSeconds, endSeconds: block.endSeconds
+            let following = block.lines.drop { $0.utterance.id != utteranceID }
+            let parts = following.enumerated().map { offset, line in
+                SpeakerRangePart(
+                    utteranceID: line.utterance.id,
+                    startSeconds: offset == 0 ? atSeconds : line.utterance.start,
+                    endSeconds: line.utterance.end
+                )
+            }
+            return SpeakerRangeTarget(
+                recordingID: block.recordingID, track: block.track, parts: parts
             )
-        case let .assign(startSeconds, endSeconds, utteranceIDs):
-            SpeakerRangeTarget(
+        case let .assign(parts):
+            return SpeakerRangeTarget(
                 recordingID: block.recordingID, track: block.track,
-                lineIDs: utteranceIDs,
-                startSeconds: startSeconds, endSeconds: endSeconds
+                parts: parts.map {
+                    SpeakerRangePart(
+                        utteranceID: $0.utteranceID, startSeconds: $0.startSeconds,
+                        endSeconds: $0.endSeconds
+                    )
+                }
             )
         }
     }

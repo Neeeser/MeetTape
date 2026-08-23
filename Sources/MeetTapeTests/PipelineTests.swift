@@ -431,8 +431,7 @@ enum PipelineTests {
                 // boundary, so it records one cut and not two.
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 5, endSeconds: 11
+                    parts: try windows(of: meeting.store, from: 5, to: 11)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -470,8 +469,7 @@ enum PipelineTests {
 
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 5, endSeconds: 7
+                    parts: try windows(of: meeting.store, from: 5, to: 7)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -502,8 +500,7 @@ enum PipelineTests {
                 )
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 5, endSeconds: 11
+                    parts: try windows(of: meeting.store, from: 5, to: 11)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -537,8 +534,7 @@ enum PipelineTests {
 
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 5, endSeconds: 11
+                    parts: try windows(of: meeting.store, from: 5, to: 11)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -583,8 +579,9 @@ enum PipelineTests {
                 let all = try expect.unwrap(try meeting.store.readCanonicalTranscript()).utterances
                 let clicked = try expect.unwrap(all.first { $0.chunkID == "c2" })
                 _ = try await pipeline.applySpeakerRange(
-                    "Dana", meetingID: meeting.id, track: .remote, lineIDs: [clicked.id],
-                    startSeconds: 6, endSeconds: 10
+                    "Dana", meetingID: meeting.id, track: .remote, parts: [SpeakerRangePart(
+                        utteranceID: clicked.id, startSeconds: 6, endSeconds: 10
+                    )]
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -627,8 +624,7 @@ enum PipelineTests {
                 // does and lasts less than that second.
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 1, endSeconds: 1.7
+                    parts: try windows(of: meeting.store, from: 1, to: 1.7)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -653,8 +649,7 @@ enum PipelineTests {
                 // does and lasts less than that second.
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 11, endSeconds: 11.7
+                    parts: try windows(of: meeting.store, from: 11, to: 11.7)
                 )
 
                 let map = try meeting.store.readSpeakerMap()
@@ -665,6 +660,52 @@ enum PipelineTests {
                 expect.equal(lines[1].text, "friday")
                 expect.equal(map.resolvedName(for: lines[1]), "Dana")
                 expect.equal(map.resolvedName(for: lines[0]), "Priya")
+            },
+
+            test("a split names the rest of the turn as it is printed") { expect in
+                // The turn shows the first chunk's line and then the second
+                // chunk's, which began earlier. Everything after the boundary
+                // on screen belongs to the person named, including the line
+                // whose clock says it started before the boundary.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeTranscribedMeeting(root: root, withOverlappingTwin: true)
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend()
+                )
+
+                let all = try expect.unwrap(try meeting.store.readCanonicalTranscript()).utterances
+                let clicked = try expect.unwrap(all.first { $0.chunkID == "c1" })
+                let printedAfter = try expect.unwrap(all.first { $0.chunkID == "c2" })
+                expect.isTrue(
+                    printedAfter.start < 6, "the later line really does begin before the boundary"
+                )
+                _ = try await pipeline.applySpeakerRange(
+                    "Dana", meetingID: meeting.id, track: .remote,
+                    parts: [
+                        SpeakerRangePart(
+                            utteranceID: clicked.id, startSeconds: 6, endSeconds: clicked.end
+                        ),
+                        SpeakerRangePart(
+                            utteranceID: printedAfter.id,
+                            startSeconds: printedAfter.start, endSeconds: printedAfter.end
+                        ),
+                    ]
+                )
+
+                let map = try meeting.store.readSpeakerMap()
+                let lines = try expect.unwrap(
+                    try meeting.store.readCanonicalTranscript()
+                ).utterances
+                let head = try expect.unwrap(lines.first { $0.chunkID == "c1" && $0.start < 6 })
+                let tail = try expect.unwrap(lines.first { $0.chunkID == "c1" && $0.start >= 6 })
+                let after = try expect.unwrap(lines.first { $0.chunkID == "c2" })
+                expect.equal(map.resolvedName(for: head), "Priya", "before the boundary")
+                expect.equal(map.resolvedName(for: tail), "Dana", "after it")
+                expect.equal(
+                    map.resolvedName(for: after), "Dana",
+                    "and the line printed after it, whose clock says otherwise"
+                )
             },
 
             test("a boundary is kept when the transcript is assembled again") { expect in
@@ -678,8 +719,7 @@ enum PipelineTests {
                 )
                 _ = try await pipeline.applySpeakerRange(
                     "Dana", meetingID: meeting.id, track: .remote,
-                    lineIDs: try lineIDs(of: meeting.store),
-                    startSeconds: 5, endSeconds: 11
+                    parts: try windows(of: meeting.store, from: 5, to: 11)
                 )
                 // Whatever else re-assembly does, the boundary and the name it
                 // carries are still there to apply.
@@ -691,9 +731,14 @@ enum PipelineTests {
         ])
     }
 
-    /// Every line the panel would be showing.
-    static func lineIDs(of store: MeetingStore) throws -> [String] {
-        (try store.readCanonicalTranscript())?.utterances.map(\.id) ?? []
+    /// Every line the panel would be showing, each windowed to the same
+    /// stretch, which is what the panel sends for a selection inside one turn.
+    static func windows(
+        of store: MeetingStore, from start: Double, to end: Double
+    ) throws -> [SpeakerRangePart] {
+        ((try store.readCanonicalTranscript())?.utterances ?? []).map {
+            SpeakerRangePart(utteranceID: $0.id, startSeconds: start, endSeconds: end)
+        }
     }
 
     /// A meeting with one transcript line: a question and its answer run

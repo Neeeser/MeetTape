@@ -129,6 +129,40 @@ enum TranscriptPanelTests {
                 }
             },
 
+            test("a selection dragged back across a seam still reads forwards") { expect in
+                // The lines of one turn are not in time order: chunks overlap
+                // by eight seconds, so the line printed second can begin before
+                // the line printed first. One range over the pair came out
+                // backwards, and nothing was renamed.
+                await MainActor.run {
+                    let view = TranscriptTextView()
+                    view.spans = [
+                        TranscriptWordSpan(
+                            location: 0, length: 4, startSeconds: 109.0, endSeconds: 109.4,
+                            utteranceID: "l1"
+                        ),
+                        TranscriptWordSpan(
+                            location: 5, length: 4, startSeconds: 109.5, endSeconds: 109.9,
+                            utteranceID: "l1"
+                        ),
+                        TranscriptWordSpan(
+                            location: 10, length: 4, startSeconds: 104.2, endSeconds: 104.6,
+                            utteranceID: "l2"
+                        ),
+                    ]
+                    let ranges = view.selectedRanges(NSRange(location: 5, length: 9))
+                    expect.equal(ranges.count, 2, "a window each")
+                    for range in ranges {
+                        expect.isTrue(
+                            range.endSeconds > range.startSeconds,
+                            "\(range.utteranceID) reads forwards"
+                        )
+                    }
+                    expect.equal(ranges.first?.startSeconds, 109.5)
+                    expect.equal(ranges.last?.startSeconds, 104.2)
+                }
+            },
+
             test("a right-click resolves to the word gap nearest it") { expect in
                 await MainActor.run {
                     // "we ship on friday", one word per second.
@@ -154,11 +188,14 @@ enum TranscriptPanelTests {
                         view.nearestBoundary(to: 0)?.startSeconds, 1.0,
                         "a click before the first word divides at the second, never at nothing"
                     )
-                    let selection = view.selectedSpanRange(NSRange(location: 5, length: 8))
-                    expect.equal(selection?.start, 1.0)
-                    expect.equal(selection?.end, 2.8, "through the end of the last word touched")
+                    let selection = view.selectedRanges(NSRange(location: 5, length: 8))
                     expect.equal(
-                        selection?.lines, ["l1", "l2"], "every line the selection crossed"
+                        selection.map(\.utteranceID), ["l1", "l2"],
+                        "one window per line the selection crossed"
+                    )
+                    expect.equal(selection.first?.startSeconds, 1.0)
+                    expect.equal(
+                        selection.last?.endSeconds, 2.8, "through the end of the last word touched"
                     )
                 }
             },

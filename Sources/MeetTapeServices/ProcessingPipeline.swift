@@ -1658,56 +1658,65 @@ public actor ProcessingPipeline {
     /// which is a state the panel can show and the user can finish. Writing the
     /// names first would leave a correction covering words that were never
     /// separated from the ones around them.
-    /// - Parameter lineIDs: the lines the reader was looking at. Chunks overlap
-    ///   by eight seconds and a near-duplicate is only dropped above a
-    ///   similarity bar, so two lines on one track routinely contain the same
-    ///   second. Time alone would put the boundary in whichever of them sorts
-    ///   first and hand the words of the other one, which is a different
-    ///   speaker, to the person being named.
+    /// - Parameter parts: one window per line the reader was pointing at, in
+    ///   that line's own coordinates. Per line rather than one range over the
+    ///   track, because a turn's lines are not in time order: chunks overlap by
+    ///   eight seconds and a near-duplicate is only dropped above a similarity
+    ///   bar, so a line printed second can begin before the line printed first.
+    ///   One range over both put a boundary in the wrong line, renamed a
+    ///   stretch the reader had not selected, and left a selection dragged
+    ///   backwards across a seam matching nothing at all.
     @discardableResult
     public func applySpeakerRange(
-        _ name: String, meetingID: String, track: CaptureTrack, lineIDs: [String],
-        startSeconds: Double, endSeconds: Double, identityID: IdentityID? = nil
+        _ name: String, meetingID: String, track: CaptureTrack, parts: [SpeakerRangePart],
+        identityID: IdentityID? = nil
     ) async throws -> IdentityID? {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
+        let first = parts.first?.utteranceID ?? ""
         guard let before = try found.store.readCanonicalTranscript() else {
-            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+            throw ProcessingError.utteranceNotFound(id: first)
         }
-        let targets = before.utterances.filter { lineIDs.contains($0.id) && $0.track == track }
-        guard !targets.isEmpty else {
-            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+        var windows: [(line: Utterance, part: SpeakerRangePart)] = []
+        for part in parts {
+            guard let line = before.utterances.first(where: {
+                $0.id == part.utteranceID && $0.track == track
+            }) else { continue }
+            windows.append((line, part))
         }
-        try divide(store: found.store, lines: targets, at: [startSeconds, endSeconds])
+        guard !windows.isEmpty else { throw ProcessingError.utteranceNotFound(id: first) }
+        try divide(store: found.store, windows: windows)
 
         guard let after = try found.store.readCanonicalTranscript() else {
-            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
+            throw ProcessingError.utteranceNotFound(id: first)
         }
         // A piece of a line the reader named, by the middle of what is spoken
         // in it: a boundary landing a hair inside the neighbouring piece cannot
-        // hand that piece over.
+        // hand that piece over. Each piece is judged against the window of the
+        // line it came from, so two lines sharing a second cannot claim each
+        // other's words.
         //
         // Measured across its words rather than its span. A line begins before
         // its first word and ends after its last, and the outermost piece keeps
-        // those outer edges so no audio ends up belonging to nobody. The range
+        // those outer edges so no audio ends up belonging to nobody. The window
         // comes from the words the reader pointed at, so comparing it against
         // the padded span made pulling out the first or last phrase of a turn
         // match no piece at all: the boundary was written and the name was not.
-        let selected = after.utterances.filter { piece in
-            guard piece.track == track, targets.contains(where: {
-                $0.chunkID == piece.chunkID && piece.start >= $0.start && piece.end <= $0.end
-            }) else { return false }
-            let spokenStart = piece.words?.first?.start ?? piece.start
-            let spokenEnd = piece.words?.last?.end ?? piece.end
-            let middle = (spokenStart + spokenEnd) / 2
-            return middle >= startSeconds && middle <= endSeconds
+        var selected: [String] = []
+        for (line, part) in windows {
+            for piece in after.utterances where piece.chunkID == line.chunkID
+                && piece.track == track && piece.start >= line.start && piece.end <= line.end {
+                let spokenStart = piece.words?.first?.start ?? piece.start
+                let spokenEnd = piece.words?.last?.end ?? piece.end
+                let middle = (spokenStart + spokenEnd) / 2
+                guard middle >= part.startSeconds, middle <= part.endSeconds else { continue }
+                if !selected.contains(piece.id) { selected.append(piece.id) }
+            }
         }
-        guard !selected.isEmpty else {
-            throw ProcessingError.utteranceNotFound(id: lineIDs.first ?? "")
-        }
+        guard !selected.isEmpty else { throw ProcessingError.utteranceNotFound(id: first) }
         return try await correctUtterances(
-            name, utteranceIDs: selected.map(\.id), meetingID: meetingID, identityID: identityID
+            name, utteranceIDs: selected, meetingID: meetingID, identityID: identityID
         )
     }
 
@@ -1726,46 +1735,51 @@ public actor ProcessingPipeline {
     /// three-second interjection displays across the turn it was merged into
     /// and confirms none of it; stretched to the piece, it would confirm all of
     /// it and put the other speaker's audio in that person's voice profile.
-    private func divide(store: MeetingStore, lines targets: [Utterance], at moments: [Double]) throws {
+    private func divide(
+        store: MeetingStore, windows: [(line: Utterance, part: SpeakerRangePart)]
+    ) throws {
         var speakers = try store.readSpeakerMap()
-        var lines = targets
         var changed = false
-        for moment in moments {
-            guard let line = lines.first(where: { moment > $0.start && moment < $0.end })
-            else { continue }
-            guard let boundary = LineDivision.boundary(in: line, near: moment) else { continue }
-            let cut = LineCut(
-                track: line.track, atSeconds: boundary, chunkID: line.chunkID, createdAt: clock.now
-            )
-            let before = speakers.lineCuts.count
-            speakers.cut(cut)
-            guard speakers.lineCuts.count != before else { continue }
-            changed = true
-            let pieces = LineDivision.divide(line, at: [cut])
-            if pieces.count > 1, let override = speakers.override(for: line) {
-                speakers.utteranceOverrides.removeAll { $0 == override }
-                let start = override.startSeconds ?? line.start
-                let end = override.endSeconds ?? line.end
-                for piece in pieces {
-                    let clippedStart = max(start, piece.start)
-                    let clippedEnd = min(end, piece.end)
-                    guard clippedEnd > clippedStart else { continue }
-                    speakers.utteranceOverrides.append(UtteranceOverride(
-                        track: piece.track,
-                        anchorSeconds: (clippedStart + clippedEnd) / 2,
-                        startSeconds: clippedStart,
-                        endSeconds: clippedEnd,
-                        assignment: override.assignment,
-                        createdAt: override.createdAt,
-                        utteranceID: piece.id,
-                        chunkID: piece.chunkID
-                    ))
+        for window in windows {
+            // This line's own pieces, so a second boundary is placed against
+            // what the first one left rather than against the line it replaced.
+            var pieces = [window.line]
+            for moment in [window.part.startSeconds, window.part.endSeconds] {
+                guard let piece = pieces.first(where: { moment > $0.start && moment < $0.end }),
+                      let boundary = LineDivision.boundary(in: piece, near: moment)
+                else { continue }
+                let cut = LineCut(
+                    track: piece.track, atSeconds: boundary, chunkID: piece.chunkID,
+                    createdAt: clock.now
+                )
+                let count = speakers.lineCuts.count
+                speakers.cut(cut)
+                guard speakers.lineCuts.count != count else { continue }
+                changed = true
+                let divided = LineDivision.divide(piece, at: [cut])
+                if divided.count > 1, let override = speakers.override(for: piece) {
+                    speakers.utteranceOverrides.removeAll { $0 == override }
+                    let start = override.startSeconds ?? piece.start
+                    let end = override.endSeconds ?? piece.end
+                    for part in divided {
+                        let clippedStart = max(start, part.start)
+                        let clippedEnd = min(end, part.end)
+                        guard clippedEnd > clippedStart else { continue }
+                        speakers.utteranceOverrides.append(UtteranceOverride(
+                            track: part.track,
+                            anchorSeconds: (clippedStart + clippedEnd) / 2,
+                            startSeconds: clippedStart,
+                            endSeconds: clippedEnd,
+                            assignment: override.assignment,
+                            createdAt: override.createdAt,
+                            utteranceID: part.id,
+                            chunkID: part.chunkID
+                        ))
+                    }
                 }
-            }
-            // Later moments are placed against the pieces, so two boundaries
-            // inside one line both land.
-            if let index = lines.firstIndex(where: { $0.id == line.id }) {
-                lines.replaceSubrange(index...index, with: pieces)
+                if let at = pieces.firstIndex(where: { $0.id == piece.id }) {
+                    pieces.replaceSubrange(at...at, with: divided)
+                }
             }
         }
         guard changed else { return }

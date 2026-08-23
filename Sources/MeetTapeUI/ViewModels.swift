@@ -244,22 +244,15 @@ public final class SettingsModel {
 public struct SpeakerRangeTarget: Sendable, Equatable {
     public var recordingID: String
     public var track: CaptureTrack
-    /// The lines the reader was looking at. Chunks overlap, so two lines on one
-    /// track routinely hold the same second and time alone would reach the
-    /// wrong one.
-    public var lineIDs: [String]
-    public var startSeconds: Double
-    public var endSeconds: Double
+    /// One window per line the reader was pointing at. Chunks overlap, so two
+    /// lines of one turn routinely hold the same second and a single range over
+    /// the track would reach the wrong one.
+    public var parts: [SpeakerRangePart]
 
-    public init(
-        recordingID: String, track: CaptureTrack, lineIDs: [String],
-        startSeconds: Double, endSeconds: Double
-    ) {
+    public init(recordingID: String, track: CaptureTrack, parts: [SpeakerRangePart]) {
         self.recordingID = recordingID
         self.track = track
-        self.lineIDs = lineIDs
-        self.startSeconds = startSeconds
-        self.endSeconds = endSeconds
+        self.parts = parts
     }
 }
 
@@ -456,8 +449,7 @@ public final class MeetingReviewModel {
     public func assignRange(_ target: SpeakerRangeTarget, to entry: SpeakerDirectoryEntry) {
         runtime.assignSpeakerRange(
             name: entry.identity.resolvedName, meetingID: target.recordingID,
-            track: target.track, lineIDs: target.lineIDs, startSeconds: target.startSeconds,
-            endSeconds: target.endSeconds, identityID: entry.id
+            track: target.track, parts: target.parts, identityID: entry.id
         )
     }
 
@@ -466,8 +458,7 @@ public final class MeetingReviewModel {
         guard !trimmed.isEmpty else { return }
         runtime.assignSpeakerRange(
             name: trimmed, meetingID: target.recordingID, track: target.track,
-            lineIDs: target.lineIDs, startSeconds: target.startSeconds,
-            endSeconds: target.endSeconds
+            parts: target.parts
         )
     }
 

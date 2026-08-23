@@ -8,9 +8,16 @@ enum TranscriptParagraphAction: Equatable {
     /// Divide the turn at this moment and give everything after it to someone.
     /// The line named is the one the boundary falls in.
     case split(atSeconds: Double, utteranceID: String)
-    /// Give this stretch to someone and leave the words either side alone,
-    /// across the lines the selection touched.
-    case assign(startSeconds: Double, endSeconds: Double, utteranceIDs: [String])
+    /// Give this stretch to someone and leave the words either side alone. One
+    /// window per line the selection touched, in that line's own coordinates.
+    case assign(parts: [SelectedLineRange])
+}
+
+/// The words of one line that a selection covered.
+struct SelectedLineRange: Equatable {
+    var utteranceID: String
+    var startSeconds: Double
+    var endSeconds: Double
 }
 
 /// One speaker's turn as a paragraph that can be selected, copied and divided.
@@ -96,10 +103,10 @@ final class TranscriptTextView: NSTextView {
         let selection = selectedRange()
         let action: TranscriptParagraphAction
         let title: String
-        if selection.length > 0, let range = selectedSpanRange(selection) {
-            action = .assign(
-                startSeconds: range.start, endSeconds: range.end, utteranceIDs: range.lines
-            )
+        if selection.length > 0 {
+            let parts = selectedRanges(selection)
+            guard !parts.isEmpty else { return menu }
+            action = .assign(parts: parts)
             title = "Assign selection to"
         } else {
             let point = convert(event.locationInWindow, from: nil)
@@ -142,17 +149,27 @@ final class TranscriptTextView: NSTextView {
         return best
     }
 
-    /// The moments a selected range covers, and the lines it touched.
-    func selectedSpanRange(_ range: NSRange) -> (start: Double, end: Double, lines: [String])? {
-        let touched = spans.filter {
-            $0.location < range.location + range.length && range.location < $0.location + $0.length
+    /// What a selection covers, as one window per line it touched.
+    ///
+    /// Per line, and by the earliest and latest word inside each, because the
+    /// lines of one turn are not in time order: a selection dragged across a
+    /// chunk seam can end at a moment earlier than it started, and one range
+    /// over the pair would be backwards.
+    func selectedRanges(_ range: NSRange) -> [SelectedLineRange] {
+        var out: [SelectedLineRange] = []
+        for span in spans where span.location < range.location + range.length
+            && range.location < span.location + span.length {
+            if let at = out.firstIndex(where: { $0.utteranceID == span.utteranceID }) {
+                out[at].startSeconds = min(out[at].startSeconds, span.startSeconds)
+                out[at].endSeconds = max(out[at].endSeconds, span.endSeconds)
+            } else {
+                out.append(SelectedLineRange(
+                    utteranceID: span.utteranceID,
+                    startSeconds: span.startSeconds, endSeconds: span.endSeconds
+                ))
+            }
         }
-        guard let first = touched.first, let last = touched.last else { return nil }
-        var lines: [String] = []
-        for span in touched where lines.last != span.utteranceID {
-            lines.append(span.utteranceID)
-        }
-        return (first.startSeconds, last.endSeconds, lines)
+        return out
     }
 }
 

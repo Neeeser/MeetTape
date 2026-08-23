@@ -234,8 +234,8 @@ against real hardware and what has not.
   meeting files, logs, fixtures, tests or CI.
 - CI fails the build on anything shaped like an API key in the tree, and on any
   committed audio file.
-- `plans/` and `probes/` hold local investigation material. They are gitignored
-  and must stay untracked.
+- `plans/`, `probes/` and `.claude/specs/` hold local investigation material.
+  They are gitignored and must stay untracked.
 
 ## Logging
 

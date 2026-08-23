@@ -40,7 +40,7 @@ enum UITests {
                     // and no models on disk. Rendered one at a time because the
                     // wizard only builds the step it is showing, so a trap in a
                     // later step would otherwise never be reached here.
-                    let setup = SetupModel(runtime: runtime)
+                    let setup = SetupModel(runtime: runtime, install: { _, _ in })
                     for step in SetupStepID.allCases {
                         setup.jump(to: step)
                         render(SetupWizardView(model: setup, onFinish: {}))
@@ -180,7 +180,12 @@ enum UITests {
                 let model = await MainActor.run {
                     SetupModel(
                         runtime: MeetTapeRuntime(settingsDirectory: root),
-                        keyPresence: { await lookups.bump(); return true }
+                        keyPresence: { await lookups.bump(); return true },
+                        // Choosing a backend starts the download for that
+                        // choice. With the real one this test fetched the
+                        // aligner from HuggingFace to answer a question about
+                        // the keychain.
+                        install: { _, _ in }
                     )
                 }
 

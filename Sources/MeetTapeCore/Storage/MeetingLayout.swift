@@ -36,6 +36,11 @@ public struct MeetingLayout: Sendable, Equatable {
     public var recordingAudio: URL { root.appendingPathComponent("recording.m4a") }
     /// Raw API responses, kept verbatim as ground truth for what the model said.
     public var apiResponses: URL { raw.appendingPathComponent("api", isDirectory: true) }
+    /// Derived timings for chunks whose model returned text alone. Regenerable
+    /// from the segments and the raw transcript, like every derived file, and
+    /// application-maintained, so it lives under `raw/` rather than beside the
+    /// files a person opens.
+    public var alignments: URL { raw.appendingPathComponent("alignments", isDirectory: true) }
     /// Imported originals live here untouched.
     public var originals: URL { raw.appendingPathComponent("original", isDirectory: true) }
     /// Per-track archive files that replace the segment chain after compaction.
@@ -59,6 +64,10 @@ public struct MeetingLayout: Sendable, Equatable {
 
     public func apiResponseFile(named name: String) -> URL {
         apiResponses.appendingPathComponent(name)
+    }
+
+    public func alignmentFile(chunkID: String) -> URL {
+        alignments.appendingPathComponent("\(chunkID).json")
     }
 
     // MARK: - the layout before raw/ existed

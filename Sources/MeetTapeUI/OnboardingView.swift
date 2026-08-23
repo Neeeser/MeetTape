@@ -69,6 +69,7 @@ public struct OnboardingView: View {
             subtitle: "Downloaded once. After that, transcription and speaker recognition run on this Mac."
         ) {
             VStack(alignment: .leading, spacing: 10) {
+                LocalModelChoicePicker(runtime: model.runtime)
                 switch model.runtime.localModelState {
                 case .installed:
                     Label("Installed", systemImage: "checkmark.circle.fill")
@@ -76,15 +77,15 @@ public struct OnboardingView: View {
                 case .outdated:
                     Label("Installed, pinned by an older build", systemImage: "checkmark.circle")
                         .foregroundStyle(.secondary).font(.callout)
-                case .downloading(let fraction, let detail):
+                case .downloading(let fraction, let detail, _):
                     ProgressView(value: fraction)
                     Text(detail).font(.caption).foregroundStyle(.secondary)
-                case .failed(let message):
+                case .failed(let message, _):
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange).font(.caption)
                     Button("Try Again") { Task { await model.runtime.installLocalModels() } }
                 case .notInstalled:
-                    Button("Download about 650 MB") {
+                    Button("Download the selected model") {
                         Task { await model.runtime.installLocalModels() }
                     }
                 }

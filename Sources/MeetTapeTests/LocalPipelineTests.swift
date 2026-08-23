@@ -14,7 +14,7 @@ final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var identifier = "stub-whisper"
     var isLocal = true
     var limits = BackendAudioLimits.none
-    var producesWordTimestamps = true
+    var timing = TranscriptTiming.words
     /// The audio handed to this backend, so a test can say which one read it.
     private let state = Mutex<[String]>([])
     var received: [String] { state.withLock { $0 } }
@@ -59,6 +59,44 @@ struct StubLocalDiarizer: DiarizationBackend, @unchecked Sendable {
     }
 }
 
+/// A transcription backend that returns the best words and no timings, the
+/// shape gpt-transcribe and local Cohere produce.
+final class StubTextTranscriber: TranscriptionBackend, @unchecked Sendable {
+    var text: String
+    var identifier = "stub-cohere"
+    var isLocal = true
+    var limits: BackendAudioLimits
+    var timing = TranscriptTiming.text
+    private let state = Mutex<[String]>([])
+    /// The audio handed to this backend, so a test can count its chunks.
+    var received: [String] { state.withLock { $0 } }
+
+    init(text: String, limits: BackendAudioLimits = .none) {
+        self.text = text
+        self.limits = limits
+    }
+
+    func transcribe(
+        audio: URL, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> TranscriptionOutput {
+        state.withLock { $0.append(audio.lastPathComponent) }
+        progress(1)
+        return TranscriptionOutput(segments: [], text: text, durationSeconds: 6)
+    }
+}
+
+/// An aligner with a fixed answer, or a refusal.
+struct StubAligner: TranscriptAligner, @unchecked Sendable {
+    var identifier = "stub-aligner"
+    var segments: [RawTranscriptSegment]
+    var refuses = false
+
+    func align(audio: URL, text: String) async throws -> [RawTranscriptSegment] {
+        if refuses { throw TranscriptAlignmentRefused(reason: "stub refusal") }
+        return segments
+    }
+}
+
 /// Stands in for the embedding extractor on a machine with no models installed.
 struct RefusingEmbeddingExtractor: SpeakerEmbeddingExtractor {
     var model: EmbeddingModelIdentifier { .fluidAudioOffline }
@@ -83,9 +121,11 @@ enum LocalPipelineTests {
     static func makePipeline(
         repository: MeetingRepository,
         backend: FakeAIBackend,
-        transcriber: StubLocalTranscriber,
+        transcriber: any TranscriptionBackend,
         diarizer: StubLocalDiarizer,
         speakers: SpeakerRecognitionService?,
+        aligner: (any TranscriptAligner)? = nil,
+        prepareAligner: (@Sendable () async throws -> Void)? = nil,
         settings: AppSettings,
         scratchRoot: URL
     ) -> ProcessingPipeline {
@@ -95,7 +135,9 @@ enum LocalPipelineTests {
             backends: ProcessingBackends(
                 transcription: { _, _ in transcriber },
                 diarization: { _, _ in diarizer },
-                speakers: speakers
+                speakers: speakers,
+                aligner: aligner,
+                prepareAligner: prepareAligner
             ),
             scratch: ProcessingScratch(root: scratchRoot),
             clock: ManualClock(),
@@ -168,6 +210,311 @@ enum LocalPipelineTests {
                 expect.equal(remote[0].text, "we ship friday")
                 expect.equal(remote[1].text, "no we do not")
                 expect.notEqual(remote[0].speakerKey, remote[1].speakerKey)
+            },
+
+            test("a text-only backend's words reach the timeline through the aligner") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "we ship friday no we do not")
+                let aligner = StubAligner(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 4.2, text: "we ship friday no we do not", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.3, text: " we"),
+                            RawTranscriptWord(start: 0.4, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.4, text: " friday"),
+                            RawTranscriptWord(start: 3.0, end: 3.2, text: " no"),
+                            RawTranscriptWord(start: 3.3, end: 3.5, text: " we"),
+                            RawTranscriptWord(start: 3.6, end: 3.8, text: " do"),
+                            RawTranscriptWord(start: 3.9, end: 4.2, text: " not"),
+                        ]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [
+                        DiarizationInterval(start: 0, end: 2, clusterID: "S1"),
+                        DiarizationInterval(start: 2.9, end: 4.5, clusterID: "S2"),
+                    ],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 31, spans: [(0, 2)])
+                        + embeddings(cluster: "S2", seed: 32, spans: [(2.9, 4.5)])
+                )
+
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: aligner,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+
+                // The raw chunk stays what the model returned: text, no timings.
+                let raw = try meeting.store.readRawTranscript()
+                let chunk = try expect.unwrap(raw.chunks.first { $0.track == .remote })
+                expect.equal(chunk.text, "we ship friday no we do not")
+                expect.equal(chunk.segments.count, 0, "no timings are invented into the raw record")
+                expect.equal(chunk.responseFormat, "local_text")
+
+                // The alignment is its own derived file, with provenance.
+                let alignment = try expect.unwrap(meeting.store.readAlignment(chunkID: chunk.id))
+                expect.equal(alignment.aligner, "stub-aligner")
+
+                // And assembly consumes the aligned words: split where the
+                // speaker changed, exactly as a word-timed backend would be.
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let remote = transcript.utterances.filter { $0.track == .remote }
+                expect.equal(remote.count, 2, "attribution worked on aligned words")
+                expect.equal(remote.first?.text, "we ship friday")
+                expect.equal(remote.last?.text, "no we do not")
+            },
+
+            test("a chunked local engine and a cloud diarizer do not collide") { expect in
+                // Both chunk the same track, and both went through the same
+                // naming. The diarizer's plans matched the transcriber's
+                // chunks, so every one was skipped as already done: nothing
+                // was diarized, no run was written, and the far end came back
+                // as one unattributed speaker with the meeting reporting
+                // success.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let backend = FakeAIBackend()
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 1.5, text: "Theirs.", speaker: "A"),
+                ]
+                // Chunked, the way Cohere is: a request limit under the
+                // meeting's own length.
+                let transcriber = StubTextTranscriber(
+                    text: "we ship friday",
+                    limits: BackendAudioLimits(maximumSeconds: 3)
+                )
+                let aligner = StubAligner(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 1.2, text: "we ship friday", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.4, text: " we"),
+                            RawTranscriptWord(start: 0.5, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.2, text: " friday"),
+                        ]
+                    ),
+                ])
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.processing.diarization = .openAI
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    backends: ProcessingBackends(
+                        transcription: { _, _ in transcriber },
+                        diarization: { _, model in
+                            OpenAIDiarizationBackend(backend: backend, model: model)
+                        },
+                        aligner: aligner
+                    ),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { resolved },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                let words = try meeting.store.readRawTranscript()
+                    .chunks(track: .remote, purpose: .words)
+                expect.isTrue(
+                    words.count > 1 && words.contains { $0.id == "remote_chunk_001" },
+                    "the local engine chunked the far end under the diarizer's own naming"
+                )
+                expect.isTrue(
+                    backend.calls.contains { $0.kind == "diarize" },
+                    "the diarizer was actually asked, not skipped as already done"
+                )
+                let diarization = try meeting.store.readRawDiarization()
+                let run = try expect.unwrap(diarization.activeRun(track: .remote))
+                expect.isFalse(run.intervals.isEmpty, "a run was written")
+
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let remote = transcript.utterances.filter { $0.track == .remote }
+                expect.isFalse(remote.isEmpty)
+                expect.isFalse(
+                    remote.allSatisfy { $0.speakerKey == SpeakerLabel.unattributed(track: .remote) },
+                    "the far end must not collapse into one unattributed speaker"
+                )
+            },
+
+            test("switching to cloud transcription later still diarizes the far end") { expect in
+                // The other route into the same collision. A local engine has
+                // already chunked the far end; the user switches transcription
+                // to Cloud and the meeting resumes at diarization. The cloud
+                // diarizer's words are no longer wanted — the local ones are
+                // already on disk and own the track — so it must ask for
+                // labels alone rather than claiming the same purpose and the
+                // same chunk names.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // What the interrupted local pass left behind.
+                var raw = try meeting.store.readRawTranscript()
+                raw.chunks.append(RawTranscriptChunk(
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 6, model: "stub-cohere", responseFormat: "local_text",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 2, text: "we ship friday", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.4, text: " we"),
+                            RawTranscriptWord(start: 0.5, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.2, text: " friday"),
+                        ]
+                    )],
+                    purpose: .words
+                ))
+                try meeting.store.writeRawTranscript(raw)
+
+                let backend = FakeAIBackend()
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 1.5, text: "Theirs.", speaker: "A"),
+                ]
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.processing.diarization = .openAI
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let pipeline = ProcessingPipeline(
+                    repository: meeting.repository,
+                    backend: backend,
+                    backends: ProcessingBackends.openAIOnly(backend),
+                    scratch: ProcessingScratch(root: root.appendingPathComponent("scratch")),
+                    clock: ManualClock(),
+                    settingsProvider: { resolved },
+                    wait: { _ in }
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                expect.isTrue(
+                    backend.calls.contains { $0.kind == "diarize" },
+                    "the diarizer was asked, not skipped as already done"
+                )
+                let diarization = try meeting.store.readRawDiarization()
+                expect.isFalse(
+                    try expect.unwrap(diarization.activeRun(track: .remote)).intervals.isEmpty
+                )
+
+                // And the local words still own the track: the cloud pass took
+                // labels only, so nothing is transcribed twice.
+                let after = try meeting.store.readRawTranscript()
+                    .chunks(track: .remote, purpose: .words)
+                expect.equal(
+                    Set(after.map(\.model)), ["stub-cohere"],
+                    "one track's words come from one backend"
+                )
+            },
+
+            test("an aligner that will not install fails the stage, it does not ship coarse timings") { expect in
+                // Distinct from a refusal. A refusal is deterministic and the
+                // chunk keeps whole-chunk timing for good; a model that would
+                // not download is transient, and completing the meeting on
+                // five-minute utterances would be permanent, because nothing
+                // revisits a finished meeting's alignment.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "we ship friday")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: StubAligner(segments: []),
+                    prepareAligner: { throw LocalModelError.installFailed("no network") },
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.notEqual(
+                    metadata.processing.state, .complete,
+                    "a meeting whose words have no timings must not report success"
+                )
+                expect.equal(metadata.processing.state, .failed)
+                expect.isTrue(
+                    metadata.processing.lastFailure?.isRetryable == true,
+                    "and the download can be tried again"
+                )
+
+                // The words are safe, so a retry aligns them rather than
+                // transcribing again.
+                let raw = try meeting.store.readRawTranscript()
+                expect.isTrue(
+                    raw.chunks.contains { $0.text == "we ship friday" },
+                    "the transcription is kept whatever the aligner did"
+                )
+            },
+
+            test("an aligner refusal keeps the words at chunk precision") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let transcriber = StubTextTranscriber(text: "nothing aligned here")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 33, spans: [(0, 5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    aligner: StubAligner(segments: [], refuses: true),
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                expect.isTrue(
+                    transcript.utterances.contains { $0.text.contains("nothing aligned here") },
+                    "the words survive at chunk-level timing instead of vanishing"
+                )
+                // A refusal is recorded as one, so the next run does not pay
+                // for the same hopeless alignment again, and a later build can
+                // tell it from real timings.
+                let raw = try meeting.store.readRawTranscript()
+                let chunk = try expect.unwrap(raw.chunks.first { $0.text != nil })
+                let alignment = try expect.unwrap(meeting.store.readAlignment(chunkID: chunk.id))
+                expect.isTrue(alignment.refused, "recorded as a refusal, not as timings")
+                expect.isTrue(alignment.segments.isEmpty)
             },
 
             test("rebuilding the transcript keeps every speaker") { expect in

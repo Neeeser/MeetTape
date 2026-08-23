@@ -110,7 +110,9 @@ enum LocalConfigurationTests {
                     .appendingPathComponent("Library/Application Support/MeetTape")
                 let locations = LocalModelLocations(applicationSupport: support)
                 for url in [locations.root, locations.whisperBase, locations.whisperModelFolder,
-                            locations.diarizerDirectory, locations.receipt] {
+                            locations.diarizerDirectory, locations.parakeetDirectory,
+                            locations.cohereDirectory, locations.alignerDirectory,
+                            locations.inventory] {
                     expect.isFalse(
                         url.path.contains("/Documents/"),
                         "\(url.path) is inside Documents"
@@ -142,24 +144,93 @@ enum LocalConfigurationTests {
                 expect.isFalse(state.isBusy)
             },
 
-            test("a receipt from a different pinned revision is not treated as current") { expect in
-                let stale = LocalModelReceipt(
-                    whisperVariant: "openai_whisper-small",
-                    whisperFolderPath: "/tmp/nowhere",
-                    whisperBytes: 1, diarizerBytes: 1, installedAt: Date(),
-                    whisperPackage: "argmax-oss-swift 0.9.0",
-                    diarizerPackage: "FluidAudio 0.15.6"
+            test("a cloud-only configuration still refuses when no models are installed") { expect in
+                // The wiring, not the closure a test hands in: `required(for:)`
+                // decides what `ensureInstalled` checks, and when it answered
+                // with an empty set for a cloud/cloud machine, ensureInstalled
+                // reported success with nothing on disk. Voice memory then
+                // reached the embedding extractor and threw from inside the
+                // speaker stage, which is not retryable, so the meeting never
+                // reached the stage that writes the markdown and the mixdown.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.processing.diarization = .openAI
+                let manager = LocalModelManager(
+                    applicationSupport: root, required: LocalModelUnit.required(for: settings)
                 )
-                expect.isFalse(stale.matchesCurrentBuild)
+                await expect.throwsError(
+                    { try await manager.ensureInstalled() },
+                    "a machine with no models must say so, whatever the backends are"
+                )
+                expect.isFalse(await manager.isInstalled)
+            },
 
-                let current = LocalModelReceipt(
-                    whisperVariant: LocalSpeechStack.whisperModel,
-                    whisperFolderPath: "/tmp/nowhere",
-                    whisperBytes: 1, diarizerBytes: 1, installedAt: Date(),
-                    whisperPackage: LocalSpeechStack.whisperPackage,
-                    diarizerPackage: LocalSpeechStack.diarizerPackage
+            test("a receipt from a different pinned revision is not treated as current") { expect in
+                let stale = LocalUnitReceipt(
+                    revision: "openai_whisper-small @ argmax-oss-swift 0.9.0",
+                    bytes: 1, installedAt: Date()
                 )
-                expect.isTrue(current.matchesCurrentBuild)
+                expect.isFalse(stale.matchesCurrentBuild(for: .whisper))
+
+                for unit in LocalModelUnit.allCases {
+                    let current = LocalUnitReceipt(
+                        revision: LocalSpeechStack.revision(for: unit),
+                        bytes: 1, installedAt: Date()
+                    )
+                    expect.isTrue(current.matchesCurrentBuild(for: unit))
+                }
+            },
+
+            test("a legacy single receipt reads as a whisper and diarizer install") { expect in
+                // The old installed.json described whisper plus the diarizer;
+                // an upgrade must keep reporting them as installed rather than
+                // offering the same 650 MB again.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let locations = LocalModelLocations(applicationSupport: root)
+                try FileManager.default.createDirectory(
+                    at: locations.root, withIntermediateDirectories: true
+                )
+                let legacy = """
+                    {"whisperVariant": "\(LocalSpeechStack.whisperModel)",
+                     "whisperFolderPath": "/tmp/nowhere",
+                     "whisperBytes": 5, "diarizerBytes": 7,
+                     "installedAt": "2026-01-01T00:00:00Z",
+                     "whisperPackage": "\(LocalSpeechStack.whisperPackage)",
+                     "diarizerPackage": "\(LocalSpeechStack.diarizerPackage)"}
+                    """
+                try Data(legacy.utf8).write(to: locations.legacyReceipt)
+                let receipts = LocalModelReceiptStore(locations: locations).read()
+                expect.equal(receipts[.whisper]?.bytes, 5)
+                expect.equal(receipts[.diarizer]?.bytes, 7)
+                expect.equal(receipts[.whisper]?.matchesCurrentBuild(for: .whisper), true)
+                expect.equal(receipts[.whisper]?.detail, "/tmp/nowhere")
+            },
+
+            test("the new engines and the aligner are pinned like the rest of the stack") { expect in
+                expect.equal(
+                    LocalSpeechStack.parakeetBackendIdentifier, "fluidaudio-parakeet-tdt-v3"
+                )
+                expect.equal(
+                    LocalSpeechStack.cohereBackendIdentifier,
+                    "fluidaudio-cohere-transcribe-03-2026-q8"
+                )
+                expect.equal(LocalSpeechStack.alignerIdentifier, "fluidaudio-parakeet-ctc-0.6b")
+                expect.equal(LocalSpeechStack.revision(for: .cohere), "cohere-transcribe-03-2026-q8 @ FluidAudio 0.15.6")
+                expect.equal(LocalSpeechStack.revision(for: .parakeet), "parakeet-tdt-0.6b-v3-int8 @ FluidAudio 0.15.6")
+                expect.equal(LocalSpeechStack.revision(for: .ctcAligner), "parakeet-ctc-0.6b @ FluidAudio 0.15.6")
+
+                // Alignment tuning: the aligner's segments feed duplicate
+                // detection and attribution, and the chunk length bounds the
+                // Viterbi trellis.
+                expect.equal(LocalAlignmentTuning.segmentPauseSeconds, 1.0)
+                expect.equal(LocalAlignmentTuning.segmentMaximumSeconds, 30)
+                expect.equal(LocalAlignmentTuning.chunkSeconds, 300)
+                // One model window per Cohere chunk: the library's own window
+                // stitching dropped a five-second span on the fixture.
+                expect.equal(LocalCohereTuning.chunkSeconds, 35)
             },
 
             test("the voice database is outside the meeting archive") { expect in

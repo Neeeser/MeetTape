@@ -449,7 +449,13 @@ public actor ProcessingPipeline {
             if transcriber.limits.requiresChunking {
                 try await runChunks(
                     store: store, metadata: &metadata, track: track, location: location,
-                    model: transcriber.identifier
+                    model: transcriber.identifier,
+                    configuration: ChunkPlanner.Configuration.fitting(
+                        transcriber.limits, timing: transcriber.timing
+                    ),
+                    // A local engine is one process on one Neural Engine, so
+                    // its chunks go one at a time; the cloud takes three.
+                    concurrency: transcriber.isLocal ? 1 : nil
                 ) { url, _ in
                     let output = try await transcriber.transcribe(audio: url, progress: { _ in })
                     return output
@@ -458,6 +464,129 @@ public actor ProcessingPipeline {
                 try await runWholeTrack(
                     store: store, metadata: &metadata, track: track,
                     location: location, timeline: timeline, backend: transcriber
+                )
+            }
+        }
+
+        // A text-only backend's words cannot reach the timeline until they
+        // carry timings; recover them now, while this stage's retry semantics
+        // still apply.
+        try await alignTextChunks(store: store, metadata: &metadata)
+    }
+
+    /// Forces timings onto every chunk whose model returned text alone.
+    ///
+    /// Idempotent: a chunk with an alignment on disk is skipped, so a resumed
+    /// run aligns only what the interruption left. A chunk the aligner refuses
+    /// (no monotonic path) gets a coarse whole-chunk alignment written instead:
+    /// the words still reach the timeline at chunk precision, and the refusal
+    /// does not fail a meeting whose words are already safe on disk.
+    private func alignTextChunks(
+        store: MeetingStore, metadata: inout MeetingMetadata
+    ) async throws {
+        let raw = try store.readRawTranscript()
+        let pending = raw.chunks.filter {
+            $0.text != nil && $0.purpose == .words && !store.hasAlignment(chunkID: $0.id)
+        }
+        guard !pending.isEmpty else { return }
+        guard let aligner = backends.aligner else {
+            Log.processing.notice(
+                "no aligner configured; \(pending.count, privacy: .public) text chunks keep chunk-level timing"
+            )
+            return
+        }
+        // The aligner specifically, not whatever the current settings need:
+        // these chunks were written by whichever model was chosen at the time,
+        // and a switch since then would install the wrong unit and leave the
+        // stage throwing.
+        do {
+            try await backends.prepareAligner?()
+        } catch {
+            // A model that would not download is not a refusal. Swallowing it
+            // completed the meeting with one five-minute utterance per chunk,
+            // each attributed whole to a single speaker, and nothing revisits
+            // a finished meeting: this stage is the only caller of alignment.
+            // Failing keeps it retryable, which is the only recovery: the
+            // meeting has no canonical transcript yet, so Rebuild Transcript
+            // is unavailable to it.
+            Log.processing.error(
+                "aligner unavailable: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw ProcessingError.localProcessingFailed(
+                reason: "The timing model could not be downloaded, so the transcript's "
+                    + "word timings are missing. The words are saved.",
+                retryable: true
+            )
+        }
+
+        let timeline = try store.readTimeline()
+        let exporter = ChunkExporter()
+        let workingDirectory = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: store.layout.root,
+            create: true
+        )
+        defer { try? FileManager.default.removeItem(at: workingDirectory) }
+        // Resolved per track the same way transcription resolves it, so a
+        // meeting whose segments have been compacted into per-track archives
+        // aligns from the archive rather than from a directory that is gone.
+        var locations: [CaptureTrack: TrackAudioLocation] = [:]
+
+        for (index, chunk) in pending.enumerated() {
+            report(
+                metadata, chunks: (index + 1, pending.count),
+                detail: "Aligning transcript timings"
+            )
+            guard let text = chunk.text else { continue }
+            // The chunk's audio span, re-exported from the immutable segments
+            // exactly as the transcription export cut it.
+            let leadIn = timeline.leadIn(track: chunk.track)
+            let plan = ChunkPlan(
+                index: index + 1,
+                start: chunk.timelineOffset - leadIn,
+                end: chunk.timelineOffset - leadIn + chunk.durationSeconds,
+                overlapEnd: 0
+            )
+            let location = try locations[chunk.track]
+                ?? store.trackAudioLocation(
+                    track: chunk.track, metadata: store.readMetadata(), timeline: timeline
+                )
+            locations[chunk.track] = location
+            let audioURL = workingDirectory.appendingPathComponent("\(chunk.id).m4a")
+            let frames = try exporter.export(
+                plan: plan, segments: location.segments, segmentsDirectory: location.directory,
+                to: audioURL
+            )
+            defer { try? FileManager.default.removeItem(at: audioURL) }
+            guard frames > 0 else { continue }
+
+            do {
+                let segments = try await aligner.align(audio: audioURL, text: text)
+                try store.writeAlignment(
+                    ChunkAlignment(aligner: aligner.identifier, alignedAt: clock.now, segments: segments),
+                    chunkID: chunk.id
+                )
+            } catch let refusal as TranscriptAlignmentRefused {
+                // Recorded as a refusal rather than as timings, so a later
+                // build with a better aligner can tell the difference and try
+                // again. Assembly falls back to whole-chunk timing either way.
+                Log.processing.notice(
+                    "alignment refused for one chunk, keeping chunk-level timing: \(refusal.reason, privacy: .public)"
+                )
+                try store.writeAlignment(
+                    ChunkAlignment(
+                        aligner: aligner.identifier, alignedAt: clock.now,
+                        segments: [], refused: true
+                    ),
+                    chunkID: chunk.id
+                )
+            } catch {
+                // Something broke rather than refused: a missing model, an
+                // unreadable export. Nothing is written, so the next run tries
+                // again, and assembly meanwhile reads the chunk as untimed.
+                Log.processing.notice(
+                    "alignment failed for one chunk: \(logSafeDescription(error), privacy: .public)"
                 )
             }
         }
@@ -496,17 +625,29 @@ public actor ProcessingPipeline {
             ))
         }
 
+        let textOnly = output.segments.isEmpty && !output.text.isEmpty
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
             track: track,
             timelineOffset: timeline.leadIn(track: track),
             durationSeconds: output.durationSeconds ?? location.seconds,
             model: backend.identifier,
-            responseFormat: backend.producesWordTimestamps ? "local_words" : "local_segments",
+            responseFormat: Self.localResponseFormat(for: backend.timing),
             segments: output.segments,
+            text: textOnly ? output.text : nil,
             rawResponseFile: nil
         ))
         try store.writeRawTranscript(raw)
+    }
+
+    /// The recorded format string for a local backend's chunk, by what timing
+    /// its output carried.
+    static func localResponseFormat(for timing: TranscriptTiming) -> String {
+        switch timing {
+        case .words: return "local_words"
+        case .segments: return "local_segments"
+        case .text: return "local_text"
+        }
     }
 
     /// Whether the transcription backend supplies the diarized track's words.
@@ -569,11 +710,20 @@ public actor ProcessingPipeline {
         // the chunks holding words and half holding labels: the assembler takes
         // one kind, so the other half of the far end would vanish permanently.
         // Only the first pass decides.
-        let existing = try store.readRawTranscript()
-            .chunks(track: track)
-            .first { $0.model == backend.identifier }
+        let raw = try store.readRawTranscript()
+        let existing = raw.chunks(track: track).first { $0.model == backend.identifier }
+        // Another backend's words are already on this track, so it owns them
+        // whatever the transcription setting says now, and this pass asks for
+        // labels alone. Without it, switching to cloud transcription after a
+        // local engine had already chunked the track made this pass claim the
+        // same purpose and the same chunk names, so every plan was skipped as
+        // done, nothing was diarized, and the far end came back unattributed.
+        // The mirror of the `foreign` guard `runTranscription` applies from
+        // the other side.
+        let foreignWords = raw.chunks(track: track, purpose: .words)
+            .contains { $0.model != backend.identifier }
         let purpose = existing?.purpose
-            ?? (transcriberOwnsWords(settings) ? .speakers : .words)
+            ?? (transcriberOwnsWords(settings) || foreignWords ? .speakers : .words)
 
         try await runChunks(
             store: store, metadata: &metadata, track: track, location: location,
@@ -585,10 +735,12 @@ public actor ProcessingPipeline {
             )
         }
 
-        let raw = try store.readRawTranscript()
+        // Re-read: the chunks this pass just wrote are not in the snapshot the
+        // purpose was decided from.
+        let written = try store.readRawTranscript()
         var intervals: [DiarizationInterval] = []
         var speech: [String: Double] = [:]
-        for chunk in raw.chunks(track: track, purpose: purpose) {
+        for chunk in written.chunks(track: track, purpose: purpose) {
             for segment in chunk.segments {
                 guard let speaker = segment.speaker else { continue }
                 // Namespaced the same way the transcript's own keys are, so the
@@ -735,6 +887,25 @@ public actor ProcessingPipeline {
         }
     }
 
+    /// Names one chunk, uniquely per producer rather than per track.
+    ///
+    /// Transcription and diarization can both chunk the same track: a local
+    /// engine with a request limit transcribes the far end while a cloud
+    /// diarizer labels it. Sharing an identifier made the diarizer's plans
+    /// match the transcriber's chunks, so every one was skipped as already
+    /// done, no diarization was requested, no run was written, and the whole
+    /// far end rendered as a single unattributed speaker with the meeting
+    /// reporting success. Words keep the original form, because every meeting
+    /// on disk uses it; speaker chunks take a distinct one.
+    static func chunkIdentifier(
+        track: CaptureTrack, purpose: RawChunkPurpose, plan: ChunkPlan
+    ) -> String {
+        switch purpose {
+        case .words: "\(track.rawValue)_\(plan.chunkID)"
+        case .speakers: "\(track.rawValue)_spk_\(plan.chunkID)"
+        }
+    }
+
     /// Chunks a track, sends each chunk, and records results as they arrive so an
     /// interrupted run resumes at the chunk it stopped on.
     private func runChunks(
@@ -744,6 +915,8 @@ public actor ProcessingPipeline {
         location: TrackAudioLocation,
         model: String,
         purpose: RawChunkPurpose = .words,
+        configuration: ChunkPlanner.Configuration? = nil,
+        concurrency: Int? = nil,
         send: @Sendable @escaping (URL, String) async throws -> TranscriptionOutput
     ) async throws {
         let exporter = ChunkExporter()
@@ -757,7 +930,7 @@ public actor ProcessingPipeline {
 
         // A pause-aware boundary needs an energy profile; skip the pass entirely
         // for recordings short enough to send in one request.
-        let planner = ChunkPlanner(configuration: chunking)
+        let planner = ChunkPlanner(configuration: configuration ?? chunking)
         let energy: EnergyProfile = duration > planner.configuration.maxChunkSeconds
             ? ((try? EnergyProfile.compute(stream: stream)) ?? .empty)
             : .empty
@@ -788,8 +961,14 @@ public actor ProcessingPipeline {
         }
         var pending: [PreparedChunk] = []
         for plan in plans {
-            let chunkID = "\(track.rawValue)_\(plan.chunkID)"
-            if raw.chunks.contains(where: { $0.id == chunkID }) { continue }
+            let chunkID = Self.chunkIdentifier(track: track, purpose: purpose, plan: plan)
+            // The identifier an earlier build wrote for this plan, so an
+            // interrupted cloud diarization resumes instead of paying for
+            // every chunk again and counting its intervals twice.
+            let legacyID = "\(track.rawValue)_\(plan.chunkID)"
+            if raw.chunks.contains(
+                where: { $0.id == chunkID || ($0.id == legacyID && $0.purpose == purpose) }
+            ) { continue }
 
             let audioURL = workingDirectory.appendingPathComponent("\(chunkID).m4a")
             let frames = try exporter.export(
@@ -806,7 +985,10 @@ public actor ProcessingPipeline {
         // concurrency limits. Each result is committed to disk as it arrives, in
         // completion order; the assembler orders utterances by timeline offset,
         // and an interrupted run still resumes at the chunks that never landed.
-        let maxConcurrentUploads = 3
+        // A local engine overrides it to one: an actor releases itself at every
+        // await, so three concurrent calls really do run three decodes against
+        // one Neural Engine.
+        let maxConcurrentUploads = concurrency ?? 3
         try await withThrowingTaskGroup(of: (PreparedChunk, TranscriptionOutput).self) { group in
             var nextIndex = 0
             while nextIndex < min(maxConcurrentUploads, pending.count) {
@@ -818,6 +1000,7 @@ public actor ProcessingPipeline {
                 if let body = response.rawBody {
                     try? store.writeAPIResponse(body, named: "\(chunk.chunkID).json")
                 }
+                let textOnly = response.segments.isEmpty && !response.text.isEmpty
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,
                     track: track,
@@ -825,13 +1008,14 @@ public actor ProcessingPipeline {
                     durationSeconds: chunk.plan.duration,
                     model: model,
                     responseFormat: response.segments.contains { $0.speaker != nil }
-                        ? "diarized_json" : "verbose_json",
+                        ? "diarized_json" : (textOnly ? "json" : "verbose_json"),
                     segments: response.segments,
+                    text: textOnly ? response.text : nil,
                     rawResponseFile: response.rawBody == nil ? nil : "api/\(chunk.chunkID).json",
                     purpose: purpose
                 ))
                 try store.writeRawTranscript(raw)
-                report(metadata, chunks: (raw.chunks(track: track).count, plans.count))
+                report(metadata, chunks: (raw.chunks(track: track, purpose: purpose).count, plans.count))
                 try? FileManager.default.removeItem(at: chunk.audioURL)
                 if nextIndex < pending.count {
                     let next = pending[nextIndex]
@@ -845,7 +1029,7 @@ public actor ProcessingPipeline {
     private func runSpeakerResolution(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
-        let raw = try store.readRawTranscript()
+        let raw = try store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         let diarization = try store.readRawDiarization()
 
@@ -871,10 +1055,17 @@ public actor ProcessingPipeline {
         }
         try store.writeSpeakerMap(speakers)
 
-        try await recognizeVoices(store: store, metadata: &metadata, settings: settings)
         // Voice memory is a side effect of the meeting, not part of it. A
         // deleted model folder or an unreadable track must not take the whole
-        // stage down and retry it three times.
+        // stage down and retry it three times, and must not stop the meeting
+        // reaching the stage that writes the markdown and the mixdown.
+        do {
+            try await recognizeVoices(store: store, metadata: &metadata, settings: settings)
+        } catch {
+            Log.processing.notice(
+                "voice recognition skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
         do {
             try await learnLocalUserVoice(store: store, metadata: metadata, settings: settings)
         } catch {
@@ -1319,7 +1510,7 @@ public actor ProcessingPipeline {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             throw StorageError.meetingNotFound(id: meetingID)
         }
-        let raw = try found.store.readRawTranscript()
+        let raw = try found.store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         // The diarization has to come with the words. Without it a locally
         // processed meeting re-assembles with every speaker collapsed into one
@@ -1646,7 +1837,15 @@ public actor ProcessingPipeline {
         let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
 
-        try await prepareLocalModels(metadata: metadata)
+        // The diarizer alone: re-analysis re-clusters, it never re-transcribes,
+        // so pulling the configured transcription engine and its aligner would
+        // download gigabytes this button will not use.
+        if let prepare = backends.prepareDiarizer {
+            report(metadata, chunks: nil, detail: "Preparing on-device models")
+            try await prepare()
+        } else {
+            try await prepareLocalModels(metadata: metadata)
+        }
         guard let audio = try scratch.trackAudio(
             meetingID: metadata.id, track: track, segments: location.segments,
             segmentsDirectory: location.directory
@@ -1694,7 +1893,7 @@ public actor ProcessingPipeline {
         // previous clustering follows them. Line-level corrections do: they are
         // anchored to a moment rather than to a cluster.
         var metadataCopy = metadata
-        let raw = try store.readRawTranscript()
+        let raw = try store.readRawTranscriptForAssembly()
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now

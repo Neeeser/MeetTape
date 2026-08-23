@@ -61,6 +61,46 @@ public struct ChunkPlanner: Sendable {
 
         /// Measured limits: 1400 s per diarization request, 25 MiB per request body.
         public static let openAIDiarization = Configuration()
+
+        /// A configuration sized to a backend's own duration limit, when that
+        /// limit is tighter than the default plan. A chunk's audio is the
+        /// boundary spacing plus the overlap tail, so the spacing ceiling
+        /// sits below the limit by the overlap; the target sits under that by
+        /// the same margin the default keeps (1140 in 1300), and the search
+        /// window never exceeds the room between minimum and target.
+        /// A text-only backend is additionally capped at
+        /// `LocalAlignmentTuning.chunkSeconds`, whatever its own limit allows:
+        /// the words come back without timings, and the alignment pass that
+        /// supplies them builds a trellis of frames times tokens. A cloud
+        /// chunk at the API's own 1400-second limit exceeded the trellis cap,
+        /// so alignment refused and a nineteen-minute chunk became one
+        /// utterance.
+        public static func fitting(
+            _ limits: BackendAudioLimits, timing: TranscriptTiming = .words
+        ) -> Configuration? {
+            let ceilings = [
+                limits.maximumSeconds,
+                timing == .text ? LocalAlignmentTuning.chunkSeconds : nil,
+            ].compactMap { $0 }
+            guard let maximum = ceilings.min(),
+                maximum < Configuration.openAIDiarization.maxChunkSeconds
+            else { return nil }
+            // Never more than a quarter of the window, so a small limit still
+            // produces a sane plan rather than a negative ceiling.
+            let overlap = min(8.0, maximum / 4)
+            // A hair under, because a boundary can land exactly on the ceiling
+            // and a model window is an inclusive limit at best.
+            let ceiling = maximum - overlap - 0.01
+            let target = ceiling * 1_140 / 1_300
+            let minimum = min(60, target / 2)
+            return Configuration(
+                targetChunkSeconds: target,
+                maxChunkSeconds: ceiling,
+                minChunkSeconds: minimum,
+                searchWindowSeconds: min(60, (target - minimum) / 2),
+                overlapSeconds: overlap
+            )
+        }
     }
 
     public let configuration: Configuration

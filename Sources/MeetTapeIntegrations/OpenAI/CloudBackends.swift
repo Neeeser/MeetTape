@@ -14,25 +14,24 @@ extension BackendAudioLimits {
 public struct OpenAITranscriptionBackend: TranscriptionBackend {
     private let backend: any AIBackend
     private let model: String
+    private let keywords: [String]
 
-    public init(backend: any AIBackend, model: String) {
+    public init(backend: any AIBackend, model: String, keywords: [String] = []) {
         self.backend = backend
         self.model = model
+        self.keywords = keywords
     }
 
     public var identifier: String { model }
     public var isLocal: Bool { false }
     public var limits: BackendAudioLimits { .openAI }
-    /// `whisper-1` returns segment timings and no words, which is why the
-    /// transcription model identifier is a setting: several newer models return
-    /// excellent text with no timings at all.
-    public var producesWordTimestamps: Bool { false }
+    public var timing: TranscriptTiming { AIModelSettings.transcriptionTiming(for: model) }
 
     public func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
         let response = try await backend.transcribe(
-            TranscriptionRequest(audio: audio, model: model)
+            TranscriptionRequest(audio: audio, model: model, keywords: keywords)
         )
         progress(1)
         return TranscriptionOutput(

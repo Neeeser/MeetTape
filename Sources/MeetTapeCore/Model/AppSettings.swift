@@ -3,29 +3,59 @@ import Foundation
 /// Model identifiers, held as configuration rather than scattered through the
 /// code so a newer model is a settings change, not a rewrite.
 public struct AIModelSettings: Codable, Sendable, Equatable {
-    /// Plain transcription for the local track. `whisper-1` with `verbose_json` is
-    /// the default because it returns the timings a timeline needs; several newer
-    /// models return excellent text with no segments and no words at all.
+    /// Plain transcription. `gpt-transcribe` returns the best words and no
+    /// timings; the local alignment stage supplies those, which is what lets
+    /// the timing-free models be chosen at all.
     public var transcription: String
     /// Speaker-attributed transcription for the remote track.
     public var diarization: String
     /// Reasoning model for speaker resolution, titles and summaries.
     public var metadata: String
+    /// Names and jargon the transcription should expect, comma or newline
+    /// separated. Sent as keyword hints to models that take them, and only to
+    /// them. Empty means nothing extra is sent anywhere.
+    public var vocabularyHints: String
 
     public init(
-        transcription: String = "whisper-1",
+        transcription: String = "gpt-transcribe",
         diarization: String = "gpt-4o-transcribe-diarize",
-        metadata: String = "gpt-5.6-luna"
+        metadata: String = "gpt-5.6-luna",
+        vocabularyHints: String = ""
     ) {
         self.transcription = transcription
         self.diarization = diarization
         self.metadata = metadata
+        self.vocabularyHints = vocabularyHints
     }
 
-    /// Models known to return the timing structure the canonical timeline needs.
-    public static let timestampCapableTranscription = ["whisper-1"]
-    public static let diarizationCapable = ["gpt-4o-transcribe-diarize"]
+    /// The cloud transcription models Settings offers, best first.
+    public static let transcriptionChoices = [
+        "gpt-transcribe", "gpt-4o-transcribe-diarize", "whisper-1",
+    ]
+    public static let diarizationChoices = ["gpt-4o-transcribe-diarize"]
     public static let metadataChoices = ["gpt-5.6-luna", "gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
+
+    /// What timing structure each cloud transcription model returns.
+    ///
+    /// `whisper-1` is the only OpenAI model with word timings; the diarize
+    /// model returns speaker segments; `gpt-transcribe` returns text alone. An
+    /// unknown identifier is requested as `verbose_json`, which yields
+    /// segments when the model honours it at all.
+    public static func transcriptionTiming(for model: String) -> TranscriptTiming {
+        switch model {
+        case "gpt-transcribe": return .text
+        case "whisper-1": return .words
+        default: return .segments
+        }
+    }
+
+    /// `vocabularyHints` as the list the request field wants.
+    public var keywordList: [String] {
+        vocabularyHints
+            .split(whereSeparator: { $0 == "," || $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 
     /// One missing key must not reset the other two.
     ///
@@ -41,6 +71,9 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
         diarization =
             try container.decodeIfPresent(String.self, forKey: .diarization) ?? defaults.diarization
         metadata = try container.decodeIfPresent(String.self, forKey: .metadata) ?? defaults.metadata
+        vocabularyHints =
+            try container.decodeIfPresent(String.self, forKey: .vocabularyHints)
+            ?? defaults.vocabularyHints
     }
 
     /// Whether the responses endpoint accepts a `reasoning` parameter for this
@@ -166,6 +199,8 @@ public struct SpeakerRecognitionSettings: Codable, Sendable, Equatable {
 public struct ProcessingSettings: Codable, Sendable, Equatable {
     public var transcription: ProcessingBackendChoice
     public var diarization: ProcessingBackendChoice
+    /// Which engine runs when transcription is local.
+    public var localTranscriptionModel: LocalTranscriptionModel
     public var speakers: SpeakerRecognitionSettings
     /// The identity that represents the person using this Mac.
     public var localUserIdentityID: IdentityID?
@@ -173,11 +208,13 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
+        localTranscriptionModel: LocalTranscriptionModel = .cohere,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
         localUserIdentityID: IdentityID? = nil
     ) {
         self.transcription = transcription
         self.diarization = diarization
+        self.localTranscriptionModel = localTranscriptionModel
         self.speakers = speakers
         self.localUserIdentityID = localUserIdentityID
     }
@@ -197,6 +234,12 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
         diarization =
             try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
             ?? defaults.diarization
+        // The key's absence means the file predates the model choice, which is
+        // an install with Whisper on disk. The fresh default is Cohere, but a
+        // 2.1 GB download must follow a person picking it, not an upgrade.
+        localTranscriptionModel =
+            try container.decodeIfPresent(LocalTranscriptionModel.self, forKey: .localTranscriptionModel)
+            ?? .whisper
         speakers =
             try container.decodeIfPresent(SpeakerRecognitionSettings.self, forKey: .speakers)
             ?? defaults.speakers
@@ -208,10 +251,11 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
 /// is readable and portable, with the API key deliberately absent: that lives in
 /// the keychain and nowhere else.
 public struct AppSettings: Codable, Sendable, Equatable {
-    /// 2 added the processing backends. The number is read on decode, because a
-    /// file written before it existed was configured under a different default
-    /// and must not be moved off it silently.
-    public static let currentVersion = 2
+    /// 2 added the processing backends; 3 added the cloud model migration and
+    /// the local model choice. The number is read on decode, because a file
+    /// written before it existed was configured under a different default and
+    /// must not be moved off it silently.
+    public static let currentVersion = 3
 
     public var version: Int
     public var storageRootPath: String
@@ -289,6 +333,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
         showNotifications =
             try container.decodeIfPresent(Bool.self, forKey: .showNotifications)
             ?? defaults.showNotifications
+        // Deliberately not migrated to the newer default. `gpt-transcribe`
+        // returns no timings, so choosing it commits the machine to a 600 MB
+        // aligner download, and an upgrade that starts one mid-meeting is the
+        // thing the processing block below refuses to do for local models.
+        // An existing installation keeps the model it was configured with and
+        // is offered the newer one in Settings, where the size is on the row.
         models = try container.decodeIfPresent(AIModelSettings.self, forKey: .models) ?? defaults.models
         // An existing installation keeps the backend it was configured with. A
         // settings file written before local processing existed described a
@@ -339,6 +389,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
         echoCancellation =
             try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
             ?? defaults.echoCancellation
+        // The stored number gated the migrations above; the decoded struct is
+        // current-schema, and writing it back as such is what stops a
+        // migration from re-running against a value the user has since chosen.
+        version = Self.currentVersion
     }
 
     /// The applications a saved list of process identifiers names, in the order

@@ -71,6 +71,13 @@ extension MeetTapeRuntime {
         await refreshLocalModelState()
     }
 
+    /// Removes one unit's files. The other units stay usable.
+    public func removeLocalModel(_ unit: LocalModelUnit) async {
+        guard let models else { return }
+        await models.remove(unit: unit)
+        await refreshLocalModelState()
+    }
+
     /// Fetches the models again even though a usable copy is on disk. What the
     /// Re-download button calls, for an install pinned by an older build.
     public func reinstallLocalModels() async {
@@ -79,16 +86,6 @@ extension MeetTapeRuntime {
             try await models.reinstall()
         } catch {
             Log.app.error("model reinstall failed: \(logSafeDescription(error), privacy: .public)")
-        }
-        await refreshLocalModelState()
-    }
-
-    public func removeLocalModels() async {
-        guard let models else { return }
-        do {
-            try await models.removeInstalledModels()
-        } catch {
-            Log.app.error("model removal failed: \(logSafeDescription(error), privacy: .public)")
         }
         await refreshLocalModelState()
     }

@@ -62,7 +62,7 @@ enum BackendSelectionTests {
                 expect.equal(settings.storageRootPath, "/tmp/meetings")
                 expect.equal(
                     settings.models.transcription, "whisper-1",
-                    "the one key that was present survives"
+                    "the one key that was present survives, models are never migrated"
                 )
                 expect.equal(
                     settings.models.diarization, AIModelSettings().diarization,
@@ -80,7 +80,7 @@ enum BackendSelectionTests {
                 defer { try? FileManager.default.removeItem(at: root) }
                 let settings = SettingsStore(directory: root).load()
                 expect.isTrue(settings.processing.isFullyLocal)
-                expect.equal(settings.version, 2)
+                expect.equal(settings.version, AppSettings.currentVersion)
             },
 
             test("a partly-written processing block keeps what it has") { expect in
@@ -94,6 +94,74 @@ enum BackendSelectionTests {
                 expect.isTrue(
                     settings.processing.speakers.recognizeKnownVoices,
                     "the switches beside it are untouched"
+                )
+            },
+
+            test("an upgrade never moves a cloud model, only a fresh install picks one") { expect in
+                // gpt-transcribe returns no timings, so choosing it commits the
+                // machine to a 600 MB aligner download. An upgrade that starts
+                // one is exactly what the processing block refuses to do for
+                // local models, and the cloud model is no different.
+                for stored in ["whisper-1", "gpt-4o-transcribe-diarize", "my-finetune"] {
+                    let file = #"{"version": 2, "models": {"transcription": "\#(stored)"}}"#
+                    let settings = try JSONDecoder().decode(AppSettings.self, from: Data(file.utf8))
+                    expect.equal(settings.models.transcription, stored, "kept what it had")
+                    expect.equal(settings.version, AppSettings.currentVersion, "and is current schema")
+                }
+                expect.equal(
+                    AppSettings().models.transcription, "gpt-transcribe",
+                    "a machine with no settings file starts on the accurate default"
+                )
+            },
+
+            test("an existing local install keeps Whisper; a fresh one gets Cohere") { expect in
+                // The key's absence means the file predates the model choice,
+                // which is an install that has Whisper on disk. A 2.1 GB
+                // download must come from a person picking the new model, not
+                // from an upgrade.
+                let existing = #"{"version": 2, "processing": {"transcription": "local"}}"#
+                let migrated = try JSONDecoder().decode(AppSettings.self, from: Data(existing.utf8))
+                expect.equal(migrated.processing.localTranscriptionModel, .whisper)
+
+                expect.equal(
+                    AppSettings().processing.localTranscriptionModel, .cohere,
+                    "a machine with no settings file starts on the accurate default"
+                )
+            },
+
+            test("the units a configuration needs follow the models it chose") { expect in
+                var settings = AppSettings()
+                settings.processing.localTranscriptionModel = .cohere
+                expect.equal(
+                    LocalModelUnit.required(for: settings), [.cohere, .ctcAligner, .diarizer],
+                    "a text-only local model brings the aligner with it"
+                )
+
+                settings.processing.localTranscriptionModel = .parakeet
+                expect.equal(LocalModelUnit.required(for: settings), [.parakeet, .diarizer])
+
+                settings.processing.transcription = .openAI
+                settings.models.transcription = "gpt-transcribe"
+                expect.equal(
+                    LocalModelUnit.required(for: settings), [.ctcAligner, .diarizer],
+                    "cloud words without timings still need the local aligner"
+                )
+
+                settings.models.transcription = "gpt-4o-transcribe-diarize"
+                expect.equal(
+                    LocalModelUnit.required(for: settings), [.diarizer],
+                    "a self-contained cloud model needs nothing but the diarizer"
+                )
+
+                // The diarizer is in every set, cloud-only included: voice
+                // memory embeds a cloud diarizer's intervals with those same
+                // models. Leaving it out made `ensureInstalled` report success
+                // on a machine with nothing installed, and the embedding
+                // extractor then threw from inside a stage.
+                settings.processing.diarization = .openAI
+                expect.equal(
+                    LocalModelUnit.required(for: settings), [.diarizer],
+                    "voice memory needs the diarizer whatever produced the labels"
                 )
             },
 
@@ -385,7 +453,7 @@ enum BackendSelectionTests {
                 func transcriber(_ settings: AppSettings) -> any TranscriptionBackend {
                     ProcessingBackends.transcriptionBackend(
                         settings: settings, model: "gpt-4o-transcribe",
-                        local: { StubLocalTranscriber(segments: []) },
+                        local: { _ in StubLocalTranscriber(segments: []) },
                         cloud: { OpenAITranscriptionBackend(backend: cloudBackend, model: $0) }
                     )
                 }

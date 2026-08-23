@@ -123,16 +123,32 @@ public struct DiarizationOutput: Sendable, Equatable {
     public var speakerCount: Int { Set(intervals.map(\.clusterID)).count }
 }
 
-/// Turns audio into words with timings.
+/// What timing structure a transcription backend's output carries.
 ///
-/// Local Whisper and the OpenAI endpoints implement this identically, so which
-/// one runs is a setting rather than a code path.
+/// `.text` is a real capability, not a degenerate `.segments`: the models with
+/// the best words return no timings at all, and their output goes through the
+/// local alignment stage before it can feed the timeline. Keeping the case
+/// explicit means a backend cannot drift into that path by accident.
+public enum TranscriptTiming: String, Sendable, Equatable, Codable {
+    /// Word timings inside each segment.
+    case words
+    /// Segment start and end only.
+    case segments
+    /// Words with no timings; alignment supplies them afterwards.
+    case text
+}
+
+/// Turns audio into words.
+///
+/// Local and cloud engines implement this identically, so which one runs is a
+/// setting rather than a code path. What timing the words arrive with is the
+/// backend's declared capability; the pipeline aligns what needs aligning.
 public protocol TranscriptionBackend: Sendable {
     /// Recorded on every chunk, so a transcript says what produced it.
     var identifier: String { get }
     var isLocal: Bool { get }
     var limits: BackendAudioLimits { get }
-    var producesWordTimestamps: Bool { get }
+    var timing: TranscriptTiming { get }
 
     func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
@@ -156,6 +172,32 @@ public protocol DiarizationBackend: Sendable {
     func diarize(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> DiarizationOutput
+}
+
+/// Recovers timings for a transcript whose backend returned none.
+///
+/// The words are the backend's; only the timings are synthesised, by forcing
+/// the known text against the audio. What comes back is segments in the same
+/// shape every timed backend produces, so nothing downstream knows the
+/// difference.
+public protocol TranscriptAligner: Sendable {
+    /// Recorded as provenance on every alignment it writes.
+    var identifier: String { get }
+
+    func align(audio: URL, text: String) async throws -> [RawTranscriptSegment]
+}
+
+/// The aligner found no monotonic path between this text and this audio.
+///
+/// Distinct from an infrastructure failure on purpose: a refusal is answered
+/// with coarse chunk-level timing, while a missing model or unreadable file
+/// propagates and fails the stage.
+public struct TranscriptAlignmentRefused: Error, Sendable {
+    public let reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
 }
 
 /// Extracts speaker vectors for intervals somebody else decided.

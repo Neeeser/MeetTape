@@ -89,7 +89,7 @@ public final class MeetTapeRuntime {
     public private(set) var settings: AppSettings
     /// Whether the on-device speech models are installed, and how far a
     /// download has got. Recording never waits on this.
-    public internal(set) var localModelState: LocalModelState = .notInstalled
+    public internal(set) var localModelState: LocalModelState = .notInstalled(LocalModelSnapshot())
 
     /// Called when a meeting's processing state changes, so an open review
     /// window can reload its files without the user refreshing by hand.
@@ -172,6 +172,7 @@ public final class MeetTapeRuntime {
         let cloud = OpenAIClient(keyProvider: keyStore)
         let modelManager = LocalModelManager(
             applicationSupport: settingsDirectory,
+            required: LocalModelUnit.required(for: loaded),
             onStateChange: { [weak relay] state in
                 Task { @MainActor in relay?.runtimeForCallbacks?.localModelState = state }
             }
@@ -198,8 +199,19 @@ public final class MeetTapeRuntime {
                 transcription: { settings, model in
                     ProcessingBackends.transcriptionBackend(
                         settings: settings, model: model,
-                        local: { WhisperTranscriptionBackend(models: modelManager) },
-                        cloud: { OpenAITranscriptionBackend(backend: cloud, model: $0) }
+                        local: { choice in
+                            switch choice {
+                            case .cohere: CohereTranscriptionBackend(models: modelManager)
+                            case .parakeet: ParakeetTranscriptionBackend(models: modelManager)
+                            case .whisper: WhisperTranscriptionBackend(models: modelManager)
+                            }
+                        },
+                        cloud: {
+                            OpenAITranscriptionBackend(
+                                backend: cloud, model: $0,
+                                keywords: settings.models.keywordList
+                            )
+                        }
                     )
                 },
                 diarization: { settings, model in
@@ -211,8 +223,16 @@ public final class MeetTapeRuntime {
                 },
                 embeddings: FluidAudioEmbeddingExtractor(models: modelManager),
                 speakers: recognition,
-                prepareLocalModels: { _ = try await modelManager.install() },
+                prepareLocalModels: { [snapshot = settingsSnapshot] in
+                    let current = snapshot.withLock { $0 }
+                    _ = try await modelManager.install(
+                        units: LocalModelUnit.required(for: current)
+                    )
+                },
                 requireLocalModels: { try await modelManager.ensureInstalled() },
+                aligner: CtcTranscriptAligner(models: modelManager),
+                prepareAligner: { _ = try await modelManager.install(units: [.ctcAligner]) },
+                prepareDiarizer: { _ = try await modelManager.install(units: [.diarizer]) },
                 singleSpeakerEmbedding: { url in
                     try await modelManager.embedSingleSpeaker(audio: url)
                 },
@@ -486,6 +506,10 @@ public final class MeetTapeRuntime {
         sessionController.policies = newSettings.providers
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)
         status.detectionPaused = newSettings.providers.detectionPaused
+        // A different model choice changes which units count as installed.
+        if let models {
+            Task { await models.setRequired(LocalModelUnit.required(for: newSettings)) }
+        }
         onStatusChange?()
     }
 

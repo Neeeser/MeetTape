@@ -24,6 +24,10 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public var model: String
     public var responseFormat: String
     public var segments: [RawTranscriptSegment]
+    /// The transcript of a chunk whose model returned no timings. The
+    /// alignment stage reads it; every timed chunk leaves it nil and keeps the
+    /// words in `segments`.
+    public var text: String?
     /// The raw response body, kept so a future build can re-derive more from it.
     public var rawResponseFile: String?
     /// Defaulted, so a meeting written before this existed reads as what it was:
@@ -33,7 +37,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
     public init(
         id: String, track: CaptureTrack, timelineOffset: Double, durationSeconds: Double,
         model: String, responseFormat: String, segments: [RawTranscriptSegment],
-        rawResponseFile: String? = nil, purpose: RawChunkPurpose = .words
+        text: String? = nil, rawResponseFile: String? = nil, purpose: RawChunkPurpose = .words
     ) {
         self.id = id
         self.track = track
@@ -43,6 +47,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
         self.model = model
         self.responseFormat = responseFormat
         self.segments = segments
+        self.text = text
         self.rawResponseFile = rawResponseFile
     }
 
@@ -58,6 +63,7 @@ public struct RawTranscriptChunk: Codable, Sendable, Equatable, Identifiable {
         model = try container.decode(String.self, forKey: .model)
         responseFormat = try container.decode(String.self, forKey: .responseFormat)
         segments = try container.decode([RawTranscriptSegment].self, forKey: .segments)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
         rawResponseFile = try container.decodeIfPresent(String.self, forKey: .rawResponseFile)
         purpose = try container.decodeIfPresent(RawChunkPurpose.self, forKey: .purpose) ?? .words
     }
@@ -107,6 +113,42 @@ public struct RawTranscriptSegment: Codable, Sendable, Equatable {
         self.text = text
         self.speaker = speaker
         self.words = words
+    }
+}
+
+/// Derived timings for one text-only chunk, stored beside the raw transcript.
+///
+/// The words are the transcription model's; the timings were forced against
+/// the chunk's audio by the named aligner. Regenerable, so a better aligner
+/// can rewrite it without touching what the model said.
+public struct ChunkAlignment: Codable, Sendable, Equatable {
+    /// Which aligner produced the timings, as provenance.
+    public var aligner: String
+    public var alignedAt: Date
+    /// Chunk-relative, in the same shape a timed backend returns. Empty when
+    /// the aligner refused.
+    public var segments: [RawTranscriptSegment]
+    /// The aligner found no path through this chunk. Recorded so the attempt
+    /// is not repeated on every run, and so a later build can tell a refusal
+    /// from real timings and try again. Decodes false for files written
+    /// before it existed, which all carried timings.
+    public var refused: Bool
+
+    public init(
+        aligner: String, alignedAt: Date, segments: [RawTranscriptSegment], refused: Bool = false
+    ) {
+        self.aligner = aligner
+        self.alignedAt = alignedAt
+        self.segments = segments
+        self.refused = refused
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        aligner = try container.decode(String.self, forKey: .aligner)
+        alignedAt = try container.decode(Date.self, forKey: .alignedAt)
+        segments = try container.decode([RawTranscriptSegment].self, forKey: .segments)
+        refused = try container.decodeIfPresent(Bool.self, forKey: .refused) ?? false
     }
 }
 

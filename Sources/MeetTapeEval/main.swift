@@ -8,7 +8,8 @@ import MeetTapeSpeakers
 // ever runs: this is how the numbers the local stack ships against get checked
 // again, on this machine, against audio somebody is allowed to use.
 //
-//   meettape-eval asr       --audio FILE
+//   meettape-eval asr       --audio FILE [--engine whisper|parakeet|cohere]
+//   meettape-eval align     --audio FILE --transcript FILE
 //   meettape-eval diarize   --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
 //   meettape-eval identity  --audio FILE [--audio FILE ...]
 //   meettape-eval voices
@@ -20,6 +21,8 @@ struct Arguments {
     var audio: [URL] = []
     var acousticScalings: [Double] = []
     var speakerCount: Int?
+    var engine = "whisper"
+    var transcript: URL?
     var applicationSupport: URL
 
     init?(_ raw: [String]) {
@@ -38,6 +41,8 @@ struct Arguments {
             case "--audio": audio.append(URL(fileURLWithPath: value))
             case "--fa": if let scaling = Double(value) { acousticScalings.append(scaling) }
             case "--speakers": speakerCount = Int(value)
+            case "--engine": engine = value
+            case "--transcript": transcript = URL(fileURLWithPath: value)
             case "--support": support = URL(fileURLWithPath: value)
             default: break
             }
@@ -70,7 +75,8 @@ func megabytes(_ bytes: UInt64) -> String { String(format: "%.0f MB", Double(byt
 func usage() -> Never {
     note("""
         usage:
-          meettape-eval asr      --audio FILE
+          meettape-eval asr      --audio FILE [--engine whisper|parakeet|cohere]
+          meettape-eval align    --audio FILE --transcript FILE
           meettape-eval diarize  --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
           meettape-eval identity --audio FILE [--audio FILE ...]
           meettape-eval voices
@@ -85,12 +91,25 @@ let manager = LocalModelManager(applicationSupport: arguments.applicationSupport
 switch arguments.command {
 case "asr":
     guard let audio = arguments.audio.first else { usage() }
-    _ = try await manager.install()
+    let backend: any TranscriptionBackend
+    switch arguments.engine {
+    case "whisper":
+        _ = try await manager.install(units: [.whisper])
+        backend = WhisperTranscriptionBackend(models: manager)
+    case "parakeet":
+        _ = try await manager.install(units: [.parakeet])
+        backend = ParakeetTranscriptionBackend(models: manager)
+    case "cohere":
+        _ = try await manager.install(units: [.cohere])
+        backend = CohereTranscriptionBackend(models: manager)
+    default:
+        usage()
+    }
     let seconds = MonoAudioDecoder.durationSeconds(audio)
     let started = Date()
-    let output = try await WhisperTranscriptionBackend(models: manager)
-        .transcribe(audio: audio) { _ in }
+    let output = try await backend.transcribe(audio: audio) { _ in }
     let elapsed = Date().timeIntervalSince(started)
+    print("engine          \(backend.identifier)")
     print("file            \(audio.lastPathComponent)")
     print("audio           \(String(format: "%.1f", seconds))s")
     print("processing      \(String(format: "%.1f", elapsed))s")
@@ -99,10 +118,36 @@ case "asr":
     print("words           \(output.wordCount)")
     print("word timings    \(output.hasWordTimings)")
     print("peak resident   \(megabytes(peakResidentBytes()))")
+    print("---")
+    print(output.text)
+
+case "align":
+    guard let audio = arguments.audio.first, let transcriptURL = arguments.transcript else { usage() }
+    let text = try String(contentsOf: transcriptURL, encoding: .utf8)
+    _ = try await manager.install(units: [.ctcAligner])
+    let seconds = MonoAudioDecoder.durationSeconds(audio)
+    let started = Date()
+    let segments = try await CtcTranscriptAligner(models: manager).align(audio: audio, text: text)
+    let elapsed = Date().timeIntervalSince(started)
+    let wordCount = segments.reduce(0) { $0 + ($1.words?.count ?? 0) }
+    let inputWords = text.split(whereSeparator: \.isWhitespace).count
+    print("file            \(audio.lastPathComponent)")
+    print("audio           \(String(format: "%.1f", seconds))s")
+    print("processing      \(String(format: "%.1f", elapsed))s")
+    print("RTFx            \(String(format: "%.1f", seconds / max(elapsed, 0.001)))")
+    print("input words     \(inputWords)")
+    print("aligned words   \(wordCount)")
+    print("segments        \(segments.count)")
+    for segment in segments {
+        print(String(format: "%8.2f –%8.2f  %@", segment.start, segment.end, segment.text))
+        for word in segment.words ?? [] {
+            print(String(format: "    %7.2f –%7.2f %@", word.start, word.end, word.text))
+        }
+    }
 
 case "diarize":
     guard let audio = arguments.audio.first else { usage() }
-    _ = try await manager.install()
+    _ = try await manager.install(units: [.diarizer])
     let scalings = arguments.acousticScalings.isEmpty
         ? [LocalDiarizationTuning.libraryDefaultWarmStartFa, LocalDiarizationTuning.warmStartFa]
         : arguments.acousticScalings
@@ -173,7 +218,7 @@ case "diarize":
 
 case "identity":
     guard !arguments.audio.isEmpty else { usage() }
-    _ = try await manager.install()
+    _ = try await manager.install(units: [.diarizer])
     // Each file is treated as one speaker, which is what an enrolment clip is.
     var vectors: [(String, [Float])] = []
     for file in arguments.audio {

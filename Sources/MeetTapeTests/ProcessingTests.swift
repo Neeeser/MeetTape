@@ -121,6 +121,47 @@ enum ProcessingTests {
                 expect.close(plans[0].end, 600, tolerance: 0.001)
             },
 
+            test("a plan fitted to a tighter limit never exceeds it, overlap included") { expect in
+                // The local Cohere engine's window is 35 s, and one second over
+                // it re-enters the library's own stitching, which is the thing
+                // the limit exists to avoid.
+                let limits = BackendAudioLimits(maximumSeconds: LocalCohereTuning.chunkSeconds)
+                let configuration = try expect.unwrap(ChunkPlanner.Configuration.fitting(limits))
+                let plans = ChunkPlanner(configuration: configuration)
+                    .plan(durationSeconds: 600)
+                expect.isTrue(plans.count > 15, "got \(plans.count) chunks of ten minutes")
+                for plan in plans {
+                    expect.isTrue(
+                        plan.duration <= LocalCohereTuning.chunkSeconds + 0.001,
+                        "chunk \(plan.index) is \(plan.duration)s, past the model window"
+                    )
+                }
+                expect.isNil(
+                    ChunkPlanner.Configuration.fitting(BackendAudioLimits.openAI),
+                    "the cloud limit keeps the measured default plan"
+                )
+            },
+
+            test("a text-only backend is chunked for the aligner, not for its own limit") { expect in
+                // gpt-transcribe may send 1400 seconds, but the words come back
+                // without timings and the alignment trellis is frames times
+                // tokens. At the API's own limit the trellis exceeded its cap,
+                // alignment refused, and a nineteen-minute chunk became one
+                // utterance on one speaker.
+                let configuration = try expect.unwrap(
+                    ChunkPlanner.Configuration.fitting(BackendAudioLimits.openAI, timing: .text)
+                )
+                let plans = ChunkPlanner(configuration: configuration)
+                    .plan(durationSeconds: 3_600)
+                expect.isTrue(plans.count >= 12, "got \(plans.count) chunks for an hour")
+                for plan in plans {
+                    expect.isTrue(
+                        plan.duration <= LocalAlignmentTuning.chunkSeconds + 0.001,
+                        "chunk \(plan.index) is \(plan.duration)s, past the alignment window"
+                    )
+                }
+            },
+
             test("a long recording is chunked under the model limit with overlap") { expect in
                 // Two hours, which is four to seven requests.
                 let plans = ChunkPlanner().plan(durationSeconds: 7_200)

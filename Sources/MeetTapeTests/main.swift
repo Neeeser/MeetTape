@@ -16,9 +16,12 @@ suites.append(UITests.suite)
 suites += LocalConfigurationTests.all
 suites += SpeakerIdentityTests.all
 suites.append(VoiceEvidenceTests.suite)
+suites.append(TranscriptGroupingTests.suite)
 suites.append(ReconnectTests.suite)
 suites += SpeakerCorrectionTests.all
 suites += BackendSelectionTests.all
+suites.append(CloudModelTests.suite)
+suites += AlignmentTests.all
 suites += ProcessingTests.all
 suites.append(PipelineTests.suite)
 suites.append(CompactionTests.suite)

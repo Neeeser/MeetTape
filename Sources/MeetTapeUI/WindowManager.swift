@@ -13,6 +13,9 @@ public final class WindowManager {
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
     private var setupPlacementToken: NSObjectProtocol?
+    /// Until when a permission prompt's aftermath should be treated as focus
+    /// MeetTape is owed rather than as the user choosing another application.
+    private var setupRaiseDeadline: Date?
     private var reviewWindows: [String: NSWindow] = [:]
     private var reviewModels: [String: MeetingReviewModel] = [:]
     private var provisionalWindow: NSWindow?
@@ -99,42 +102,58 @@ public final class WindowManager {
         // wizard asks for focus back when a prompt closes, and steps aside when
         // System Settings comes forward, so it is beside the pane rather than
         // lost behind it.
+        //
+        // Follows the user rather than making them find it: ordered front, the
+        // window comes to whichever space they are on, including alongside a
+        // full-screen application. Neither of these raises the window level, so
+        // system prompts still sit above it.
         window.collectionBehavior.insert(.moveToActiveSpace)
-        model.onNeedsFocus = { [weak window] in
-            guard let window else { return }
-            // A permission prompt belongs to another process. When it closes,
-            // macOS restores activation to what it considers the previous
+        window.collectionBehavior.insert(.fullScreenAuxiliary)
+        model.onNeedsFocus = { [weak self] in
+            guard let self else { return }
+            // A permission prompt belongs to another process, and closing it
+            // hands activation back to what macOS considers the previous
             // application, which for an accessory application with no Dock
-            // presence is usually not us, so a single activation fired the
-            // instant the prompt returns is undone a moment later. Repeating it
-            // briefly is what survives that restore.
-            //
-            // `orderFrontRegardless` is there for the case where activation is
-            // refused outright: the window still comes up, even if MeetTape does
-            // not become the active application.
-            func raise() {
-                NSApp.activate()
-                window.makeKeyAndOrderFront(nil)
-                window.orderFrontRegardless()
-            }
-            raise()
-            for delay in [0.15, 0.4, 0.9] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { raise() }
-            }
+            // presence is usually not us. Anything activating in the next couple
+            // of seconds is that handover rather than the user picking an
+            // application, so the workspace observer re-raises instead of
+            // standing down.
+            self.setupRaiseDeadline = Date().addingTimeInterval(2.5)
+            self.raiseSetup()
         }
         setupWindow = window
-        // Floating keeps the instructions visible, and would otherwise keep them
-        // on top of the pane they are describing.
         setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            guard app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID else {
-                return
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Reacting to the activation itself rather than to a timer: the
+                // window drops and comes back within one frame instead of
+                // blinking out for as long as the next scheduled attempt.
+                if let deadline = self.setupRaiseDeadline, Date() < deadline,
+                    app?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    self.raiseSetup()
+                }
+                if app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID {
+                    self.moveSetupAsideFromSystemSettings()
+                }
             }
-            MainActor.assumeIsolated { self?.moveSetupAsideFromSystemSettings() }
         }
         present(window)
+    }
+
+    /// Brings the setup window to the front.
+    ///
+    /// `orderFrontRegardless` does the work. macOS refuses to make an accessory
+    /// application active at all: measured here, MeetTape stayed behind Finder as
+    /// the active application while its window sat ahead of Finder's in the
+    /// window list. Activation is the part that is refused; raising is not.
+    private func raiseSetup() {
+        guard let window = setupWindow else { return }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     /// Moves the setup window off System Settings when it comes forward.
@@ -174,6 +193,7 @@ public final class WindowManager {
             NSWorkspace.shared.notificationCenter.removeObserver(setupPlacementToken)
         }
         setupPlacementToken = nil
+        setupRaiseDeadline = nil
         // The observer polls while the window is up, so closing it by any route
         // has to stop that, not only pressing Done.
         setupModel?.end()

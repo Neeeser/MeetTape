@@ -227,7 +227,6 @@ enum SetupFlowTests {
                 expect.isTrue(PermissionKind.microphone.isGrantedByPrompt)
             },
 
-
             test("the Speech models step offers the engine choice at the settings default") { expect in
                 // The step showed whatever the settings default happened to be
                 // and no way to change it, so a fresh install committed to an
@@ -237,7 +236,15 @@ enum SetupFlowTests {
 
                 let model = await MainActor.run { makeSetupModel(root: root, requested: nil) }
                 await MainActor.run {
-                    expect.equal(model.localModelChoices, LocalTranscriptionModel.allCases)
+                    expect.equal(
+                        Set(LocalTranscriptionModel.offered),
+                        Set(LocalTranscriptionModel.allCases),
+                        "every engine has a row in the picker"
+                    )
+                    expect.equal(
+                        LocalTranscriptionModel.offered.first, .parakeet,
+                        "and the recommended one is offered first"
+                    )
                     expect.equal(model.localModel, AppSettings().processing.localTranscriptionModel)
                     expect.equal(model.localModel, .parakeet)
                     expect.isTrue(
@@ -284,9 +291,11 @@ enum SetupFlowTests {
                 await model.startModelDownload()
 
                 expect.equal(await requested.all, [[.parakeet, .diarizer]])
+                await MainActor.run { model.finish() }
                 expect.equal(
                     SettingsStore(directory: root).load().processing.localTranscriptionModel,
-                    .parakeet
+                    .parakeet,
+                    "and finishing setup stores the engine nobody touched"
                 )
             },
 

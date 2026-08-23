@@ -309,35 +309,43 @@ struct LocalModelChoicePicker: View {
 
     var body: some View {
         Picker("Model", selection: Binding(get: { selected }, set: select)) {
-            choice(
-                .parakeet, "Parakeet TDT v3",
-                "Lowest word error rate of the three: it won all 14 meetings of "
-                    + "the benchmark. Word timings built in, 25 languages, over "
-                    + "100x realtime. 460 MB."
-            )
-            choice(
-                .cohere, "Cohere Transcribe",
-                "Ranks higher than Parakeet on published leaderboards and "
-                    + "scored worse over the same 14 meetings. Around 8x "
-                    + "realtime. 2.1 GB plus a 600 MB aligner for word timings; "
-                    + "the first use takes a few minutes to prepare."
-            )
-            choice(
-                .whisper, "Whisper Large-v3-Turbo",
-                "The previous engine. 624 MB."
-            )
+            ForEach(LocalTranscriptionModel.offered, id: \.rawValue) { model in
+                choice(model)
+            }
         }
         .pickerStyle(.radioGroup)
     }
 
-    private func choice(
-        _ tag: LocalTranscriptionModel, _ title: String, _ blurb: String
-    ) -> some View {
+    private func choice(_ model: LocalTranscriptionModel) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(title)
-            Text(blurb).font(.caption).foregroundStyle(.secondary)
+            Text(Self.title(model))
+            Text(Self.blurb(model)).font(.caption).foregroundStyle(.secondary)
         }
-        .tag(tag)
+        .tag(model)
+    }
+
+    private static func title(_ model: LocalTranscriptionModel) -> String {
+        switch model {
+        case .parakeet: "Parakeet TDT v3"
+        case .cohere: "Cohere Transcribe"
+        case .whisper: "Whisper Large-v3-Turbo"
+        }
+    }
+
+    private static func blurb(_ model: LocalTranscriptionModel) -> String {
+        switch model {
+        case .parakeet:
+            "Lowest word error rate of the three: it won all 14 meetings of "
+                + "the benchmark. Word timings built in, 25 languages, over "
+                + "100x realtime. 460 MB."
+        case .cohere:
+            "Ranks higher than Parakeet on published leaderboards and "
+                + "scored worse over the same 14 meetings. Around 8x "
+                + "realtime. 2.1 GB plus a 600 MB aligner for word timings; "
+                + "the first use takes a few minutes to prepare."
+        case .whisper:
+            "The previous engine. 624 MB."
+        }
     }
 }
 

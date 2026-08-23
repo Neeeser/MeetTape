@@ -187,9 +187,6 @@ public final class SetupModel {
         runtime.settings.processing.localTranscriptionModel
     }
 
-    /// The engines the step offers, in the order they are shown.
-    public var localModelChoices: [LocalTranscriptionModel] { LocalTranscriptionModel.allCases }
-
     /// Picking an engine mid-setup re-targets the pending install at that
     /// engine's units. A 2.1 GB download arrives because someone chose it here,
     /// never because a default or an upgrade decided for them.

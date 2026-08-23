@@ -125,6 +125,11 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
     /// The original local engine, kept for installs that already have it.
     case whisper
 
+    /// The engines in the order they are offered, recommended first.
+    /// `allCases` is declaration order, which is alphabetical and puts a 2.1 GB
+    /// engine above the one that won every meeting of the benchmark.
+    public static let offered: [LocalTranscriptionModel] = [.parakeet, .cohere, .whisper]
+
     public var backendIdentifier: String {
         switch self {
         case .cohere: LocalSpeechStack.cohereBackendIdentifier

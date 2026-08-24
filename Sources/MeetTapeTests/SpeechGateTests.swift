@@ -264,7 +264,7 @@ enum SpeechGateTests {
         Suite("SpeechGate/assembly", [
             test("the standup turn survives and the invented filler after it does not") { expect in
                 // The audited meeting, cut down: one real turn, then four of
-                // the 36 fabrications that followed it. Before this guard all
+                // the 37 fabrications that followed it. Before this guard all
                 // five were rendered under the user's name.
                 let raw = RawTranscript(chunks: [chunk([
                     (24.95, 27.25, "Hey, Brian, how's it going?"),
@@ -364,8 +364,11 @@ enum SpeechGateTests {
                 )
                 let afterPadding = Array(evidence.remoteLevels.dropFirst(leadInWindows))
                 expect.isTrue(!afterPadding.isEmpty, "and its own audio follows the padding")
+                // The first window after the padding, not any window after it:
+                // padding the track twice over leaves the prefix silent too,
+                // and only the boundary says how much was added.
                 expect.isTrue(
-                    afterPadding.contains { $0 > floor },
+                    afterPadding.first.map { $0 > floor } ?? false,
                     "the far end's tone begins at second twelve"
                 )
                 expect.isTrue(evidence.micSpeech.isEmpty, "no detector, no readings")

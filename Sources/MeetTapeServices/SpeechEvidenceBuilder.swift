@@ -84,6 +84,12 @@ public enum SpeechEvidenceBuilder {
                     by: leadIn, windowSeconds: readings.windowSeconds, filler: 0
                 )
                 detectorIdentifier = detector.identifier
+            } catch is CancellationError {
+                // Not a detector that refused, a pass that was stopped. Writing
+                // what it had would record a half-measurement as the finished
+                // one, and the measure-once rule would then leave the meeting
+                // gated on levels alone for good.
+                throw CancellationError()
             } catch {
                 Log.processing.notice(
                     "voice detection skipped: \(logSafeDescription(error), privacy: .public)"

@@ -707,10 +707,12 @@ public actor ProcessingPipeline {
     /// the window, and on a window's last attempt records it as nothing.
     ///
     /// A speech model given a window with little speech in it can loop, and the
-    /// loop is billed, recorded and assembled like any other answer. Six of
+    /// loop is billed, recorded and assembled like any other answer. Five of
     /// sixteen ES2003a chunks came back with the same fabricated paragraph:
     /// 438 invented words against a 386-word reference, 266 insertions and 193%
-    /// DER, with the meeting reporting success. Failing the chunk retries it,
+    /// DER, with the meeting reporting success. A sampled decoder loops on some
+    /// passes and not others, so the count varies from run to run and the guard
+    /// does not care what it is. Failing the chunk retries it,
     /// which is worth doing because a sampled decoder often comes back with
     /// speech the second time. A decoder that loops deterministically never
     /// will, so the last attempt drops the chunk instead: a hole in one window

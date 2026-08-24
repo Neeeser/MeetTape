@@ -138,12 +138,13 @@ enum PipelineTests {
 
             test("a chunk that loops one phrase fails retryably") { expect in
                 // A speech model given a window with little speech in it can
-                // repeat one phrase for the length of the window. Six of
+                // repeat one phrase for the length of the window. Five of
                 // sixteen ES2003a chunks came back with the same fabricated
                 // paragraph: 438 invented words against a 386-word reference,
                 // 266 insertions, 153 repeated 8-grams and 193% DER, with the
-                // meeting reporting success.
-                // What five of ES2003a's sixteen chunks returned, verbatim.
+                // meeting reporting success. How many chunks loop varies from
+                // run to run; that any of them do is what this measures.
+                // The paragraph, verbatim.
                 let loop = "The world is a very important part of the world. And I think "
                     + "that's what we need to do in terms of the world, and it's not just "
                     + "about the world, but also about the world, and we need to be able to "

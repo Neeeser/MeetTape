@@ -167,6 +167,41 @@ enum LocalConfigurationTests {
                 expect.isFalse(await manager.isInstalled)
             },
 
+            test("a unit nobody asked about does not read as a machine with no models") { expect in
+                // `ensureInstalled` used to judge the whole required set, so
+                // every unit added to that set turned voice memory off on
+                // machines already installed: the new unit has no receipt, the
+                // check throws, and `localModelsAvailable` reads that as "no
+                // models" for work the new unit has nothing to do with. Voice
+                // memory embeds with the diarizer and asks for it by name.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let locations = LocalModelLocations(applicationSupport: root)
+                try FileManager.default.createDirectory(
+                    at: locations.diarizerDirectory, withIntermediateDirectories: true
+                )
+                try LocalModelReceiptStore(locations: locations).write([
+                    .diarizer: LocalUnitReceipt(
+                        revision: LocalSpeechStack.revision(for: .diarizer),
+                        bytes: 1, installedAt: Date()
+                    ),
+                ])
+                let manager = LocalModelManager(
+                    applicationSupport: root, required: [.diarizer, .voiceActivity]
+                )
+
+                try await manager.ensureInstalled(units: [.diarizer])
+
+                await expect.throwsError(
+                    { try await manager.ensureInstalled(units: [.voiceActivity]) },
+                    "the unit that really is missing still says so"
+                )
+                await expect.throwsError(
+                    { try await manager.ensureInstalled() },
+                    "and so does the set as a whole, which is what the download button reads"
+                )
+            },
+
             test("a receipt from a different pinned revision is not treated as current") { expect in
                 let stale = LocalUnitReceipt(
                     revision: "openai_whisper-small @ argmax-oss-swift 0.9.0",

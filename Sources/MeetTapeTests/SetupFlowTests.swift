@@ -267,7 +267,7 @@ enum SetupFlowTests {
                 await model.chooseLocalModel(.cohere)
 
                 expect.equal(
-                    await requested.all, [[.cohere, .ctcAligner, .diarizer]],
+                    await requested.all, [[.cohere, .ctcAligner, .diarizer, .voiceActivity]],
                     "the download is for the chosen engine, with the aligner it needs"
                 )
                 await MainActor.run {
@@ -290,7 +290,7 @@ enum SetupFlowTests {
                 let model = await MainActor.run { makeSetupModel(root: root, requested: requested) }
                 await model.startModelDownload()
 
-                expect.equal(await requested.all, [[.parakeet, .diarizer]])
+                expect.equal(await requested.all, [[.parakeet, .diarizer, .voiceActivity]])
                 await MainActor.run { model.finish() }
                 expect.equal(
                     SettingsStore(directory: root).load().processing.localTranscriptionModel,

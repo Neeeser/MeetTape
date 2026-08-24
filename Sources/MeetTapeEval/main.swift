@@ -13,6 +13,7 @@ import MeetTapeSpeakers
 //   meettape-eval diarize   --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
 //   meettape-eval identity  --audio FILE [--audio FILE ...]
 //   meettape-eval voices
+//   meettape-eval gate      --meeting DIR
 //   meettape-eval bench     [--suite ami-core] [--engine parakeet ...] [--diarizer local]
 //
 // The audio never leaves the machine and nothing here writes to a meeting.
@@ -24,6 +25,7 @@ struct Arguments {
     var speakerCount: Int?
     var engine = "whisper"
     var transcript: URL?
+    var meeting: URL?
     var applicationSupport: URL
     var bench: BenchCommand.Options
 
@@ -54,6 +56,7 @@ struct Arguments {
             case "--speakers": speakerCount = Int(value)
             case "--engine": engine = value; engines.append(value)
             case "--transcript": transcript = URL(fileURLWithPath: value)
+            case "--meeting": meeting = URL(fileURLWithPath: value)
             case "--support": support = URL(fileURLWithPath: value)
             case "--suite": benchOptions.suite = value
             case "--case": benchOptions.meetings.append(value)
@@ -105,6 +108,7 @@ func usage() -> Never {
           meettape-eval diarize  --audio FILE [--fa 0.07 --fa 0.20] [--speakers N]
           meettape-eval identity --audio FILE [--audio FILE ...]
           meettape-eval voices
+          meettape-eval gate     --meeting MEETING_FOLDER
           meettape-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
                                  [--diarizer local|cloud] [--out FILE] [--baseline FILE]
@@ -319,6 +323,13 @@ case "voices":
             worst.pair.0, worst.pair.1, worst.score
         ))
     }
+
+case "gate":
+    guard let folder = arguments.meeting else { usage() }
+    let code = await GateCommand.run(
+        meeting: folder, applicationSupport: arguments.applicationSupport
+    )
+    if code != 0 { exit(code) }
 
 case "bench":
     let code = await BenchCommand.run(arguments.bench)

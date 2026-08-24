@@ -974,6 +974,52 @@ public actor ProcessingPipeline {
         }
     }
 
+    /// Measures what the recorded audio holds, once, before the first assembly.
+    ///
+    /// Only here. Every later assembly reads the file, so a rebuild is free and
+    /// gives the same answer: re-measuring would decode both tracks again on
+    /// every re-analysis, and on a machine whose detector has since been
+    /// deleted it would put the fabricated lines back.
+    ///
+    /// Only for a meeting whose microphone track is the local user, which is
+    /// the only track the gate judges. Imported audio would otherwise pay a
+    /// full decode and a detector pass to write a file nothing reads.
+    ///
+    /// Never throws. The words are already safe on disk as raw chunks, and a
+    /// meeting that cannot be measured assembles the way it did before this
+    /// existed: every segment kept. Failing the stage instead would turn an
+    /// unreadable track into a meeting with no markdown and no mixdown.
+    private func measureSpeech(store: MeetingStore, metadata: MeetingMetadata) async {
+        guard metadata.source.micTrackIsLocalUser else { return }
+        guard store.readSpeechEvidence() == nil else { return }
+        // The detector by name, and 1.1 MB of it. The rule that voice memory
+        // may wait for an install but never start one is about not pulling
+        // gigabytes onto a machine that chose the cloud. This is a correctness
+        // guard on the transcript the user asked for, every configuration
+        // already requires it, and the catch-up exists for machines installed
+        // before the unit did.
+        if let prepare = backends.prepareVoiceActivity {
+            do {
+                try await prepare()
+            } catch {
+                Log.processing.notice(
+                    "voice detector unavailable: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
+        }
+        do {
+            let evidence = try await SpeechEvidenceBuilder.build(
+                store: store, metadata: metadata, timeline: try store.readTimeline(),
+                detector: backends.voiceActivity
+            )
+            try store.writeSpeechEvidence(evidence)
+        } catch {
+            Log.processing.notice(
+                "speech evidence skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
+    }
+
     /// Waits for the on-device models, downloading them if this is the first
     /// local job. Recording is never blocked on this; a meeting queues instead.
     private func prepareLocalModels(metadata: MeetingMetadata) async throws {
@@ -1155,10 +1201,12 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         let diarization = try store.readRawDiarization()
+        await measureSpeech(store: store, metadata: metadata)
 
         let assembler = TranscriptAssembler()
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
+            speech: store.readSpeechEvidence(),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
@@ -1644,6 +1692,7 @@ public actor ProcessingPipeline {
         let transcript = assembler.assemble(
             raw: raw,
             diarization: diarization,
+            speech: found.store.readSpeechEvidence(),
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )
@@ -2145,6 +2194,7 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscriptForAssembly()
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
+            speech: store.readSpeechEvidence(),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)

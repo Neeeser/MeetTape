@@ -92,37 +92,45 @@ extension LocalModelManager {
     func lseendDiarize(
         audio: URL, variant: LSEENDVariant, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> DiarizationOutput {
-        let model = try await LSEENDModel.loadFromHuggingFace(
-            variant: variant, cacheDirectory: locations.root
-        )
-        let diarizer = LSEENDDiarizer()
-        try diarizer.initialize(model: model)
-        let samples = try MonoAudioDecoder.loadMono16k(audio)
-        let timeline = try diarizer.processComplete(
-            samples, sourceSampleRate: 16_000,
-            progressCallback: { done, total, _ in
-                guard total > 0 else { return }
-                progress(min(1, Double(done) / Double(total)))
+        // The model class is not Sendable, so its whole lifetime stays inside
+        // one detached task and only the Sendable output crosses back; loaded
+        // on the actor, the stricter toolchains refuse the transfer. The
+        // actor method still serializes callers the way every heavy pass
+        // does: each call awaits the whole run.
+        let root = locations.root
+        return try await Task.detached(priority: .userInitiated) {
+            let model = try await LSEENDModel.loadFromHuggingFace(
+                variant: variant, cacheDirectory: root
+            )
+            let diarizer = LSEENDDiarizer()
+            try diarizer.initialize(model: model)
+            let samples = try MonoAudioDecoder.loadMono16k(audio)
+            let timeline = try diarizer.processComplete(
+                samples, sourceSampleRate: 16_000,
+                progressCallback: { done, total, _ in
+                    guard total > 0 else { return }
+                    progress(min(1, Double(done) / Double(total)))
+                }
+            )
+            var segments: [(speaker: Int, start: Double, end: Double, activity: Double)] = []
+            for (index, speaker) in timeline.speakers {
+                for segment in speaker.finalizedSegments {
+                    segments.append((
+                        speaker: index,
+                        start: Double(segment.startTime), end: Double(segment.endTime),
+                        activity: Double(segment.activity)
+                    ))
+                }
             }
-        )
-        var segments: [(speaker: Int, start: Double, end: Double, activity: Double)] = []
-        for (index, speaker) in timeline.speakers {
-            for segment in speaker.finalizedSegments {
-                segments.append((
-                    speaker: index,
-                    start: Double(segment.startTime), end: Double(segment.endTime),
-                    activity: Double(segment.activity)
-                ))
-            }
-        }
-        progress(1)
-        return LSEendDiarizationBackend.output(
-            segments: segments,
-            configuration: [
-                "backend": "\(LocalSpeechStack.lseendBackendIdentifierPrefix)\(variant)-0.15.6",
-                "pipeline": "ls-eend",
-                "variant": "\(variant)",
-            ]
-        )
+            progress(1)
+            return LSEendDiarizationBackend.output(
+                segments: segments,
+                configuration: [
+                    "backend": "\(LocalSpeechStack.lseendBackendIdentifierPrefix)\(variant)-0.15.6",
+                    "pipeline": "ls-eend",
+                    "variant": "\(variant)",
+                ]
+            )
+        }.value
     }
 }

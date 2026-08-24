@@ -247,12 +247,13 @@ docstrings in `scripts/build-bench-truth.py` record what each difference costs.
 
 ## Baselines
 
-`baselines.json` comes from the deciding run of 2026-08-23: all 14 `ami-core`
-cases on Parakeet with local diarization, which is the shipping configuration.
-The same run measured Cohere over the same cases and it lost every one, so the
-committed baselines are Parakeet's. `ami-overlap` and `icsi` have no entries
-yet: a case with no baseline is still run and still reported, it just has
-nothing to compare against, and these two are pending the full comparative run.
+`baselines.json` holds two generations. The 2026-08-23 run of all 14
+`ami-core` cases on Parakeet with local diarization gates the regression
+suites. The 2026-08-24 campaign finals added every `deciding` case for the
+three finalists (Parakeet, Apple, Whisper, each the mean of three runs), which
+covers `ami-overlap`, `icsi` and `notsofar` through the meetings `deciding`
+shares with them. A gated case with no entry fails the run, so a suite gains
+baselines before it gains gate duty.
 
 Regenerate from a bench run's own output:
 
@@ -263,9 +264,9 @@ python3 scripts/build-bench-baselines.py /tmp/parakeet.json \
     --out Benchmarks/baselines.json
 ```
 
-The generator keeps the five numbers the rule reads (`wer`, `werNoFiller`,
-`attribution`, `der`, `repeatedNgrams`), refuses a case that did not reach `complete`, and carries
-the existing tolerances over.
+The generator keeps the six numbers the rule reads (`wer`, `werNoFiller`,
+`attribution`, `der`, `tcpWer`, `repeatedNgrams`), refuses a case that did not
+reach `complete`, and carries the existing tolerances over.
 
 ## What a baseline check enforces
 

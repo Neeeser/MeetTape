@@ -305,9 +305,17 @@ enum BenchCommand {
 
         var existing: [Row] = []
         if options.resume, let out = options.out,
-            let data = try? Data(contentsOf: out),
-            let decoded = try? JSONDecoder().decode([Row].self, from: data)
+            FileManager.default.fileExists(atPath: out.path)
         {
+            // A file that exists but does not decode is refused, never
+            // treated as empty: starting over would overwrite the hours of
+            // results resuming exists to protect.
+            guard let data = try? Data(contentsOf: out),
+                let decoded = try? JSONDecoder().decode([Row].self, from: data)
+            else {
+                note("bench: \(out.path) exists but did not decode; fix or delete it before resuming")
+                return 2
+            }
             existing = decoded
             note("resuming: \(decoded.count) recorded row(s) in \(out.lastPathComponent)")
         }
@@ -400,7 +408,10 @@ enum BenchCommand {
         guard let out else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(rows) { try? data.write(to: out) }
+        // Atomic, because this file is rewritten after every case and a kill
+        // mid-write must leave the previous complete version, not a
+        // truncated one nothing can resume from.
+        if let data = try? encoder.encode(rows) { try? data.write(to: out, options: .atomic) }
     }
 
     static func runOne(

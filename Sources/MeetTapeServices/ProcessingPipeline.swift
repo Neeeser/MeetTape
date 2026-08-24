@@ -994,9 +994,10 @@ public actor ProcessingPipeline {
         guard store.readSpeechEvidence() == nil else { return }
         // The detector by name, and 1.1 MB of it. The rule that voice memory
         // may wait for an install but never start one is about not pulling
-        // gigabytes onto a machine that chose the cloud; this is a correctness
-        // guard on the transcript the user asked for, and it is smaller than
-        // one minute of the audio the same stage has already uploaded.
+        // gigabytes onto a machine that chose the cloud. This is a correctness
+        // guard on the transcript the user asked for, every configuration
+        // already requires it, and the catch-up exists for machines installed
+        // before the unit did.
         if let prepare = backends.prepareVoiceActivity {
             do {
                 try await prepare()

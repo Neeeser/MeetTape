@@ -97,8 +97,8 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
         // instead of the meeting skipping voice memory.
         // The detector is required for the same reason and in the same set.
         // Every backend fabricates filler for a microphone track that is mostly
-        // not speech, cloud ones included: 181 of 222 segments on the local
-        // user's track across five meetings were words nobody said. Leaving it
+        // not speech, cloud ones included: 181 of 222 segments over four
+        // meetings on the local user's track were words nobody said. Leaving it
         // optional would mean the configuration most exposed to the defect,
         // cloud transcription of a listener's own microphone, is the one
         // shipped without the guard.

@@ -542,6 +542,10 @@ public actor LocalModelManager {
         var values: [Float] = []
 
         while let block = try await next() {
+            // A quit or a cancelled job stops the pass here. Without it the
+            // whole track is still decoded and judged after the caller has
+            // gone, which is what the push version's `onTermination` covered.
+            try Task.checkCancellation()
             pending.append(contentsOf: block)
             while pending.count >= window {
                 let result = try await manager.processStreamingChunk(

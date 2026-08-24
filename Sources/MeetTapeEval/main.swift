@@ -45,6 +45,14 @@ struct Arguments {
                 benchOptions.keepScratch = true
                 continue
             }
+            if flag == "--resume" {
+                benchOptions.resume = true
+                continue
+            }
+            if flag == "--allow-missing-baseline" {
+                benchOptions.allowMissingBaseline = true
+                continue
+            }
             guard index < raw.count else { break }
             let value = raw[index]
             index += 1
@@ -107,8 +115,9 @@ func usage() -> Never {
           meettape-eval voices
           meettape-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
-                                 [--diarizer local|cloud] [--out FILE] [--baseline FILE]
-                                 [--audio-dir DIR] [--repeats N] [--keep-scratch]
+                                 [--diarizer local|lseend|cloud] [--out FILE] [--baseline FILE]
+                                 [--allow-missing-baseline] [--audio-dir DIR]
+                                 [--repeats N] [--keep-scratch] [--resume]
         """)
     exit(2)
 }

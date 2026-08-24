@@ -26,9 +26,12 @@ enum BenchScorerTests {
     /// A score holding only the fields a baseline rule reads. Decoded rather
     /// than built, because the memberwise initialiser is internal to the bench
     /// module.
-    static func score(werNoFiller: Double, attribution: Double, repeats: Int) throws -> BenchScore {
+    static func score(
+        werNoFiller: Double, attribution: Double, repeats: Int, tcpWer: Double? = nil
+    ) throws -> BenchScore {
         let json = """
             {"meeting":"ES2002b","wer":\(werNoFiller),"werNoFiller":\(werNoFiller),
+             \(tcpWer.map { "\"tcpWer\":\($0)," } ?? "")
              "substitutions":0,"insertions":0,"deletions":0,"referenceWords":100,
              "hypothesisWords":100,"utterances":10,"attribution":\(attribution),
              "attributionMerged":\(attribution),"attributionOfLabelled":\(attribution),
@@ -286,6 +289,92 @@ enum BenchScorerTests {
                 expect.close(score.netOfFloorWer, score.wer, tolerance: 0.0001)
             },
 
+            test("an oracle transcript scores zero per-speaker word error") { expect in
+                let truth = try truth()
+                let score = BenchScorer.score(truth: truth, utterances: oracle(truth))
+                expect.close(
+                    try expect.unwrap(score.cpWer), 0, tolerance: 0.0001,
+                    "every speaker's words are present on some key, so the best assignment is exact"
+                )
+            },
+
+            test("words on the wrong speaker are charged on both speakers' streams") { expect in
+                // A and B speak four words each; the transcript holds all eight
+                // words, all on one key. Serialized WER reads it as perfect.
+                // Per speaker, A's stream carries four insertions and B's four
+                // deletions: eight edits over eight reference words.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 4, ["b1", "b2", "b3", "b4"]),
+                ], seconds: 10)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 8, text: "a1 a2 a3 a4 b1 b2 b3 b4", speakerKey: "c0"
+                    )]
+                )
+                expect.close(score.wer, 0, tolerance: 0.0001, "the serialized stream is exact")
+                expect.close(
+                    try expect.unwrap(score.cpWer), 1.0, tolerance: 0.0001,
+                    "one stream for two speakers pays every misplaced word twice"
+                )
+            },
+
+            test("a dropped overlap word is a deletion to cpWER and invisible to attribution") {
+                expect in
+                // The same sixteen-word fixture attribution coverage uses: the
+                // last eight words are spoken across each other and the
+                // transcript never writes B's overlapped four. Attribution
+                // scores the easy half and says so; cpWER charges the four
+                // missing words as deletions on B's stream.
+                let truth = made([
+                    ("A", 0, ["a1", "a2", "a3", "a4"]),
+                    ("B", 4, ["b1", "b2", "b3", "b4"]),
+                    ("A", 8, ["a5", "a6", "a7", "a8"]),
+                    ("B", 8, ["b5", "b6", "b7", "b8"]),
+                ], seconds: 12)
+                let score = BenchScorer.score(
+                    truth: truth,
+                    utterances: [
+                        BenchUtterance(start: 0, end: 4, text: "a1 a2 a3 a4", speakerKey: "c0"),
+                        BenchUtterance(start: 4, end: 8, text: "b1 b2 b3 b4", speakerKey: "c1"),
+                        BenchUtterance(start: 8, end: 12, text: "a5 a6 a7 a8", speakerKey: "c0"),
+                    ]
+                )
+                expect.close(score.attribution, 1.0, tolerance: 0.0001)
+                expect.close(
+                    try expect.unwrap(score.cpWer), 4.0 / 16.0, tolerance: 0.0001,
+                    "the four overlapped words nobody transcribed are deletions"
+                )
+            },
+
+            test("tcpWER charges words placed far from when they were spoken") { expect in
+                // The right words on the right speaker, twenty seconds late.
+                // cpWER accepts them; the time-constrained variant refuses the
+                // match beyond the five-second collar and pays each word as a
+                // deletion where it was said plus an insertion where it landed.
+                let truth = made([("A", 0, ["a1", "a2", "a3", "a4"])], seconds: 30)
+                let late = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(
+                        start: 20, end: 24, text: "a1 a2 a3 a4", speakerKey: "c0"
+                    )]
+                )
+                expect.close(try expect.unwrap(late.cpWer), 0, tolerance: 0.0001)
+                expect.close(
+                    try expect.unwrap(late.tcpWer), 2.0, tolerance: 0.0001,
+                    "four deletions and four insertions over four reference words"
+                )
+
+                let punctual = BenchScorer.score(
+                    truth: truth,
+                    utterances: [BenchUtterance(
+                        start: 0, end: 4, text: "a1 a2 a3 a4", speakerKey: "c0"
+                    )]
+                )
+                expect.close(try expect.unwrap(punctual.tcpWer), 0, tolerance: 0.0001)
+            },
+
             test("attribution reports the share of words it asked about") { expect in
                 // Sixteen words. The first eight are spoken alone, the last
                 // eight across each other, so attribution is asked about half
@@ -393,6 +482,56 @@ enum BenchScorerTests {
                 }
             },
 
+            test("a case with no baseline entry fails when entries are required") { expect in
+                let baselines = BenchBaselines(entries: [:])
+                let clean = try score(werNoFiller: 0.20, attribution: 0.95, repeats: 0)
+                expect.isTrue(
+                    baselines.regressions(key: "parakeet/local/Bmr019", score: clean).isEmpty,
+                    "an exploratory run without an entry still passes"
+                )
+                let required = baselines.regressions(
+                    key: "parakeet/local/Bmr019", score: clean, requireEntry: true
+                )
+                expect.equal(
+                    required, ["no baseline entry for parakeet/local/Bmr019"],
+                    "a gate with a hole in it is not a gate"
+                )
+            },
+
+            test("tcpWER drift past its tolerance is a regression") { expect in
+                let baselines = BenchBaselines(entries: [
+                    "parakeet/local/EN2002d": BenchBaselines.Entry(
+                        wer: 0.40, werNoFiller: 0.38, attribution: 0.85, der: 0.30,
+                        repeatedNgrams: 0, tcpWer: 0.45
+                    )
+                ])
+                let drifted = try score(
+                    werNoFiller: 0.38, attribution: 0.85, repeats: 0, tcpWer: 0.50
+                )
+                expect.equal(
+                    baselines.regressions(key: "parakeet/local/EN2002d", score: drifted),
+                    ["tcpWER 50.0% against 45.0%"],
+                    "five points of per-speaker drift is past the tolerance"
+                )
+                let steady = try score(
+                    werNoFiller: 0.38, attribution: 0.85, repeats: 0, tcpWer: 0.46
+                )
+                expect.isTrue(
+                    baselines.regressions(key: "parakeet/local/EN2002d", score: steady).isEmpty,
+                    "one point sits inside the tolerance"
+                )
+                // An entry recorded before the metric existed compares nothing.
+                let legacy = BenchBaselines(entries: [
+                    "parakeet/local/EN2002d": BenchBaselines.Entry(
+                        wer: 0.40, werNoFiller: 0.38, attribution: 0.85, der: 0.30
+                    )
+                ])
+                expect.isTrue(
+                    legacy.regressions(key: "parakeet/local/EN2002d", score: drifted).isEmpty,
+                    "no recorded tcpWER means nothing to drift from"
+                )
+            },
+
             test("a repeat budget ratchets down and never up") { expect in
                 // The deciding run left two cases with repeats at a chunk seam.
                 // Those two carry a budget so a clean sweep is green; every
@@ -482,12 +621,50 @@ enum BenchScorerTests {
                         // `source` is what the harness then looks for.
                         let url = manifest.audioURL?[meeting]
                             ?? manifest.mirror.replacingOccurrences(of: "{meeting}", with: meeting)
+                        let saved = manifest.audioFilename?[meeting]
+                            ?? URL(string: url)?.lastPathComponent
                         expect.equal(
-                            URL(string: url)?.lastPathComponent, truth.source,
+                            saved, truth.source,
                             "\(suite): \(meeting) downloads under another name"
                         )
                     }
                 }
+            },
+
+            test("the deciding suite holds no meeting an engine may have trained on") { expect in
+                // Parakeet's model card lists AMI in its training data, and
+                // nine of the fourteen core cases sit in AMI's training
+                // partition. A suite that ranks engines must not read them.
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                let layout = BenchLayout(root: repository.appendingPathComponent("Benchmarks"))
+                let manifest = try BenchManifest.read(from: layout.manifest)
+                let partition = try expect.unwrap(manifest.partition)
+                for meeting in manifest.audio.keys {
+                    expect.isTrue(
+                        partition[meeting] != nil,
+                        "\(meeting) carries no partition, so nobody can tell what it may decide"
+                    )
+                }
+                // Spot checks against the published full-corpus-ASR split.
+                expect.equal(partition["ES2002a"], "ami-train")
+                expect.equal(partition["IS1008a"], "ami-dev")
+                expect.equal(partition["EN2002a"], "ami-eval")
+                expect.equal(partition["IB4005"], "excluded")
+                expect.equal(partition["Bmr019"], "clean")
+
+                let deciding = try expect.unwrap(manifest.suites["deciding"])
+                for meeting in deciding {
+                    let held = partition[meeting] ?? "missing"
+                    expect.isTrue(
+                        held == "ami-eval" || held == "clean",
+                        "\(meeting) is \(held): only held-out or uncontaminated data may rank engines"
+                    )
+                }
+                expect.isTrue(deciding.contains("IS1009c"), "the long held-out case is in")
+                expect.isTrue(deciding.contains("Bmr019"), "ICSI is in")
             },
 
             test("the overlap suites share no meeting with the core suite") { expect in
@@ -564,6 +741,56 @@ enum BenchScorerTests {
                 expect.isTrue(
                     BenchAggregate.deciding(over: []) == nil, "no runs decide nothing"
                 )
+            },
+
+            test("repeated runs decide per-speaker error on the mean") { expect in
+                let first = try score(werNoFiller: 0.20, attribution: 0.95, repeats: 0, tcpWer: 0.40)
+                let second = try score(werNoFiller: 0.20, attribution: 0.95, repeats: 0, tcpWer: 0.50)
+                let deciding = try expect.unwrap(BenchAggregate.deciding(over: [first, second]))
+                expect.close(
+                    try expect.unwrap(deciding.tcpWer), 0.45, tolerance: 0.0001,
+                    "the gate reads the mean of the runs"
+                )
+                let legacy = try score(werNoFiller: 0.20, attribution: 0.95, repeats: 0)
+                let mixed = try expect.unwrap(BenchAggregate.deciding(over: [legacy, first]))
+                expect.close(
+                    try expect.unwrap(mixed.tcpWer), 0.40, tolerance: 0.0001,
+                    "a run recorded before the metric existed does not drag the mean"
+                )
+            },
+
+            test("a resumed run skips what the out file already holds") { expect in
+                func row(_ meeting: String, engine: String, diarizer: String, run: Int) throws -> BenchRow {
+                    var recorded = try self.score(werNoFiller: 0.2, attribution: 0.9, repeats: 0)
+                    recorded.meeting = meeting
+                    return BenchRow(
+                        engine: engine, diarizer: diarizer, score: recorded,
+                        processingSeconds: 60, audioSeconds: 360, state: "complete",
+                        transcriptionModels: [], diarizationBackends: [],
+                        overlapRatio: nil, run: run, scratch: nil
+                    )
+                }
+                let existing = [
+                    try row("ES2002b", engine: "parakeet", diarizer: "local", run: 1),
+                    try row("ES2002b", engine: "parakeet", diarizer: "local", run: 3),
+                    try row("ES2002b", engine: "cohere", diarizer: "local", run: 1),
+                ]
+                let plan = BenchResume.pending(
+                    existing: existing, meeting: "ES2002b",
+                    engine: "parakeet", diarizer: "local", repeats: 3
+                )
+                expect.equal(plan.runs, [2], "runs one and three are already on disk")
+                expect.equal(plan.done.count, 2, "the recorded runs still feed the mean")
+
+                let fresh = BenchResume.pending(
+                    existing: existing, meeting: "ES2002b",
+                    engine: "parakeet", diarizer: "lseend", repeats: 2
+                )
+                expect.equal(
+                    fresh.runs, [1, 2],
+                    "a different diarizer shares nothing with the recorded rows"
+                )
+                expect.equal(fresh.done.count, 0)
             },
 
             test("a run with no DER leaves the aggregate without one") { expect in

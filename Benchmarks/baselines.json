@@ -1,11 +1,172 @@
 {
   "entries": {
+    "apple/local/Bed016": {
+      "attribution": 0.5832012678288431,
+      "der": 0.6233193132455354,
+      "repeatedNgrams": 2,
+      "tcpWer": 0.8302687411598303,
+      "wer": 0.6343705799151343,
+      "werNoFiller": 0.6310319227913883
+    },
+    "apple/local/Bmr019": {
+      "attribution": 0.6788685524126455,
+      "der": 0.5557122234531843,
+      "repeatedNgrams": 5,
+      "tcpWer": 0.8426344896933132,
+      "wer": 0.6872800402212166,
+      "werNoFiller": 0.6815459989112683
+    },
+    "apple/local/Bsr001": {
+      "attribution": 0.704225352112676,
+      "der": 0.413392764590028,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.734733756717147,
+      "wer": 0.5740107474352711,
+      "werNoFiller": 0.5593047034764826
+    },
+    "apple/local/Btr001": {
+      "attribution": 0.4085545722713864,
+      "der": 0.8139344931797762,
+      "repeatedNgrams": 1,
+      "tcpWer": 0.842622950819672,
+      "wer": 0.7923497267759562,
+      "werNoFiller": 0.7924743443557581
+    },
+    "apple/local/EN2002a": {
+      "attribution": 0.9323076923076923,
+      "der": 0.3300077002912719,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.5329341317365269,
+      "wer": 0.44461077844311375,
+      "werNoFiller": 0.4244833068362481
+    },
+    "apple/local/EN2002b": {
+      "attribution": 0.8630393996247655,
+      "der": 0.501776988005331,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6637795275590551,
+      "wer": 0.48740157480314955,
+      "werNoFiller": 0.46
+    },
+    "apple/local/EN2002d": {
+      "attribution": 0.8670411985018727,
+      "der": 0.5056044835868695,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6616643929058663,
+      "wer": 0.5075034106412005,
+      "werNoFiller": 0.4862914862914863
+    },
+    "apple/local/IS1009a": {
+      "attribution": 0.9524421593830334,
+      "der": 0.1401859359709213,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.355877616747182,
+      "wer": 0.2898550724637681,
+      "werNoFiller": 0.23958333333333334
+    },
+    "apple/local/IS1009c": {
+      "attribution": 0.9574413863404688,
+      "der": 0.07063397217427227,
+      "repeatedNgrams": 3,
+      "tcpWer": 0.30083078268473984,
+      "wer": 0.2310887625710538,
+      "werNoFiller": 0.14803775459513163
+    },
+    "apple/local/MTG_32000": {
+      "attribution": 0.913375796178344,
+      "der": 0.2122990169930656,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.5157534246575343,
+      "wer": 0.39657534246575343,
+      "werNoFiller": 0.3659605551497444
+    },
+    "apple/local/MTG_32046": {
+      "attribution": 0.9205298013245033,
+      "der": 0.0685619880223033,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.3785926660059465,
+      "wer": 0.23488602576808723,
+      "werNoFiller": 0.19659936238044637
+    },
+    "apple/local/MTG_32052": {
+      "attribution": 0.7948717948717948,
+      "der": 0.3599262976321154,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7915617128463476,
+      "wer": 0.4527707808564232,
+      "werNoFiller": 0.42904290429042896
+    },
+    "apple/local/MTG_32093": {
+      "attribution": 0.8745019920318725,
+      "der": 0.3720067127089653,
+      "repeatedNgrams": 21,
+      "tcpWer": 0.760475651189128,
+      "wer": 0.5900339750849377,
+      "werNoFiller": 0.5769230769230769
+    },
+    "apple/local/MTG_32102": {
+      "attribution": 0.751358695652174,
+      "der": 0.40452085323145487,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.8566037735849057,
+      "wer": 0.5028301886792453,
+      "werNoFiller": 0.4912109375
+    },
+    "parakeet/local/Bed016": {
+      "attribution": 0.6418383518225039,
+      "der": 0.6173550299937944,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.8550212164073551,
+      "wer": 0.516973125884017,
+      "werNoFiller": 0.5115070527097253
+    },
+    "parakeet/local/Bmr019": {
+      "attribution": 0.64891846921797,
+      "der": 0.57860811763521,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.85771744595274,
+      "wer": 0.6425339366515838,
+      "werNoFiller": 0.6260206859009254
+    },
+    "parakeet/local/Bsr001": {
+      "attribution": 0.7183098591549296,
+      "der": 0.38416087902975016,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7122618466047875,
+      "wer": 0.5144113336590131,
+      "werNoFiller": 0.5040899795501023
+    },
+    "parakeet/local/Btr001": {
+      "attribution": 0.42625368731563423,
+      "der": 0.8252062403005799,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.842622950819672,
+      "wer": 0.7497267759562841,
+      "werNoFiller": 0.7474344355758267
+    },
     "parakeet/local/EN2002a": {
       "attribution": 0.9246153846153846,
       "der": 0.31216311225685495,
       "repeatedNgrams": 0,
-      "wer": 0.3869760479041916,
-      "werNoFiller": 0.3688394276629571
+      "tcpWer": 0.4940119760479042,
+      "wer": 0.38697604790419166,
+      "werNoFiller": 0.36883942766295713
+    },
+    "parakeet/local/EN2002b": {
+      "attribution": 0.8630393996247655,
+      "der": 0.495501999111506,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6362204724409449,
+      "wer": 0.41338582677165353,
+      "werNoFiller": 0.395
+    },
+    "parakeet/local/EN2002d": {
+      "attribution": 0.8632958801498128,
+      "der": 0.49585382591787713,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6589358799454298,
+      "wer": 0.47748976807639837,
+      "werNoFiller": 0.4624819624819625
     },
     "parakeet/local/ES2002a": {
       "attribution": 0.9013282732447818,
@@ -74,6 +235,7 @@
       "attribution": 0.961439588688946,
       "der": 0.14934293303509016,
       "repeatedNgrams": 0,
+      "tcpWer": 0.31803542673107893,
       "wer": 0.23349436392914655,
       "werNoFiller": 0.2109375
     },
@@ -81,8 +243,49 @@
       "attribution": 0.9561671763506626,
       "der": 0.1229141769574647,
       "repeatedNgrams": 7,
-      "wer": 0.16724967205946656,
+      "tcpWer": 0.25426322693484915,
+      "wer": 0.1672496720594666,
       "werNoFiller": 0.12468951813214109
+    },
+    "parakeet/local/MTG_32000": {
+      "attribution": 0.9070063694267517,
+      "der": 0.2265869084812924,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.4876712328767123,
+      "wer": 0.34178082191780823,
+      "werNoFiller": 0.3316289262235208
+    },
+    "parakeet/local/MTG_32046": {
+      "attribution": 0.9260485651214129,
+      "der": 0.07375920699387348,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.27849355797819625,
+      "wer": 0.1159563924677899,
+      "werNoFiller": 0.09989373007438895
+    },
+    "parakeet/local/MTG_32052": {
+      "attribution": 0.7931623931623931,
+      "der": 0.3788615336365062,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7468513853904281,
+      "wer": 0.3916876574307305,
+      "werNoFiller": 0.3795379537953795
+    },
+    "parakeet/local/MTG_32093": {
+      "attribution": 0.8386454183266933,
+      "der": 0.4419092493384109,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7361268403171007,
+      "wer": 0.5339750849377124,
+      "werNoFiller": 0.5325443786982249
+    },
+    "parakeet/local/MTG_32102": {
+      "attribution": 0.7391304347826088,
+      "der": 0.41735116205030237,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.8466981132075472,
+      "wer": 0.46273584905660375,
+      "werNoFiller": 0.45703125
     },
     "parakeet/local/TS3005a": {
       "attribution": 0.9176470588235294,
@@ -97,11 +300,124 @@
       "repeatedNgrams": 0,
       "wer": 0.3565365025466893,
       "werNoFiller": 0.33582787652011226
+    },
+    "whisper/local/Bed016": {
+      "attribution": 0.629688325409403,
+      "der": 0.5871428899767864,
+      "repeatedNgrams": 26,
+      "tcpWer": 0.8769448373408769,
+      "wer": 0.5598774163130599,
+      "werNoFiller": 0.5441722345953971
+    },
+    "whisper/local/Bmr019": {
+      "attribution": 0.6245146977260122,
+      "der": 0.5964794485290003,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.9146975029327971,
+      "wer": 0.7474442768560415,
+      "werNoFiller": 0.7294501905280347
+    },
+    "whisper/local/Bsr001": {
+      "attribution": 0.7408450704225352,
+      "der": 0.3593345081372447,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7205666829506595,
+      "wer": 0.5315095261358085,
+      "werNoFiller": 0.5127811860940695
+    },
+    "whisper/local/Btr001": {
+      "attribution": 0.42969518190757133,
+      "der": 0.7885866753791282,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.8887067395264117,
+      "wer": 0.7841530054644809,
+      "werNoFiller": 0.7753705815279361
+    },
+    "whisper/local/EN2002a": {
+      "attribution": 0.9,
+      "der": 0.3739997991228364,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.5336826347305389,
+      "wer": 0.4453592814371257,
+      "werNoFiller": 0.417329093799682
+    },
+    "whisper/local/EN2002b": {
+      "attribution": 0.851782363977486,
+      "der": 0.528764993336295,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6818897637795276,
+      "wer": 0.5039370078740157,
+      "werNoFiller": 0.4791666666666667
+    },
+    "whisper/local/EN2002d": {
+      "attribution": 0.8539325842696629,
+      "der": 0.4838728125357428,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.6780354706684856,
+      "wer": 0.5129604365620737,
+      "werNoFiller": 0.4963924963924964
+    },
+    "whisper/local/IS1009a": {
+      "attribution": 0.9511568123393316,
+      "der": 0.15178945896826507,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.36312399355877617,
+      "wer": 0.27697262479871176,
+      "werNoFiller": 0.2230902777777778
+    },
+    "whisper/local/IS1009c": {
+      "attribution": 0.9533639143730887,
+      "der": 0.1084185367149117,
+      "repeatedNgrams": 5,
+      "tcpWer": 0.3390905115872322,
+      "wer": 0.25615799446144877,
+      "werNoFiller": 0.16260970359331015
+    },
+    "whisper/local/MTG_32000": {
+      "attribution": 0.9019108280254778,
+      "der": 0.2354644517259773,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.5383561643835616,
+      "wer": 0.41232876712328775,
+      "werNoFiller": 0.37837837837837834
+    },
+    "whisper/local/MTG_32046": {
+      "attribution": 0.9150110375275938,
+      "der": 0.0821917808219178,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.4251734390485629,
+      "wer": 0.2874132804757185,
+      "werNoFiller": 0.23698193411264612
+    },
+    "whisper/local/MTG_32052": {
+      "attribution": 0.7948717948717948,
+      "der": 0.3612984161831582,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7789672544080605,
+      "wer": 0.41435768261964734,
+      "werNoFiller": 0.38877887788778875
+    },
+    "whisper/local/MTG_32093": {
+      "attribution": 0.8645418326693227,
+      "der": 0.4038920802943265,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.7559456398640997,
+      "wer": 0.5402038505096263,
+      "werNoFiller": 0.521301775147929
+    },
+    "whisper/local/MTG_32102": {
+      "attribution": 0.751358695652174,
+      "der": 0.4131168417701369,
+      "repeatedNgrams": 0,
+      "tcpWer": 0.8382075471698113,
+      "wer": 0.5146226415094339,
+      "werNoFiller": 0.50048828125
     }
   },
   "tolerances": {
     "attribution": 1.0,
     "der": 2.0,
+    "tcpWer": 2.0,
     "wer": 1.5
   }
 }

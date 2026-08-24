@@ -177,17 +177,41 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
     /// locally, and reachable through `meettape-eval bench --engine canary`
     /// alone: it is not in `offered`, so no settings surface can select it.
     case canary
-    /// Benchmark candidate: Apple's SpeechAnalyzer, macOS 26 and later. Word
-    /// timings of its own, system-managed model assets, zero install cost.
-    /// Not in `offered` until the comparative run and an availability story
-    /// earn it a place.
+    /// Apple's SpeechAnalyzer, macOS 26 and later. Word timings of its own,
+    /// system-managed model assets, zero install cost. The fresh-install
+    /// default where it exists: 1.3 tcpWER points behind Parakeet on the
+    /// deciding run at the same speed, with nothing to download.
     case apple
 
-    /// The engines in the order they are offered, recommended first.
-    /// `allCases` is declaration order, which is alphabetical and puts a 2.1 GB
-    /// engine above the one that won every meeting of the benchmark. Canary is
-    /// deliberately absent until the comparative run earns it a place.
-    public static let offered: [LocalTranscriptionModel] = [.parakeet, .cohere, .whisper]
+    /// The engines in the order they are offered, default first.
+    ///
+    /// The 2026-08-24 deciding run over held-out audio set this list. Apple
+    /// leads where it exists because a fresh install transcribes immediately
+    /// with nothing to download, and it finished 1.3 tcpWER points behind
+    /// Parakeet at the same speed; Parakeet is the pick for accuracy and the
+    /// only choice before macOS 26. Cohere (lost all 14 clean cases, 178
+    /// repeated 8-grams, 4.6 GB) and Whisper (0 case wins over Parakeet) left
+    /// the list on the same data; installs that have them keep them, and the
+    /// cases remain selectable by the bench.
+    public static var offered: [LocalTranscriptionModel] {
+        if #available(macOS 26.0, *) { return [.apple, .parakeet] }
+        return [.parakeet]
+    }
+
+    /// What a fresh install gets: the first offered engine on this OS.
+    public static var preferred: LocalTranscriptionModel {
+        if #available(macOS 26.0, *) { return .apple }
+        return .parakeet
+    }
+
+    /// What an engine picker shows: the offered engines, plus whatever this
+    /// install already has selected. A stored choice is never migrated, so a
+    /// model that left the offered list keeps its row on the machines that
+    /// chose it; hiding it would show a picker with nothing selected and one
+    /// click away from a download nobody asked for.
+    public static func pickerRows(selected: LocalTranscriptionModel) -> [LocalTranscriptionModel] {
+        offered.contains(selected) ? offered : offered + [selected]
+    }
 
     public var backendIdentifier: String {
         switch self {

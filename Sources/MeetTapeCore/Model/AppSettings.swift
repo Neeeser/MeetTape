@@ -17,7 +17,7 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
     public var vocabularyHints: String
 
     public init(
-        transcription: String = "gpt-transcribe",
+        transcription: String = "gpt-4o-transcribe-diarize",
         diarization: String = "gpt-4o-transcribe-diarize",
         metadata: String = "gpt-5.6-luna",
         vocabularyHints: String = ""
@@ -28,9 +28,18 @@ public struct AIModelSettings: Codable, Sendable, Equatable {
         self.vocabularyHints = vocabularyHints
     }
 
-    /// The cloud transcription models Settings offers, best first.
+    /// The cloud transcription models Settings offers, default first.
+    ///
+    /// whisper-1 left the list after the 2026-08-24 deciding run: zero case
+    /// wins against the free local default, and the word timings that were
+    /// its reason to exist come from the local aligner now. It still parses,
+    /// times and runs for anyone who types it under Custom. gpt-transcribe
+    /// stays despite failing the five hardest bench meetings with empty
+    /// output (a documented behaviour of the model family on long, hard
+    /// audio): on ordinary recordings it is the strongest text model, and the
+    /// pipeline fails a meeting loudly rather than filing a hole.
     public static let transcriptionChoices = [
-        "gpt-transcribe", "gpt-4o-transcribe-diarize", "whisper-1",
+        "gpt-4o-transcribe-diarize", "gpt-transcribe",
     ]
     public static let diarizationChoices = ["gpt-4o-transcribe-diarize"]
     public static let metadataChoices = ["gpt-5.6-luna", "gpt-5.1", "gpt-5.1-mini", "gpt-4.1"]
@@ -208,7 +217,7 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
-        localTranscriptionModel: LocalTranscriptionModel = .parakeet,
+        localTranscriptionModel: LocalTranscriptionModel = .preferred,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
         localUserIdentityID: IdentityID? = nil
     ) {
@@ -235,9 +244,9 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(ProcessingBackendChoice.self, forKey: .diarization)
             ?? defaults.diarization
         // The key's absence means the file predates the model choice, which is
-        // an install with Whisper on disk. The fresh default is Parakeet, but
-        // no stored value is migrated: a download must follow a person picking
-        // a model, not an upgrade.
+        // an install with Whisper on disk. The fresh default is Apple on
+        // macOS 26+ and Parakeet before it, but no stored value is migrated:
+        // a download must follow a person picking a model, not an upgrade.
         localTranscriptionModel =
             try container.decodeIfPresent(LocalTranscriptionModel.self, forKey: .localTranscriptionModel)
             ?? .whisper

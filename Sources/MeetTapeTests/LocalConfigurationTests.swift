@@ -71,19 +71,50 @@ enum LocalConfigurationTests {
                 )
             },
 
-            test("Apple speech needs no downloaded units and is not offered") { expect in
+            test("Apple speech needs no downloaded units and leads where the OS has it") { expect in
                 // The models are system assets the OS installs and owns, so
-                // the only unit the configuration needs is the diarizer every
-                // configuration needs. It stays out of `offered` with the
-                // other bench candidates.
+                // the configuration needs only the units every configuration
+                // needs. Where macOS 26 exists it is the fresh-install
+                // default, because a first meeting should transcribe without
+                // a download; earlier systems default to Parakeet.
                 var settings = AppSettings()
                 settings.processing.transcription = .local
                 settings.processing.localTranscriptionModel = .apple
                 expect.equal(LocalModelUnit.required(for: settings), [.diarizer, .voiceActivity])
-                expect.isTrue(!LocalTranscriptionModel.offered.contains(.apple))
                 expect.equal(
                     LocalTranscriptionModel.apple.backendIdentifier,
                     LocalSpeechStack.appleBackendIdentifier
+                )
+                if #available(macOS 26.0, *) {
+                    expect.equal(LocalTranscriptionModel.preferred, .apple)
+                    expect.equal(LocalTranscriptionModel.offered, [.apple, .parakeet])
+                } else {
+                    expect.equal(LocalTranscriptionModel.preferred, .parakeet)
+                    expect.equal(LocalTranscriptionModel.offered, [.parakeet])
+                }
+                expect.equal(
+                    AppSettings().processing.localTranscriptionModel,
+                    LocalTranscriptionModel.preferred,
+                    "a fresh install starts on the preferred engine"
+                )
+            },
+
+            test("the cloud lineup is the diarize model first and no whisper-1 row") { expect in
+                // Set by the 2026-08-24 deciding run: whisper-1 won zero of
+                // fourteen cases against the free local default, and its word
+                // timings come from the local aligner now. It still parses
+                // and times for anyone who types it under Custom.
+                expect.equal(
+                    AIModelSettings.transcriptionChoices,
+                    ["gpt-4o-transcribe-diarize", "gpt-transcribe"]
+                )
+                expect.equal(
+                    AIModelSettings().transcription, "gpt-4o-transcribe-diarize",
+                    "choosing Cloud starts on the model that does both jobs"
+                )
+                expect.equal(
+                    AIModelSettings.transcriptionTiming(for: "whisper-1"), .words,
+                    "a typed whisper-1 still knows its timings"
                 )
             },
 

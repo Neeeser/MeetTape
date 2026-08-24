@@ -103,17 +103,15 @@ struct ProcessingSettingsTab: View {
                 }
             )) {
                 cloudChoice(
-                    "gpt-transcribe",
-                    "Most accurate, takes vocabulary hints. Timings are computed on "
-                        + "this Mac by a 600 MB aligner model."
-                )
-                cloudChoice(
                     "gpt-4o-transcribe-diarize",
                     "Words and speakers in one request. Nothing to download."
                 )
                 cloudChoice(
-                    "whisper-1",
-                    "The previous generation, word timings from the API."
+                    "gpt-transcribe",
+                    "Strongest on clear recordings, takes vocabulary hints. Timings "
+                        + "are computed on this Mac by a 600 MB aligner model. Can "
+                        + "return nothing for stretches of very difficult audio; the "
+                        + "meeting then retries instead of losing words."
                 )
                 Text("Custom…").tag(Self.customModelTag)
             }
@@ -311,7 +309,7 @@ struct LocalModelChoicePicker: View {
 
     var body: some View {
         Picker("Model", selection: Binding(get: { selected }, set: select)) {
-            ForEach(LocalTranscriptionModel.offered, id: \.rawValue) { model in
+            ForEach(LocalTranscriptionModel.pickerRows(selected: selected), id: \.rawValue) { model in
                 choice(model)
             }
         }
@@ -338,20 +336,23 @@ struct LocalModelChoicePicker: View {
 
     private static func blurb(_ model: LocalTranscriptionModel) -> String {
         switch model {
+        case .apple:
+            "Nothing to download: the models come with macOS. The most "
+                + "accurate speaker attribution of the benchmark, a step "
+                + "behind Parakeet on words."
         case .parakeet:
-            "Lowest word error rate of the three: it won all 14 meetings of "
-                + "the benchmark. Word timings built in, 25 languages, over "
-                + "100x realtime. 460 MB."
+            "Most accurate engine of the benchmark, on meetings no model had "
+                + "trained on, with the fewest invented repetitions. Word "
+                + "timings built in, 25 languages, about 50x realtime. 460 MB."
         case .cohere:
-            "Ranks higher than Parakeet on published leaderboards and "
-                + "scored worse over the same 14 meetings. Around 8x "
-                + "realtime. 2.1 GB plus a 600 MB aligner for word timings; "
-                + "the first use takes a few minutes to prepare."
+            // Rendered only on installs that already have it selected.
+            "Lost every meeting of the held-out benchmark to Parakeet and "
+                + "repeats itself on hard audio. 2.1 GB plus a 600 MB aligner."
         case .whisper:
             "The previous engine. 624 MB."
-        case .canary, .apple:
-            // Never rendered: `offered` includes neither. Here because the
-            // switch is exhaustive.
+        case .canary:
+            // Never rendered: not offered. Here because the switch is
+            // exhaustive.
             "Benchmark candidate."
         }
     }

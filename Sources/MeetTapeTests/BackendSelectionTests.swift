@@ -149,12 +149,12 @@ enum BackendSelectionTests {
                     expect.equal(settings.version, AppSettings.currentVersion, "and is current schema")
                 }
                 expect.equal(
-                    AppSettings().models.transcription, "gpt-transcribe",
-                    "a machine with no settings file starts on the accurate default"
+                    AppSettings().models.transcription, "gpt-4o-transcribe-diarize",
+                    "a machine with no settings file starts on the model that does both jobs"
                 )
             },
 
-            test("an existing local install keeps Whisper; a fresh one gets Parakeet") { expect in
+            test("an existing local install keeps Whisper; a fresh one gets the preferred engine") { expect in
                 // The key's absence means the file predates the model choice,
                 // which is an install that has Whisper on disk. A new download
                 // must come from a person picking the new model, not from an
@@ -164,8 +164,9 @@ enum BackendSelectionTests {
                 expect.equal(migrated.processing.localTranscriptionModel, .whisper)
 
                 expect.equal(
-                    AppSettings().processing.localTranscriptionModel, .parakeet,
-                    "a machine with no settings file starts on the model that measured best"
+                    AppSettings().processing.localTranscriptionModel,
+                    LocalTranscriptionModel.preferred,
+                    "a machine with no settings file starts on this OS's preferred engine"
                 )
             },
 

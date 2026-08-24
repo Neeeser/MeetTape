@@ -7,7 +7,7 @@ import TestKit
 ///
 /// Every case here carries measurements from meetings on disk. A 29-minute
 /// Google Meet where the user spoke once, at 0:24 to 4:11, came back from
-/// gpt-4o-transcribe-diarize with 36 further segments on the microphone track,
+/// gpt-4o-transcribe-diarize with 37 further segments on the microphone track,
 /// among them "We'll be right back.", "Thanks for watching!" and "Good
 /// evening.". A second meeting's whole microphone track was 125 consecutive
 /// segments of " ♪". A third produced "Thank you." six times for a user who
@@ -362,12 +362,10 @@ enum SpeechGateTests {
                     Array(repeating: floor, count: leadInWindows),
                     "the later track reads as nothing until it started"
                 )
+                let afterPadding = Array(evidence.remoteLevels.dropFirst(leadInWindows))
+                expect.isTrue(!afterPadding.isEmpty, "and its own audio follows the padding")
                 expect.isTrue(
-                    evidence.remoteLevels.count > leadInWindows,
-                    "and its own audio follows the padding"
-                )
-                expect.isTrue(
-                    evidence.remoteLevels[leadInWindows] > floor,
+                    afterPadding.contains { $0 > floor },
                     "the far end's tone begins at second twelve"
                 )
                 expect.isTrue(evidence.micSpeech.isEmpty, "no detector, no readings")
@@ -400,6 +398,38 @@ enum SpeechGateTests {
                     LocalSpeechPolicy.decide(text: "so that is the plan", reading: after),
                     .spoken,
                     "the detector decides alone rather than the clause deciding silently"
+                )
+            },
+
+            test("evidence already on disk is never measured over") { expect in
+                // The stage that measures is retryable, so a failure writing the
+                // transcript or the speaker map after the measurement brings it
+                // round again. Without this the second attempt decodes both
+                // tracks from the top for a file it already has.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root)
+                let sentinel = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: [-11, -12, -13], detector: "measured-earlier"
+                )
+                try meeting.store.writeSpeechEvidence(sentinel)
+
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "I think we change retrieval.", speaker: nil),
+                ]
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Chris here, agreed.", speaker: "A"),
+                ]
+                let pipeline = PipelineTests.makePipeline(
+                    repository: meeting.repository, backend: backend
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(
+                    meeting.store.readSpeechEvidence(), sentinel,
+                    "what was measured before is what the meeting is judged against"
                 )
             },
 

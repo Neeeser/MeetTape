@@ -23,7 +23,7 @@ public struct AppleSpeechTranscriptionBackend: TranscriptionBackend {
     /// OS must have the API and this binary must have been built against an
     /// SDK that knows it.
     public static var isAvailable: Bool {
-        #if swift(>=6.2)
+        #if compiler(>=6.2)
             if #available(macOS 26.0, *) { return true }
         #endif
         return false
@@ -32,7 +32,7 @@ public struct AppleSpeechTranscriptionBackend: TranscriptionBackend {
     public func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
-        #if swift(>=6.2)
+        #if compiler(>=6.2)
             guard #available(macOS 26.0, *) else {
                 throw AppleSpeechError.requiresNewerMacOS
             }
@@ -96,7 +96,7 @@ public enum AppleSpeechError: Error, CustomStringConvertible {
     }
 }
 
-#if swift(>=6.2)
+#if compiler(>=6.2)
 @available(macOS 26.0, *)
 enum AppleSpeechAnalyzerRunner {
     struct Output {

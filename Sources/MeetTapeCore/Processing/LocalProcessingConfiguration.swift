@@ -200,7 +200,7 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
         // would otherwise offer a default it cannot run. Swift 6.2 is the
         // toolchain the macOS 26 SDK first shipped with, which is what makes
         // it the compile-time proxy for "the API exists".
-        #if swift(>=6.2)
+        #if compiler(>=6.2)
             if #available(macOS 26.0, *) { return [.apple, .parakeet] }
         #endif
         return [.parakeet]
@@ -208,7 +208,7 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
 
     /// What a fresh install gets: the first offered engine on this OS.
     public static var preferred: LocalTranscriptionModel {
-        #if swift(>=6.2)
+        #if compiler(>=6.2)
             if #available(macOS 26.0, *) { return .apple }
         #endif
         return .parakeet

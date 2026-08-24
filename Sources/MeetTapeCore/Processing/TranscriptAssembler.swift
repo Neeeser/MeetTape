@@ -109,9 +109,14 @@ public struct TranscriptAssembler: Sendable {
     ///   transcript segments carry no speaker of their own, which is every
     ///   local run and any mixed configuration where words and speakers came
     ///   from different backends.
+    /// - Parameter speech: what the recorded audio holds, which decides whether
+    ///   the local user said the words written on their track. Nil for a
+    ///   meeting processed before the evidence existed, and there every segment
+    ///   is kept, which is what those meetings already show.
     public func assemble(
         raw: RawTranscript,
         diarization: RawDiarization,
+        speech: SpeechEvidence? = nil,
         micTrackIsLocalUser: Bool,
         generatedAt: Date
     ) -> CanonicalTranscript {
@@ -170,7 +175,12 @@ public struct TranscriptAssembler: Sendable {
             let assembled = assembleTrack(
                 attributed,
                 treatAsLocalUser: treatAsLocalUser,
-                echoReference: treatAsLocalUser ? echoReference.sorted { $0.start < $1.start } : []
+                echoReference: treatAsLocalUser ? echoReference.sorted { $0.start < $1.start } : [],
+                // Only the local user's track. The far end arrives on its own
+                // tap, which is silent when nobody is speaking and carries no
+                // leakage of anybody else, and the harm this guards against is
+                // a sentence the user is shown as having said.
+                speech: treatAsLocalUser ? speech : nil
             )
             if !treatAsLocalUser { echoReference.append(contentsOf: assembled) }
             utterances.append(contentsOf: assembled)
@@ -537,12 +547,14 @@ public struct TranscriptAssembler: Sendable {
     }
 
     private func assembleTrack(
-        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance]
+        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance],
+        speech: SpeechEvidence?
     ) -> [Utterance] {
         var accepted: [Utterance] = []
         for chunk in deduplicateOverlaps(chunks) {
             let candidates = utterances(
-                from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference
+                from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference,
+                speech: speech
             )
             for candidate in candidates {
                 if isDuplicate(candidate, of: accepted) { continue }
@@ -557,7 +569,8 @@ public struct TranscriptAssembler: Sendable {
     /// Groups consecutive same-speaker segments into readable turns and moves
     /// them onto the meeting timeline.
     private func utterances(
-        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, echoReference: [Utterance]
+        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, echoReference: [Utterance],
+        speech: SpeechEvidence?
     ) -> [Utterance] {
         var result: [Utterance] = []
         var current: (
@@ -629,8 +642,11 @@ public struct TranscriptAssembler: Sendable {
         for segment in chunk.segments.sorted(by: { $0.start < $1.start }) {
             let text = segment.text.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
-            if isEcho(text, start: chunk.timelineOffset + segment.start,
-                      end: chunk.timelineOffset + segment.end, reference: echoReference) {
+            let start = chunk.timelineOffset + segment.start
+            let end = chunk.timelineOffset + segment.end
+            if isEcho(text, start: start, end: end, reference: echoReference) { continue }
+            if let reading = speech?.reading(from: start, to: end),
+               LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
                 continue
             }
             if var group = current,

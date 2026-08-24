@@ -27,6 +27,10 @@ public struct MeetingLayout: Sendable, Equatable {
     /// the words because the two come from independently chosen backends and
     /// re-analysing speakers must never invalidate a transcription.
     public var rawDiarization: URL { raw.appendingPathComponent("diarization.raw.json") }
+    /// What the recorded audio holds, sampled on a fixed grid. Derived from
+    /// audio that never changes, so it is written once and read on every
+    /// assembly rather than measured again.
+    public var speechEvidence: URL { raw.appendingPathComponent("speech.json") }
     public var speakerMap: URL { raw.appendingPathComponent("speakers.map.json") }
     public var canonicalTranscript: URL { raw.appendingPathComponent("transcript.json") }
     public var transcriptMarkdown: URL { root.appendingPathComponent("transcript.md") }

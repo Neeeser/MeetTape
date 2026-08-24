@@ -55,6 +55,12 @@ public struct LocalModelLocations: Sendable, Equatable {
         root.appendingPathComponent(Repo.canary1bV2.folderName, isDirectory: true)
     }
 
+    /// Silero VAD, under the repository's own folder name for the same reason
+    /// as the engines above.
+    public var voiceActivityDirectory: URL {
+        root.appendingPathComponent(Repo.vad.folderName, isDirectory: true)
+    }
+
     public var alignerDirectory: URL {
         root.appendingPathComponent(
             CtcModelVariant.ctc06b.repo.folderName, isDirectory: true
@@ -70,6 +76,7 @@ public struct LocalModelLocations: Sendable, Equatable {
         case .canary: canaryDirectory
         case .ctcAligner: alignerDirectory
         case .diarizer: diarizerDirectory
+        case .voiceActivity: voiceActivityDirectory
         }
     }
 

@@ -31,6 +31,7 @@ public actor LocalModelManager {
     private var cohereModels: CoherePipeline.LoadedModels?
     private var canaryModels: CanaryModels?
     private var alignerModels: (models: CtcModels, tokenizer: CtcTokenizer)?
+    private var voiceActivity: VadManager?
     private var installTask: Task<LocalModelSnapshot, Error>?
     /// Identifies which call owns `installTask`; see `install`.
     private var installGeneration: UInt64 = 0
@@ -134,6 +135,10 @@ public actor LocalModelManager {
         case .ctcAligner:
             return CtcModels.modelsExist(at: directory)
                 && manager.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path)
+        case .voiceActivity:
+            return ModelNames.VAD.requiredModels.allSatisfy {
+                manager.fileExists(atPath: directory.appendingPathComponent($0).path)
+            }
         }
     }
 
@@ -328,6 +333,11 @@ public actor LocalModelManager {
         case .diarizer:
             progress(0, "Downloading speaker models")
             diarizerModels = try await OfflineDiarizerModels.load(from: directory)
+
+        case .voiceActivity:
+            // ModelHub appends the repository folder itself, as for Cohere.
+            progress(0, "Downloading the voice detector")
+            voiceActivity = try await Self.loadVoiceActivity(root: locations.root)
         }
 
         receipts[unit] = LocalUnitReceipt(
@@ -366,6 +376,7 @@ public actor LocalModelManager {
         case .canary: canaryModels = nil
         case .ctcAligner: alignerModels = nil
         case .diarizer: diarizerModels = nil
+        case .voiceActivity: voiceActivity = nil
         }
     }
 
@@ -375,11 +386,18 @@ public actor LocalModelManager {
     /// For the work that happens because voice memory is on rather than because
     /// the user chose a local backend. A cloud-only configuration must not
     /// discover, mid-meeting, that it is fetching gigabytes nobody asked for.
-    public func ensureInstalled() async throws {
+    ///
+    /// - Parameter units: what the caller actually needs, defaulting to the
+    ///   whole required set. Voice memory names the diarizer, because judging
+    ///   it against everything meant that adding any new unit to the required
+    ///   set turned voice memory off on every machine already installed: the
+    ///   receipt for the new unit is missing, this throws, and the caller reads
+    ///   that as "no models" for work the new unit has nothing to do with.
+    public func ensureInstalled(units: Set<LocalModelUnit>? = nil) async throws {
         if let installTask {
             _ = try await installTask.value
         }
-        let missing = required.filter { unit in
+        let missing = (units ?? required).filter { unit in
             !Self.filesPresent(unit, locations: locations, receipt: receipts[unit])
         }
         guard missing.isEmpty else { throw LocalModelError.notInstalled }
@@ -468,6 +486,28 @@ public actor LocalModelManager {
         return models
     }
 
+    /// The loaded voice detector.
+    func loadedVoiceActivity() async throws -> VadManager {
+        if let voiceActivity { return voiceActivity }
+        guard Self.filesPresent(.voiceActivity, locations: locations, receipt: receipts[.voiceActivity])
+        else { throw LocalModelError.notInstalled }
+        ModelHub.offlineMode = true
+        defer { ModelHub.offlineMode = false }
+        let manager = try await Self.loadVoiceActivity(root: locations.root)
+        voiceActivity = manager
+        return manager
+    }
+
+    private static func loadVoiceActivity(root: URL) async throws -> VadManager {
+        let models = try await ModelHub.loadModels(
+            .vad, modelNames: Array(ModelNames.VAD.requiredModels), directory: root
+        )
+        guard let model = models[ModelNames.VAD.sileroVadFile] else {
+            throw LocalModelError.notInstalled
+        }
+        return VadManager(config: .default, vadModel: model)
+    }
+
     private func loadedAligner() async throws -> (models: CtcModels, tokenizer: CtcTokenizer) {
         if let alignerModels { return alignerModels }
         guard Self.filesPresent(.ctcAligner, locations: locations, receipt: receipts[.ctcAligner])
@@ -515,6 +555,53 @@ public actor LocalModelManager {
         guard !samples.isEmpty else { return "" }
         let manager = CanaryManager(models: models)
         return try await manager.transcribe(audio: samples)
+    }
+
+    /// Silero over one whole track, reporting a probability every 256 ms.
+    ///
+    /// Deliberately not on this actor's heavy-job path in the sense that
+    /// matters: it takes seconds where a transcription pass takes minutes. It
+    /// is here because the actor owns the loaded model.
+    ///
+    /// The samples are pulled a block at a time and re-blocked to the model's
+    /// window here, so the read never runs ahead of the model and the track is
+    /// never held whole: two hours at 16 kHz float32 is over 400 MB.
+    func detectVoiceActivity(
+        reading next: @escaping @Sendable () async throws -> [Float]?
+    ) async throws -> VoiceActivityProfile {
+        let manager = try await loadedVoiceActivity()
+        let window = VadManager.chunkSize
+        var state = await manager.makeStreamState()
+        var pending: [Float] = []
+        pending.reserveCapacity(window * 2)
+        var values: [Float] = []
+
+        while let block = try await next() {
+            // A quit or a cancelled job stops the pass here. Without it the
+            // whole track is still decoded and judged after the caller has
+            // gone, which is what the push version's `onTermination` covered.
+            try Task.checkCancellation()
+            pending.append(contentsOf: block)
+            while pending.count >= window {
+                let result = try await manager.processStreamingChunk(
+                    Array(pending.prefix(window)), state: state
+                )
+                state = result.state
+                values.append(result.probability)
+                pending.removeFirst(window)
+            }
+        }
+        // The tail is padded by the model rather than dropped, so a segment in
+        // the last quarter-second of a track still has a reading to be judged
+        // against.
+        if !pending.isEmpty {
+            let result = try await manager.processStreamingChunk(pending, state: state)
+            values.append(result.probability)
+        }
+
+        return VoiceActivityProfile(
+            windowSeconds: Double(window) / Double(VadManager.sampleRate), values: values
+        )
     }
 
     /// Forces the given text against the audio and returns timed segments.

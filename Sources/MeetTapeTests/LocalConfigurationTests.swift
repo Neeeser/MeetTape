@@ -51,9 +51,11 @@ enum LocalConfigurationTests {
                 var settings = AppSettings()
                 settings.processing.transcription = .local
                 settings.processing.localTranscriptionModel = .canary
+                // The diarizer and the voice detector ride along: every
+                // configuration requires both.
                 expect.equal(
                     LocalModelUnit.required(for: settings),
-                    [.canary, .ctcAligner, .diarizer]
+                    [.canary, .ctcAligner, .diarizer, .voiceActivity]
                 )
                 expect.isTrue(
                     !LocalTranscriptionModel.offered.contains(.canary),
@@ -77,7 +79,7 @@ enum LocalConfigurationTests {
                 var settings = AppSettings()
                 settings.processing.transcription = .local
                 settings.processing.localTranscriptionModel = .apple
-                expect.equal(LocalModelUnit.required(for: settings), [.diarizer])
+                expect.equal(LocalModelUnit.required(for: settings), [.diarizer, .voiceActivity])
                 expect.isTrue(!LocalTranscriptionModel.offered.contains(.apple))
                 expect.equal(
                     LocalTranscriptionModel.apple.backendIdentifier,
@@ -260,6 +262,41 @@ enum LocalConfigurationTests {
                     "a machine with no models must say so, whatever the backends are"
                 )
                 expect.isFalse(await manager.isInstalled)
+            },
+
+            test("a unit nobody asked about does not read as a machine with no models") { expect in
+                // `ensureInstalled` used to judge the whole required set, so
+                // every unit added to that set turned voice memory off on
+                // machines already installed: the new unit has no receipt, the
+                // check throws, and `localModelsAvailable` reads that as "no
+                // models" for work the new unit has nothing to do with. Voice
+                // memory embeds with the diarizer and asks for it by name.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let locations = LocalModelLocations(applicationSupport: root)
+                try FileManager.default.createDirectory(
+                    at: locations.diarizerDirectory, withIntermediateDirectories: true
+                )
+                try LocalModelReceiptStore(locations: locations).write([
+                    .diarizer: LocalUnitReceipt(
+                        revision: LocalSpeechStack.revision(for: .diarizer),
+                        bytes: 1, installedAt: Date()
+                    ),
+                ])
+                let manager = LocalModelManager(
+                    applicationSupport: root, required: [.diarizer, .voiceActivity]
+                )
+
+                try await manager.ensureInstalled(units: [.diarizer])
+
+                await expect.throwsError(
+                    { try await manager.ensureInstalled(units: [.voiceActivity]) },
+                    "the unit that really is missing still says so"
+                )
+                await expect.throwsError(
+                    { try await manager.ensureInstalled() },
+                    "and so does the set as a whole, which is what the download button reads"
+                )
             },
 
             test("a receipt from a different pinned revision is not treated as current") { expect in

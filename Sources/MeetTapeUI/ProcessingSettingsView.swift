@@ -275,6 +275,7 @@ struct ProcessingSettingsTab: View {
         case .canary: "Canary 1B v2"
         case .ctcAligner: "Timing aligner"
         case .diarizer: "Speaker models"
+        case .voiceActivity: "Voice detector"
         }
     }
 

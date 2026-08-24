@@ -237,7 +237,13 @@ public final class MeetTapeRuntime {
                         units: LocalModelUnit.required(for: current)
                     )
                 },
-                requireLocalModels: { try await modelManager.ensureInstalled() },
+                // The diarizer by name. Voice memory embeds with those models
+                // and needs nothing else, and asking for the whole required set
+                // meant that every unit added to it since a machine was
+                // installed read as "no models" and skipped voice memory.
+                requireLocalModels: { try await modelManager.ensureInstalled(units: [.diarizer]) },
+                voiceActivity: FluidAudioVoiceActivityBackend(models: modelManager),
+                prepareVoiceActivity: { _ = try await modelManager.install(units: [.voiceActivity]) },
                 aligner: CtcTranscriptAligner(models: modelManager),
                 prepareAligner: { _ = try await modelManager.install(units: [.ctcAligner]) },
                 prepareDiarizer: { _ = try await modelManager.install(units: [.diarizer]) },

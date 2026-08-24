@@ -212,3 +212,45 @@ public protocol SpeakerEmbeddingExtractor: Sendable {
         audio: URL, intervals: [DiarizationInterval]
     ) async throws -> [DiarizationChunkEmbedding]
 }
+
+/// Speech probability sampled on a fixed grid.
+public struct VoiceActivityProfile: Sendable, Equatable {
+    public var windowSeconds: Double
+    /// One probability in 0...1 per window, in order.
+    public var values: [Float]
+
+    public init(windowSeconds: Double, values: [Float]) {
+        self.windowSeconds = windowSeconds
+        self.values = values
+    }
+}
+
+/// Decides which parts of a track hold a voice.
+///
+/// Separate from diarization, which asks whose voice it is over a whole meeting
+/// and costs a great deal more. This answers only whether anybody is speaking,
+/// which is what tells a fabricated sentence from a real one on the local user's
+/// track.
+///
+/// The whole track goes through one call because the detector carries state
+/// between windows.
+///
+/// The detector pulls the samples rather than being handed them, so the read
+/// cannot run ahead of the model. Pushing them meant the decoder filled a
+/// buffer at its own speed while the model worked through it, and a two-hour
+/// track at 16 kHz float32 is over 400 MB to be holding.
+public protocol VoiceActivityBackend: Sendable {
+    /// Recorded on the evidence, so a reader can tell what judged the audio.
+    var identifier: String { get }
+    /// The rate the samples must arrive at. The caller reads the track at this
+    /// rate or does not call at all: resampling silently to something else
+    /// would move every reading in time.
+    var sampleRate: Double { get }
+
+    /// - Parameter next: the next block of mono samples at `sampleRate`, or nil
+    ///   at the end of the track. Called from inside the detector, one block at
+    ///   a time.
+    func probabilities(
+        reading next: @escaping @Sendable () async throws -> [Float]?
+    ) async throws -> VoiceActivityProfile
+}

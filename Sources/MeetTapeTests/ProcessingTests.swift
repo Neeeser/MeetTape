@@ -742,6 +742,73 @@ enum ProcessingTests {
                 expect.equal(words.count, spoken.count + continued.count + 2, "got \(words)")
             },
 
+            test("two chunks that say the same thing minutes apart both keep it") { expect in
+                // Two bounds keep the seam a seam: a chunk is compared against
+                // the words that still reach it in time, and only inside the
+                // span the two chunks share. Where one side has no timings,
+                // which is every chunk whose aligner refused, they are all that
+                // is left, because such a word pairs on what it says and on
+                // nothing else. A meeting says "we should ship the new build on
+                // friday if the tests pass" at 0 s, and a refused chunk forty
+                // seconds later says it again; both are the meeting. Either
+                // bound alone covers this fixture, so it is the pair being
+                // pinned: drop both and the second "we" goes.
+                let sentence = "we should ship the new build on friday if the tests pass"
+                    .components(separatedBy: " ")
+                let between = (0..<45).map { "omega\($0)" }
+                func word(_ text: String, at start: Double, offset: Double) -> RawTranscriptWord {
+                    RawTranscriptWord(start: start - offset, end: start + 0.4 - offset, text: " \(text)")
+                }
+                func timed(
+                    _ id: String, offset: Double, words: [RawTranscriptWord], speaker: String
+                ) -> RawTranscriptChunk {
+                    RawTranscriptChunk(
+                        id: id, track: .remote, timelineOffset: offset,
+                        durationSeconds: 35, model: "cohere", responseFormat: "local_words",
+                        segments: [RawTranscriptSegment(
+                            start: words[0].start, end: words[words.count - 1].end,
+                            text: words.map(\.text).joined().trimmingCharacters(in: .whitespaces),
+                            speaker: speaker, words: words
+                        )]
+                    )
+                }
+                let first = timed(
+                    "remote_chunk_001", offset: 0,
+                    words: sentence.enumerated().map { word($1, at: Double($0) * 0.5, offset: 0) },
+                    speaker: "A"
+                )
+                // Twenty-two seconds of other talk, running two seconds past
+                // where the third chunk opens, so the third chunk does have
+                // words to compare and it is the bounds that spare them.
+                let second = timed(
+                    "remote_chunk_002", offset: 20,
+                    words: between.enumerated().map { word($1, at: 20 + Double($0) * 0.5, offset: 20) },
+                    speaker: "B"
+                )
+                // The aligner refused here: one wordless segment over the whole
+                // chunk, so its words pair on text alone.
+                let third = RawTranscriptChunk(
+                    id: "remote_chunk_003", track: .remote, timelineOffset: 40,
+                    durationSeconds: 35, model: "cohere", responseFormat: "local_text",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 35, text: sentence.joined(separator: " "),
+                        speaker: nil, words: nil
+                    )]
+                )
+
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [first, second, third]),
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let words = transcript.utterances.flatMap { TextSimilarity.normalise($0.text) }
+                expect.equal(
+                    words, sentence + between + sentence,
+                    "a repeat outside the shared span is not a seam"
+                )
+                expect.equal(words.filter { $0 == "friday" }.count, 2, "got \(words)")
+            },
+
             test("the diarizer the user chose beats labels embedded in the words") { expect in
                 // Cloud transcription with diarization set to Local ran the
                 // local diarizer, wrote an active run with the right four

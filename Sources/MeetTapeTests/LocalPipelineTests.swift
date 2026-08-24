@@ -434,6 +434,68 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("a whole track that keeps looping fails the meeting, it never empties it") { expect in
+                // Dropping a looping chunk on the last attempt is scoped to a
+                // window: a hole in one of sixteen costs that window and the
+                // other fifteen are still speech. On the whole-track path the
+                // one chunk is the meeting, so the same drop wrote an empty
+                // raw transcript, enrichment returned early on it, and the
+                // meeting reported success with an empty transcript.md. A
+                // whole track therefore fails however many attempts it has
+                // used, which leaves the meeting retryable with its audio
+                // untouched.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // What five of ES2003a's sixteen chunks returned, verbatim.
+                let loop = "The world is a very important part of the world. And I think "
+                    + "that's what we need to do in terms of the world, and it's not just "
+                    + "about the world, but also about the world, and we need to be able to "
+                    + "make sure that there are people who are not going to be able to do "
+                    + "that. So, I think that's what we need to do in terms of the world."
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(start: 0, end: 5, text: loop, speaker: nil, words: nil),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 37, spans: [(0, 5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.notEqual(
+                    metadata.processing.state, .complete,
+                    "a meeting with nothing in its transcript must not report success"
+                )
+                expect.equal(metadata.processing.state, .failed)
+                expect.isTrue(
+                    metadata.processing.lastFailure?.isRetryable == true,
+                    "and the meeting can be transcribed again"
+                )
+                let raw = try meeting.store.readRawTranscript()
+                expect.isTrue(
+                    raw.chunks.allSatisfy { !($0.segments.isEmpty && ($0.text ?? "").isEmpty) },
+                    "no track was recorded as nothing"
+                )
+                expect.isFalse(
+                    FileManager.default.fileExists(
+                        atPath: meeting.store.layout.transcriptMarkdown.path
+                    ),
+                    "and no empty transcript was written"
+                )
+            },
+
             test("an aligner that will not install fails the stage, it does not ship coarse timings") { expect in
                 // Distinct from a refusal. A refusal is deterministic and the
                 // chunk keeps whole-chunk timing for good; a model that would

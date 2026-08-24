@@ -136,6 +136,146 @@ enum PipelineTests {
                 expect.isTrue(caught?.isRetryable == true, "the stage retries")
             },
 
+            test("a chunk that loops one phrase fails retryably") { expect in
+                // A speech model given a window with little speech in it can
+                // repeat one phrase for the length of the window. Five of
+                // sixteen ES2003a chunks came back with the same fabricated
+                // paragraph: 438 invented words against a 386-word reference,
+                // 266 insertions, 153 repeated 8-grams and 193% DER, with the
+                // meeting reporting success. How many chunks loop varies from
+                // run to run; that any of them do is what this measures.
+                // The paragraph, verbatim.
+                let loop = "The world is a very important part of the world. And I think "
+                    + "that's what we need to do in terms of the world, and it's not just "
+                    + "about the world, but also about the world, and we need to be able to "
+                    + "make sure that there are people who are not going to be able to do "
+                    + "that. So, I think that's what we need to do in terms of the world."
+                expect.isTrue(
+                    DegenerateTranscriptPolicy.repeatedShare(of: loop) > 0.25,
+                    "the loop scores \(DegenerateTranscriptPolicy.repeatedShare(of: loop))"
+                )
+                var caught: ProcessingError?
+                do {
+                    _ = try ProcessingPipeline.dropIfLooping(
+                        response: TranscriptionOutput(segments: [], text: loop),
+                        chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: false,
+                        scope: .chunk
+                    )
+                } catch let error as ProcessingError {
+                    caught = error
+                }
+                expect.equal(
+                    caught, .degenerateTranscript(chunk: "remote_chunk_007"),
+                    "a looping chunk is a failed chunk"
+                )
+                expect.isTrue(caught?.isRetryable == true, "the stage retries")
+
+                // A decoder that loops deterministically loops again, so the
+                // last attempt records the window as nothing rather than
+                // failing a meeting whose other fifteen chunks are speech.
+                let dropped = try ProcessingPipeline.dropIfLooping(
+                    response: TranscriptionOutput(segments: [], text: loop),
+                    chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: true, scope: .chunk
+                )
+                expect.isTrue(dropped, "the last attempt drops the chunk instead of failing")
+
+                // A whole track is the meeting, so the same drop would leave an
+                // empty transcript reported as success. It fails on every
+                // attempt instead.
+                var wholeTrack: ProcessingError?
+                do {
+                    _ = try ProcessingPipeline.dropIfLooping(
+                        response: TranscriptionOutput(segments: [], text: loop),
+                        chunkID: "remote_full", purpose: .words, isLastAttempt: true,
+                        scope: .wholeTrack
+                    )
+                } catch let error as ProcessingError {
+                    wholeTrack = error
+                }
+                expect.equal(
+                    wholeTrack, .degenerateTranscript(chunk: "remote_full"),
+                    "a whole track is never recorded as nothing"
+                )
+
+                // The eleven ES2003a chunks that hold speech score between
+                // 0.00 and 0.03, so a chunk that says one thing twice is
+                // still a chunk of speech and is kept.
+                let spoken = ((0..<100).map { "word\($0)" }
+                    + (0..<8).map { "word\($0)" }).joined(separator: " ")
+                expect.isTrue(
+                    DegenerateTranscriptPolicy.repeatedShare(of: spoken) < 0.2,
+                    "a repeated sentence scores \(DegenerateTranscriptPolicy.repeatedShare(of: spoken))"
+                )
+                let keptSpeech = try ProcessingPipeline.dropIfLooping(
+                    response: TranscriptionOutput(segments: [], text: spoken),
+                    chunkID: "remote_chunk_008", purpose: .words, isLastAttempt: true, scope: .chunk
+                )
+                expect.isFalse(keptSpeech, "speech is kept")
+                // And a chunk asked for speakers rather than words is not
+                // measured on its text at all.
+                let keptLabels = try ProcessingPipeline.dropIfLooping(
+                    response: TranscriptionOutput(segments: [], text: loop),
+                    chunkID: "remote_chunk_009", purpose: .speakers, isLastAttempt: false, scope: .chunk
+                )
+                expect.isFalse(keptLabels, "a speakers chunk is not measured on its text")
+            },
+
+            test("speech with few words in it is not a loop") { expect in
+                // The measure counts repeated phrase positions, and a speaker
+                // with a handful of words saturates it: a window of nothing but
+                // backchannel and a window of somebody counting both score 1.00
+                // ungated, five times the limit, with the forty-word floor the
+                // only thing in the way. Thirty-five seconds of listening noise
+                // on a remote track clears forty words easily. So a chunk is
+                // measured only where its vocabulary is wide enough that the
+                // repetition cannot be explained by how few words it holds.
+                let fabricated = "The world is a very important part of the world. And I think "
+                    + "that's what we need to do in terms of the world, and it's not just "
+                    + "about the world, but also about the world, and we need to be able to "
+                    + "make sure that there are people who are not going to be able to do "
+                    + "that. So, I think that's what we need to do in terms of the world."
+                let dialogue = "Okay so the remote control needs to be cheap, right, but we "
+                    + "also said it should look modern. I think if we go with the rubber "
+                    + "buttons we can keep the cost down. Mm-hmm. And what about the "
+                    + "display, do we need one at all? Well, the marketing report said "
+                    + "younger users expect some kind of feedback, so maybe a small LED "
+                    + "instead. That could work. Let's put that down as an option and come "
+                    + "back to it after lunch when we have the costings."
+                let backchannel = String(
+                    repeating: "yeah yeah right yeah okay yeah right okay ", count: 6
+                )
+                let counting = String(
+                    repeating: "one two three four five six seven eight nine ten ", count: 4
+                )
+
+                // 76 words, 36 of them distinct: a decoder inventing sentences.
+                expect.isTrue(
+                    DegenerateTranscriptPolicy.repeatedShare(of: fabricated) > 0.25,
+                    "the fabricated paragraph scores "
+                        + "\(DegenerateTranscriptPolicy.repeatedShare(of: fabricated))"
+                )
+                // 87 words, 71 distinct: ordinary conversation, like the eleven
+                // ES2003a chunks that hold speech.
+                expect.equal(
+                    DegenerateTranscriptPolicy.repeatedShare(of: dialogue), 0,
+                    "ordinary dialogue is not a loop"
+                )
+                // 48 words, 3 distinct.
+                expect.equal(
+                    DegenerateTranscriptPolicy.repeatedShare(of: backchannel), 0,
+                    "a window of backchannel is somebody listening, not a decoder looping"
+                )
+                // 40 words, 10 distinct.
+                expect.equal(
+                    DegenerateTranscriptPolicy.repeatedShare(of: counting), 0,
+                    "counting to ten four times is speech"
+                )
+                expect.equal(DegenerateTranscriptPolicy.decide(text: backchannel), .accept)
+                expect.equal(DegenerateTranscriptPolicy.decide(text: counting), .accept)
+                expect.equal(DegenerateTranscriptPolicy.decide(text: dialogue), .accept)
+                expect.equal(DegenerateTranscriptPolicy.decide(text: fabricated), .fail)
+            },
+
             test("each track is placed at its own start on the meeting timeline") { expect in
                 // The remote writer opens on the first packet from the meeting
                 // application, which here is 12 s after the microphone started. A

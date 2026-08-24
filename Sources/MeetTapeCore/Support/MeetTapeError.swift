@@ -76,6 +76,11 @@ public enum ProcessingError: LogSafeError, Equatable {
     /// carries speech. Retryable: filing it as a finished chunk drops that part
     /// of the meeting while the meeting still reports success.
     case emptyTranscript(chunk: String)
+    /// A transcription request came back looping one phrase for the length of
+    /// the chunk. Retryable for the same reason as an empty one: the words are
+    /// not what was said, and recording them puts invented sentences in the
+    /// transcript with the meeting reporting success.
+    case degenerateTranscript(chunk: String)
     case transport(reason: String)
     case audioUnreadable(path: String)
     /// A correction arrived for a transcript line that no longer exists,
@@ -88,7 +93,7 @@ public enum ProcessingError: LogSafeError, Equatable {
 
     public var isRetryable: Bool {
         switch self {
-        case .rateLimited, .serverError, .transport, .emptyTranscript: true
+        case .rateLimited, .serverError, .transport, .emptyTranscript, .degenerateTranscript: true
         case .localProcessingFailed(_, let retryable): retryable
         case .missingAPIKey, .authenticationFailed, .requestTooLarge, .durationTooLong,
              .malformedResponse, .audioUnreadable, .utteranceNotFound, .cancelled: false
@@ -105,6 +110,7 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .durationTooLong(let seconds, let limit): "durationTooLong(\(Int(seconds))/\(Int(limit)))"
         case .malformedResponse(let reason): "malformedResponse(\(reason))"
         case .emptyTranscript(let chunk): "emptyTranscript(\(chunk))"
+        case .degenerateTranscript(let chunk): "degenerateTranscript(\(chunk))"
         case .transport(let reason): "transport(\(reason))"
         case .localProcessingFailed(let reason, _): "local(\(reason))"
         case .audioUnreadable(let path): "audioUnreadable(\(path))"
@@ -126,6 +132,8 @@ public enum ProcessingError: LogSafeError, Equatable {
         case .malformedResponse: "OpenAI returned an unexpected response. Your recording is safe."
         case .emptyTranscript:
             "Transcription returned nothing for part of this meeting. MeetTape will retry. Your recording is safe."
+        case .degenerateTranscript:
+            "Transcription repeated itself for part of this meeting. MeetTape will retry. Your recording is safe."
         case .transport: "MeetTape could not reach OpenAI. It will retry. Your recording is safe."
         case .audioUnreadable: "MeetTape could not read the recorded audio for this stage."
         case .utteranceNotFound:

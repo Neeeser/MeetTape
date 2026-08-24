@@ -26,17 +26,6 @@ struct ProcessingSettingsTab: View {
                     cloudTranscriptionPicker
                 }
             }
-            Section("Diarization") {
-                Text(
-                    runtime.settings.processing.usesLocalDiarization
-                        ? "Who spoke when, identified on this Mac. The voice models "
-                            + "follow the transcription choice above."
-                        : "Who spoke when, labelled by "
-                            + "\(runtime.settings.models.diarization) in the same request "
-                            + "as the words."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
             Section("Speaker recognition") {
                 speakerToggle("Recognize known voices", keyPath: \.recognizeKnownVoices)
                 speakerToggle("Remember recurring unnamed voices", keyPath: \.rememberRecurringVoices)
@@ -104,7 +93,8 @@ struct ProcessingSettingsTab: View {
             )) {
                 cloudChoice(
                     "gpt-4o-transcribe-diarize",
-                    "Words and speakers in one request. Nothing to download."
+                    "Speaker identification built in: one request returns the words "
+                        + "and who said them. Nothing to download."
                 )
                 cloudChoice(
                     "gpt-transcribe",
@@ -186,8 +176,8 @@ struct ProcessingSettingsTab: View {
             case .outdated:
                 Label(
                     "These were downloaded by an older build that pinned different model "
-                        + "revisions. Re-downloading matches the versions this build was "
-                        + "measured against.",
+                        + "revisions. Re-downloading matches the versions this build "
+                        + "expects.",
                     systemImage: "arrow.triangle.2.circlepath"
                 )
                 .font(.caption).foregroundStyle(.secondary)
@@ -306,23 +296,21 @@ struct LocalModelChoicePicker: View {
     private static func blurb(_ model: LocalTranscriptionModel) -> String {
         switch model {
         case .apple:
-            "Nothing to download: the models come with macOS. The most "
-                + "accurate speaker attribution of the benchmark, a step "
-                + "behind Parakeet on words."
+            "Nothing to download: the speech models come with macOS. "
+                + "Transcribes your first meeting immediately."
         case .parakeet:
-            "Most accurate engine of the benchmark, on meetings no model had "
-                + "trained on, with the fewest invented repetitions. Word "
-                + "timings built in, 25 languages, about 50x realtime. 460 MB."
+            "The most accurate engine. Word timings built in, 25 languages, "
+                + "about 50x realtime. 460 MB."
         case .cohere:
             // Rendered only on installs that already have it selected.
-            "Lost every meeting of the held-out benchmark to Parakeet and "
-                + "repeats itself on hard audio. 2.1 GB plus a 600 MB aligner."
+            "Slower and larger than Parakeet, with no accuracy advantage. "
+                + "2.1 GB plus a 600 MB aligner."
         case .whisper:
             "The previous engine. 624 MB."
         case .canary:
             // Never rendered: not offered. Here because the switch is
             // exhaustive.
-            "Benchmark candidate."
+            "Not offered."
         }
     }
 }

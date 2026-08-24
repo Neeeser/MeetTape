@@ -238,6 +238,7 @@ public final class MeetTapeRuntime {
                     )
                 },
                 requireLocalModels: { try await modelManager.ensureInstalled() },
+                voiceActivity: FluidAudioVoiceActivityBackend(models: modelManager),
                 aligner: CtcTranscriptAligner(models: modelManager),
                 prepareAligner: { _ = try await modelManager.install(units: [.ctcAligner]) },
                 prepareDiarizer: { _ = try await modelManager.install(units: [.diarizer]) },

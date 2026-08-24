@@ -78,6 +78,7 @@ bump.
 | Models install as independent units, and picking a model is the consent for its download | One 650 MB blob meant choosing a 21 MB diarizer-only configuration still offered the full download, and a 2.1 GB engine must never arrive on an upgrade nobody asked for. No stored model identifier is ever migrated for the same reason |
 | A fresh install transcribes locally with Parakeet | Over 14 AMI cases through the real pipeline it won filler-stripped WER 14 times out of 14 against Cohere, median 20.2% against 36.0%, with 8 repeated 8-grams against 244. Cohere leads as a raw model and loses once chunking, alignment and assembly are in the path |
 | The diarizer unit is required in every configuration, cloud included | Voice memory embeds a cloud diarizer's intervals with those models. Leaving it out of the required set made `ensureInstalled` report success on a machine with nothing installed, and the extractor threw from inside the speaker stage, which is not retryable |
+| The 1.1 MB voice detector is required in every configuration for the same reason | Every backend fabricates filler for a microphone track that is mostly not speech, cloud ones included. Leaving it optional would ship the configuration most exposed to the defect, cloud transcription of a listener's own microphone, without the guard |
 | Voice memory never fails a meeting | It is a side effect of the meeting, not part of it, and the stage that would fail comes before the one that writes the markdown and the mixdown |
 | Whoever already owns a track's words keeps them, whatever the settings say now | Deciding the diarizer's purpose from the current transcription setting alone made a cloud pass claim `.words` on a track a local engine had already chunked: same purpose, same chunk names, every plan skipped as done, nothing diarized |
 | A chunk identifier is unique per producer, not per track | A chunked local transcriber and a cloud diarizer both name chunks after the track, so the diarizer's plans matched chunks the transcriber had written, every one was skipped as already done, and the far end came back as one unattributed speaker with the meeting reporting success |
@@ -114,12 +115,20 @@ bump.
 | A boundary a person puts in the transcript lands on a word, never on a proportion of the text | A correction hands its span to voice memory. A line whose backend reported no word timings therefore divides only at its edges, and a turn keeps its timings only when every segment in it was timed: half a word list deleted the untimed half of the turn the first time anyone split that line |
 | Dividing a corrected line clips the correction to each piece rather than re-anchoring it | A correction's width is what says how much of a line a person vouched for. Stretched to the piece, a name set on a three-second interjection would confirm the whole piece and put the other speaker's audio in that person's profile |
 | A correction carries one window per line, in that line's own coordinates | The lines of a turn are not in time order: the line printed second can begin before the line printed first. One range over the pair put a boundary in the wrong line, and a selection dragged backwards across a seam ended before it began |
+| A segment on the local user's track survives only if it holds words, a detector fires inside it, and the microphone is not quieter than the far end | Every backend invents filler for a microphone track that is mostly not speech. Across five meetings, 179 of 222 segments on the user's track were words nobody said: 36 fabrications after one meeting's last real sentence at 4:11, a second meeting's whole track as 125 segments of " ♪", a third producing "Thank you." six times for a user who never spoke. Measured with the shipping model, the three clauses remove 178 of 179 and cost 2 genuine backchannels |
+| The detector cannot judge leakage and the level comparison cannot judge silence, so both are required | The far end coming back through the speakers is speech, and Silero correctly scores it 0.99. On its own the detector removed 80 of 179. Fabrication over true silence reads 0.000 and no level comparison catches it |
+| A segment with no letter or digit in it is not words | `DegenerateTranscriptPolicy` strips everything non-alphanumeric before counting repetition and is then left with nothing to count, so one meeting's 125 identical " ♪" segments scored zero and passed |
+| Speech evidence is anchored to time and written once, never recomputed at assembly | Alignment rewrites a text-only chunk's segments before assembly sees them, so a reading keyed to a segment's position would measure different words than it judges. Recomputing would put the fabrications back on a machine whose detector has since been deleted |
+| The gate never fails a meeting, and unmeasured audio is not silent audio | The words are already safe as raw chunks. A meeting that cannot be measured assembles the way it did before this existed, and a segment timed past the end of the recording is kept |
 | The opening words of a line that repeat the closing words of the previous one, across a chunk boundary and over shared time, are the overlap tail transcribed twice | 21 of 148 consecutive pairs on a 25-minute meeting repeated 3 to 17 words, 20 of them over shared time. Separate timecodes rendered it as a stutter; one paragraph per speaker renders it as nonsense |
 
 The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
 decoder settings in `LocalDiarizationTuning`, `LocalTranscriptionTuning` and
-`LocalAlignmentTuning`, and `LocalConfigurationTests` and
-`SpeakerIdentityTests` assert them.
+`LocalAlignmentTuning`, the speech gate in `LocalSpeechPolicy`, and
+`LocalConfigurationTests`, `SpeakerIdentityTests` and `SpeechGateTests` assert
+them. `meettape-eval gate --meeting DIR` measures one meeting folder and prints
+the three measures beside every segment on the local user's track with the
+verdict, which is how those numbers get checked again on real audio.
 `VoiceEvidenceTests` covers what a vector was derived from and what may be taken
 back, `ReconnectTests` covers a call recorded in two halves, and
 `TranscriptDivisionTests` and `TranscriptPanelTests` cover the boundaries a
@@ -208,6 +217,11 @@ against real hardware and what has not.
   the metadata, and only then deletes the segments. Every failure mode leaves
   at least one verified copy: deletion is strictly after the metadata write,
   and an interrupted deletion resumes on the next launch sweep.
+- `raw/speech.json` records what the recorded audio holds: the level of each
+  quarter-second on both tracks and Silero's speech probability every 256 ms on
+  the microphone. Derived from audio that never changes, so it is measured once
+  and read on every assembly. Absent for meetings processed before it existed,
+  and the assembler then keeps every segment.
 - Speaker corrections are layers above immutable diarization: a cluster mapping,
   per-line overrides and the boundaries a person put in the transcript, all in
   `speakers.map.json`. A line override is anchored to a moment on the timeline
@@ -281,6 +295,7 @@ swift run meettape-eval asr      --audio meeting.wav
 swift run meettape-eval diarize  --audio meeting.wav --fa 0.07 --fa 0.20
 swift run meettape-eval identity --audio andrew.wav --audio chris.wav
 swift run meettape-eval voices
+swift run meettape-eval gate     --meeting ~/Documents/MeetTape/Meetings/2026/08/<id>
 ```
 Assertions count how many expected terms survive transcription instead of
 requiring exact wording, because synthetic speech transcribes with variation.

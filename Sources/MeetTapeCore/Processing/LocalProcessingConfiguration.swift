@@ -46,6 +46,13 @@ public enum LocalSpeechStack {
     public static let alignerIdentifier = "fluidaudio-parakeet-ctc-0.6b"
     public static let approximateAlignerBytes: Int64 = 600 * 1_024 * 1_024
 
+    /// Silero VAD v6.2.1 through FluidAudio, the unified 256 ms Core ML build.
+    /// Recorded on the speech evidence as what judged the microphone track.
+    /// 1.1 MB installed, and it reads a 30-minute track in a second or two, so
+    /// it costs nothing measurable against a transcription pass.
+    public static let voiceActivityIdentifier = "silero-vad-unified-256ms-v6.2.1"
+    public static let approximateVoiceActivityBytes: Int64 = 2 * 1_024 * 1_024
+
     /// What each unit's files came from, written into its receipt so a
     /// dependency or variant bump reads as a stale install rather than as
     /// strange results.
@@ -56,6 +63,7 @@ public enum LocalSpeechStack {
         case .cohere: "cohere-transcribe-03-2026-q8 @ \(diarizerPackage)"
         case .ctcAligner: "parakeet-ctc-0.6b @ \(diarizerPackage)"
         case .diarizer: diarizerPackage
+        case .voiceActivity: "\(voiceActivityIdentifier) @ \(diarizerPackage)"
         }
     }
 }
@@ -70,6 +78,7 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
     case cohere
     case ctcAligner = "ctc-aligner"
     case diarizer
+    case voiceActivity = "voice-activity"
 
     /// The units the given settings actually use.
     ///
@@ -84,7 +93,14 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
         // `ensureInstalled` report success for a machine with no models at
         // all, and the embedding extractor then threw from inside a stage
         // instead of the meeting skipping voice memory.
-        var units: Set<LocalModelUnit> = [.diarizer]
+        // The detector is required for the same reason and in the same set.
+        // Every backend fabricates filler for a microphone track that is mostly
+        // not speech, cloud ones included: 179 of 222 segments on the local
+        // user's track across five meetings were words nobody said. Leaving it
+        // optional would mean the configuration most exposed to the defect,
+        // cloud transcription of a listener's own microphone, is the one
+        // shipped without the guard.
+        var units: Set<LocalModelUnit> = [.diarizer, .voiceActivity]
         if settings.processing.usesLocalTranscription {
             switch settings.processing.localTranscriptionModel {
             case .cohere:
@@ -110,6 +126,7 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
         case .cohere: LocalSpeechStack.approximateCohereBytes
         case .ctcAligner: LocalSpeechStack.approximateAlignerBytes
         case .diarizer: LocalSpeechStack.approximateDiarizerBytes
+        case .voiceActivity: LocalSpeechStack.approximateVoiceActivityBytes
         }
     }
 }

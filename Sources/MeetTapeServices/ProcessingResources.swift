@@ -29,6 +29,11 @@ public struct ProcessingBackends: Sendable {
     /// Recovers timings for chunks whose backend returned text alone. Absent
     /// in cloud-only test configurations; the pipeline then falls back to
     /// chunk-level timing.
+    /// Decides which parts of the microphone track hold a voice, which is what
+    /// tells a sentence the local user said from one the transcription backend
+    /// invented for a gap. Absent in cloud-only test configurations; the gate
+    /// then decides on levels alone.
+    public var voiceActivity: (any VoiceActivityBackend)?
     public var aligner: (any TranscriptAligner)?
     /// Installs the aligner specifically, rather than whatever the current
     /// settings need. The chunks being aligned were written by whichever
@@ -53,6 +58,7 @@ public struct ProcessingBackends: Sendable {
         speakers: SpeakerRecognitionService? = nil,
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
+        voiceActivity: (any VoiceActivityBackend)? = nil,
         aligner: (any TranscriptAligner)? = nil,
         prepareAligner: (@Sendable () async throws -> Void)? = nil,
         prepareDiarizer: (@Sendable () async throws -> Void)? = nil,
@@ -65,6 +71,7 @@ public struct ProcessingBackends: Sendable {
         self.speakers = speakers
         self.prepareLocalModels = prepareLocalModels
         self.requireLocalModels = requireLocalModels
+        self.voiceActivity = voiceActivity
         self.aligner = aligner
         self.prepareAligner = prepareAligner
         self.prepareDiarizer = prepareDiarizer

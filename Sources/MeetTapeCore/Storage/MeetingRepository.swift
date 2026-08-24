@@ -106,6 +106,22 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(diarization), to: layout.rawDiarization)
     }
 
+    /// Nil where nothing measured this meeting, which is every meeting
+    /// processed before the evidence existed. The assembler then keeps every
+    /// segment, which is what those meetings already show.
+    public func readSpeechEvidence() -> SpeechEvidence? {
+        guard FileManager.default.fileExists(atPath: layout.speechEvidence.path),
+              let data = try? read(layout.speechEvidence)
+        else { return nil }
+        return try? ArchiveCoding.decode(
+            SpeechEvidence.self, from: data, path: layout.speechEvidence.path
+        )
+    }
+
+    public func writeSpeechEvidence(_ evidence: SpeechEvidence) throws {
+        try AtomicFile.write(try ArchiveCoding.encode(evidence), to: layout.speechEvidence)
+    }
+
     public func readSpeakerMap() throws -> SpeakerMap {
         guard FileManager.default.fileExists(atPath: layout.speakerMap.path) else { return SpeakerMap() }
         let data = try read(layout.speakerMap)

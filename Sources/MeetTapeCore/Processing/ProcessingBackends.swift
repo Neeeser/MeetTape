@@ -212,3 +212,38 @@ public protocol SpeakerEmbeddingExtractor: Sendable {
         audio: URL, intervals: [DiarizationInterval]
     ) async throws -> [DiarizationChunkEmbedding]
 }
+
+/// Speech probability sampled on a fixed grid.
+public struct VoiceActivityProfile: Sendable, Equatable {
+    public var windowSeconds: Double
+    /// One probability in 0...1 per window, in order.
+    public var values: [Float]
+
+    public init(windowSeconds: Double, values: [Float]) {
+        self.windowSeconds = windowSeconds
+        self.values = values
+    }
+
+    public static let empty = VoiceActivityProfile(windowSeconds: 0, values: [])
+}
+
+/// Decides which parts of a track hold a voice.
+///
+/// Separate from diarization, which asks whose voice it is over a whole meeting
+/// and costs a great deal more. This answers only whether anybody is speaking,
+/// which is what tells a fabricated sentence from a real one on the local user's
+/// track.
+///
+/// The whole track goes through one call because the detector carries state
+/// between windows, and the samples arrive as a stream because a two-hour track
+/// at 16 kHz float32 is over 400 MB held at once.
+public protocol VoiceActivityBackend: Sendable {
+    /// Recorded on the evidence, so a reader can tell what judged the audio.
+    var identifier: String { get }
+    /// The rate the samples must arrive at.
+    var sampleRate: Double { get }
+
+    func probabilities(
+        samples: AsyncThrowingStream<[Float], any Error>
+    ) async throws -> VoiceActivityProfile
+}

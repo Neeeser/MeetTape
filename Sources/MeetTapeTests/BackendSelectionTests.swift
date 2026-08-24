@@ -190,34 +190,42 @@ enum BackendSelectionTests {
                 var settings = AppSettings()
                 settings.processing.localTranscriptionModel = .cohere
                 expect.equal(
-                    LocalModelUnit.required(for: settings), [.cohere, .ctcAligner, .diarizer],
+                    LocalModelUnit.required(for: settings),
+                    [.cohere, .ctcAligner, .diarizer, .voiceActivity],
                     "a text-only local model brings the aligner with it"
                 )
 
                 settings.processing.localTranscriptionModel = .parakeet
-                expect.equal(LocalModelUnit.required(for: settings), [.parakeet, .diarizer])
+                expect.equal(
+                    LocalModelUnit.required(for: settings),
+                    [.parakeet, .diarizer, .voiceActivity]
+                )
 
                 settings.processing.transcription = .openAI
                 settings.models.transcription = "gpt-transcribe"
                 expect.equal(
-                    LocalModelUnit.required(for: settings), [.ctcAligner, .diarizer],
+                    LocalModelUnit.required(for: settings),
+                    [.ctcAligner, .diarizer, .voiceActivity],
                     "cloud words without timings still need the local aligner"
                 )
 
                 settings.models.transcription = "gpt-4o-transcribe-diarize"
                 expect.equal(
-                    LocalModelUnit.required(for: settings), [.diarizer],
-                    "a self-contained cloud model needs nothing but the diarizer"
+                    LocalModelUnit.required(for: settings), [.diarizer, .voiceActivity],
+                    "a self-contained cloud model brings the diarizer and the detector"
                 )
 
                 // The diarizer is in every set, cloud-only included: voice
                 // memory embeds a cloud diarizer's intervals with those same
                 // models. Leaving it out made `ensureInstalled` report success
                 // on a machine with nothing installed, and the embedding
-                // extractor then threw from inside a stage.
+                // extractor then threw from inside a stage. The 2.3 MB voice
+                // detector is in every set for the same kind of reason: every
+                // backend fabricates filler for a microphone track that is
+                // mostly not speech, and a cloud user has no other guard.
                 settings.processing.diarization = .openAI
                 expect.equal(
-                    LocalModelUnit.required(for: settings), [.diarizer],
+                    LocalModelUnit.required(for: settings), [.diarizer, .voiceActivity],
                     "voice memory needs the diarizer whatever produced the labels"
                 )
             },

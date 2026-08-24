@@ -274,6 +274,7 @@ struct ProcessingSettingsTab: View {
         case .cohere: "Cohere Transcribe"
         case .ctcAligner: "Timing aligner"
         case .diarizer: "Speaker models"
+        case .voiceActivity: "Voice detector"
         }
     }
 

@@ -976,6 +976,37 @@ public actor ProcessingPipeline {
 
     /// Waits for the on-device models, downloading them if this is the first
     /// local job. Recording is never blocked on this; a meeting queues instead.
+    /// What the recorded audio holds, measured once and kept.
+    ///
+    /// Never throws. The transcript this feeds is already safe on disk as raw
+    /// chunks, and a meeting that cannot be measured is a meeting assembled the
+    /// way it was before this existed: every segment kept. Failing the stage
+    /// instead would turn an unreadable track or a missing model into a meeting
+    /// with no markdown and no mixdown.
+    ///
+    /// Re-measured when the stored evidence has no detector reading and a
+    /// detector is available now, which is the machine that processed a meeting
+    /// while the model was still downloading.
+    private func speechEvidence(
+        store: MeetingStore, metadata: MeetingMetadata
+    ) async -> SpeechEvidence? {
+        let stored = store.readSpeechEvidence()
+        if let stored, stored.detector != nil || backends.voiceActivity == nil { return stored }
+        do {
+            let evidence = try await SpeechEvidenceBuilder.build(
+                store: store, metadata: metadata, timeline: try store.readTimeline(),
+                detector: backends.voiceActivity
+            )
+            try store.writeSpeechEvidence(evidence)
+            return evidence
+        } catch {
+            Log.processing.notice(
+                "speech evidence skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return stored
+        }
+    }
+
     private func prepareLocalModels(metadata: MeetingMetadata) async throws {
         guard let prepare = backends.prepareLocalModels else { return }
         report(metadata, chunks: nil, detail: "Preparing on-device models")
@@ -1159,6 +1190,7 @@ public actor ProcessingPipeline {
         let assembler = TranscriptAssembler()
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
+            speech: await speechEvidence(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
@@ -1644,6 +1676,7 @@ public actor ProcessingPipeline {
         let transcript = assembler.assemble(
             raw: raw,
             diarization: diarization,
+            speech: await speechEvidence(store: found.store, metadata: found.metadata),
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )
@@ -2145,6 +2178,7 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscriptForAssembly()
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
+            speech: await speechEvidence(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)

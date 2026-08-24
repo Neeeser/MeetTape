@@ -974,39 +974,53 @@ public actor ProcessingPipeline {
         }
     }
 
-    /// Waits for the on-device models, downloading them if this is the first
-    /// local job. Recording is never blocked on this; a meeting queues instead.
-    /// What the recorded audio holds, measured once and kept.
+    /// Measures what the recorded audio holds, once, before the first assembly.
     ///
-    /// Never throws. The transcript this feeds is already safe on disk as raw
-    /// chunks, and a meeting that cannot be measured is a meeting assembled the
-    /// way it was before this existed: every segment kept. Failing the stage
-    /// instead would turn an unreadable track or a missing model into a meeting
-    /// with no markdown and no mixdown.
+    /// Only here. Every later assembly reads the file, so a rebuild is free and
+    /// gives the same answer: re-measuring would decode both tracks again on
+    /// every re-analysis, and on a machine whose detector has since been
+    /// deleted it would put the fabricated lines back.
     ///
-    /// Re-measured when the stored evidence has no detector reading and a
-    /// detector is available now, which is the machine that processed a meeting
-    /// while the model was still downloading.
-    private func speechEvidence(
-        store: MeetingStore, metadata: MeetingMetadata
-    ) async -> SpeechEvidence? {
-        let stored = store.readSpeechEvidence()
-        if let stored, stored.detector != nil || backends.voiceActivity == nil { return stored }
+    /// Only for a meeting whose microphone track is the local user, which is
+    /// the only track the gate judges. Imported audio would otherwise pay a
+    /// full decode and a detector pass to write a file nothing reads.
+    ///
+    /// Never throws. The words are already safe on disk as raw chunks, and a
+    /// meeting that cannot be measured assembles the way it did before this
+    /// existed: every segment kept. Failing the stage instead would turn an
+    /// unreadable track into a meeting with no markdown and no mixdown.
+    private func measureSpeech(store: MeetingStore, metadata: MeetingMetadata) async {
+        guard metadata.source.micTrackIsLocalUser else { return }
+        guard store.readSpeechEvidence() == nil else { return }
+        // The detector by name, and 1.1 MB of it. The rule that voice memory
+        // may wait for an install but never start one is about not pulling
+        // gigabytes onto a machine that chose the cloud; this is a correctness
+        // guard on the transcript the user asked for, and it is smaller than
+        // one minute of the audio the same stage has already uploaded.
+        if let prepare = backends.prepareVoiceActivity {
+            do {
+                try await prepare()
+            } catch {
+                Log.processing.notice(
+                    "voice detector unavailable: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
+        }
         do {
             let evidence = try await SpeechEvidenceBuilder.build(
                 store: store, metadata: metadata, timeline: try store.readTimeline(),
                 detector: backends.voiceActivity
             )
             try store.writeSpeechEvidence(evidence)
-            return evidence
         } catch {
             Log.processing.notice(
                 "speech evidence skipped: \(logSafeDescription(error), privacy: .public)"
             )
-            return stored
         }
     }
 
+    /// Waits for the on-device models, downloading them if this is the first
+    /// local job. Recording is never blocked on this; a meeting queues instead.
     private func prepareLocalModels(metadata: MeetingMetadata) async throws {
         guard let prepare = backends.prepareLocalModels else { return }
         report(metadata, chunks: nil, detail: "Preparing on-device models")
@@ -1186,11 +1200,12 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
         let diarization = try store.readRawDiarization()
+        await measureSpeech(store: store, metadata: metadata)
 
         let assembler = TranscriptAssembler()
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
-            speech: await speechEvidence(store: store, metadata: metadata),
+            speech: store.readSpeechEvidence(),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
@@ -1676,7 +1691,7 @@ public actor ProcessingPipeline {
         let transcript = assembler.assemble(
             raw: raw,
             diarization: diarization,
-            speech: await speechEvidence(store: found.store, metadata: found.metadata),
+            speech: found.store.readSpeechEvidence(),
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )
@@ -2178,7 +2193,7 @@ public actor ProcessingPipeline {
         let raw = try store.readRawTranscriptForAssembly()
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
-            speech: await speechEvidence(store: store, metadata: metadata),
+            speech: store.readSpeechEvidence(),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)

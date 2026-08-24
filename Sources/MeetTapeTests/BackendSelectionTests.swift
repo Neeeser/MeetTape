@@ -219,7 +219,7 @@ enum BackendSelectionTests {
                 // memory embeds a cloud diarizer's intervals with those same
                 // models. Leaving it out made `ensureInstalled` report success
                 // on a machine with nothing installed, and the embedding
-                // extractor then threw from inside a stage. The 2.3 MB voice
+                // extractor then threw from inside a stage. The 1.1 MB voice
                 // detector is in every set for the same kind of reason: every
                 // backend fabricates filler for a microphone track that is
                 // mostly not speech, and a cloud user has no other guard.

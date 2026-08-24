@@ -26,14 +26,17 @@ public struct ProcessingBackends: Sendable {
     /// running and refuses rather than starting one, so a cloud-only setup never
     /// downloads models it was not asked for.
     public var requireLocalModels: (@Sendable () async throws -> Void)?
-    /// Recovers timings for chunks whose backend returned text alone. Absent
-    /// in cloud-only test configurations; the pipeline then falls back to
-    /// chunk-level timing.
     /// Decides which parts of the microphone track hold a voice, which is what
     /// tells a sentence the local user said from one the transcription backend
     /// invented for a gap. Absent in cloud-only test configurations; the gate
     /// then decides on levels alone.
     public var voiceActivity: (any VoiceActivityBackend)?
+    /// Installs the detector alone, before the one stage that measures a
+    /// meeting. 1.1 MB, and every configuration needs it.
+    public var prepareVoiceActivity: (@Sendable () async throws -> Void)?
+    /// Recovers timings for chunks whose backend returned text alone. Absent
+    /// in cloud-only test configurations; the pipeline then falls back to
+    /// chunk-level timing.
     public var aligner: (any TranscriptAligner)?
     /// Installs the aligner specifically, rather than whatever the current
     /// settings need. The chunks being aligned were written by whichever
@@ -59,6 +62,7 @@ public struct ProcessingBackends: Sendable {
         prepareLocalModels: (@Sendable () async throws -> Void)? = nil,
         requireLocalModels: (@Sendable () async throws -> Void)? = nil,
         voiceActivity: (any VoiceActivityBackend)? = nil,
+        prepareVoiceActivity: (@Sendable () async throws -> Void)? = nil,
         aligner: (any TranscriptAligner)? = nil,
         prepareAligner: (@Sendable () async throws -> Void)? = nil,
         prepareDiarizer: (@Sendable () async throws -> Void)? = nil,
@@ -72,6 +76,7 @@ public struct ProcessingBackends: Sendable {
         self.prepareLocalModels = prepareLocalModels
         self.requireLocalModels = requireLocalModels
         self.voiceActivity = voiceActivity
+        self.prepareVoiceActivity = prepareVoiceActivity
         self.aligner = aligner
         self.prepareAligner = prepareAligner
         self.prepareDiarizer = prepareDiarizer

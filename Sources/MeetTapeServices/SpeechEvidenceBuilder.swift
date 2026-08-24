@@ -7,8 +7,8 @@ import MeetTapeCore
 /// sentence the local user said from one a speech model invented for the gaps.
 ///
 /// Reads each track once at 16 kHz mono, the rate every model here works at.
-/// The level pass is arithmetic and the detector pass is Silero, which reads
-/// two and a half hours in about seven seconds.
+/// The level pass is arithmetic and the detector pass is Silero. A 29-minute
+/// meeting measured in under two seconds.
 ///
 /// Everything is put on the meeting timeline before it is stored. The two
 /// tracks do not start at the same instant, and the transcript segments this is
@@ -63,12 +63,21 @@ public enum SpeechEvidenceBuilder {
             )
 
             guard track == .mic, let detector else { continue }
+            // The detector's own rate or nothing. Handing it audio at another
+            // rate would move every reading in time against the levels beside
+            // it, which is worse than having no readings at all.
+            guard detector.sampleRate == readFormat.sampleRate else {
+                Log.processing.notice(
+                    "voice detection skipped: detector wants \(detector.sampleRate, format: .fixed(precision: 0)) Hz"
+                )
+                continue
+            }
             // A detector that is not installed yet costs its clause, not the
             // measurement: levels alone still remove most of what a model
-            // invents, and the evidence records that nothing judged the audio
-            // so a later pass can measure it again.
+            // invents, and the evidence records that nothing judged the audio.
             do {
-                let readings = try await detector.probabilities(samples: samples(of: stream))
+                let reader = try SampleReader(stream: stream)
+                let readings = try await detector.probabilities(reading: { try await reader.next() })
                 speechWindowSeconds = readings.windowSeconds
                 speech = padded(
                     readings.values.map { Int8(max(0, min(100, ($0 * 100).rounded()))) },
@@ -102,32 +111,33 @@ public enum SpeechEvidenceBuilder {
         guard windows > 0 else { return values }
         return Array(repeating: filler, count: windows) + values
     }
+}
 
-    /// The track's samples, block by block, for a detector that carries state
-    /// across the whole pass.
-    ///
-    /// The reader is synchronous and the detector is an actor, so the read runs
-    /// on its own task and the blocks cross over the stream's buffer. Nothing
-    /// holds the track whole: two hours at 16 kHz float32 is over 400 MB.
-    private static func samples(
-        of stream: TrackAudioStream
-    ) -> AsyncThrowingStream<[Float], any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task.detached(priority: .utility) {
-                do {
-                    try stream.forEachBuffer { buffer, _ in
-                        guard let channel = buffer.floatChannelData?[0] else { return true }
-                        let frames = Int(buffer.frameLength)
-                        guard frames > 0 else { return true }
-                        continuation.yield(Array(UnsafeBufferPointer(start: channel, count: frames)))
-                        return !Task.isCancelled
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+/// One track, read a block at a time on demand.
+///
+/// The detector pulls through this, so no more of the track is decoded than the
+/// model has asked for. The reader is a stateful class that is not `Sendable`;
+/// the actor is what makes handing a closure over it across isolation safe.
+private actor SampleReader {
+    private let reader: TrackAudioReader
+    private let frames: AVAudioFrameCount
+
+    init(stream: TrackAudioStream, frames: AVAudioFrameCount = 8_192) throws {
+        guard let reader = stream.makeReader() else {
+            throw ProcessingError.audioUnreadable(path: stream.segmentsDirectory.lastPathComponent)
+        }
+        self.reader = reader
+        self.frames = frames
+    }
+
+    /// The next block of mono samples, or nil at the end of the track.
+    func next() throws -> [Float]? {
+        while true {
+            guard let buffer = try reader.read(frames: frames), buffer.frameLength > 0 else {
+                return nil
             }
-            continuation.onTermination = { _ in task.cancel() }
+            guard let channel = buffer.floatChannelData?[0] else { continue }
+            return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
         }
     }
 }

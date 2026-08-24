@@ -70,11 +70,13 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         guard let far, let loudestFar = far.max() else {
             return SpeechReading(speechProbability: probability, loudestLocalDB: Double(loudestLocal))
         }
-        // Zipped rather than indexed: these are slices of the two series, so
-        // their indices are positions in the whole recording rather than in the
-        // span, and the two do not start at the same one.
+        // Zipped rather than indexed: these are slices, so their indices are
+        // positions in the whole recording rather than in the span, and the far
+        // end's slice is the shorter of the two wherever its track ended first.
         var differences = zip(local, far).map { Double($0) - Double($1) }
         differences.sort()
+        // The upper of the two middle values for an even count. The measures
+        // separate by 10 dB and more, so which one is taken decides nothing.
         let median = differences.isEmpty ? 0 : differences[differences.count / 2]
         return SpeechReading(
             speechProbability: probability,
@@ -91,9 +93,14 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         _ values: [Int8], windowSeconds: Double, from start: Double, to end: Double
     ) -> ArraySlice<Int8>? {
         guard !values.isEmpty, windowSeconds > 0, end >= start else { return nil }
+        // A backend supplies these times, and converting a non-finite or
+        // astronomically large one to Int traps rather than returning anything.
+        guard start.isFinite, end.isFinite, start >= 0,
+              start / windowSeconds < Double(values.count) else { return nil }
         let first = Int(start / windowSeconds)
-        guard first >= 0, first < values.count else { return nil }
-        let last = min(values.count - 1, max(first, Int((end / windowSeconds).rounded(.up)) - 1))
+        guard first < values.count else { return nil }
+        let reach = min(end / windowSeconds, Double(values.count))
+        let last = min(values.count - 1, max(first, Int(reach.rounded(.up)) - 1))
         return values[first...last]
     }
 

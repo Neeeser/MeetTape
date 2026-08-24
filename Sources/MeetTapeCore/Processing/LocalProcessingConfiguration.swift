@@ -48,9 +48,11 @@ public enum LocalSpeechStack {
 
     /// Silero VAD v6.2.1 through FluidAudio, the unified 256 ms Core ML build.
     /// Recorded on the speech evidence as what judged the microphone track.
-    /// 1.1 MB installed, and it reads a 30-minute track in a second or two, so
-    /// it costs nothing measurable against a transcription pass.
+    /// 1.1 MB installed. Measuring a 29-minute meeting, both tracks levelled
+    /// and the microphone judged, took under two seconds, so it costs nothing
+    /// measurable against a transcription pass.
     public static let voiceActivityIdentifier = "silero-vad-unified-256ms-v6.2.1"
+    /// Rounded up from the 1.1 MB the install leaves on disk.
     public static let approximateVoiceActivityBytes: Int64 = 2 * 1_024 * 1_024
 
     /// What each unit's files came from, written into its receipt so a
@@ -95,7 +97,7 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
         // instead of the meeting skipping voice memory.
         // The detector is required for the same reason and in the same set.
         // Every backend fabricates filler for a microphone track that is mostly
-        // not speech, cloud ones included: 179 of 222 segments on the local
+        // not speech, cloud ones included: 181 of 222 segments on the local
         // user's track across five meetings were words nobody said. Leaving it
         // optional would mean the configuration most exposed to the defect,
         // cloud transcription of a listener's own microphone, is the one

@@ -19,29 +19,41 @@ public struct AppleSpeechTranscriptionBackend: TranscriptionBackend {
     public var limits: BackendAudioLimits { .none }
     public var timing: TranscriptTiming { .words }
 
+    /// Both gates from `LocalTranscriptionModel.offered`, in one place: the
+    /// OS must have the API and this binary must have been built against an
+    /// SDK that knows it.
     public static var isAvailable: Bool {
-        if #available(macOS 26.0, *) { return true }
+        #if swift(>=6.2)
+            if #available(macOS 26.0, *) { return true }
+        #endif
         return false
     }
 
     public func transcribe(
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
-        guard #available(macOS 26.0, *) else {
+        #if swift(>=6.2)
+            guard #available(macOS 26.0, *) else {
+                throw AppleSpeechError.requiresNewerMacOS
+            }
+            let result = try await AppleSpeechAnalyzerRunner.transcribe(audio: audio)
+            progress(1)
+            let words = Self.words(from: result.runs)
+            return TranscriptionOutput(
+                segments: CtcForcedAlignment.segments(
+                    from: words,
+                    pauseSeconds: LocalAlignmentTuning.segmentPauseSeconds,
+                    maximumSeconds: LocalAlignmentTuning.segmentMaximumSeconds
+                ),
+                text: result.text,
+                durationSeconds: result.durationSeconds
+            )
+        #else
+            // Built against an SDK without the SpeechAnalyzer API; `offered`
+            // never names this engine from such a build, so only a settings
+            // file written by a newer build can reach here.
             throw AppleSpeechError.requiresNewerMacOS
-        }
-        let result = try await AppleSpeechAnalyzerRunner.transcribe(audio: audio)
-        progress(1)
-        let words = Self.words(from: result.runs)
-        return TranscriptionOutput(
-            segments: CtcForcedAlignment.segments(
-                from: words,
-                pauseSeconds: LocalAlignmentTuning.segmentPauseSeconds,
-                maximumSeconds: LocalAlignmentTuning.segmentMaximumSeconds
-            ),
-            text: result.text,
-            durationSeconds: result.durationSeconds
-        )
+        #endif
     }
 
     /// Attributed-run spans as aligned words: each run's tokens split its span
@@ -84,6 +96,7 @@ public enum AppleSpeechError: Error, CustomStringConvertible {
     }
 }
 
+#if swift(>=6.2)
 @available(macOS 26.0, *)
 enum AppleSpeechAnalyzerRunner {
     struct Output {
@@ -142,3 +155,4 @@ enum AppleSpeechAnalyzerRunner {
         return Output(text: text, runs: runs, durationSeconds: seconds)
     }
 }
+#endif

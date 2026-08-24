@@ -85,7 +85,9 @@ enum LocalConfigurationTests {
                     LocalTranscriptionModel.apple.backendIdentifier,
                     LocalSpeechStack.appleBackendIdentifier
                 )
-                if #available(macOS 26.0, *) {
+                // The backend's own gate is the source of truth: OS and the
+                // SDK this binary was built against, together.
+                if AppleSpeechTranscriptionBackend.isAvailable {
                     expect.equal(LocalTranscriptionModel.preferred, .apple)
                     expect.equal(LocalTranscriptionModel.offered, [.apple, .parakeet])
                 } else {

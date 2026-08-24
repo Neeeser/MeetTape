@@ -194,13 +194,23 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
     /// the list on the same data; installs that have them keep them, and the
     /// cases remain selectable by the bench.
     public static var offered: [LocalTranscriptionModel] {
-        if #available(macOS 26.0, *) { return [.apple, .parakeet] }
+        // Two gates, both required. The runtime check keeps Apple off
+        // machines older than macOS 26; the compiler check keeps it out of a
+        // binary built against an SDK without the SpeechAnalyzer API, which
+        // would otherwise offer a default it cannot run. Swift 6.2 is the
+        // toolchain the macOS 26 SDK first shipped with, which is what makes
+        // it the compile-time proxy for "the API exists".
+        #if swift(>=6.2)
+            if #available(macOS 26.0, *) { return [.apple, .parakeet] }
+        #endif
         return [.parakeet]
     }
 
     /// What a fresh install gets: the first offered engine on this OS.
     public static var preferred: LocalTranscriptionModel {
-        if #available(macOS 26.0, *) { return .apple }
+        #if swift(>=6.2)
+            if #available(macOS 26.0, *) { return .apple }
+        #endif
         return .parakeet
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import MeetTapeCore
+import MeetTapeLocalAI
 import MeetTapeServices
 import MeetTapeUI
 import TestKit
@@ -246,10 +247,10 @@ enum SetupFlowTests {
                     // accident. Cohere and Whisper retired on the 2026-08-24
                     // deciding run; Canary never earned a place; Apple is
                     // offered where the OS has it.
-                    let unoffered: Set<LocalTranscriptionModel> = {
-                        if #available(macOS 26.0, *) { return [.canary, .cohere, .whisper] }
-                        return [.canary, .cohere, .whisper, .apple]
-                    }()
+                    let unoffered: Set<LocalTranscriptionModel> =
+                        AppleSpeechTranscriptionBackend.isAvailable
+                        ? [.canary, .cohere, .whisper]
+                        : [.canary, .cohere, .whisper, .apple]
                     expect.equal(
                         Set(LocalTranscriptionModel.offered).union(unoffered),
                         Set(LocalTranscriptionModel.allCases),

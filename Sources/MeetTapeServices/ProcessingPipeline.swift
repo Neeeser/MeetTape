@@ -632,7 +632,8 @@ public actor ProcessingPipeline {
         let looping = try Self.dropIfLooping(
             response: output, chunkID: chunkID, purpose: .words,
             isLastAttempt: metadata.processing.attemptCount(for: .transcribing)
-                >= Self.maxAttemptsPerStage
+                >= Self.maxAttemptsPerStage,
+            scope: .wholeTrack
         )
         raw.chunks.append(RawTranscriptChunk(
             id: chunkID,
@@ -693,8 +694,17 @@ public actor ProcessingPipeline {
         throw ProcessingError.emptyTranscript(chunk: chunkID)
     }
 
+    /// Whether a response covers one window of a track or the whole track.
+    public enum LoopScope: Sendable, Equatable {
+        /// One window of several. A hole in it costs that window.
+        case chunk
+        /// The track in one request. There is no other window to fall back on,
+        /// so recording it as nothing empties the meeting.
+        case wholeTrack
+    }
+
     /// Fails a chunk whose response is one phrase repeated for the length of
-    /// the window, and on the last attempt records it as nothing.
+    /// the window, and on a window's last attempt records it as nothing.
     ///
     /// A speech model given a window with little speech in it can loop, and the
     /// loop is billed, recorded and assembled like any other answer. Six of
@@ -707,10 +717,17 @@ public actor ProcessingPipeline {
     /// costs that window, and failing the stage would cost the whole meeting
     /// for audio nothing can transcribe.
     ///
+    /// That trade holds only where a window is one of several. A whole track
+    /// arrives as a single chunk, so dropping it records the meeting as
+    /// nothing: enrichment returns early on an empty transcript and the meeting
+    /// completes with an empty transcript.md, reported as success. A whole
+    /// track therefore fails on every attempt and is left retryable, with its
+    /// audio untouched for a later run or a different backend.
+    ///
     /// - Returns: true when the chunk is to be recorded as nothing.
     public static func dropIfLooping(
         response: TranscriptionOutput, chunkID: String, purpose: RawChunkPurpose,
-        isLastAttempt: Bool
+        isLastAttempt: Bool, scope: LoopScope
     ) throws -> Bool {
         guard purpose == .words else { return false }
         let text = response.text.isEmpty
@@ -721,7 +738,9 @@ public actor ProcessingPipeline {
         Log.processing.error(
             "looping transcript for chunk \(chunkID, privacy: .public), repeated phrase share \(share, format: .fixed(precision: 2))"
         )
-        guard isLastAttempt else { throw ProcessingError.degenerateTranscript(chunk: chunkID) }
+        guard isLastAttempt, scope == .chunk else {
+            throw ProcessingError.degenerateTranscript(chunk: chunkID)
+        }
         return true
     }
 
@@ -1101,7 +1120,7 @@ public actor ProcessingPipeline {
                 )
                 let looping = try Self.dropIfLooping(
                     response: response, chunkID: chunk.chunkID, purpose: purpose,
-                    isLastAttempt: lastAttempt
+                    isLastAttempt: lastAttempt, scope: .chunk
                 )
                 raw.chunks.append(RawTranscriptChunk(
                     id: chunk.chunkID,

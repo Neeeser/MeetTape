@@ -157,7 +157,8 @@ enum PipelineTests {
                 do {
                     _ = try ProcessingPipeline.dropIfLooping(
                         response: TranscriptionOutput(segments: [], text: loop),
-                        chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: false
+                        chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: false,
+                        scope: .chunk
                     )
                 } catch let error as ProcessingError {
                     caught = error
@@ -173,9 +174,27 @@ enum PipelineTests {
                 // failing a meeting whose other fifteen chunks are speech.
                 let dropped = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: loop),
-                    chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: true
+                    chunkID: "remote_chunk_007", purpose: .words, isLastAttempt: true, scope: .chunk
                 )
                 expect.isTrue(dropped, "the last attempt drops the chunk instead of failing")
+
+                // A whole track is the meeting, so the same drop would leave an
+                // empty transcript reported as success. It fails on every
+                // attempt instead.
+                var wholeTrack: ProcessingError?
+                do {
+                    _ = try ProcessingPipeline.dropIfLooping(
+                        response: TranscriptionOutput(segments: [], text: loop),
+                        chunkID: "remote_full", purpose: .words, isLastAttempt: true,
+                        scope: .wholeTrack
+                    )
+                } catch let error as ProcessingError {
+                    wholeTrack = error
+                }
+                expect.equal(
+                    wholeTrack, .degenerateTranscript(chunk: "remote_full"),
+                    "a whole track is never recorded as nothing"
+                )
 
                 // The eleven ES2003a chunks that hold speech score between
                 // 0.00 and 0.03, so a chunk that says one thing twice is
@@ -188,14 +207,14 @@ enum PipelineTests {
                 )
                 let keptSpeech = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: spoken),
-                    chunkID: "remote_chunk_008", purpose: .words, isLastAttempt: true
+                    chunkID: "remote_chunk_008", purpose: .words, isLastAttempt: true, scope: .chunk
                 )
                 expect.isFalse(keptSpeech, "speech is kept")
                 // And a chunk asked for speakers rather than words is not
                 // measured on its text at all.
                 let keptLabels = try ProcessingPipeline.dropIfLooping(
                     response: TranscriptionOutput(segments: [], text: loop),
-                    chunkID: "remote_chunk_009", purpose: .speakers, isLastAttempt: false
+                    chunkID: "remote_chunk_009", purpose: .speakers, isLastAttempt: false, scope: .chunk
                 )
                 expect.isFalse(keptLabels, "a speakers chunk is not measured on its text")
             },

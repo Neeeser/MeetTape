@@ -272,6 +272,7 @@ struct ProcessingSettingsTab: View {
         case .whisper: "Whisper Large-v3-Turbo"
         case .parakeet: "Parakeet TDT v3"
         case .cohere: "Cohere Transcribe"
+        case .canary: "Canary 1B v2"
         case .ctcAligner: "Timing aligner"
         case .diarizer: "Speaker models"
         }
@@ -329,6 +330,8 @@ struct LocalModelChoicePicker: View {
         case .parakeet: "Parakeet TDT v3"
         case .cohere: "Cohere Transcribe"
         case .whisper: "Whisper Large-v3-Turbo"
+        case .canary: "Canary 1B v2"
+        case .apple: "Apple Speech"
         }
     }
 
@@ -345,6 +348,10 @@ struct LocalModelChoicePicker: View {
                 + "the first use takes a few minutes to prepare."
         case .whisper:
             "The previous engine. 624 MB."
+        case .canary, .apple:
+            // Never rendered: `offered` includes neither. Here because the
+            // switch is exhaustive.
+            "Benchmark candidate."
         }
     }
 }

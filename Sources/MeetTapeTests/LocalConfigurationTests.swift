@@ -13,6 +13,101 @@ import TestKit
 enum LocalConfigurationTests {
     static var configurationSuite: Suite {
         Suite("LocalConfiguration", [
+            test("an LS-EEND timeline keeps two speakers talking at once") { expect in
+                // The offline clusterer assigns one speaker per moment, so a
+                // simultaneous second voice cannot exist in its output. The
+                // whole point of the EEND backend is that it can, and the
+                // conversion must not flatten it back out.
+                let output = LSEendDiarizationBackend.output(
+                    segments: [
+                        (speaker: 0, start: 0, end: 10, activity: 0.9),
+                        (speaker: 1, start: 4, end: 8, activity: 0.7),
+                        (speaker: 0, start: 12, end: 15, activity: 0.5),
+                    ],
+                    configuration: ["backend": "test"]
+                )
+                expect.equal(output.intervals.count, 3)
+                let sorted = output.intervals.sorted { $0.start < $1.start }
+                expect.equal(sorted[0].clusterID, sorted[2].clusterID, "one voice keeps one key")
+                expect.isTrue(
+                    sorted[1].clusterID != sorted[0].clusterID
+                        && sorted[1].start < sorted[0].end,
+                    "the second voice overlaps the first and survives as its own interval"
+                )
+                let byID = Dictionary(uniqueKeysWithValues: output.clusters.map { ($0.id, $0) })
+                expect.close(
+                    byID[sorted[0].clusterID]?.speechSeconds ?? 0, 13, tolerance: 0.001,
+                    "a cluster's speech is the sum of its own intervals"
+                )
+                expect.close(byID[sorted[1].clusterID]?.speechSeconds ?? 0, 4, tolerance: 0.001)
+                expect.equal(output.configuration["backend"], "test")
+            },
+
+            test("Canary is a bench candidate, not an offered model") { expect in
+                // A text-only engine: its units are its own weights plus the
+                // aligner that supplies the timings it does not, the same
+                // shape as Cohere. It stays out of `offered` until the
+                // comparative run earns it a place in the settings UI.
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.processing.localTranscriptionModel = .canary
+                expect.equal(
+                    LocalModelUnit.required(for: settings),
+                    [.canary, .ctcAligner, .diarizer]
+                )
+                expect.isTrue(
+                    !LocalTranscriptionModel.offered.contains(.canary),
+                    "the settings UI does not offer what the bench has not proven"
+                )
+                expect.equal(
+                    LocalTranscriptionModel.canary.backendIdentifier,
+                    LocalSpeechStack.canaryBackendIdentifier
+                )
+                expect.close(
+                    LocalCanaryTuning.chunkSeconds, 15, tolerance: 0.0001,
+                    "one fixed model window per chunk, so the library's own stitching never runs"
+                )
+            },
+
+            test("Apple speech needs no downloaded units and is not offered") { expect in
+                // The models are system assets the OS installs and owns, so
+                // the only unit the configuration needs is the diarizer every
+                // configuration needs. It stays out of `offered` with the
+                // other bench candidates.
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.processing.localTranscriptionModel = .apple
+                expect.equal(LocalModelUnit.required(for: settings), [.diarizer])
+                expect.isTrue(!LocalTranscriptionModel.offered.contains(.apple))
+                expect.equal(
+                    LocalTranscriptionModel.apple.backendIdentifier,
+                    LocalSpeechStack.appleBackendIdentifier
+                )
+            },
+
+            test("attributed runs become words that keep the aligner's conventions") { expect in
+                // The assembler concatenates word texts verbatim, so every
+                // word carries a leading space; a run's words split its span
+                // evenly, and a run the recognizer left untimed rides the
+                // previous edge rather than inventing a time.
+                let words = AppleSpeechTranscriptionBackend.words(from: [
+                    (text: "Hello there ", start: 0, end: 2),
+                    (text: "world", start: 2, end: 3),
+                ])
+                expect.equal(words.map(\.text), [" Hello", " there", " world"])
+                expect.close(words[0].start, 0, tolerance: 0.0001)
+                expect.close(words[0].end, 1, tolerance: 0.0001)
+                expect.close(words[1].start, 1, tolerance: 0.0001)
+                expect.close(words[2].end, 3, tolerance: 0.0001)
+
+                let tail = AppleSpeechTranscriptionBackend.words(from: [
+                    (text: "one", start: 0, end: 1),
+                    (text: "two", start: nil, end: nil),
+                ])
+                expect.close(tail[1].start, 1, tolerance: 0.0001)
+                expect.close(tail[1].end, 1, tolerance: 0.0001)
+            },
+
             test("a meeting where nobody spoke is empty, not failed") { expect in
                 // FluidAudio raises noSpeechDetected rather than returning zero
                 // turns. Passed on as an error it failed the meeting, so a

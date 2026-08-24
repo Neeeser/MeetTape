@@ -236,10 +236,18 @@ enum SetupFlowTests {
 
                 let model = await MainActor.run { makeSetupModel(root: root, requested: nil) }
                 await MainActor.run {
+                    // Canary and Apple are bench candidates: cases the
+                    // harness can run and no settings surface offers. A new
+                    // case must land in exactly one of the two lists, so an
+                    // engine cannot go missing from the picker by accident.
                     expect.equal(
-                        Set(LocalTranscriptionModel.offered),
+                        Set(LocalTranscriptionModel.offered).union([.canary, .apple]),
                         Set(LocalTranscriptionModel.allCases),
-                        "every engine has a row in the picker"
+                        "every engine is offered or is a named bench candidate"
+                    )
+                    expect.isTrue(
+                        Set(LocalTranscriptionModel.offered).isDisjoint(with: [.canary, .apple]),
+                        "a candidate is not offered until the comparative run says so"
                     )
                     expect.equal(
                         LocalTranscriptionModel.offered.first, .parakeet,

@@ -210,6 +210,8 @@ public final class MeetTapeRuntime {
                         local: { choice in
                             switch choice {
                             case .cohere: CohereTranscriptionBackend(models: modelManager)
+                            case .canary: CanaryTranscriptionBackend(models: modelManager)
+                            case .apple: AppleSpeechTranscriptionBackend()
                             case .parakeet: ParakeetTranscriptionBackend(models: modelManager)
                             case .whisper: WhisperTranscriptionBackend(models: modelManager)
                             }

@@ -51,6 +51,10 @@ public struct LocalModelLocations: Sendable, Equatable {
         root.appendingPathComponent(Repo.cohereTranscribeCoreml.folderName, isDirectory: true)
     }
 
+    public var canaryDirectory: URL {
+        root.appendingPathComponent(Repo.canary1bV2.folderName, isDirectory: true)
+    }
+
     public var alignerDirectory: URL {
         root.appendingPathComponent(
             CtcModelVariant.ctc06b.repo.folderName, isDirectory: true
@@ -63,6 +67,7 @@ public struct LocalModelLocations: Sendable, Equatable {
         case .whisper: whisperBase
         case .parakeet: parakeetDirectory
         case .cohere: cohereDirectory
+        case .canary: canaryDirectory
         case .ctcAligner: alignerDirectory
         case .diarizer: diarizerDirectory
         }

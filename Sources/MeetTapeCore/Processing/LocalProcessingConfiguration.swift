@@ -13,6 +13,14 @@ public enum LocalSpeechStack {
     public static let diarizerPackage = "FluidAudio 0.15.6"
     /// What goes in `DiarizationRun.backend`.
     public static let diarizerBackendIdentifier = "fluidaudio-offline-0.15.6"
+
+    /// LS-EEND through FluidAudio. A benchmark candidate: end-to-end neural
+    /// diarization that can mark two speakers at the same instant, which the
+    /// offline clusterer structurally cannot. The checkpoint variant completes
+    /// the identifier, because the variants behave like different models. Not
+    /// constructed anywhere in the application until the comparative run says
+    /// it should be.
+    public static let lseendBackendIdentifierPrefix = "fluidaudio-lseend-"
     public static let whisperBackendIdentifier = "whisperkit-large-v3-turbo"
 
     public static let approximateWhisperBytes: Int64 = 624 * 1_024 * 1_024
@@ -38,6 +46,18 @@ public enum LocalSpeechStack {
     public static let cohereBackendIdentifier = "fluidaudio-cohere-transcribe-03-2026-q8"
     public static let approximateCohereBytes: Int64 = 2_100 * 1_024 * 1_024
 
+    /// Canary-1B-v2 through FluidAudio, the INT4 build, beta in 0.15.6. A
+    /// benchmark candidate: text-only like Cohere, so it takes the chunked
+    /// path and the aligner supplies its timings. Not offered in settings
+    /// until the comparative run says it should be.
+    public static let canaryBackendIdentifier = "fluidaudio-canary-1b-v2-int4"
+    public static let approximateCanaryBytes: Int64 = 700 * 1_024 * 1_024
+
+    /// Apple's SpeechAnalyzer, macOS 26 and later. A benchmark candidate with
+    /// word timings of its own and no download MeetTape manages: the models
+    /// are system assets the OS installs and owns.
+    public static let appleBackendIdentifier = "apple-speechanalyzer"
+
     /// Parakeet CTC 0.6B, the forced-alignment model. Recorded as alignment
     /// provenance on every aligned chunk. The 110M variant was measured first
     /// and warped badly where a voice gave it weak posteriors, stacking whole
@@ -54,6 +74,7 @@ public enum LocalSpeechStack {
         case .whisper: "\(whisperModel) @ \(whisperPackage)"
         case .parakeet: "parakeet-tdt-0.6b-v3-int8 @ \(diarizerPackage)"
         case .cohere: "cohere-transcribe-03-2026-q8 @ \(diarizerPackage)"
+        case .canary: "canary-1b-v2-int4 @ \(diarizerPackage)"
         case .ctcAligner: "parakeet-ctc-0.6b @ \(diarizerPackage)"
         case .diarizer: diarizerPackage
         }
@@ -68,6 +89,7 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
     case whisper
     case parakeet
     case cohere
+    case canary
     case ctcAligner = "ctc-aligner"
     case diarizer
 
@@ -90,6 +112,13 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
             case .cohere:
                 units.insert(.cohere)
                 units.insert(.ctcAligner)
+            case .canary:
+                units.insert(.canary)
+                units.insert(.ctcAligner)
+            case .apple:
+                // System assets, installed and owned by the OS. Nothing of
+                // MeetTape's to download; the base diarizer is already in.
+                break
             case .parakeet:
                 units.insert(.parakeet)
             case .whisper:
@@ -108,6 +137,7 @@ public enum LocalModelUnit: String, Codable, CaseIterable, Sendable {
         case .whisper: LocalSpeechStack.approximateWhisperBytes
         case .parakeet: LocalSpeechStack.approximateParakeetBytes
         case .cohere: LocalSpeechStack.approximateCohereBytes
+        case .canary: LocalSpeechStack.approximateCanaryBytes
         case .ctcAligner: LocalSpeechStack.approximateAlignerBytes
         case .diarizer: LocalSpeechStack.approximateDiarizerBytes
         }
@@ -124,14 +154,26 @@ public enum LocalTranscriptionModel: String, Codable, CaseIterable, Sendable {
     case parakeet
     /// The original local engine, kept for installs that already have it.
     case whisper
+    /// Benchmark candidate, beta in the pinned FluidAudio. Text only, aligned
+    /// locally, and reachable through `meettape-eval bench --engine canary`
+    /// alone: it is not in `offered`, so no settings surface can select it.
+    case canary
+    /// Benchmark candidate: Apple's SpeechAnalyzer, macOS 26 and later. Word
+    /// timings of its own, system-managed model assets, zero install cost.
+    /// Not in `offered` until the comparative run and an availability story
+    /// earn it a place.
+    case apple
 
     /// The engines in the order they are offered, recommended first.
     /// `allCases` is declaration order, which is alphabetical and puts a 2.1 GB
-    /// engine above the one that won every meeting of the benchmark.
+    /// engine above the one that won every meeting of the benchmark. Canary is
+    /// deliberately absent until the comparative run earns it a place.
     public static let offered: [LocalTranscriptionModel] = [.parakeet, .cohere, .whisper]
 
     public var backendIdentifier: String {
         switch self {
+        case .apple: LocalSpeechStack.appleBackendIdentifier
+        case .canary: LocalSpeechStack.canaryBackendIdentifier
         case .cohere: LocalSpeechStack.cohereBackendIdentifier
         case .parakeet: LocalSpeechStack.parakeetBackendIdentifier
         case .whisper: LocalSpeechStack.whisperBackendIdentifier
@@ -162,6 +204,16 @@ public enum LocalCohereTuning {
     /// are the machinery the cloud path has always used. Matches
     /// `CohereAsrConfig.maxAudioSeconds`.
     public static let chunkSeconds: Double = 35
+}
+
+/// The local Canary engine's chunking.
+public enum LocalCanaryTuning {
+    /// One fixed model window per chunk. Canary's CoreML pipeline runs a 15 s
+    /// window and stitches longer audio with a 3 s overlap of its own; the
+    /// Cohere lesson applies unchanged, so MeetTape cuts at the window and
+    /// keeps the library's stitching out of the path. Matches
+    /// `CanaryConfig`'s window length.
+    public static let chunkSeconds: Double = 15
 }
 
 /// The offline diarizer settings MeetTape overrides, and why.

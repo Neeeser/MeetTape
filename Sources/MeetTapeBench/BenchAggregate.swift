@@ -27,6 +27,10 @@ public enum BenchAggregate {
         score.der = ders.isEmpty ? nil : mean(ders)
         let strict = runs.compactMap(\.derStrict)
         score.derStrict = strict.isEmpty ? nil : mean(strict)
+        let cp = runs.compactMap(\.cpWer)
+        score.cpWer = cp.isEmpty ? nil : mean(cp)
+        let tcp = runs.compactMap(\.tcpWer)
+        score.tcpWer = tcp.isEmpty ? nil : mean(tcp)
         score.repeatedNgrams = runs.map(\.repeatedNgrams).max() ?? score.repeatedNgrams
         return score
     }

@@ -15,11 +15,28 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
         public var attribution: Double
         /// How much worse the diarization error rate may get, in points.
         public var der: Double
+        /// How much worse the per-speaker time-constrained word error rate may
+        /// get, in points. Wider than `wer`'s: tcpWER moves with attribution
+        /// and timing as well as with the words, so its run-to-run spread is
+        /// larger.
+        public var tcpWer: Double
 
-        public init(wer: Double = 1.5, attribution: Double = 1.0, der: Double = 2.0) {
+        public init(
+            wer: Double = 1.5, attribution: Double = 1.0, der: Double = 2.0,
+            tcpWer: Double = 2.0
+        ) {
             self.wer = wer
             self.attribution = attribution
             self.der = der
+            self.tcpWer = tcpWer
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            wer = try container.decode(Double.self, forKey: .wer)
+            attribution = try container.decode(Double.self, forKey: .attribution)
+            der = try container.decode(Double.self, forKey: .der)
+            tcpWer = try container.decodeIfPresent(Double.self, forKey: .tcpWer) ?? 2.0
         }
     }
 
@@ -32,16 +49,20 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
         /// not a tolerance: a case may not produce more than it did, and a
         /// case recorded at zero may not produce any.
         public var repeatedNgrams: Int
+        /// Per-speaker time-constrained word error rate. Absent on entries
+        /// recorded before the metric existed, and compared only when present.
+        public var tcpWer: Double?
 
         public init(
             wer: Double, werNoFiller: Double, attribution: Double, der: Double?,
-            repeatedNgrams: Int = 0
+            repeatedNgrams: Int = 0, tcpWer: Double? = nil
         ) {
             self.wer = wer
             self.werNoFiller = werNoFiller
             self.attribution = attribution
             self.der = der
             self.repeatedNgrams = repeatedNgrams
+            self.tcpWer = tcpWer
         }
 
         public init(from decoder: Decoder) throws {
@@ -51,6 +72,7 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
             attribution = try container.decode(Double.self, forKey: .attribution)
             der = try container.decodeIfPresent(Double.self, forKey: .der)
             repeatedNgrams = try container.decodeIfPresent(Int.self, forKey: .repeatedNgrams) ?? 0
+            tcpWer = try container.decodeIfPresent(Double.self, forKey: .tcpWer)
         }
     }
 
@@ -79,13 +101,22 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
     /// more of them than its entry records, and a case with no entry, or an
     /// entry recording none, may produce none at all. Two cases carry a nonzero
     /// budget until the chunk-seam work that removes them lands.
-    public func regressions(key: String, score: BenchScore) -> [String] {
+    /// With `requireEntry`, a case that has no entry at all is itself a
+    /// failure: a suite gated this way cannot silently regress on a case
+    /// nobody recorded. Off by default so an exploratory run over a new suite
+    /// still reports rather than aborts.
+    public func regressions(
+        key: String, score: BenchScore, requireEntry: Bool = false
+    ) -> [String] {
         var broken: [String] = []
         let budget = entries[key]?.repeatedNgrams ?? 0
         if score.repeatedNgrams > budget {
             broken.append("\(score.repeatedNgrams) repeated 8-grams against \(budget)")
         }
-        guard let baseline = entries[key] else { return broken }
+        guard let baseline = entries[key] else {
+            if requireEntry { broken.append("no baseline entry for \(key)") }
+            return broken
+        }
         let werDrift = (score.werNoFiller - baseline.werNoFiller) * 100
         if werDrift > tolerances.wer {
             broken.append(String(
@@ -102,6 +133,13 @@ public struct BenchBaselines: Codable, Sendable, Equatable {
         }
         if let baselineDer = baseline.der, let der = score.der, (der - baselineDer) * 100 > tolerances.der {
             broken.append(String(format: "DER %.1f%% against %.1f%%", der * 100, baselineDer * 100))
+        }
+        if let baselineTcp = baseline.tcpWer, let tcp = score.tcpWer,
+            (tcp - baselineTcp) * 100 > tolerances.tcpWer
+        {
+            broken.append(String(
+                format: "tcpWER %.1f%% against %.1f%%", tcp * 100, baselineTcp * 100
+            ))
         }
         return broken
     }

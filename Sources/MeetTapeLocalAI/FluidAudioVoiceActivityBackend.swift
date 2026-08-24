@@ -5,8 +5,8 @@ import MeetTapeCore
 /// Silero VAD behind the voice activity protocol.
 ///
 /// Reads one track once and reports a speech probability every 256 ms. Fast
-/// enough not to register beside a transcription pass: a 30-minute track takes
-/// a second or two.
+/// enough not to register beside a transcription pass: a 29-minute meeting took
+/// under two seconds to measure, both tracks included.
 public struct FluidAudioVoiceActivityBackend: VoiceActivityBackend {
     private let models: LocalModelManager
 
@@ -18,8 +18,8 @@ public struct FluidAudioVoiceActivityBackend: VoiceActivityBackend {
     public var sampleRate: Double { Double(VadManager.sampleRate) }
 
     public func probabilities(
-        samples: AsyncThrowingStream<[Float], any Error>
+        reading next: @escaping @Sendable () async throws -> [Float]?
     ) async throws -> VoiceActivityProfile {
-        try await models.detectVoiceActivity(samples: samples)
+        try await models.detectVoiceActivity(reading: next)
     }
 }

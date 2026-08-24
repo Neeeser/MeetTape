@@ -332,5 +332,126 @@ enum SpeechGateTests {
         ])
     }
 
-    static var all: [Suite] { [policySuite, evidenceSuite, assemblySuite] }
+    static var measurementSuite: Suite {
+        Suite("SpeechGate/measurement", [
+            test("each track's measurements are moved onto the meeting timeline") { expect in
+                // The two tracks do not start at the same instant, and the
+                // transcript segments this is compared against already carry
+                // their track's lead-in. A profile measured from each track's
+                // own zero would put the microphone and the far end twelve
+                // seconds out of step, and every level comparison would then be
+                // between two different moments.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(
+                    root: root, seconds: 6, remoteStartOffset: 12
+                )
+                let evidence = try await SpeechEvidenceBuilder.build(
+                    store: meeting.store, metadata: meeting.metadata,
+                    timeline: try meeting.store.readTimeline(), detector: nil
+                )
+
+                let floor = Int8(EmptyTranscriptPolicy.silenceFloorDBFS)
+                let leadInWindows = Int(12 / SpeechEvidenceBuilder.levelWindowSeconds)
+                expect.isTrue(
+                    evidence.micLevels.first.map { $0 > floor } ?? false,
+                    "the earlier track's tone starts at the timeline's zero"
+                )
+                expect.equal(
+                    Array(evidence.remoteLevels.prefix(leadInWindows)),
+                    Array(repeating: floor, count: leadInWindows),
+                    "the later track reads as nothing until it started"
+                )
+                expect.isTrue(
+                    evidence.remoteLevels.count > leadInWindows,
+                    "and its own audio follows the padding"
+                )
+                expect.isTrue(
+                    evidence.remoteLevels[leadInWindows] > floor,
+                    "the far end's tone begins at second twelve"
+                )
+                expect.isTrue(evidence.micSpeech.isEmpty, "no detector, no readings")
+                expect.isTrue(evidence.detector == nil)
+            },
+
+            test("a far end that stopped recording first leaves the rest to the detector") { expect in
+                // The process tap delivers nothing while the application is
+                // idle, so the far end's track can end while the microphone is
+                // still recording. There is no evidence about the far end after
+                // that, and inventing some would be the guard deciding on a
+                // measurement nobody made.
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: [Int8](repeating: -20, count: 400),
+                    remoteLevels: [Int8](repeating: -18, count: 40),
+                    micSpeech: [Int8](repeating: 95, count: 400), detector: "silero"
+                )
+                let during = try expect.unwrap(evidence.reading(from: 2, to: 3))
+                expect.isTrue(during.loudestFarDB != nil, "compared while both tracks ran")
+                expect.equal(
+                    LocalSpeechPolicy.decide(text: "so that is the plan", reading: during),
+                    .notSpoken,
+                    "quieter than the far end, so not the user"
+                )
+
+                let after = try expect.unwrap(evidence.reading(from: 40, to: 41))
+                expect.isTrue(after.loudestFarDB == nil, "nothing to compare against")
+                expect.equal(
+                    LocalSpeechPolicy.decide(text: "so that is the plan", reading: after),
+                    .spoken,
+                    "the detector decides alone rather than the clause deciding silently"
+                )
+            },
+
+            test("a meeting is measured once, and only where the gate can use it") { expect in
+                // Re-measuring decodes both tracks again on every re-analysis,
+                // and on a machine whose detector has since been deleted it
+                // would put the fabricated lines back. An imported recording's
+                // microphone holds everybody, so it never reaches the gate.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root)
+                let backend = FakeAIBackend()
+                backend.transcriptionSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "I think we change retrieval.", speaker: nil),
+                ]
+                backend.diarizationSegments = [
+                    RawTranscriptSegment(start: 0, end: 2, text: "Chris here, agreed.", speaker: "A"),
+                ]
+                let pipeline = PipelineTests.makePipeline(
+                    repository: meeting.repository, backend: backend
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+                let written = try expect.unwrap(meeting.store.readSpeechEvidence())
+                expect.isTrue(!written.micLevels.isEmpty, "a call is measured")
+
+                // A rebuild reads the file rather than measuring again: the
+                // levels it assembles against are the ones already on disk.
+                let stamp = try FileManager.default.attributesOfItem(
+                    atPath: meeting.store.layout.speechEvidence.path
+                )[.modificationDate] as? Date
+                try await pipeline.rebuildTranscript(meetingID: meeting.metadata.id)
+                let after = try FileManager.default.attributesOfItem(
+                    atPath: meeting.store.layout.speechEvidence.path
+                )[.modificationDate] as? Date
+                expect.equal(after, stamp, "the rebuild rewrote nothing")
+
+                let importedRoot = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: importedRoot) }
+                let imported = try PipelineTests.makeRecordedMeeting(
+                    root: importedRoot, source: .imported
+                )
+                let importedPipeline = PipelineTests.makePipeline(
+                    repository: imported.repository, backend: backend
+                )
+                await importedPipeline.process(meetingID: imported.metadata.id)
+                expect.isTrue(
+                    imported.store.readSpeechEvidence() == nil,
+                    "an imported recording is never measured"
+                )
+            },
+        ])
+    }
+
+    static var all: [Suite] { [policySuite, evidenceSuite, assemblySuite, measurementSuite] }
 }

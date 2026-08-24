@@ -370,11 +370,18 @@ public actor LocalModelManager {
     /// For the work that happens because voice memory is on rather than because
     /// the user chose a local backend. A cloud-only configuration must not
     /// discover, mid-meeting, that it is fetching gigabytes nobody asked for.
-    public func ensureInstalled() async throws {
+    ///
+    /// - Parameter units: what the caller actually needs, defaulting to the
+    ///   whole required set. Voice memory names the diarizer, because judging
+    ///   it against everything meant that adding any new unit to the required
+    ///   set turned voice memory off on every machine already installed: the
+    ///   receipt for the new unit is missing, this throws, and the caller reads
+    ///   that as "no models" for work the new unit has nothing to do with.
+    public func ensureInstalled(units: Set<LocalModelUnit>? = nil) async throws {
         if let installTask {
             _ = try await installTask.value
         }
-        let missing = required.filter { unit in
+        let missing = (units ?? required).filter { unit in
             !Self.filesPresent(unit, locations: locations, receipt: receipts[unit])
         }
         guard missing.isEmpty else { throw LocalModelError.notInstalled }
@@ -521,11 +528,11 @@ public actor LocalModelManager {
     /// matters: it takes seconds where a transcription pass takes minutes. It
     /// is here because the actor owns the loaded model.
     ///
-    /// The samples arrive as a stream and are re-blocked to the model's window
-    /// here, because a track is read once from disk and never held whole: two
-    /// hours at 16 kHz float32 is over 400 MB.
+    /// The samples are pulled a block at a time and re-blocked to the model's
+    /// window here, so the read never runs ahead of the model and the track is
+    /// never held whole: two hours at 16 kHz float32 is over 400 MB.
     func detectVoiceActivity(
-        samples: AsyncThrowingStream<[Float], any Error>
+        reading next: @escaping @Sendable () async throws -> [Float]?
     ) async throws -> VoiceActivityProfile {
         let manager = try await loadedVoiceActivity()
         let window = VadManager.chunkSize
@@ -534,7 +541,7 @@ public actor LocalModelManager {
         pending.reserveCapacity(window * 2)
         var values: [Float] = []
 
-        for try await block in samples {
+        while let block = try await next() {
             pending.append(contentsOf: block)
             while pending.count >= window {
                 let result = try await manager.processStreamingChunk(

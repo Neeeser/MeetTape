@@ -59,7 +59,18 @@ enum GateCommand {
                 let start = chunk.timelineOffset + segment.start
                 let end = chunk.timelineOffset + segment.end
                 let text = segment.text.trimmingCharacters(in: .whitespaces)
-                guard let reading = evidence.reading(from: start, to: end) else { continue }
+                // A segment the evidence does not cover is one the assembler
+                // keeps, so it is counted here as kept. Skipping it made the
+                // totals disagree with the transcript they are meant to explain.
+                guard let reading = evidence.reading(from: start, to: end) else {
+                    kept += 1
+                    print(String(
+                        format: "%9.2f %8.2f  %6@ %6@ %6@  %6@  %-7@  %@",
+                        start, end, "-" as NSString, "-" as NSString, "-" as NSString,
+                        "-" as NSString, "keep" as NSString, String(text.prefix(60))
+                    ))
+                    continue
+                }
                 let decision = LocalSpeechPolicy.decide(text: text, reading: reading)
                 if decision == .spoken { kept += 1 } else { dropped += 1 }
                 print(String(

@@ -37,14 +37,14 @@ public struct SpeechReading: Sendable, Equatable {
 ///
 /// A speech model handed a microphone track that is mostly not speech invents
 /// filler for the parts that are not, and the invention is billed, recorded and
-/// assembled like any other answer. Measured over five meetings on disk, 179 of
-/// 222 segments on the local user's track were words nobody said. One 29-minute
-/// meeting held 36 fabrications after the user's last real sentence at 4:11,
-/// among them "We'll be right back.", "Thanks for watching!" and "Good
-/// evening.", which is caption boilerplate from the model's training data. A
-/// second meeting's whole local track was 125 consecutive segments reading
-/// " ♪". A third produced "Thank you." six times and "Terima kasih." once for a
-/// user who never spoke.
+/// assembled like any other answer. Over four meetings on disk, labelled by
+/// hand, 181 of the 222 segments on the local user's track were words nobody
+/// said. One 29-minute meeting held 37 of them after the user's last real
+/// sentence at 4:11, among them "We'll be right back.", "Thanks for watching!"
+/// and "Good evening.", which is caption boilerplate from the model's training
+/// data. A second meeting's whole local track was 125 consecutive segments
+/// reading " ♪". A third produced "Thank you." six times and "Terima kasih."
+/// once for a user who never spoke.
 ///
 /// Every existing guard is blind to it. `EmptyTranscriptPolicy` asks whether the
 /// response was empty and it was not. `DegenerateTranscriptPolicy` asks whether
@@ -60,14 +60,15 @@ public struct SpeechReading: Sendable, Equatable {
 /// louder than the far end, which is what leakage fails. Leakage is the case
 /// the detector cannot judge, because the far end coming back through the
 /// speakers into the microphone is speech and the detector correctly says so:
-/// on its own the detector removed 80 of 179 fabrications, worse than the level
+/// on its own the detector removed 80 of those 181, worse than the level
 /// comparison alone.
 ///
-/// Together the three keep 39 of 41 genuine segments and remove 178 of 179
-/// invented ones. The two genuine losses are backchannels said while the far end
-/// was talking, "yeah" and "Yeah.", where the microphone really does hold more
-/// of the far end than of the user. That is the side to be wrong on: a
-/// fabricated sentence attributed to the user is worse than a missing "yeah".
+/// Together, run with the shipping model over the same four meetings, the three
+/// remove 178 of the 181 invented segments and keep 39 of the 41 genuine ones.
+/// Both genuine losses are backchannels said while the far end was talking,
+/// "yeah" and "Yeah.", where the microphone really does hold more of the far
+/// end than of the user. That is the side to be wrong on: a fabricated sentence
+/// attributed to the user is worse than a missing "yeah".
 public enum LocalSpeechPolicy {
     /// The detector reading a span needs to reach somewhere inside it.
     ///
@@ -78,13 +79,13 @@ public enum LocalSpeechPolicy {
     /// the conventional value.
     public static let speechProbability = 0.5
 
-    /// How far the local track's loudest window must sit above the far end's
-    /// over most of the span for the segment to survive on sustained level
-    /// alone.
+    /// How far the microphone must sit above the far end through the middle of
+    /// the span, measured as the median of the per-window differences, for the
+    /// segment to survive on that alone.
     ///
     /// The two clauses catch different shapes. A short word spoken over the far
-    /// end wins on its peak; a long turn during which the far end is quiet most
-    /// of the time wins on the median. Ten decibels is where the genuine
+    /// end wins on its loudest window; a turn during which the far end is quiet
+    /// most of the time wins on the median. Ten decibels is where the genuine
     /// segments sit: 21 of 25 in the meeting that was audited read 22 dB or
     /// more, and every fabrication reads at most 1 dB.
     public static let sustainedMarginDB = 10.0
@@ -108,8 +109,11 @@ public enum LocalSpeechPolicy {
         if let probability = reading.speechProbability, probability < speechProbability {
             return .notSpoken
         }
-        // One track, so there is no far end to be quieter than. Imported audio
-        // and a meeting recorded without a tap both land here.
+        // One track, so there is no far end to be quieter than. A recording
+        // whose process tap produced nothing lands here, and so does the tail
+        // of a meeting whose tap stopped before the microphone did. Imported
+        // and in-person audio never reaches the gate at all: the microphone
+        // there holds everybody, so it is not the local user's track.
         guard let far = reading.loudestFarDB, let median = reading.medianDifferenceDB else {
             return .spoken
         }

@@ -25,9 +25,31 @@ The reference data `meettape-eval bench` scores against.
 | `ami-single` | ES2002b | AMI | 12% | One real case, for checking a harness change end to end. It downloads a 73 MB recording |
 | `ami-overlap` | 6 | AMI | 38 to 46% | Four people talking over each other, on meetings `ami-core` does not touch |
 | `icsi` | 4 | ICSI | 28 to 39% | The same, with six to nine people in the room, which is what stresses speaker counting |
+| `notsofar` | 5 | NOTSOFAR-1 | 4 to 46% | Real unscripted 2023 office meetings, whole sessions, spanning no-overlap to debate. The one corpus recorded this decade, and in no candidate's training data |
+| `deciding` | 14 | AMI + ICSI + NOTSOFAR | 4 to 46% | The only suite that may rank one engine against another. Held-out and uncontaminated meetings alone; see the partition section |
 
 `ami-excerpts`, `ami-long` and `ami-single` are subsets of `ami-core`.
 `ami-overlap` and `icsi` share no meeting with it.
+
+## Which suites may rank engines
+
+Parakeet TDT v3's model card lists AMI among its training corpora (NeMo ASR
+Set 3.0), and Canary's oversamples it. Against AMI's published
+full-corpus-ASR split, nine of the fourteen `ami-core` meetings are training
+meetings: ES2002a-d, ES2003a, ES2005a, ES2008b, TS3005a and TS3009c, with
+IS1008a in dev, IS1009a/c and EN2002a-d held out for evaluation, and IB4005
+excluded from the split for sharing speakers across sets. Four of the six
+`ami-overlap` meetings are training meetings too. ICSI appears in no
+candidate's published training list.
+
+`manifest.json` records each meeting's side of that line in `partition`
+(`ami-train`, `ami-dev`, `ami-eval`, `excluded`, `clean`), and a test holds
+the `deciding` suite to `ami-eval` and `clean` members only. The consequence
+for reading results: a suite containing training-partition meetings measures
+this pipeline against itself, where the contamination sits on both sides of
+the comparison, and must not be used to rank one engine against another. The
+2026-08-23 deciding run predates this split and its 14-of-14 margin over
+Cohere is part-memorization; the `deciding` suite is what replaces it.
 
 `ami-single` was called `ami-smoke` and was renamed because it shares no
 property with a smoke test: it needs the network, the annotations and about
@@ -63,6 +85,11 @@ scripts/eval.sh bench --suite ami-core --engine parakeet --diarizer local \
   baseline built from an `--out` file written under repeats records the mean of
   the runs and the worst of their repeated 8-gram counts, which is what the
   gate will compare against.
+- `--resume` re-reads `--out` and runs only the case-engine-diarizer-run
+  tuples it does not already hold. The file is rewritten after every case, so
+  a killed session loses at most the case in flight, and a multi-hour engine
+  is relaunched with the same command instead of re-paid. Recorded rows still
+  feed the mean the gate compares.
 - `--keep-scratch` writes each run's meeting folder beside `--out`, or into
   `bench-scratch/` when there is no `--out`, named `<case>-<engine>-<diarizer>`
   and `-runN` under repeats,
@@ -87,6 +114,23 @@ records:
 
 The `ami-core` windows overlap 3 to 31%, median 12%, so the two new suites move
 the measurement into speech the old roster barely held.
+
+The `notsofar` cases are whole sessions, chosen across the corpus's overlap
+range so the suite brackets a real call from both sides:
+
+| Case | Whole session | Overlap | Speakers | Words | Corpus tag |
+|---|---|---|---|---|---|
+| MTG_32046 | 356 s | 3.9% | 5 | 1007 | #TurnsNoOverlap |
+| MTG_32000 | 360 s | 23.3% | 4 | 1458 | #NaturalMeeting |
+| MTG_32052 | 358 s | 37.7% | 5 | 1583 | #NaturalMeeting |
+| MTG_32102 | 473 s | 39.8% | 7 | 2119 | #TalkNearWhiteboard |
+| MTG_32093 | 353 s | 46.1% | 5 | 1766 | #DebateOverlaps |
+
+The audio is the corpus's own single-channel device (`sc_meetup_0/ch0.wav`), a
+real far-field recorder with its own processing, so the condition is harder
+than a headset mix and different from it: robustness, not parity. Every word
+in the corpus's ground truth carries its own timing, so the reader
+interpolates nothing.
 
 ## A duplicated passage in Bsr001
 
@@ -123,7 +167,14 @@ AVFoundation; there is no ffmpeg dependency anywhere in the path.
 ```bash
 scripts/fetch-bench-audio.sh ami-overlap
 scripts/fetch-bench-audio.sh icsi
+scripts/fetch-bench-audio.sh notsofar
 ```
+
+NOTSOFAR downloads from the Hugging Face copy of the corpus at a pinned
+revision, so the URL cannot silently start serving different bytes, and the
+checksums verify it did not anyway. Each recording saves under
+`<meeting>.sc_meetup_0.wav` (the manifest's `audioFilename`), because the
+corpus publishes every device channel as `ch0.wav`.
 
 ## Regenerating the truth
 
@@ -142,6 +193,11 @@ python3 scripts/build-bench-truth.py --annotations "$AMI" \
     --overlap-rank 6 --all --exclude-suite ami-core
 python3 scripts/build-bench-truth.py --corpus icsi --annotations "$ICSI" \
     --overlap-rank 4 --all
+
+scripts/fetch-bench-audio.sh --annotations notsofar
+python3 scripts/build-bench-truth.py --corpus notsofar \
+    --annotations ~/Library/Caches/meettape-bench \
+    --whole MTG_32046 MTG_32000 MTG_32052 MTG_32102 MTG_32093
 ```
 
 The generator reads the annotation archive alone: no audio, no ffmpeg. Window
@@ -214,8 +270,10 @@ the existing tolerances over.
 ## What a baseline check enforces
 
 Pass `--baseline Benchmarks/baselines.json` and each case is compared against
-its entry. A case with no entry is still run and still reported; it just has
-nothing to compare against.
+its entry. A case with no entry fails the run: a gate with a hole in it is
+not a gate, and a suite could otherwise regress on a case nobody recorded.
+`--allow-missing-baseline` restores the old behaviour for exploratory runs
+over suites whose baselines do not exist yet.
 
 - `werNoFiller` may rise by 1.5 points, attribution may fall by 1.0, DER may
   rise by 2.0. The tolerances are absolute percentage points, sized to absorb
@@ -236,6 +294,30 @@ Under `--repeats N` the comparison reads the mean of the runs, and the repeated
 backend: an alignment refusal happens or does not, and one case was observed
 moving 6.6 points of WER between two runs of identical code, against a
 tolerance of 1.5.
+
+## Per-speaker word error: cpWER and tcpWER
+
+`cpWer` concatenates each speaker's words on both sides, pairs hypothesis
+keys with reference speakers by whichever one-to-one assignment costs the
+fewest edits, and divides total edits by total reference words. `tcpWer` is
+the same under a time constraint: a word only matches within five seconds of
+when it was said, the collar the CHiME challenges score with.
+
+These are the numbers that score overlapped speech at all. The serialized
+`wer` interleaves simultaneous speakers into one stream and pays an ordering
+floor for it, and `attribution` declines to ask about words spoken across
+another turn, which is 22.7% of the suite. Per speaker there is no
+interleaving and no exclusion: a talked-over word nobody transcribed is a
+deletion, and a word on the wrong voice is charged on both streams. tcpWER is
+therefore the headline number on `ami-overlap`, `icsi` and `deciding`, and
+what it says is strict about splitting: a voice cut into two clusters pays
+for every word the leftover cluster holds, the same basis as `attribution`
+and `derStrict`.
+
+The Swift implementation is validated against MeetEval, the reference the
+CHiME challenges use: `scripts/check-scorer-against-meeteval.py` converts a
+`--keep-scratch` run to SegLST and compares, and both metrics agreed to four
+decimals on the smoke fixture and on ES2002b (cpWER 0.2014, tcpWER 0.2077).
 
 ## How to read a number
 
@@ -311,6 +393,16 @@ Creative Commons Attribution 4.0 International licence (CC BY 4.0,
 https://creativecommons.org/licenses/by/4.0/). The word texts, timings and
 speaker identifiers in `ground-truth/` are taken from that corpus. See
 https://groups.inf.ed.ac.uk/ami/corpus/ for the corpus and its citation.
+
+The `notsofar` ground truth is derived from the NOTSOFAR-1 corpus
+(Microsoft), `240825.1_eval_full_with_GT`, fetched from the Hugging Face
+distribution at a pinned revision and published under CC BY 4.0 (the
+repository's DATA_LICENSE). See https://huggingface.co/datasets/microsoft/NOTSOFAR
+and the NOTSOFAR-1 paper (arXiv:2401.08887) for the corpus and its citation.
+Word texts, timings and speaker aliases in `ground-truth/MTG_*.json` are taken
+from its `gt_transcription.json` files; annotation markers (`<FILL/>`, name
+delimiters and the like) are standalone tokens there and are dropped as
+events rather than words.
 
 The `icsi` ground truth is derived from the ICSI Meeting Corpus core NXT
 annotations (`ICSI_core_NXT.zip`, v1.0), distributed by the University of

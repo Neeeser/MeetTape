@@ -87,7 +87,9 @@ case "$ROUND" in
         # Reference rows, not candidates: what money buys, next to what the
         # local engines deliver. One repeat; cloud decoding does not vary the
         # way a Neural Engine decode does, and repeats triple the bill.
-        bench --suite deciding --engine gpt-transcribe --engine whisper-1 \
+        # whisper-1 left the offered list, so it parses only in the explicit
+        # cloud form.
+        bench --suite deciding --engine gpt-transcribe --engine cloud:whisper-1 \
             --diarizer "$DIARIZER" --out "$DIR/finals-cloud-$DIARIZER.json"
         bench --suite deciding --engine gpt-4o-transcribe-diarize --diarizer cloud \
             --out "$DIR/finals-cloud-combined.json"

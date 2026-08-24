@@ -119,15 +119,17 @@ enum LocalConfigurationTests {
             },
 
             test("attributed runs become words that keep the aligner's conventions") { expect in
-                // The assembler concatenates word texts verbatim, so every
-                // word carries a leading space; a run's words split its span
-                // evenly, and a run the recognizer left untimed rides the
-                // previous edge rather than inventing a time.
+                // Aligned word texts are bare tokens: `segments` adds the
+                // assembler's leading space itself, so a token that arrives
+                // with one renders every gap as a double space. A run's words
+                // split its span evenly, and a run the recognizer left
+                // untimed rides the previous edge rather than inventing a
+                // time.
                 let words = AppleSpeechTranscriptionBackend.words(from: [
                     (text: "Hello there ", start: 0, end: 2),
                     (text: "world", start: 2, end: 3),
                 ])
-                expect.equal(words.map(\.text), [" Hello", " there", " world"])
+                expect.equal(words.map(\.text), ["Hello", "there", "world"])
                 expect.close(words[0].start, 0, tolerance: 0.0001)
                 expect.close(words[0].end, 1, tolerance: 0.0001)
                 expect.close(words[1].start, 1, tolerance: 0.0001)

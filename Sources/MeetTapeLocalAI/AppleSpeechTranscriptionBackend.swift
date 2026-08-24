@@ -45,9 +45,10 @@ public struct AppleSpeechTranscriptionBackend: TranscriptionBackend {
     }
 
     /// Attributed-run spans as aligned words: each run's tokens split its span
-    /// evenly, every word text carries the assembler's leading space, and a
-    /// run the recognizer left untimed rides the previous word's end rather
-    /// than inventing a time.
+    /// evenly, and a run the recognizer left untimed rides the previous
+    /// word's end rather than inventing a time. Tokens stay bare: `segments`
+    /// adds the assembler's leading space itself, and a token arriving with
+    /// one rendered every gap as a double space.
     public static func words(
         from runs: [(text: String, start: Double?, end: Double?)]
     ) -> [CtcForcedAlignment.AlignedWord] {
@@ -62,7 +63,7 @@ public struct AppleSpeechTranscriptionBackend: TranscriptionBackend {
             for (index, token) in tokens.enumerated() {
                 let wordStart = start + Double(index) * width
                 out.append(CtcForcedAlignment.AlignedWord(
-                    text: " " + token, start: wordStart, end: wordStart + width
+                    text: token, start: wordStart, end: wordStart + width
                 ))
             }
             reach = max(reach, end)

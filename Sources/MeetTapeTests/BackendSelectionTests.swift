@@ -63,6 +63,43 @@ enum BackendSelectionTests {
                 expect.isTrue(settings.processing.speakers.learnFromCorrections)
             },
 
+            test("speakers follow the words: settings carry one knob, not two") { expect in
+                // Two cloud rows named gpt-4o made the screen read as a
+                // contradiction, and the only reason to pay for that model is
+                // to let it do both jobs. Saving settings derives diarization:
+                // cloud exactly when the chosen cloud model is the diarize
+                // model, local for everything else, including a cloud text
+                // model, whose speakers the local clusterer identifies.
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.models.transcription = "gpt-4o-transcribe-diarize"
+                settings.processing.diarization = .local
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .openAI,
+                    "the diarize model does both jobs in one request"
+                )
+
+                settings.models.transcription = "gpt-transcribe"
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .local,
+                    "a cloud text model gets local speakers"
+                )
+
+                settings.models.transcription = "my-finetune"
+                settings.coupleDiarization()
+                expect.equal(settings.processing.diarization, .local, "a custom model too")
+
+                settings.processing.transcription = .local
+                settings.processing.diarization = .openAI
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .local,
+                    "local words never pay for cloud speakers"
+                )
+            },
+
             test("transcription and diarization are chosen independently") { expect in
                 var settings = AppSettings()
                 settings.processing.diarization = .openAI

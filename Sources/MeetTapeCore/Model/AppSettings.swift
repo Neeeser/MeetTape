@@ -230,6 +230,14 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
 
     public var usesLocalTranscription: Bool { transcription == .local }
     public var usesLocalDiarization: Bool { diarization == .local }
+
+    /// Whether this transcription configuration also names the speakers:
+    /// cloud, with a model whose one request labels both.
+    public static func transcriptionCoversDiarization(
+        transcription: ProcessingBackendChoice, model: String
+    ) -> Bool {
+        transcription == .openAI && AIModelSettings.diarizationChoices.contains(model)
+    }
     /// True when nothing in the transcript path needs an API key.
     public var isFullyLocal: Bool { usesLocalTranscription && usesLocalDiarization }
 
@@ -459,5 +467,25 @@ public struct SettingsStore: Sendable {
 
     public func save(_ settings: AppSettings) throws {
         try AtomicFile.write(try ArchiveCoding.encode(settings), to: url)
+    }
+}
+
+extension AppSettings {
+    /// Derives diarization from the transcription choice.
+    ///
+    /// Settings show one knob: pick the diarize model and it does both jobs
+    /// in its one request; pick anything else, a local engine, a cloud text
+    /// model, a custom identifier, and the local clusterer names the
+    /// speakers, which the 2026-08-24 deciding run measured as the stronger
+    /// diarizer anyway. The stored field survives for the pipeline and the
+    /// bench, which still exercise the combinations directly; this runs when
+    /// settings are saved, so a stale pairing normalizes on the next change.
+    public mutating func coupleDiarization() {
+        processing.diarization = ProcessingSettings.transcriptionCoversDiarization(
+            transcription: processing.transcription, model: models.transcription
+        ) ? .openAI : .local
+        if processing.diarization == .openAI {
+            models.diarization = models.transcription
+        }
     }
 }

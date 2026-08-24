@@ -27,13 +27,13 @@ struct ProcessingSettingsTab: View {
                 }
             }
             Section("Diarization") {
-                backendPicker(keyPath: \.diarization)
-                if !runtime.settings.processing.usesLocalDiarization {
-                    cloudDiarizationRow
-                }
                 Text(
-                    "Who spoke when. Chosen separately from transcription: either one can "
-                        + "run in the cloud without the other."
+                    runtime.settings.processing.usesLocalDiarization
+                        ? "Who spoke when, identified on this Mac. The voice models "
+                            + "follow the transcription choice above."
+                        : "Who spoke when, labelled by "
+                            + "\(runtime.settings.models.diarization) in the same request "
+                            + "as the words."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -151,37 +151,6 @@ struct ProcessingSettingsTab: View {
             Text(blurb).font(.caption).foregroundStyle(.secondary)
         }
         .tag(id)
-    }
-
-    private var cloudDiarizationRow: some View {
-        let current = runtime.settings.models.diarization
-        let isPreset = AIModelSettings.diarizationChoices.contains(current)
-        return VStack(alignment: .leading, spacing: 6) {
-            Picker("Model", selection: Binding(
-                get: { isPreset ? current : Self.customModelTag },
-                set: { newValue in
-                    var settings = runtime.settings
-                    settings.models.diarization =
-                        newValue == Self.customModelTag ? "" : newValue
-                    runtime.update(settings: settings)
-                }
-            )) {
-                Text("gpt-4o-transcribe-diarize").tag("gpt-4o-transcribe-diarize")
-                Text("Custom…").tag(Self.customModelTag)
-            }
-            .pickerStyle(.radioGroup)
-            if !isPreset {
-                TextField("model identifier", text: Binding(
-                    get: { runtime.settings.models.diarization },
-                    set: { newValue in
-                        var settings = runtime.settings
-                        settings.models.diarization = newValue
-                        runtime.update(settings: settings)
-                    }
-                ))
-                .frame(width: 280)
-            }
-        }
     }
 
     /// Everything installed or needed, with the one control set that changes it.

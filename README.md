@@ -1,13 +1,15 @@
-# MeetTape
+![Pipit meeting recorder](Assets/Pipit/README/pipit-readme-hero.png)
 
-MeetTape is a macOS menu-bar application that records meetings automatically. It
+# Pipit
+
+Pipit is a macOS menu-bar application that records meetings automatically. It
 detects Slack Huddles and Google Meet and Zoom calls in the browser, records the
 microphone and the meeting audio as two separate streams, transcribes them and
 works out who spoke when on this Mac, and writes the results to ordinary files on
 disk.
 
 Transcription and speaker identification run on device by default and need no API
-key. MeetTape also remembers voices: a person you name once is recognized in
+key. Pipit also remembers voices: a person you name once is recognized in
 later meetings, and a voice that recurs without a name is remembered as one until
 you name it. Voice profiles never leave the machine.
 
@@ -69,7 +71,7 @@ Settings carry one processing knob. Speaker separation follows the
 transcription choice: local for every engine except `gpt-4o-transcribe-diarize`,
 whose one request also labels the speakers. Neither is tied to enrichment, and
 selecting OpenAI does not move voice profiles off the machine: a cloud diarizer
-returns speaker labels and no vectors, so MeetTape extracts them locally over
+returns speaker labels and no vectors, so Pipit extracts them locally over
 the intervals it reported.
 
 On a 65-minute meeting the whole local pipeline took 4.5 minutes on an M2 Pro,
@@ -92,7 +94,7 @@ aligned for text-only models.
 
 ### How the engines measured
 
-Every offering decision above comes from `meettape-eval bench` runs of the real
+Every offering decision above comes from `pipit-eval bench` runs of the real
 pipeline over the `deciding` suite: 14 meetings from AMI's held-out evaluation
 partition, ICSI and NOTSOFAR-1, none of them in any local candidate's training
 data, spanning 4% to 46% overlapped speech. Medians below; per-speaker tcpWER
@@ -119,7 +121,7 @@ The suites, checksums and scoring rules live in `Benchmarks/`.
 
 ## Speaker recognition
 
-Each speaker MeetTape separates out is matched against the voices it holds. A
+Each speaker Pipit separates out is matched against the voices it holds. A
 match needs three things at once: a similarity of at least 0.70, a clear margin
 over the next-best candidate, and at least 45 seconds of that person's speech in
 the meeting. The margin is not optional. Over a gallery of 326 verified-distinct
@@ -187,15 +189,15 @@ one addresses a failure that was observed on real hardware:
 ## Architecture
 
 ```
-MeetTapeCore          pure logic: manifest, timeline, recovery policy, session
+PipitCore          pure logic: manifest, timeline, recovery policy, session
                       lifecycle, chunk planning, transcript assembly, storage
-MeetTapeAudio         AVAudioEngine, CoreAudio process taps, segment writing,
+PipitAudio         AVAudioEngine, CoreAudio process taps, segment writing,
                       pre-roll, import, mixdown
-MeetTapeDetection     accessibility, window titles, audio process observation,
+PipitDetection     accessibility, window titles, audio process observation,
                       the browser sensor socket
-MeetTapeIntegrations  OpenAI, Keychain, EventKit, notifications, permissions
-MeetTapeServices      runtime wiring and the processing pipeline
-MeetTapeUI            menu bar, onboarding, settings, meeting review
+PipitIntegrations  OpenAI, Keychain, EventKit, notifications, permissions
+PipitServices      runtime wiring and the processing pipeline
+PipitUI            menu bar, onboarding, settings, meeting review
 ```
 
 Detection code produces evidence about what is happening on the machine.
@@ -217,12 +219,12 @@ Requirements: macOS 15 or later and a Swift 6 toolchain. Xcode is not required;
 the project builds with Command Line Tools.
 
 ```bash
-git clone https://github.com/Neeeser/MeetTape.git
-cd MeetTape
+git clone https://github.com/Neeeser/Pipit.git
+cd Pipit
 ./scripts/build.sh          # debug build
 ./scripts/test.sh           # the whole suite
-./scripts/bundle-app.sh     # assembles dist/MeetTape.app, ad-hoc signed
-open dist/MeetTape.app
+./scripts/bundle-app.sh     # assembles dist/Pipit.app, ad-hoc signed
+open dist/Pipit.app
 ```
 
 Always build through the scripts. They source `scripts/spm-env.sh`, which
@@ -231,7 +233,7 @@ dependencies linking, and exports flags a bare `swift build` would miss.
 `scripts/eval.sh` is a developer tool for checking the local stack's measured
 numbers against real audio; see [CLAUDE.md](CLAUDE.md).
 
-Tests run as a plain executable (`meettape-test`) instead of through `swift
+Tests run as a plain executable (`pipit-test`) instead of through `swift
 test`, because XCTest and swift-testing ship with Xcode and this project is built
 to work without it.
 
@@ -260,10 +262,10 @@ tabs that were already open, so reload any Meet or Zoom tab afterwards.
 
 The extension communicates with a compiled native messaging host. Browsers spawn
 hosts with a minimal `PATH`, so a script with an interpreter shebang fails to
-launch. MeetTape installs the host binary and its manifest at startup.
+launch. Pipit installs the host binary and its manifest at startup.
 
 The application accepts a socket connection only from its own relay binary when
-that binary was launched by a browser. MeetTape holds the microphone grant, so a
+that binary was launched by a browser. Pipit holds the microphone grant, so a
 process able to send a fabricated meeting event could record audio without
 triggering a permission prompt of its own. Refused connections are logged with a
 reason and shown in Settings under Permissions.
@@ -285,7 +287,7 @@ has no access.
 
 ## OpenAI configuration
 
-Optional. With no key at all MeetTape records, transcribes, separates speakers
+Optional. With no key at all Pipit records, transcribes, separates speakers
 and recognizes voices; what a key adds is titles, descriptions, summaries, notes
 and textual speaker suggestions, plus the option of running transcription or
 speaker separation in the cloud instead of locally.
@@ -308,15 +310,15 @@ Model identifiers are settings rather than constants:
   hand. Metadata requests run at low reasoning effort, because titles, summaries
   and speaker mapping are extraction rather than problem solving.
 
-Every enrichment step is optional. With all of them disabled, MeetTape still
+Every enrichment step is optional. With all of them disabled, Pipit still
 records and transcribes.
 
-Spend and usage are not readable through a project key, so MeetTape shows no
+Spend and usage are not readable through a project key, so Pipit shows no
 balance and links to the OpenAI dashboard.
 
 ## Where recordings are stored
 
-Recordings are written to `~/Documents/MeetTape/Meetings/YYYY/MM/<meeting>/`,
+Recordings are written to `~/Documents/Pipit/Meetings/YYYY/MM/<meeting>/`,
 which can be changed in Settings.
 
 The top level holds what a person opens directly; everything the application
@@ -361,7 +363,7 @@ the raw diarization. Re-analyzing speakers writes a new analysis alongside the
 old one rather than replacing it.
 
 Voice profiles are deliberately absent from this list. They live in
-`~/Library/Application Support/MeetTape/Speakers/voices.sqlite` and are never
+`~/Library/Application Support/Pipit/Speakers/voices.sqlite` and are never
 written into a meeting folder or an export.
 
 ## Privacy
@@ -369,7 +371,7 @@ written into a meeting folder or an export.
 By default no audio leaves the machine. Transcription, speaker separation and
 voice recognition all run locally. Audio is uploaded only if you select OpenAI
 for transcription or speaker separation in Settings; transcript text is uploaded
-only if you switch on titles, summaries or notes. There is no MeetTape account,
+only if you switch on titles, summaries or notes. There is no Pipit account,
 no telemetry and no analytics.
 
 Voice profiles are 256-number vectors derived from speech. They are not audio and
@@ -384,7 +386,7 @@ health states. Meeting titles, transcripts, notes, participant names and meeting
 URLs are treated as content and are never logged. The API key is stored in the
 keychain and is not written anywhere else on disk.
 
-Recordings remain readable after MeetTape is uninstalled.
+Recordings remain readable after Pipit is uninstalled.
 
 ## Verification status
 

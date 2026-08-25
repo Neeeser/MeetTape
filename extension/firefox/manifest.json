@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "MeetTape Sensor",
+  "name": "Pipit Sensor",
   "version": "1.0.0",
-  "description": "Reports Google Meet and Zoom meeting state to MeetTape so it records the right calls.",
+  "description": "Reports Google Meet and Zoom meeting state to Pipit so it records the right calls.",
   "permissions": [
     "nativeMessaging",
     "scripting",
@@ -30,7 +30,7 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "sensor@meettape.app",
+      "id": "sensor@pipit.app",
       "strict_min_version": "115.0"
     }
   }

@@ -1,4 +1,4 @@
-# MeetTape development notes
+# Pipit development notes
 
 Reference material for anyone working in this repository. Product behaviour is
 documented in the README; this file covers how to build, test and change the
@@ -9,7 +9,7 @@ code.
 ```bash
 ./scripts/build.sh [debug|release]   # canonical build
 ./scripts/test.sh [--filter X]       # canonical test run
-./scripts/bundle-app.sh [debug|release]   # assembles dist/MeetTape.app
+./scripts/bundle-app.sh [debug|release]   # assembles dist/Pipit.app
 ./scripts/check-offline.sh           # the suite must download no model
 cd extension && npm test             # browser sensor logic
 ```
@@ -19,7 +19,7 @@ two Command Line Tools defects and exports the flags a bare `swift build` would
 miss. Sourcing it from zsh fails: it reads `BASH_SOURCE`.
 
 `check-offline.sh` runs the ordinary suite and fails if a model fetch started.
-A test that builds a real `MeetTapeRuntime`, `SetupModel` or `LocalModelManager`
+A test that builds a real `PipitRuntime`, `SetupModel` or `LocalModelManager`
 can start an install from a detached Task: the runner neither waits for it nor
 reports it, so the only trace is FluidAudio's own log line and the bytes it
 leaves in the test's temporary directory. Run it after touching a test that
@@ -44,7 +44,7 @@ up:
   C-family target. FluidAudio has two, so `spm-env.sh` detects the stub and puts
   the SDK include path back in front through
   `-Xcxx -I$(xcrun --show-sdk-path)/usr/include/c++/v1`. The flags land in the
-  `MEETTAPE_SWIFT_FLAGS` array, which every caller of `swift build` in
+  `PIPIT_SWIFT_FLAGS` array, which every caller of `swift build` in
   `scripts/` forwards. A new build entry point must do the same.
 
 `scripts/spm-env.sh` also repairs a stale `PackageDescription.private.swiftinterface`
@@ -131,7 +131,7 @@ The thresholds live in `SpeakerResolutionPolicy.shipping`, the diarizer and
 decoder settings in `LocalDiarizationTuning`, `LocalTranscriptionTuning` and
 `LocalAlignmentTuning`, the speech gate in `LocalSpeechPolicy`, and
 `LocalConfigurationTests`, `SpeakerIdentityTests` and `SpeechGateTests` assert
-them. `meettape-eval gate --meeting DIR` measures one meeting folder and prints
+them. `pipit-eval gate --meeting DIR` measures one meeting folder and prints
 the three measures beside every segment on the local user's track with the
 verdict, which is how those numbers get checked again on real audio.
 `VoiceEvidenceTests` covers what a vector was derived from and what may be taken
@@ -150,7 +150,7 @@ now with a test:
   upsert and `SpeakerMap.applySuggestion` both enforce it, from opposite ends.
 - Work that happens because voice memory is on, rather than because the user
   chose a local backend, may wait for a model install but must never start one.
-- Long pipeline calls go through `MeetTapeRuntime.runProcessing`, not `enqueue`.
+- Long pipeline calls go through `PipitRuntime.runProcessing`, not `enqueue`.
   The `enqueue` chain carries capture lifecycle actions and is what quit waits
   on, so a multi-minute job on it stops the next meeting being recorded.
 
@@ -174,14 +174,14 @@ any of them changes verified behaviour. The numbers live in `CaptureThresholds`.
 | The browser extension can stop reporting without stopping a recording | Detection falls back to native signals, so a DOM change costs accuracy rather than the meeting |
 | Sensor evidence is combined with native evidence and never replaces it | If a provider renamed its leave button, replacing native evidence would take a live meeting from confirmed to nothing |
 | Detection reasserts a meeting on every poll | The session ends a recording whose evidence disappears, so a one-shot event would cut the call short |
-| Only MeetTape's own relay, launched by a browser, may use the sensor socket | The application holds the microphone grant, so a fabricated meeting event would produce a recording without a prompt |
+| Only Pipit's own relay, launched by a browser, may use the sensor socket | The application holds the microphone grant, so a fabricated meeting event would produce a recording without a prompt |
 | Content scripts are plain scripts and never ES modules | An `import` statement makes the whole script fail to load and the sensor silently never runs |
 | No file I/O, manifest write or device work on an audio callback | An `fsync` on a render thread drops the audio being recorded |
 | Every device build, teardown and poll runs on the capture control queue | Otherwise a poll-driven rebuild races a user-driven stop and leaves a live engine running |
 | Echo cancellation disables ducking and falls back to plain capture if the voice unit refuses to build | Default ducking quiets the meeting audio being recorded, and the unit rejects some input/output pairings (virtual outputs, AirPods input with built-in output) |
 
 Regression tests for these rules are in
-`Sources/MeetTapeTests/CaptureRecoveryTests.swift`, `DetectionTests.swift`,
+`Sources/PipitTests/CaptureRecoveryTests.swift`, `DetectionTests.swift`,
 `ManifestTests.swift` and `HardeningTests.swift`. A failure in one of them
 indicates a behavioural regression. The last two rules, about audio callbacks and
 the control queue, are structural: they are enforced by where the code lives
@@ -191,21 +191,21 @@ against real hardware and what has not.
 
 ## Architectural boundaries
 
-- `MeetTapeCore` imports only Foundation and holds every decision that can be
+- `PipitCore` imports only Foundation and holds every decision that can be
   made without I/O: recovery policy, session lifecycle, chunk planning,
   transcript assembly, manifest handling and storage layout. New logic belongs
   here by default.
 - Provider adapters emit evidence. They do not start, stop or own recordings.
   `SessionController` is the only component that decides lifecycle.
 - Transcription and diarization go through `TranscriptionBackend` and
-  `DiarizationBackend` in `MeetTapeCore`. Local and cloud implement the same
+  `DiarizationBackend` in `PipitCore`. Local and cloud implement the same
   protocols, chosen independently per meeting from settings, and neither is
   coupled to enrichment. Speaker memory is local in every configuration.
-- `MeetTapeSpeakers` owns every vector and knows nothing about what produced
+- `PipitSpeakers` owns every vector and knows nothing about what produced
   them. That is what lets a cloud diarizer's labels be embedded locally and
   resolved against the same store.
 - The coordinators (`MicrophoneRecoveryCoordinator`, `RemoteTapCoordinator`) hold
-  the recovery algorithms, and `MeetTapeAudio` supplies AVFoundation and
+  the recovery algorithms, and `PipitAudio` supplies AVFoundation and
   CoreAudio implementations behind `MicrophoneEngineController` and
   `ProcessTapController`. Tests drive the real algorithm through fakes instead of
   reimplementing it.
@@ -237,7 +237,7 @@ against real hardware and what has not.
   keeps holding what the assembler produced.
 - Re-analysing speakers appends a diarization run and marks it active. The
   previous one stays on disk.
-- `MeetTapeSpeakers` records what every stored vector was derived from, in
+- `PipitSpeakers` records what every stored vector was derived from, in
   coordinates the application never rewrites: a recording, a track and time
   spans on the meeting timeline. Cluster and analysis identifiers travel
   alongside as context for a reader and decide nothing. That is what makes
@@ -263,7 +263,7 @@ against real hardware and what has not.
 
 ## Logging
 
-`Log` in `MeetTapeCore` exposes one logger per subsystem. Log lines carry
+`Log` in `PipitCore` exposes one logger per subsystem. Log lines carry
 operational information only: identifiers, counts, durations, health states and
 error categories. Meeting titles, transcripts, notes, participant names and
 meeting URLs are content and are never logged. Errors are formatted through
@@ -275,9 +275,9 @@ Live tests are skipped unless explicitly enabled, so an ordinary run makes no AP
 calls:
 
 ```bash
-./scripts/make-live-fixture.sh /tmp/meettape-fixture   # local `say`, free
-MEETTAPE_LIVE_OPENAI=1 \
-MEETTAPE_LIVE_FIXTURE=/tmp/meettape-fixture \
+./scripts/make-live-fixture.sh /tmp/pipit-fixture   # local `say`, free
+PIPIT_LIVE_OPENAI=1 \
+PIPIT_LIVE_FIXTURE=/tmp/pipit-fixture \
 OPENAI_API_KEY=<your key> \
   ./scripts/test.sh --filter LiveOpenAI
 ```
@@ -287,38 +287,38 @@ The fixture is synthesised locally, so only the API requests are live.
 The on-device tests are gated the same way and cost nothing but time and disk:
 
 ```bash
-MEETTAPE_LOCAL_MODELS=1 \
-MEETTAPE_LIVE_FIXTURE=/tmp/meettape-fixture \
+PIPIT_LOCAL_MODELS=1 \
+PIPIT_LIVE_FIXTURE=/tmp/pipit-fixture \
   ./scripts/test.sh --filter LocalModels
 ```
 
-The first run downloads about 650 MB. `meettape-eval` is the developer tool for
+The first run downloads about 650 MB. `pipit-eval` is the developer tool for
 checking the measured numbers again on real audio:
 
 ```bash
-swift run meettape-eval asr      --audio meeting.wav
-swift run meettape-eval diarize  --audio meeting.wav --fa 0.07 --fa 0.20
-swift run meettape-eval identity --audio andrew.wav --audio chris.wav
-swift run meettape-eval voices
-swift run meettape-eval gate     --meeting ~/Documents/MeetTape/Meetings/2026/08/<id>
+swift run pipit-eval asr      --audio meeting.wav
+swift run pipit-eval diarize  --audio meeting.wav --fa 0.07 --fa 0.20
+swift run pipit-eval identity --audio andrew.wav --audio chris.wav
+swift run pipit-eval voices
+swift run pipit-eval gate     --meeting ~/Documents/Pipit/Meetings/2026/08/<id>
 ```
 Assertions count how many expected terms survive transcription instead of
 requiring exact wording, because synthetic speech transcribes with variation.
 
-Two further opt-in suites exist. `MEETTAPE_LIVE_CAPTURE=1` records from the real
+Two further opt-in suites exist. `PIPIT_LIVE_CAPTURE=1` records from the real
 microphone and process tap, checks the manifest against the files on disk, and
-runs a manual recording through `MeetTapeRuntime`. `MEETTAPE_LIVE_LONG=1` puts an
+runs a manual recording through `PipitRuntime`. `PIPIT_LIVE_LONG=1` puts an
 hour of audio through the chunked pipeline; it costs money and takes tens of
 minutes.
 
 ## Benchmarks
 
-`meettape-eval bench` runs the real `ProcessingPipeline` over AMI meetings and
+`pipit-eval bench` runs the real `ProcessingPipeline` over AMI meetings and
 scores the meeting folder that comes out, so a change to transcription or
 diarization is measured rather than argued about:
 
 ```bash
-scripts/fetch-bench-audio.sh                    # audio into ~/Library/Caches/meettape-bench
+scripts/fetch-bench-audio.sh                    # audio into ~/Library/Caches/pipit-bench
 scripts/eval.sh bench --suite ami-core --engine parakeet --engine cohere \
     --diarizer local --out /tmp/bench.json
 scripts/eval.sh bench --case ES2002b --engine parakeet --baseline Benchmarks/baselines.json
@@ -331,7 +331,7 @@ AVFoundation. `scripts/make-bench-smoke.sh` synthesises a free two-voice
 fixture for the same command via `--truth`, which catches wiring, chunk-seam
 and assembly defects without touching the corpus.
 
-The scorer is `MeetTapeBench`, ported metric for metric from the Python scorer
+The scorer is `PipitBench`, ported metric for metric from the Python scorer
 the model-path probe validated. Attribution is reported twice: `attribution`
 scores the best injective cluster mapping, where a cluster left over after
 every reference speaker is claimed contributes nothing, and

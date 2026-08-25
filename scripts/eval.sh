@@ -13,4 +13,4 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=spm-env.sh
 source "$REPO_ROOT/scripts/spm-env.sh"
 cd "$REPO_ROOT"
-swift run --configuration release "${MEETTAPE_SWIFT_FLAGS[@]+"${MEETTAPE_SWIFT_FLAGS[@]}"}" meettape-eval "$@"
+swift run --configuration release "${PIPIT_SWIFT_FLAGS[@]+"${PIPIT_SWIFT_FLAGS[@]}"}" pipit-eval "$@"

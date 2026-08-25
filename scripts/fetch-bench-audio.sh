@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO_ROOT/Benchmarks/manifest.json"
-AUDIO_DIR="$HOME/Library/Caches/meettape-bench"
+AUDIO_DIR="$HOME/Library/Caches/pipit-bench"
 SUITE="ami-core"
 ANNOTATIONS=""
 

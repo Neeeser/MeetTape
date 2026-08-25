@@ -135,16 +135,98 @@ enum SpeechGateTests {
             },
 
             test("a word quieter than the far end at its peak survives on the rest of the span") { expect in
-                // 26.70: the user's "Good" while the far end is mid-sentence.
-                // The peak comparison alone reads -9.4 and would drop it; over
-                // the span the microphone is 27 dB above the far end, which is
-                // what a person speaking into their own microphone looks like.
+                // 769.22 of the huddle: the user's "No, you're good." while the
+                // far end is mid-sentence. The peak comparison alone reads -3
+                // and would drop it; over the span the microphone is 35 dB above
+                // the far end, which is what a person speaking into their own
+                // microphone looks like. Nothing of the far end is in it: the
+                // user was on headphones and the echo measure reads 0.00 dB.
+                expect.equal(
+                    LocalSpeechPolicy.decide(
+                        text: "No, you're good.",
+                        reading: SpeechReading(
+                            speechProbability: 1.0, loudestLocalDB: -28,
+                            loudestFarDB: -25, medianDifferenceDB: 35,
+                            echoReturnLossDB: 0.0
+                        )
+                    ),
+                    .spoken
+                )
+            },
+
+            test("the far end's own answer is not the user's, whatever the span says") { expect in
+                // 26.70 of the audited meeting, which this suite used to hold up
+                // as the user speaking a quiet word. It is not. The user asked
+                // "how's it going?" and stopped at 26.20, the far end's own track
+                // holds "Good." at 26.51, and what the microphone caught at 26.70
+                // is that word out of the speakers: 10 dB under the far end at
+                // its peak, and a filter of the far end accounts for 2.3 dB of
+                // it. The median clause reads 29 dB and keeps it, which is
+                // exactly the hole this measurement fills.
                 expect.equal(
                     LocalSpeechPolicy.decide(
                         text: "Good",
                         reading: SpeechReading(
-                            speechProbability: 0.766, loudestLocalDB: -30.2,
-                            loudestFarDB: -20.8, medianDifferenceDB: 27.3
+                            speechProbability: 1.0, loudestLocalDB: -36,
+                            loudestFarDB: -26, medianDifferenceDB: 29,
+                            echoReturnLossDB: 2.28
+                        )
+                    ),
+                    .notSpoken
+                )
+            },
+
+            test("words the speakers played back into the microphone are not the user's") { expect in
+                // 1738.80 of the Capital One call: "we use three, yeah" while
+                // the far end said "we use S3... yeah". The user was muted for
+                // the whole meeting. Every level clause keeps it, because the
+                // voice unit's gain control lifts the leakage to 3 dB above the
+                // far end's own quietly recorded track, and the detector calls
+                // it speech because leakage is speech. Only subtracting the far
+                // end from the microphone tells them apart: a filter of the
+                // remote track accounts for 1.1 dB of this segment's energy.
+                expect.equal(
+                    LocalSpeechPolicy.decide(
+                        text: "we use three, yeah",
+                        reading: SpeechReading(
+                            speechProbability: 1.0, loudestLocalDB: -28,
+                            loudestFarDB: -29, medianDifferenceDB: 5,
+                            echoReturnLossDB: 1.08
+                        )
+                    ),
+                    .notSpoken
+                )
+            },
+
+            test("a sentence the far end cannot account for survives the same measurement") { expect in
+                // The huddle where the user spoke throughout, on headphones.
+                // Nothing of the far end reaches the microphone, so the filter
+                // removes nothing and the clause cannot speak.
+                expect.equal(
+                    LocalSpeechPolicy.decide(
+                        text: "Let me go ahead and say hi.",
+                        reading: SpeechReading(
+                            speechProbability: 0.99, loudestLocalDB: -18,
+                            loudestFarDB: -40, medianDifferenceDB: 22,
+                            echoReturnLossDB: 0.01
+                        )
+                    ),
+                    .spoken
+                )
+            },
+
+            test("a meeting nothing measured the echo of is judged as before") { expect in
+                // Every meeting recorded before this measurement existed, and
+                // every one-track recording. A reading of nil is not a reading
+                // of zero, and the clause has to stay silent rather than keep or
+                // drop on a measurement nobody made.
+                expect.equal(
+                    LocalSpeechPolicy.decide(
+                        text: "I'll send a video in the slack later today",
+                        reading: SpeechReading(
+                            speechProbability: 1.0, loudestLocalDB: -11.2,
+                            loudestFarDB: -23.2, medianDifferenceDB: 53.4,
+                            echoReturnLossDB: nil
                         )
                     ),
                     .spoken
@@ -237,6 +319,81 @@ enum SpeechGateTests {
                 // rather than because of it.
                 let evidence = evidence(seconds: 10, spans: [])
                 expect.isTrue(evidence.reading(from: 30, to: 31) == nil)
+            },
+
+            test("the echo reading is weighted by where the microphone's energy is") { expect in
+                // A segment's windows are not equally worth measuring. A loud
+                // second surrounded by near-silence is the loud second's
+                // measurement, so the quiet windows either side must not average
+                // it away: the transcription backend's segment boundaries are
+                // approximate and routinely take in a beat of the silence
+                // around a word.
+                let windows = Int(20 / 0.25)
+                var levels = [Int8](repeating: -70, count: windows)
+                var echo = [Int16](repeating: 0, count: windows)
+                for index in Int(10 / 0.25)..<Int(11 / 0.25) {
+                    levels[index] = -20
+                    echo[index] = 20
+                }
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: levels, remoteLevels: [Int8](repeating: -30, count: windows),
+                    micSpeech: [Int8](repeating: 90, count: windows),
+                    micEchoReturnLoss: echo, detector: "silero"
+                )
+                let onIt = try expect.unwrap(evidence.reading(from: 10, to: 11))
+                expect.close(
+                    onIt.echoReturnLossDB ?? 0, 2.0, tolerance: 0.01,
+                    "the windows holding the words report their own measurement"
+                )
+                let around = try expect.unwrap(evidence.reading(from: 9.5, to: 11.5))
+                expect.close(
+                    around.echoReturnLossDB ?? 0, 2.0, tolerance: 0.05,
+                    "fifty decibels below, the neighbouring silence carries no weight"
+                )
+            },
+
+            test("evidence written before the echo pass still reads") { expect in
+                // Every meeting already on disk. The file has no echo series in
+                // it, and a decoder that rejected it would leave the meeting
+                // with no evidence at all, which is the gate keeping every
+                // fabrication the other clauses were already removing.
+                let json = """
+                {"version":1,"levelWindowSeconds":0.25,"speechWindowSeconds":0.256,\
+                "micLevels":[-20,-21],"remoteLevels":[-30,-31],"micSpeech":[90,91],\
+                "detector":"silero-vad-unified-256ms-v6.2.1"}
+                """
+                let evidence = try JSONDecoder().decode(
+                    SpeechEvidence.self, from: Data(json.utf8)
+                )
+                expect.equal(evidence.micLevels, [-20, -21])
+                expect.equal(evidence.detector, "silero-vad-unified-256ms-v6.2.1")
+                expect.isTrue(evidence.micEchoReturnLoss.isEmpty, "nothing measured the echo")
+
+                // And what this build writes reads back whole.
+                let written = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: [-20, -21], remoteLevels: [-30, -31], micSpeech: [90, 91],
+                    micEchoReturnLoss: [4, 25], detector: "silero"
+                )
+                let roundTripped = try JSONDecoder().decode(
+                    SpeechEvidence.self, from: JSONEncoder().encode(written)
+                )
+                expect.equal(roundTripped, written)
+            },
+
+            test("a meeting measured before the echo pass existed reports no echo") { expect in
+                // The evidence already on disk has no echo series in it. An
+                // empty series is nothing measured, which the reading has to
+                // report as nil so the clause stays out of the decision.
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: [Int8](repeating: -20, count: 40),
+                    remoteLevels: [Int8](repeating: -30, count: 40),
+                    micSpeech: [Int8](repeating: 90, count: 40), detector: "silero"
+                )
+                let reading = try expect.unwrap(evidence.reading(from: 1, to: 2))
+                expect.isTrue(reading.echoReturnLossDB == nil)
             },
 
             test("a meeting with one track reports no far end") { expect in
@@ -373,6 +530,50 @@ enum SpeechGateTests {
                 )
                 expect.isTrue(evidence.micSpeech.isEmpty, "no detector, no readings")
                 expect.isTrue(evidence.detector == nil)
+            },
+
+            test("the echo pass runs over a recorded pair and measures the whole track") { expect in
+                // The measurement reads both tracks in lockstep, a few minutes
+                // at a time, through code no unit test reaches. This runs it on
+                // audio decoded off disk. The two tracks hold different tones,
+                // and no filter of one sinusoid produces another at a different
+                // frequency, so the answer has to be that the far end accounts
+                // for nothing.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 12)
+                let evidence = try await SpeechEvidenceBuilder.build(
+                    store: meeting.store, metadata: meeting.metadata,
+                    timeline: try meeting.store.readTimeline(), detector: nil
+                )
+                expect.isTrue(!evidence.micEchoReturnLoss.isEmpty, "the pass produced a series")
+                // One reading per level window, give or take the part window the
+                // level pass keeps at the end and this one does not.
+                expect.isTrue(
+                    evidence.micLevels.count - evidence.micEchoReturnLoss.count <= 1,
+                    "\(evidence.micEchoReturnLoss.count) readings against \(evidence.micLevels.count) levels"
+                )
+                let loudest = Double(evidence.micEchoReturnLoss.max() ?? 0) / 10
+                expect.isTrue(
+                    loudest < LocalSpeechPolicy.echoReturnLossDB,
+                    "loudest reading \(loudest) dB, under what the gate drops at"
+                )
+            },
+
+            test("a recording with no far end is never measured for echo") { expect in
+                // An import and an in-person session have one track. There is
+                // nothing for the microphone to have leaked, and the clause has
+                // to stay out of the decision rather than measure the track
+                // against itself.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, source: .inPerson)
+                let evidence = try await SpeechEvidenceBuilder.build(
+                    store: meeting.store, metadata: meeting.metadata,
+                    timeline: try meeting.store.readTimeline(), detector: nil
+                )
+                expect.isTrue(evidence.remoteLevels.isEmpty, "no far end was recorded")
+                expect.isTrue(evidence.micEchoReturnLoss.isEmpty, "so nothing measured the echo")
             },
 
             test("a far end that stopped recording first leaves the rest to the detector") { expect in

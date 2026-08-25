@@ -103,8 +103,173 @@ public enum SpeechEvidenceBuilder {
             micLevels: levels[.mic] ?? [],
             remoteLevels: levels[.remote] ?? [],
             micSpeech: speech,
+            micEchoReturnLoss: try echoReturnLoss(
+                store: store, metadata: metadata, timeline: timeline
+            ),
             detector: detectorIdentifier
         )
+    }
+
+    /// How much of each window of the microphone the far end's own audio
+    /// accounts for.
+    ///
+    /// Two passes over the pair of tracks. The first looks for the delay the
+    /// speakers put between the far end being captured and it arriving back in
+    /// the microphone, sampling stretches from across the meeting and keeping
+    /// the one whose peak stands clearest. The second fits and subtracts.
+    ///
+    /// A failure here costs the clause, not the measurement: the rest of the
+    /// evidence is still written and the gate decides on levels and the detector
+    /// as it did before.
+    static func echoReturnLoss(
+        store: MeetingStore, metadata: MeetingMetadata, timeline: RecordingTimeline
+    ) throws -> [Int16] {
+        let locations = CaptureTrack.allCases.reduce(into: [CaptureTrack: TrackAudioLocation]()) {
+            $0[$1] = store.trackAudioLocation(track: $1, metadata: metadata, timeline: timeline)
+        }
+        // One track is a recording with no far end to have leaked, which is
+        // every import and every in-person session.
+        guard let micLocation = locations[.mic], !micLocation.isEmpty,
+              let remoteLocation = locations[.remote], !remoteLocation.isEmpty
+        else { return [] }
+
+        let rate = readFormat.sampleRate
+        func pair() -> (mic: TimelineTrackReader, remote: TimelineTrackReader)? {
+            guard let mic = TimelineTrackReader(
+                location: micLocation, format: readFormat,
+                leadIn: timeline.leadIn(track: .mic), windowSeconds: levelWindowSeconds
+            ), let remote = TimelineTrackReader(
+                location: remoteLocation, format: readFormat,
+                leadIn: timeline.leadIn(track: .remote), windowSeconds: levelWindowSeconds
+            ) else { return nil }
+            return (mic, remote)
+        }
+
+        do {
+            guard let first = pair() else { return [] }
+            let delay = try searchDelay(
+                mic: first.mic, remote: first.remote,
+                durationSeconds: metadata.durationSeconds, rate: rate
+            )
+            guard let second = pair() else { return [] }
+            let profile = try measure(
+                mic: second.mic, remote: second.remote, delay: delay.samples, rate: rate
+            )
+            try Task.checkCancellation()
+            Log.processing.notice(
+                """
+                echo measured: delay \(Double(delay.samples) / rate, format: .fixed(precision: 3)) s, \
+                sharpness \(delay.sharpness, format: .fixed(precision: 1)), \
+                windows \(profile.count)
+                """
+            )
+            return profile
+        } catch is CancellationError {
+            // A pass that was stopped, not a pair of tracks that refused. Writing
+            // what it had would record a half-measurement as the finished one,
+            // and the measure-once rule would leave the meeting judged on it.
+            throw CancellationError()
+        } catch {
+            Log.processing.notice(
+                "echo measurement skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return []
+        }
+    }
+
+    /// Seconds of one stretch handed to the delay search, and how many stretches
+    /// are taken. Nine stretches of thirty seconds covers a meeting of any
+    /// length for the price of nine transforms.
+    private static let delayStretchSeconds = 30.0
+    private static let delayStretches = 9
+
+    private static func searchDelay(
+        mic: TimelineTrackReader, remote: TimelineTrackReader,
+        durationSeconds: Double, rate: Double
+    ) throws -> EchoReturnLossProfile.Delay {
+        let stretch = Int(delayStretchSeconds * rate)
+        let total = max(1, Int(durationSeconds / delayStretchSeconds))
+        let step = max(1, total / delayStretches)
+        var best = EchoReturnLossProfile.Delay.none
+        var index = 0
+        while true {
+            try Task.checkCancellation()
+            let micSamples = try mic.next(count: stretch)
+            let remoteSamples = try remote.next(count: stretch)
+            if micSamples.isEmpty || remoteSamples.isEmpty { break }
+            defer { index += 1 }
+            guard index % step == 0 else { continue }
+            let found = EchoReturnLossProfile.delay(
+                mic: micSamples, remote: remoteSamples,
+                maxLag: Int(EchoReturnLossProfile.searchSeconds * rate)
+            )
+            if found.sharpness > best.sharpness { best = found }
+        }
+        return best
+    }
+
+    /// Measured a few minutes at a time, so a long meeting never holds both
+    /// tracks in memory at once.
+    ///
+    /// Rounded down to a whole number of filter blocks, and each block is
+    /// already a whole number of level windows, so a chunk boundary never falls
+    /// inside either. A chunk that ended mid-window would drop the remainder and
+    /// slide every later window of the series against the levels it is weighted
+    /// by.
+    private static let chunkSeconds = 300.0
+
+    private static func chunkSamples(rate: Double) -> Int {
+        let window = Int(levelWindowSeconds * rate)
+        let block = max(1, Int(EchoReturnLossProfile.blockSeconds / levelWindowSeconds)) * window
+        return max(block, (Int(chunkSeconds * rate) / block) * block)
+    }
+
+    private static func measure(
+        mic: TimelineTrackReader, remote: TimelineTrackReader, delay: Int, rate: Double
+    ) throws -> [Int16] {
+        let chunk = chunkSamples(rate: rate)
+        // The far end from before this chunk that the filter reaches back over.
+        let lead = EchoReturnLossProfile.filterTaps + max(0, delay)
+        // And from after it. A delay found below zero puts the far end's copy
+        // ahead of the microphone rather than behind it, and the end of every
+        // chunk would otherwise be fitted against silence that has not been read
+        // yet. Only a meeting with no acoustic path measures below zero, so this
+        // costs nothing on the meetings it matters for and keeps the arithmetic
+        // honest on the ones it does not.
+        let ahead = max(0, -delay)
+        var history = [Float](repeating: 0, count: lead)
+        var carried: [Float] = []
+        var profile: [Int16] = []
+        while true {
+            try Task.checkCancellation()
+            let micSamples = try mic.next(count: chunk)
+            guard !micSamples.isEmpty else { break }
+            let wanted = micSamples.count + ahead
+            var body = carried
+            if body.count < wanted {
+                body += try remote.next(count: wanted - body.count)
+            }
+            // The far end's tap can stop before the microphone does. What it did
+            // not record is silence, and silence explains nothing, which leaves
+            // those windows reading zero.
+            if body.count < wanted {
+                body += [Float](repeating: 0, count: wanted - body.count)
+            }
+            profile += EchoReturnLossProfile.measure(
+                mic: micSamples, remote: history + body, delay: delay,
+                sampleRate: rate, windowSeconds: levelWindowSeconds, remoteLead: lead
+            )
+            // What the next chunk needs: the last `lead` samples before its
+            // start, and whatever was read past it. Taken from `body` alone
+            // wherever that is long enough, so the chunk is not copied again.
+            let boundary = body.prefix(micSamples.count)
+            history = boundary.count >= lead
+                ? Array(boundary.suffix(lead))
+                : Array((history + boundary).suffix(lead))
+            carried = Array(body.dropFirst(micSamples.count))
+            if micSamples.count < chunk { break }
+        }
+        return profile
     }
 
     /// Moves a track's own measurements onto the meeting timeline by filling
@@ -140,6 +305,72 @@ private actor SampleReader {
     func next() throws -> [Float]? {
         while true {
             guard let buffer = try reader.read(frames: frames), buffer.frameLength > 0 else {
+                return nil
+            }
+            guard let channel = buffer.floatChannelData?[0] else { continue }
+            return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        }
+    }
+}
+
+/// One track, read a stretch at a time, positioned on the meeting timeline.
+///
+/// The two tracks do not begin at the same instant, and every comparison the
+/// echo pass makes is between the same moment on both. The seconds before a
+/// track started recording are handed back as the silence they were, which is
+/// the same thing `padded` does to the level series.
+private final class TimelineTrackReader {
+    private let reader: TrackAudioReader
+    private var silenceRemaining: Int
+    private var pending: [Float] = []
+    private var exhausted = false
+
+    /// - Parameter windowSeconds: the grid the measurements land on. The lead-in
+    ///   is rounded to a whole number of these, because `padded` rounds the level
+    ///   series the same way and the gate reads the two side by side. Rounding
+    ///   them differently would slide the echo series up to half a window against
+    ///   the levels it is weighted by, and weight each reading with a
+    ///   neighbouring window's energy.
+    init?(
+        location: TrackAudioLocation, format: AudioFormatDescriptor, leadIn: Double,
+        windowSeconds: Double
+    ) {
+        let stream = TrackAudioStream(
+            segments: location.segments, segmentsDirectory: location.directory, format: format
+        )
+        guard let reader = stream.makeReader() else { return nil }
+        self.reader = reader
+        let windows = leadIn > 0 && windowSeconds > 0 ? Int((leadIn / windowSeconds).rounded()) : 0
+        self.silenceRemaining = max(0, windows) * Int(windowSeconds * format.sampleRate)
+    }
+
+    /// The next `count` samples, or fewer where the track has run out.
+    func next(count: Int) throws -> [Float] {
+        var out: [Float] = []
+        out.reserveCapacity(count)
+        if silenceRemaining > 0 {
+            let take = min(silenceRemaining, count)
+            out.append(contentsOf: repeatElement(0, count: take))
+            silenceRemaining -= take
+        }
+        while out.count < count {
+            if pending.isEmpty {
+                guard !exhausted, let block = try read() else {
+                    exhausted = true
+                    break
+                }
+                pending = block
+            }
+            let take = min(count - out.count, pending.count)
+            out.append(contentsOf: pending[..<take])
+            pending.removeFirst(take)
+        }
+        return out
+    }
+
+    private func read() throws -> [Float]? {
+        while true {
+            guard let buffer = try reader.read(frames: 16_384), buffer.frameLength > 0 else {
                 return nil
             }
             guard let channel = buffer.floatChannelData?[0] else { continue }

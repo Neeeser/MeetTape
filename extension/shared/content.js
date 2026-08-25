@@ -1,4 +1,4 @@
-// MeetTape browser sensor: observes meeting lifecycle and reports it.
+// Pipit browser sensor: observes meeting lifecycle and reports it.
 //
 // It records nothing, calls no service, and owns no meeting state. If it stops
 // working the app falls back to native detection and keeps recording.

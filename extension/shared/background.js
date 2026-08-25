@@ -1,7 +1,7 @@
 // Relays content-script observations to the native host, and counts audible tabs.
 
 const api = globalThis.browser ?? globalThis.chrome;
-const HOST_NAME = 'com.meettape.sensor';
+const HOST_NAME = 'com.pipit.sensor';
 
 let port = null;
 

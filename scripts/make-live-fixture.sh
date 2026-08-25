@@ -7,7 +7,7 @@
 # Usage: scripts/make-live-fixture.sh [output-directory]
 set -euo pipefail
 
-OUT_DIR="${1:-${TMPDIR:-/tmp}/meettape-live-fixture}"
+OUT_DIR="${1:-${TMPDIR:-/tmp}/pipit-live-fixture}"
 mkdir -p "$OUT_DIR"
 WORK="$OUT_DIR/turns"
 rm -rf "$WORK"

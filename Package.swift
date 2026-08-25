@@ -1,18 +1,18 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// MeetTape is built with SwiftPM because the development machine has Command Line
+// Pipit is built with SwiftPM because the development machine has Command Line
 // Tools only (no Xcode, so no xcodebuild). scripts/bundle-app.sh assembles the
-// executable products into MeetTape.app.
+// executable products into Pipit.app.
 let package = Package(
-    name: "MeetTape",
+    name: "Pipit",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "MeetTape", targets: ["MeetTapeApp"]),
-        .executable(name: "meettape-nativehost", targets: ["MeetTapeNativeHost"]),
-        .executable(name: "meettape-test", targets: ["MeetTapeTests"]),
-        .executable(name: "meettape-eval", targets: ["MeetTapeEval"]),
-        .library(name: "MeetTapeCore", targets: ["MeetTapeCore"]),
+        .executable(name: "Pipit", targets: ["PipitApp"]),
+        .executable(name: "pipit-nativehost", targets: ["PipitNativeHost"]),
+        .executable(name: "pipit-test", targets: ["PipitTests"]),
+        .executable(name: "pipit-eval", targets: ["PipitEval"]),
+        .library(name: "PipitCore", targets: ["PipitCore"]),
     ],
     // Pinned to the exact versions the local-processing and speaker-scale probes
     // measured. A newer revision changes transcription and embedding behaviour,
@@ -25,32 +25,32 @@ let package = Package(
         // Pure logic. Foundation only: state machines, manifest, timeline arithmetic,
         // chunk planning, transcript merging, storage layout. Everything here is
         // deterministic and directly testable.
-        .target(name: "MeetTapeCore"),
+        .target(name: "PipitCore"),
 
         // AVFoundation + CoreAudio capture: microphone engine, process taps,
         // segment writing, pre-roll, import, mixdown, energy analysis.
-        .target(name: "MeetTapeAudio", dependencies: ["MeetTapeCore"]),
+        .target(name: "PipitAudio", dependencies: ["PipitCore"]),
 
         // Accessibility, window titles, CoreAudio process observation, browser sensor
         // transport. Turns OS signals into provider evidence.
-        .target(name: "MeetTapeDetection", dependencies: ["MeetTapeCore", "MeetTapeAudio"]),
+        .target(name: "PipitDetection", dependencies: ["PipitCore", "PipitAudio"]),
 
         // OpenAI, Keychain, EventKit, UserNotifications.
-        .target(name: "MeetTapeIntegrations", dependencies: ["MeetTapeCore"]),
+        .target(name: "PipitIntegrations", dependencies: ["PipitCore"]),
 
         // The local voice-identity store: SQLite with Float32 embedding BLOBs,
         // plus the recognition service that scores a speaker occurrence against
         // it. Independent of which transcription or diarization backend ran, so
         // choosing OpenAI in Settings still keeps voice memory local.
-        .target(name: "MeetTapeSpeakers", dependencies: ["MeetTapeCore"]),
+        .target(name: "PipitSpeakers", dependencies: ["PipitCore"]),
 
         // On-device speech: WhisperKit transcription and the FluidAudio offline
         // diarizer, behind the same protocols the OpenAI client implements.
         .target(
-            name: "MeetTapeLocalAI",
+            name: "PipitLocalAI",
             dependencies: [
-                "MeetTapeCore",
-                "MeetTapeAudio",
+                "PipitCore",
+                "PipitAudio",
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
@@ -59,34 +59,34 @@ let package = Package(
         // Wiring: session controller runtime, capture engine, processing pipeline,
         // meeting repository, app coordinator.
         .target(
-            name: "MeetTapeServices",
+            name: "PipitServices",
             dependencies: [
-                "MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection", "MeetTapeIntegrations",
-                "MeetTapeSpeakers", "MeetTapeLocalAI",
+                "PipitCore", "PipitAudio", "PipitDetection", "PipitIntegrations",
+                "PipitSpeakers", "PipitLocalAI",
             ]
         ),
 
         // SwiftUI/AppKit surfaces.
-        .target(name: "MeetTapeUI", dependencies: ["MeetTapeServices"]),
+        .target(name: "PipitUI", dependencies: ["PipitServices"]),
 
-        .executableTarget(name: "MeetTapeApp", dependencies: ["MeetTapeUI"]),
+        .executableTarget(name: "PipitApp", dependencies: ["PipitUI"]),
 
         // Firefox native messaging host. A compiled binary, because Firefox spawns
         // hosts with a minimal PATH and an interpreter shebang silently fails.
-        .executableTarget(name: "MeetTapeNativeHost", dependencies: ["MeetTapeCore"]),
+        .executableTarget(name: "PipitNativeHost", dependencies: ["PipitCore"]),
 
         // The benchmark meter: ground-truth model, scorer and suite manifest.
         // Foundation only, so the same arithmetic runs in the test suite and in
-        // the evaluation tool, and so nothing eval-only lands in MeetTapeCore.
-        .target(name: "MeetTapeBench"),
+        // the evaluation tool, and so nothing eval-only lands in PipitCore.
+        .target(name: "PipitBench"),
 
         // Developer evaluation tool. Not bundled into the application: it is how
         // the local stack's measured numbers get checked again on real audio.
         .executableTarget(
-            name: "MeetTapeEval",
+            name: "PipitEval",
             dependencies: [
-                "MeetTapeCore", "MeetTapeAudio", "MeetTapeLocalAI", "MeetTapeSpeakers",
-                "MeetTapeBench", "MeetTapeIntegrations", "MeetTapeServices",
+                "PipitCore", "PipitAudio", "PipitLocalAI", "PipitSpeakers",
+                "PipitBench", "PipitIntegrations", "PipitServices",
             ]
         ),
 
@@ -94,11 +94,11 @@ let package = Package(
         // not installed here, so the suite runs as an ordinary executable.
         .target(name: "TestKit"),
         .executableTarget(
-            name: "MeetTapeTests",
+            name: "PipitTests",
             dependencies: [
-                "TestKit", "MeetTapeCore", "MeetTapeAudio", "MeetTapeDetection",
-                "MeetTapeIntegrations", "MeetTapeSpeakers", "MeetTapeLocalAI",
-                "MeetTapeServices", "MeetTapeUI", "MeetTapeBench",
+                "TestKit", "PipitCore", "PipitAudio", "PipitDetection",
+                "PipitIntegrations", "PipitSpeakers", "PipitLocalAI",
+                "PipitServices", "PipitUI", "PipitBench",
             ],
             resources: [.copy("Fixtures")]
         ),

@@ -1,6 +1,6 @@
 # Benchmarks
 
-The reference data `meettape-eval bench` scores against.
+The reference data `pipit-eval bench` scores against.
 
 ## What is here
 
@@ -62,8 +62,8 @@ words are exactly what was spoken, and word timings are spread evenly across
 each turn because `say` reports none.
 
 ```bash
-scripts/make-bench-smoke.sh /tmp/meettape-bench-smoke
-scripts/eval.sh bench --truth /tmp/meettape-bench-smoke/smoke.json --engine parakeet
+scripts/make-bench-smoke.sh /tmp/pipit-bench-smoke
+scripts/eval.sh bench --truth /tmp/pipit-bench-smoke/smoke.json --engine parakeet
 ```
 
 Its turns strictly alternate and never overlap, so it cannot exercise the two
@@ -159,7 +159,7 @@ the diarizer the answer.
 
 CI fails the build on any committed audio file, and the recordings are 15 to
 190 MB each. `scripts/fetch-bench-audio.sh` downloads them from the Edinburgh
-mirror into `~/Library/Caches/meettape-bench` and verifies each one against the
+mirror into `~/Library/Caches/pipit-bench` and verifies each one against the
 pinned checksum, so a mirror serving a re-encoded copy is caught rather than
 silently measured. The harness cuts the excerpt window itself, with
 AVFoundation; there is no ffmpeg dependency anywhere in the path.
@@ -181,8 +181,8 @@ corpus publishes every device channel as `ch0.wav`.
 ```bash
 scripts/fetch-bench-audio.sh --annotations
 scripts/fetch-bench-audio.sh --annotations icsi
-AMI=~/Library/Caches/meettape-bench/ami_public_manual_1.6.2.zip
-ICSI=~/Library/Caches/meettape-bench/ICSI_core_NXT.zip
+AMI=~/Library/Caches/pipit-bench/ami_public_manual_1.6.2.zip
+ICSI=~/Library/Caches/pipit-bench/ICSI_core_NXT.zip
 
 python3 scripts/build-bench-truth.py --annotations "$AMI" \
     --window 360 ES2002a ES2002b ES2002c ES2002d ES2003a ES2005a \
@@ -196,7 +196,7 @@ python3 scripts/build-bench-truth.py --corpus icsi --annotations "$ICSI" \
 
 scripts/fetch-bench-audio.sh --annotations notsofar
 python3 scripts/build-bench-truth.py --corpus notsofar \
-    --annotations ~/Library/Caches/meettape-bench \
+    --annotations ~/Library/Caches/pipit-bench \
     --whole MTG_32046 MTG_32000 MTG_32052 MTG_32102 MTG_32093
 ```
 

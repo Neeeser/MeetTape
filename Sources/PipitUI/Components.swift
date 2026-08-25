@@ -63,6 +63,26 @@ public enum Format {
         return "\(total)s"
     }
 
+    /// Just the clock time, for a row already under a heading that says which
+    /// day it was.
+    public static func timeOfDay(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+
+    /// What a row says under a heading that may or may not name a day.
+    ///
+    /// Today and Yesterday name one, so a clock time is enough there. Every
+    /// other heading is a month, and a clock time alone left no way to tell
+    /// which day a meeting was without opening it.
+    public static func listDate(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now)
+        if calendar.isDate(date, inSameDayAs: now) || date > now
+            || (yesterday.map { calendar.isDate(date, inSameDayAs: $0) } ?? false) {
+            return timeOfDay(date)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
     public static func day(_ date: Date) -> String {
         if Calendar.current.isDateInToday(date) {
             return "Today \(date.formatted(date: .omitted, time: .shortened))"
@@ -74,7 +94,7 @@ public enum Format {
     }
 }
 
-/// The status of one processing stage, for the review panel.
+/// The status of one processing stage, for the meetings window.
 public struct StageBadge: View {
     public let state: ProcessingState
 

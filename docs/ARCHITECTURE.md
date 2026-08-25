@@ -191,8 +191,8 @@ arrives, so a resumed run does not repeat work that already succeeded.
 
 A rate limit, a server error or a transport failure is retried in place, using
 the server's `Retry-After` when it sends one, up to three attempts per stage.
-After that the meeting waits for the user, who can retry it from the review panel
-or from the notification.
+After that the meeting waits for the user, who can retry it from the meetings
+window or from the notification.
 
 The two tracks do not start at the same instant, and a chunk's offset is a
 position inside one track's audio. The track's lead-in, meaning the delay between

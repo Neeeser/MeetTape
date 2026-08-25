@@ -191,7 +191,15 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(recentMeetingsItem())
+        let meetings = NSMenuItem(
+            title: "Meetings…", action: #selector(openMeetings), keyEquivalent: "m"
+        )
+        meetings.target = self
+        menu.addItem(meetings)
+
+        let people = NSMenuItem(title: "People…", action: #selector(openPeople), keyEquivalent: "p")
+        people.target = self
+        menu.addItem(people)
 
         menu.addItem(.separator())
         let pause = NSMenuItem(
@@ -202,9 +210,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         pause.state = status.detectionPaused ? .on : .off
         menu.addItem(pause)
 
-        let people = NSMenuItem(title: "People…", action: #selector(openPeople), keyEquivalent: "p")
-        people.target = self
-        menu.addItem(people)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -318,53 +323,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(importItem)
     }
 
-    private func recentMeetingsItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "Recent Meetings", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        let meetings = runtime.recentMeetings.prefix(12)
-        if meetings.isEmpty {
-            submenu.addItem(Self.informationItem("No meetings yet"))
-        } else {
-            for meeting in meetings {
-                let subtitle = [
-                    Format.day(meeting.startedAt),
-                    Format.shortDuration(meeting.durationSeconds),
-                    meeting.processingState == .complete ? nil : meeting.processingState.displayName,
-                ].compactMap { $0 }.joined(separator: " · ")
-                let entry = NSMenuItem(
-                    title: meeting.title, action: #selector(openMeeting(_:)), keyEquivalent: ""
-                )
-                entry.target = self
-                entry.representedObject = meeting.id
-                entry.toolTip = subtitle
-                // The label colour is explicit: an attributed title without one
-                // draws in black, which is unreadable on a dark menu.
-                let attributed = NSMutableAttributedString(
-                    string: meeting.title,
-                    attributes: [
-                        .font: NSFont.menuFont(ofSize: 0),
-                        .foregroundColor: NSColor.labelColor,
-                    ]
-                )
-                attributed.append(NSAttributedString(
-                    string: "\n\(subtitle)",
-                    attributes: [
-                        .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                        .foregroundColor: NSColor.secondaryLabelColor,
-                    ]
-                ))
-                entry.attributedTitle = attributed
-                submenu.addItem(entry)
-            }
-            submenu.addItem(.separator())
-            let all = NSMenuItem(title: "Open Meetings Folder", action: #selector(openFolder), keyEquivalent: "")
-            all.target = self
-            submenu.addItem(all)
-        }
-        item.submenu = submenu
-        return item
-    }
-
     // MARK: - actions
 
     @objc private func startManual() { runtime.startManualRecording() }
@@ -380,17 +338,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func openPeople() { windows.showPeople() }
 
+    @objc private func openMeetings() { windows.showMeetings() }
+
     @objc private func togglePause() {
         runtime.setDetectionPaused(!runtime.status.detectionPaused)
-    }
-
-    @objc private func openMeeting(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        windows.showReview(meetingID: id)
-    }
-
-    @objc private func openFolder() {
-        NSWorkspace.shared.open(runtime.repository.archive.root)
     }
 
     @objc private func addNote() {
@@ -421,7 +372,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
         Task { @MainActor in
             do {
-                // The review window is not opened here. Transcription takes a
+                // The meetings window is not opened here. Transcription takes a
                 // while, so the import shows progress in this menu and posts a
                 // notification when the transcript is ready.
                 _ = try await runtime.importRecording(from: url)

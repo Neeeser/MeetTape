@@ -163,6 +163,10 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     public var possibleContinuationReason: String?
     /// Original filename for an imported recording, preserved verbatim.
     public var importedOriginalFilename: String?
+    /// Where an imported recording's `startedAt` came from. Absent on captured
+    /// meetings, whose start is the moment capture began, and on imports made
+    /// before the file's own timestamp was read.
+    public var recordedDateSource: RecordedDateSource?
     /// Whether the user confirmed a provisionally recorded unknown call.
     public var provisionalDecision: ProvisionalDecision?
     public var captureWarnings: [String]
@@ -212,6 +216,7 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.possibleContinuationOf = nil
         self.possibleContinuationReason = nil
         self.importedOriginalFilename = nil
+        self.recordedDateSource = nil
         self.provisionalDecision = nil
         self.captureWarnings = []
         self.hadOtherAudibleTabs = false

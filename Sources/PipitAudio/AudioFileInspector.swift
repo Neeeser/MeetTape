@@ -71,3 +71,54 @@ public struct MediaFileInspector: Sendable {
         ["wav", "m4a", "mp3", "caf", "aiff", "aif", "mp4", "mov", "aac", "flac", "m4v"]
     }
 }
+
+/// Reads the creation date a recorder wrote into a media file.
+///
+/// Three containers matter and each stores it differently: QuickTime and MP4
+/// under `com.apple.quicktime.creationdate` and the ISO user-data date, MP3
+/// under the ID3 recording time, and AAC in an iTunes release date. AVFoundation
+/// hands most of them back through `AVAsset.creationDate`, and the rest need the
+/// metadata list read directly.
+///
+/// A value that decodes to a date is used as it stands. One that only decodes to
+/// a string goes through `RecordedDatePolicy.parseMetadataDate`, which refuses a
+/// year on its own: a bare "2026" would put a meeting on the first of January.
+public struct MediaCreationDateReader: Sendable {
+    public init() {}
+
+    public func creationDate(of url: URL) async -> Date? {
+        let asset = AVURLAsset(url: url)
+        if let item = try? await asset.load(.creationDate), let date = await Self.date(from: item) {
+            return date
+        }
+        let common = (try? await asset.load(.commonMetadata)) ?? []
+        let all = (try? await asset.load(.metadata)) ?? []
+        for item in common + all where Self.namesACreationDate(item) {
+            if let date = await Self.date(from: item) { return date }
+        }
+        return nil
+    }
+
+    /// The identifiers a creation date is written under, across the containers
+    /// AVFoundation decodes.
+    private static let creationIdentifiers: Set<AVMetadataIdentifier> = [
+        .quickTimeMetadataCreationDate,
+        .quickTimeUserDataCreationDate,
+        .isoUserDataDate,
+        .id3MetadataRecordingTime,
+        .id3MetadataDate,
+        .iTunesMetadataReleaseDate,
+    ]
+
+    private static func namesACreationDate(_ item: AVMetadataItem) -> Bool {
+        if item.commonKey == .commonKeyCreationDate { return true }
+        guard let identifier = item.identifier else { return false }
+        return creationIdentifiers.contains(identifier)
+    }
+
+    private static func date(from item: AVMetadataItem) async -> Date? {
+        if let date = try? await item.load(.dateValue) { return date }
+        guard let text = try? await item.load(.stringValue) else { return nil }
+        return RecordedDatePolicy.parseMetadataDate(text)
+    }
+}

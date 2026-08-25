@@ -247,6 +247,29 @@ against real hardware and what has not.
   recordings, each immutable and complete on its own. The combined duration and
   transcript are derived on read; linking and separating write one field on each
   side and move no audio.
+- The meetings window is the one place a past meeting is opened, corrected and
+  read. It owns the list and one `MeetingReviewModel` at a time. That model owns
+  reading and editing one meeting's files. Grouping, filtering and search are
+  pure functions in `MeetingsDirectoryFilter`, so the sidebar's behaviour is
+  tested without a window. The full-text search index is read in the background,
+  again when the archive gains a meeting or a conversation gains or loses a
+  recording, and one meeting's entry is dropped and read again when a change
+  rewrites its `transcript.md`.
+- A row's speakers are the clusters its `transcript.json` uses, named through
+  its `speakers.map.json`. The map holds only the clusters that have a name, so
+  a row built from the map alone shows no voices to name in exactly the meetings
+  holding the most of them, and the Unnamed filter lists nothing. A cluster
+  holding under `TranscriptSpeaker.audibleSeconds` is left out unless the map
+  names it, which is the rule the speaker strip draws by. A diarizer can emit a
+  label owning no transcript time, and counting one as a voice waiting for a
+  name put a meeting under Unnamed with nothing in it to name.
+- An imported recording's date comes from what the recorder said rather than
+  from the copy. `RecordedDatePolicy` takes the container's creation date, then
+  a timestamp in the filename, then the file's date on this Mac, refusing
+  anything before 1990 or more than a day ahead. The filename outranks the
+  filesystem because AirDrop, a download and a drag off a phone all stamp today.
+  The manifest is still the authoritative timeline. It says how long the audio
+  runs, and this says when it was recorded.
 - Nothing before `audio_safe` sends data to OpenAI. Every stage after it is
   retryable, and until `complete` nothing deletes source audio. Compaction is
   the one deletion in the system, and it removes only a representation whose

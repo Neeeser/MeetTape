@@ -1,4 +1,5 @@
 import CryptoKit
+import FluidAudio
 import Foundation
 import MeetTapeAudio
 import MeetTapeBench
@@ -36,6 +37,14 @@ enum BenchCommand {
         /// is unreadable without the transcript, the manifest and the raw
         /// output it produced.
         var keepScratch = false
+        /// Re-read `--out` and run only what it does not already hold. This is
+        /// what lets a multi-hour engine survive a killed session: relaunch
+        /// with the same command and the recorded rows are kept, not re-paid.
+        var resume = false
+        /// Let a case without a baseline entry pass with only the repeat
+        /// ratchet. Off, a gated run fails on the missing entry itself, so a
+        /// suite cannot silently regress on a case nobody recorded.
+        var allowMissingBaseline = false
     }
 
     /// Where a kept scratch directory goes: beside `--out` when there is one,
@@ -55,26 +64,9 @@ enum BenchCommand {
         var audio: URL
     }
 
-    struct Row: Codable {
-        var engine: String
-        var diarizer: String
-        var score: BenchScore
-        var processingSeconds: Double
-        var audioSeconds: Double
-        var state: String
-        var transcriptionModels: [String]
-        var diarizationBackends: [String]
-        /// What the truth records for the scored window, carried into the
-        /// output so a row explains how hard its case was.
-        var overlapRatio: Double?
-        /// Which run of `--repeats` this row is, from 1. Every run is written
-        /// to `--out`, so the spread in the table can be checked against the
-        /// rows it came from.
-        var run: Int = 1
-        /// The meeting folder this row was scored from, when `--keep-scratch`
-        /// preserved it.
-        var scratch: String?
-    }
+    /// The row shape lives in `MeetTapeBench` so tests can decode a results
+    /// file and pin the resume rule.
+    typealias Row = BenchRow
 
     /// Which backend an --engine value names.
     ///
@@ -197,8 +189,25 @@ enum BenchCommand {
         init(_ description: String) { self.description = description }
     }
 
+    /// The local diarizers the bench can put under measurement. "local" is the
+    /// shipping offline pipeline; the lseend rows are the overlap-aware
+    /// candidate's checkpoints, which behave like different models: the AMI
+    /// one won AMI windows and collapsed on NOTSOFAR's far-field audio.
+    static let localDiarizers: Set<String> = [
+        "local", "lseend", "lseend-dihard3", "lseend-callhome",
+    ]
+
+    static func lseendVariant(for diarizer: String) -> LSEENDVariant {
+        switch diarizer {
+        case "lseend-dihard3": .dihard3
+        case "lseend-callhome": .callhome
+        default: .ami
+        }
+    }
+
     static func makeBackends(
-        models: LocalModelManager, cloud: OpenAIClient
+        models: LocalModelManager, cloud: OpenAIClient, configuration: AppSettings,
+        diarizer: String
     ) -> ProcessingBackends {
         // The same wiring MeetTapeRuntime builds, minus the speaker store: the
         // harness must not touch the voice memory of whoever runs it.
@@ -209,6 +218,8 @@ enum BenchCommand {
                     local: { choice in
                         switch choice {
                         case .cohere: CohereTranscriptionBackend(models: models)
+                        case .canary: CanaryTranscriptionBackend(models: models)
+                        case .apple: AppleSpeechTranscriptionBackend()
                         case .parakeet: ParakeetTranscriptionBackend(models: models)
                         case .whisper: WhisperTranscriptionBackend(models: models)
                         }
@@ -219,13 +230,21 @@ enum BenchCommand {
             diarization: { settings, model in
                 ProcessingBackends.diarizationBackend(
                     settings: settings, model: model,
-                    local: { FluidAudioDiarizationBackend(models: models) },
+                    local: { () -> any DiarizationBackend in
+                        diarizer.hasPrefix("lseend")
+                            ? LSEendDiarizationBackend(
+                                models: models, variant: lseendVariant(for: diarizer))
+                            : FluidAudioDiarizationBackend(models: models)
+                    },
                     cloud: { OpenAIDiarizationBackend(backend: cloud, model: $0) }
                 )
             },
             embeddings: FluidAudioEmbeddingExtractor(models: models),
+            // The units the requested configuration needs, not the default's:
+            // preparing for default AppSettings left a clean machine without
+            // the Cohere or Whisper models the run had actually selected.
             prepareLocalModels: { [models] in
-                _ = try await models.install(units: LocalModelUnit.required(for: AppSettings()))
+                _ = try await models.install(units: LocalModelUnit.required(for: configuration))
             },
             aligner: CtcTranscriptAligner(models: models),
             prepareAligner: { [models] in _ = try await models.install(units: [.ctcAligner]) },
@@ -263,6 +282,10 @@ enum BenchCommand {
             note("cloud diarization needs OPENAI_API_KEY")
             return 2
         }
+        guard options.diarizer == "cloud" || Self.localDiarizers.contains(options.diarizer) else {
+            note("bench: unknown --diarizer \(options.diarizer). Valid: \(Self.localDiarizers.sorted().joined(separator: ", ")), cloud")
+            return 2
+        }
         guard !engines.isEmpty else {
             note("nothing to run")
             return 0
@@ -270,45 +293,82 @@ enum BenchCommand {
 
         let models = LocalModelManager(applicationSupport: options.applicationSupport)
         let cloud = OpenAIClient(keyProvider: EnvironmentAPIKeyStore())
-        let backends = makeBackends(models: models, cloud: cloud)
         let baselines = options.baseline.flatMap { try? BenchBaselines.read(from: $0) }
         if options.baseline != nil && baselines == nil {
             note("bench: no readable baseline at \(options.baseline?.path ?? "")")
             return 2
         }
+        if options.resume && options.out == nil {
+            note("bench: --resume needs --out, it is the file being resumed")
+            return 2
+        }
 
-        var rows: [Row] = []
+        var existing: [Row] = []
+        if options.resume, let out = options.out,
+            FileManager.default.fileExists(atPath: out.path)
+        {
+            // A file that exists but does not decode is refused, never
+            // treated as empty: starting over would overwrite the hours of
+            // results resuming exists to protect.
+            guard let data = try? Data(contentsOf: out),
+                let decoded = try? JSONDecoder().decode([Row].self, from: data)
+            else {
+                note("bench: \(out.path) exists but did not decode; fix or delete it before resuming")
+                return 2
+            }
+            existing = decoded
+            note("resuming: \(decoded.count) recorded row(s) in \(out.lastPathComponent)")
+        }
+
+        var rows: [Row] = existing
         var failures: [String] = []
         var digests: [String: String] = [:]
         for engine in engines {
+            let backends = makeBackends(
+                models: models, cloud: cloud,
+                configuration: settings(engine: engine, diarizer: options.diarizer),
+                diarizer: options.diarizer
+            )
             for benchCase in cases {
-                guard FileManager.default.fileExists(atPath: benchCase.audio.path) else {
-                    note("missing audio for \(benchCase.truth.meeting): run scripts/fetch-bench-audio.sh")
-                    failures.append("\(benchCase.truth.meeting): no audio")
-                    continue
-                }
-                if let expected = manifest?.audio[benchCase.truth.meeting] {
-                    let actual = (try? sha256(of: benchCase.audio, cache: &digests)) ?? ""
-                    guard actual == expected else {
-                        note("\(benchCase.truth.meeting): audio hashes \(actual), manifest says \(expected)")
-                        failures.append("\(benchCase.truth.meeting): checksum")
+                let plan = BenchResume.pending(
+                    existing: existing, meeting: benchCase.truth.meeting,
+                    engine: engine.name, diarizer: options.diarizer,
+                    repeats: max(1, options.repeats)
+                )
+                var runs: [Row] = plan.done
+                if plan.runs.isEmpty {
+                    note("\(benchCase.truth.meeting) on \(engine.name): recorded, skipping")
+                } else {
+                    guard FileManager.default.fileExists(atPath: benchCase.audio.path) else {
+                        note("missing audio for \(benchCase.truth.meeting): run scripts/fetch-bench-audio.sh")
+                        failures.append("\(benchCase.truth.meeting): no audio")
                         continue
                     }
-                }
-                var runs: [Row] = []
-                for run in 1...max(1, options.repeats) {
-                    do {
-                        var row = try await runOne(
-                            benchCase, engine: engine, options: options,
-                            backends: backends, run: run
-                        )
-                        row.run = run
-                        runs.append(row)
-                        rows.append(row)
-                        report(row, of: max(1, options.repeats))
-                    } catch {
-                        note("\(benchCase.truth.meeting) on \(engine.name) failed: \(error)")
-                        failures.append("\(benchCase.truth.meeting) on \(engine.name)")
+                    if let expected = manifest?.audio[benchCase.truth.meeting] {
+                        let actual = (try? sha256(of: benchCase.audio, cache: &digests)) ?? ""
+                        guard actual == expected else {
+                            note("\(benchCase.truth.meeting): audio hashes \(actual), manifest says \(expected)")
+                            failures.append("\(benchCase.truth.meeting): checksum")
+                            continue
+                        }
+                    }
+                    for run in plan.runs {
+                        do {
+                            var row = try await runOne(
+                                benchCase, engine: engine, options: options,
+                                backends: backends, run: run
+                            )
+                            row.run = run
+                            runs.append(row)
+                            rows.append(row)
+                            // Written after every case, so an interrupted run
+                            // leaves everything it finished for --resume.
+                            writeOut(rows, to: options.out)
+                            report(row, of: max(1, options.repeats))
+                        } catch {
+                            note("\(benchCase.truth.meeting) on \(engine.name) failed: \(error)")
+                            failures.append("\(benchCase.truth.meeting) on \(engine.name)")
+                        }
                     }
                 }
                 guard let deciding = mean(of: runs) else { continue }
@@ -321,7 +381,10 @@ enum BenchCommand {
                     // The mean decides, so one unlucky alignment refusal in
                     // three runs neither fails the gate on its own nor hides
                     // behind a lucky one.
-                    let broken = baselines.regressions(key: key, score: deciding)
+                    let broken = baselines.regressions(
+                        key: key, score: deciding,
+                        requireEntry: !options.allowMissingBaseline
+                    )
                     for entry in broken { note("regression \(key): \(entry)") }
                     failures.append(contentsOf: broken.map { "\(key): \($0)" })
                 }
@@ -329,9 +392,7 @@ enum BenchCommand {
         }
 
         if let out = options.out {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            if let data = try? encoder.encode(rows) { try? data.write(to: out) }
+            writeOut(rows, to: out)
             note("wrote \(rows.count) results to \(out.path)")
         }
         summarise(rows, repeats: max(1, options.repeats))
@@ -341,6 +402,16 @@ enum BenchCommand {
             return 1
         }
         return 0
+    }
+
+    static func writeOut(_ rows: [Row], to out: URL?) {
+        guard let out else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Atomic, because this file is rewritten after every case and a kill
+        // mid-write must leave the previous complete version, not a
+        // truncated one nothing can resume from.
+        if let data = try? encoder.encode(rows) { try? data.write(to: out, options: .atomic) }
     }
 
     static func runOne(
@@ -454,6 +525,10 @@ enum BenchCommand {
                      score.wer * 100, score.werNoFiller * 100, score.werConversational * 100))
         print(String(format: "  ordering floor      %5.1f%%   (at least %.1f%% of WER is not ordering)",
                      score.orderingFloorWer * 100, score.netOfFloorWer * 100))
+        if let cp = score.cpWer, let tcp = score.tcpWer {
+            print(String(format: "  per-speaker WER     %5.1f%%   (time-constrained %.1f%%, every word scored, overlap included)",
+                         cp * 100, tcp * 100))
+        }
         print(String(format: "  words               %5d ref / %d hyp   (%.0f/min, %.0f%% of the window is speech)",
                      score.referenceWords, score.hypothesisWords,
                      score.wordsPerMinute, score.speechCoverage * 100))
@@ -520,24 +595,32 @@ enum BenchCommand {
         print("  of reference words attribution asked about; the rest overlap another speaker.")
         print("  DER is on the merged mapping, strict on the injective one, and above 100% is")
         print("  arithmetic rather than a defect: false alarm has no upper bound.")
+        print("  tcpWER concatenates each speaker's words and scores all of them, overlapped")
+        print("  speech included, with a five-second time constraint; it is the headline number")
+        print("  on an overlap suite. Size is what the configuration installs.")
         print("")
         // The count is rows, which is cases times repeats, so it is named for
         // what it counts rather than left saying "cases" over a number three
         // times the roster.
-        var header = "  engine       \(repeats > 1 ? "runs" : "case")   WER   floor     net   no filler   conv"
-        header += "   attribution   coverage   merged     DER   strict   repeats"
+        var header = "  engine       \(repeats > 1 ? "runs" : "case")     tcp    cpWER   WER   floor     net   no filler   conv"
+        header += "   attribution   coverage   merged     DER   strict   repeats   RTFx     size"
         if repeats > 1 { header += "   WER spread" }
         print(header)
         for engine in Array(Set(rows.map(\.engine))).sorted() {
             let group = rows.filter { $0.engine == engine }
             let ders = group.compactMap(\.score.der)
             let strict = group.compactMap(\.score.derStrict)
+            let tcp = group.compactMap(\.score.tcpWer)
+            let cp = group.compactMap(\.score.cpWer)
+            let speeds = group.map { $0.audioSeconds / max($0.processingSeconds, 0.001) }
             let padded = engine.padding(
                 toLength: max(engine.count, 10), withPad: " ", startingAt: 0
             )
             var line = padded.prefix(10) + String(
-                format: " %5d  %5.1f%%  %5.1f%%  %5.1f%%     %5.1f%%  %5.1f%%        %5.1f%%     %5.1f%%   %5.1f%%  %5.1f%%   %5.1f%%   %d",
+                format: " %5d  %5.1f%%  %5.1f%%  %5.1f%%  %5.1f%%  %5.1f%%     %5.1f%%  %5.1f%%        %5.1f%%     %5.1f%%   %5.1f%%  %5.1f%%   %5.1f%%   %d",
                 group.count,
+                tcp.isEmpty ? 0 : median(tcp) * 100,
+                cp.isEmpty ? 0 : median(cp) * 100,
                 median(group.map(\.score.wer)) * 100,
                 median(group.map(\.score.orderingFloorWer)) * 100,
                 median(group.map(\.score.netOfFloorWer)) * 100,
@@ -550,6 +633,8 @@ enum BenchCommand {
                 strict.isEmpty ? 0 : median(strict) * 100,
                 group.reduce(0) { $0 + $1.score.repeatedNgrams }
             )
+            line += String(format: "   %5.1f", median(speeds))
+            line += "  " + installSize(engineName: engine, diarizer: group.first?.diarizer ?? "local")
             if repeats > 1 {
                 // The widest a single case moved between its own runs, which
                 // is the number a tolerance has to clear.
@@ -563,6 +648,16 @@ enum BenchCommand {
             print(line)
         }
         fflush(stdout)
+    }
+
+    /// What the configuration downloads onto a fresh machine, from the same
+    /// constants the installer shows. Cloud engines install the diarizer unit
+    /// alone.
+    static func installSize(engineName: String, diarizer: String) -> String {
+        guard let engine = Engine.parse(engineName) else { return "      ?" }
+        let units = LocalModelUnit.required(for: settings(engine: engine, diarizer: diarizer))
+        let bytes = units.reduce(Int64(0)) { $0 + $1.approximateBytes }
+        return String(format: "%5.1fGB", Double(bytes) / (1024 * 1024 * 1024))
     }
 
     static func mean(_ values: [Double]) -> Double { BenchAggregate.mean(values) }

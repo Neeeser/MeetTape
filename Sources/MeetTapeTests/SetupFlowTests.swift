@@ -1,5 +1,6 @@
 import Foundation
 import MeetTapeCore
+import MeetTapeLocalAI
 import MeetTapeServices
 import MeetTapeUI
 import TestKit
@@ -87,6 +88,11 @@ enum SetupFlowTests {
                 var cloud = AppSettings()
                 cloud.processing.transcription = .openAI
                 cloud.processing.diarization = .openAI
+                expect.isTrue(
+                    !LocalModelUnit.required(for: cloud).contains(.ctcAligner),
+                    "the default cloud model reports its own timings and needs no aligner"
+                )
+                cloud.models.transcription = "gpt-transcribe"
                 let units = LocalModelUnit.required(for: cloud)
                 expect.isTrue(units.contains(.diarizer), "the diarizer is always required")
                 expect.isTrue(
@@ -236,17 +242,43 @@ enum SetupFlowTests {
 
                 let model = await MainActor.run { makeSetupModel(root: root, requested: nil) }
                 await MainActor.run {
+                    // Every case is offered, retired, or a bench candidate,
+                    // so an engine cannot go missing from the picker by
+                    // accident. Cohere and Whisper retired on the 2026-08-24
+                    // deciding run; Canary never earned a place; Apple is
+                    // offered where the OS has it.
+                    let unoffered: Set<LocalTranscriptionModel> =
+                        AppleSpeechTranscriptionBackend.isAvailable
+                        ? [.canary, .cohere, .whisper]
+                        : [.canary, .cohere, .whisper, .apple]
                     expect.equal(
-                        Set(LocalTranscriptionModel.offered),
+                        Set(LocalTranscriptionModel.offered).union(unoffered),
                         Set(LocalTranscriptionModel.allCases),
-                        "every engine has a row in the picker"
+                        "every engine is offered, retired, or a named bench candidate"
+                    )
+                    expect.isTrue(
+                        Set(LocalTranscriptionModel.offered).isDisjoint(with: unoffered),
+                        "retired engines and candidates stay out of the picker"
                     )
                     expect.equal(
-                        LocalTranscriptionModel.offered.first, .parakeet,
-                        "and the recommended one is offered first"
+                        LocalTranscriptionModel.offered.first, LocalTranscriptionModel.preferred,
+                        "and the fresh-install default is offered first"
+                    )
+                    // A stored choice that left the offered list keeps its
+                    // row: hiding it would show a picker with nothing
+                    // selected, one click from a download nobody asked for.
+                    expect.equal(
+                        LocalTranscriptionModel.pickerRows(selected: .cohere).last,
+                        LocalTranscriptionModel.cohere,
+                        "an unoffered selection still has its row"
+                    )
+                    expect.equal(
+                        LocalTranscriptionModel.pickerRows(selected: .parakeet),
+                        LocalTranscriptionModel.offered,
+                        "an offered selection adds nothing"
                     )
                     expect.equal(model.localModel, AppSettings().processing.localTranscriptionModel)
-                    expect.equal(model.localModel, .parakeet)
+                    expect.equal(model.localModel, LocalTranscriptionModel.preferred)
                     expect.isTrue(
                         model.runtime.settings.processing.usesLocalTranscription,
                         "the default backend is local, which is what shows the picker"
@@ -281,8 +313,10 @@ enum SetupFlowTests {
                 )
             },
 
-            test("leaving the choice alone downloads Parakeet and the diarizer only") { expect in
+            test("leaving the choice alone downloads only what the default needs") { expect in
                 // Nothing in setup may reach for the 2.1 GB engine on its own.
+                // On macOS 26 the default is Apple and the download is the
+                // shared 22 MB; before it, Parakeet's 460 MB.
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
 
@@ -290,11 +324,13 @@ enum SetupFlowTests {
                 let model = await MainActor.run { makeSetupModel(root: root, requested: requested) }
                 await model.startModelDownload()
 
-                expect.equal(await requested.all, [[.parakeet, .diarizer, .voiceActivity]])
+                var defaults = AppSettings()
+                defaults.processing.transcription = .local
+                expect.equal(await requested.all, [LocalModelUnit.required(for: defaults)])
                 await MainActor.run { model.finish() }
                 expect.equal(
                     SettingsStore(directory: root).load().processing.localTranscriptionModel,
-                    .parakeet,
+                    LocalTranscriptionModel.preferred,
                     "and finishing setup stores the engine nobody touched"
                 )
             },

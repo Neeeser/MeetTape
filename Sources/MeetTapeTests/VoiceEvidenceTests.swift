@@ -34,6 +34,37 @@ enum VoiceEvidenceTests {
 
     static var suite: Suite {
         Suite("VoiceEvidence", [
+            test("audio where two clusters overlap enrols nobody") { expect in
+                // The clustering diarizer assigns one speaker per moment, so
+                // this never arose. An overlap-aware diarizer marks both
+                // voices across the same seconds, and those seconds hold two
+                // people: fed to either cluster's vector they put someone
+                // else's voice in a profile. Overlapping audio cannot belong
+                // to two people, so it belongs to neither.
+                let solo = DiarizationInterval.soloSpeech([
+                    DiarizationInterval(start: 0, end: 10, clusterID: "a"),
+                    DiarizationInterval(start: 4, end: 8, clusterID: "b"),
+                    DiarizationInterval(start: 12, end: 15, clusterID: "a"),
+                ])
+                let a = solo.filter { $0.clusterID == "a" }
+                expect.equal(
+                    a.map { [$0.start, $0.end] }, [[0, 4], [8, 10], [12, 15]],
+                    "the overlapped middle of a's turn is cut out, the rest survives"
+                )
+                expect.isTrue(
+                    solo.filter { $0.clusterID == "b" }.isEmpty,
+                    "b spoke only across a, so b has no clean audio to enrol"
+                )
+
+                // Two intervals of the same cluster touching each other are
+                // that person twice, not an overlap.
+                let sameVoice = DiarizationInterval.soloSpeech([
+                    DiarizationInterval(start: 0, end: 5, clusterID: "a"),
+                    DiarizationInterval(start: 3, end: 9, clusterID: "a"),
+                ])
+                expect.equal(sameVoice.count, 2, "one voice cannot overlap itself away")
+            },
+
             test("a re-analysis renumbers the clusters and the voice can still be taken back") { expect in
                 // The defect this exists for: provenance recorded as a cluster
                 // label stops matching the moment a re-analysis renumbers the

@@ -7,7 +7,7 @@
 # mirror serving a re-encoded copy is caught rather than silently measured.
 #
 # Usage: scripts/fetch-bench-audio.sh [suite] [--audio-dir DIR]
-#        scripts/fetch-bench-audio.sh --annotations [ami|icsi]
+#        scripts/fetch-bench-audio.sh --annotations [ami|icsi|notsofar]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +41,14 @@ manifest = json.load(open(sys.argv[1]))
 what = sys.argv[2]
 if what.startswith("annotations:"):
     corpus = what.split(":", 1)[1]
+    if corpus == "notsofar":
+        # Not an archive: per-meeting ground-truth JSON, pinned individually.
+        block = manifest["notsofar"]
+        for meeting, hashes in sorted(block["groundTruth"].items()):
+            base = "%s/%s" % (block["base"], meeting)
+            print("%s/gt_transcription.json %s %s.gt.json" % (base, hashes["gt"], meeting))
+            print("%s/gt_meeting_metadata.json %s %s.meta.json" % (base, hashes["meta"], meeting))
+        sys.exit(0)
     archives = manifest["annotations"]
     if corpus not in archives:
         sys.exit("no annotations for %s" % corpus)
@@ -53,7 +61,8 @@ for meeting in manifest["suites"][what]:
     url = manifest.get("audioURL", {}).get(meeting)
     if url is None:
         url = manifest["mirror"].replace("{meeting}", meeting)
-    print("%s %s %s" % (url, manifest["audio"][meeting], posixpath.basename(url)))
+    name = manifest.get("audioFilename", {}).get(meeting, posixpath.basename(url))
+    print("%s %s %s" % (url, manifest["audio"][meeting], name))
 ' "$MANIFEST" "$1"
 }
 

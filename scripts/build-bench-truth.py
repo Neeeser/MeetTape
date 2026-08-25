@@ -371,7 +371,70 @@ class IcsiReader:
         return word_list
 
 
-READERS = {"ami": AmiReader, "icsi": IcsiReader}
+class NotsofarReader:
+    """NOTSOFAR-1 ground truth, fetched as flat per-meeting JSON files.
+
+    `scripts/fetch-bench-audio.sh --annotations notsofar` writes
+    `<meeting>.gt.json` (the corpus's gt_transcription.json) and
+    `<meeting>.meta.json` (its gt_meeting_metadata.json) into one directory,
+    and this reads those. Unlike AMI and ICSI there is no per-agent channel:
+    the transcription carries speaker aliases directly, so an alias is both
+    the agent and the speaker.
+
+    Every word carries its own timing (the corpus was built for tcpWER), so
+    nothing here interpolates. Annotation markers travel as standalone tokens
+    in `word_timing` (`<FILL/>`, `<BA/>`, `<ST/>`, and the `<PName>` name
+    delimiters); they are events rather than words and are dropped, while the
+    real words between name delimiters stay.
+    """
+
+    name = "notsofar"
+    source_suffix = ".sc_meetup_0.wav"
+    prefix = ""
+
+    def __init__(self, annotations):
+        self.annotations = annotations
+
+    def meetings(self):
+        if self.annotations.zip is None:
+            names = os.listdir(self.annotations.path)
+        else:
+            names = self.annotations.names
+        return sorted(
+            name[: -len(".gt.json")] for name in names if name.endswith(".gt.json")
+        )
+
+    def participants(self, meeting):
+        raw = self.annotations.read("%s.meta.json" % meeting)
+        if raw is None:
+            raise SystemExit("no %s.meta.json in the annotations" % meeting)
+        aliases = json.loads(raw)["ParticipantAliases"]
+        return {alias: alias for alias in aliases}
+
+    def words(self, meeting, agent):
+        raw = self.annotations.read("%s.gt.json" % meeting)
+        if raw is None:
+            return []
+        out = []
+        for utterance in json.loads(raw):
+            if utterance["speaker_id"] != agent:
+                continue
+            for text, start, end in utterance.get("word_timing") or []:
+                if "<" in text or not text.strip():
+                    continue
+                if start is None or end is None:
+                    continue
+                out.append({
+                    "start": float(start),
+                    "end": float(end),
+                    "text": text.strip(),
+                    "agent": agent,
+                    "truncated": False,
+                })
+        return out
+
+
+READERS = {"ami": AmiReader, "icsi": IcsiReader, "notsofar": NotsofarReader}
 
 
 def merged(word_list, gap=0.0):

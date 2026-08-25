@@ -210,6 +210,8 @@ public final class MeetTapeRuntime {
                         local: { choice in
                             switch choice {
                             case .cohere: CohereTranscriptionBackend(models: modelManager)
+                            case .canary: CanaryTranscriptionBackend(models: modelManager)
+                            case .apple: AppleSpeechTranscriptionBackend()
                             case .parakeet: ParakeetTranscriptionBackend(models: modelManager)
                             case .whisper: WhisperTranscriptionBackend(models: modelManager)
                             }
@@ -497,6 +499,10 @@ public final class MeetTapeRuntime {
     }
 
     public func update(settings newSettings: AppSettings) {
+        var newSettings = newSettings
+        // Speakers follow the words: settings carry one knob, and any stale
+        // pairing a previous build stored normalizes on the next save.
+        newSettings.coupleDiarization()
         let rootChanged = newSettings.storageRootPath != settings.storageRootPath
         settings = newSettings
         settingsSnapshot.withLock { $0 = newSettings }

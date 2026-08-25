@@ -19,6 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select the newest Xcode on the image
+        # A release built without the macOS 26 SDK ships without the Apple
+        # speech engine: the compile gate keeps such a build correct, but the
+        # newest toolchain is what keeps the engine in the product.
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "selecting $newest"
+          sudo xcode-select -s "$newest"
+
       - name: Resolve the version
         id: version
         env:

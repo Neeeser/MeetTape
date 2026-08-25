@@ -63,6 +63,43 @@ enum BackendSelectionTests {
                 expect.isTrue(settings.processing.speakers.learnFromCorrections)
             },
 
+            test("speakers follow the words: settings carry one knob, not two") { expect in
+                // Two cloud rows named gpt-4o made the screen read as a
+                // contradiction, and the only reason to pay for that model is
+                // to let it do both jobs. Saving settings derives diarization:
+                // cloud exactly when the chosen cloud model is the diarize
+                // model, local for everything else, including a cloud text
+                // model, whose speakers the local clusterer identifies.
+                var settings = AppSettings()
+                settings.processing.transcription = .openAI
+                settings.models.transcription = "gpt-4o-transcribe-diarize"
+                settings.processing.diarization = .local
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .openAI,
+                    "the diarize model does both jobs in one request"
+                )
+
+                settings.models.transcription = "gpt-transcribe"
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .local,
+                    "a cloud text model gets local speakers"
+                )
+
+                settings.models.transcription = "my-finetune"
+                settings.coupleDiarization()
+                expect.equal(settings.processing.diarization, .local, "a custom model too")
+
+                settings.processing.transcription = .local
+                settings.processing.diarization = .openAI
+                settings.coupleDiarization()
+                expect.equal(
+                    settings.processing.diarization, .local,
+                    "local words never pay for cloud speakers"
+                )
+            },
+
             test("transcription and diarization are chosen independently") { expect in
                 var settings = AppSettings()
                 settings.processing.diarization = .openAI
@@ -149,12 +186,12 @@ enum BackendSelectionTests {
                     expect.equal(settings.version, AppSettings.currentVersion, "and is current schema")
                 }
                 expect.equal(
-                    AppSettings().models.transcription, "gpt-transcribe",
-                    "a machine with no settings file starts on the accurate default"
+                    AppSettings().models.transcription, "gpt-4o-transcribe-diarize",
+                    "a machine with no settings file starts on the model that does both jobs"
                 )
             },
 
-            test("an existing local install keeps Whisper; a fresh one gets Parakeet") { expect in
+            test("an existing local install keeps Whisper; a fresh one gets the preferred engine") { expect in
                 // The key's absence means the file predates the model choice,
                 // which is an install that has Whisper on disk. A new download
                 // must come from a person picking the new model, not from an
@@ -164,8 +201,9 @@ enum BackendSelectionTests {
                 expect.equal(migrated.processing.localTranscriptionModel, .whisper)
 
                 expect.equal(
-                    AppSettings().processing.localTranscriptionModel, .parakeet,
-                    "a machine with no settings file starts on the model that measured best"
+                    AppSettings().processing.localTranscriptionModel,
+                    LocalTranscriptionModel.preferred,
+                    "a machine with no settings file starts on this OS's preferred engine"
                 )
             },
 

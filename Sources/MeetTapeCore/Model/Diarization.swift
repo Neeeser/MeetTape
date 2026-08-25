@@ -17,6 +17,45 @@ public struct DiarizationInterval: Codable, Sendable, Equatable {
     }
 
     public var duration: Double { max(0, end - start) }
+
+    /// The same intervals with every second that a different cluster also
+    /// claims cut out. An interval fully covered by another voice disappears.
+    ///
+    /// This is what voice enrolment reads. An overlap-aware diarizer marks
+    /// both speakers across shared seconds, and that audio holds two people:
+    /// fed to either cluster's embedding it puts someone else's voice in a
+    /// profile, which is the permanent kind of wrong. Overlapping audio cannot
+    /// belong to two people, so it enrols neither. Two intervals of the same
+    /// cluster never cut each other: one voice cannot talk over itself.
+    public static func soloSpeech(_ intervals: [DiarizationInterval]) -> [DiarizationInterval] {
+        var out: [DiarizationInterval] = []
+        for interval in intervals {
+            let others = intervals.filter {
+                $0.clusterID != interval.clusterID
+                    && $0.start < interval.end && $0.end > interval.start
+            }
+            var pieces: [(start: Double, end: Double)] = [(interval.start, interval.end)]
+            for other in others {
+                var next: [(start: Double, end: Double)] = []
+                for piece in pieces {
+                    if other.end <= piece.start || other.start >= piece.end {
+                        next.append(piece)
+                        continue
+                    }
+                    if other.start > piece.start { next.append((piece.start, other.start)) }
+                    if other.end < piece.end { next.append((other.end, piece.end)) }
+                }
+                pieces = next
+            }
+            for piece in pieces where piece.end > piece.start {
+                out.append(DiarizationInterval(
+                    start: piece.start, end: piece.end,
+                    clusterID: interval.clusterID, quality: interval.quality
+                ))
+            }
+        }
+        return out
+    }
 }
 
 /// One cluster the diarizer found.

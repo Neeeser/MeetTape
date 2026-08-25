@@ -51,6 +51,10 @@ public struct LocalModelLocations: Sendable, Equatable {
         root.appendingPathComponent(Repo.cohereTranscribeCoreml.folderName, isDirectory: true)
     }
 
+    public var canaryDirectory: URL {
+        root.appendingPathComponent(Repo.canary1bV2.folderName, isDirectory: true)
+    }
+
     /// Silero VAD, under the repository's own folder name for the same reason
     /// as the engines above.
     public var voiceActivityDirectory: URL {
@@ -69,6 +73,7 @@ public struct LocalModelLocations: Sendable, Equatable {
         case .whisper: whisperBase
         case .parakeet: parakeetDirectory
         case .cohere: cohereDirectory
+        case .canary: canaryDirectory
         case .ctcAligner: alignerDirectory
         case .diarizer: diarizerDirectory
         case .voiceActivity: voiceActivityDirectory

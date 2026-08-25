@@ -21,6 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select the newest Xcode on the image
+        # The SpeechAnalyzer backend needs the macOS 26 SDK to compile in.
+        # The code carries its own compile gate, so an image without a new
+        # enough Xcode still builds; it just builds without the Apple engine,
+        # and a release from such a toolchain would ship without it too.
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "selecting $newest"
+          sudo xcode-select -s "$newest"
+
       - name: Show toolchain
         run: |
           swift --version

@@ -26,17 +26,6 @@ struct ProcessingSettingsTab: View {
                     cloudTranscriptionPicker
                 }
             }
-            Section("Diarization") {
-                backendPicker(keyPath: \.diarization)
-                if !runtime.settings.processing.usesLocalDiarization {
-                    cloudDiarizationRow
-                }
-                Text(
-                    "Who spoke when. Chosen separately from transcription: either one can "
-                        + "run in the cloud without the other."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
             Section("Speaker recognition") {
                 speakerToggle("Recognize known voices", keyPath: \.recognizeKnownVoices)
                 speakerToggle("Remember recurring unnamed voices", keyPath: \.rememberRecurringVoices)
@@ -103,17 +92,16 @@ struct ProcessingSettingsTab: View {
                 }
             )) {
                 cloudChoice(
-                    "gpt-transcribe",
-                    "Most accurate, takes vocabulary hints. Timings are computed on "
-                        + "this Mac by a 600 MB aligner model."
-                )
-                cloudChoice(
                     "gpt-4o-transcribe-diarize",
-                    "Words and speakers in one request. Nothing to download."
+                    "Speaker identification built in: one request returns the words "
+                        + "and who said them. Nothing to download."
                 )
                 cloudChoice(
-                    "whisper-1",
-                    "The previous generation, word timings from the API."
+                    "gpt-transcribe",
+                    "Strongest on clear recordings, takes vocabulary hints. Timings "
+                        + "are computed on this Mac by a 600 MB aligner model. Can "
+                        + "return nothing for stretches of very difficult audio; the "
+                        + "meeting then retries instead of losing words."
                 )
                 Text("Custom…").tag(Self.customModelTag)
             }
@@ -155,37 +143,6 @@ struct ProcessingSettingsTab: View {
         .tag(id)
     }
 
-    private var cloudDiarizationRow: some View {
-        let current = runtime.settings.models.diarization
-        let isPreset = AIModelSettings.diarizationChoices.contains(current)
-        return VStack(alignment: .leading, spacing: 6) {
-            Picker("Model", selection: Binding(
-                get: { isPreset ? current : Self.customModelTag },
-                set: { newValue in
-                    var settings = runtime.settings
-                    settings.models.diarization =
-                        newValue == Self.customModelTag ? "" : newValue
-                    runtime.update(settings: settings)
-                }
-            )) {
-                Text("gpt-4o-transcribe-diarize").tag("gpt-4o-transcribe-diarize")
-                Text("Custom…").tag(Self.customModelTag)
-            }
-            .pickerStyle(.radioGroup)
-            if !isPreset {
-                TextField("model identifier", text: Binding(
-                    get: { runtime.settings.models.diarization },
-                    set: { newValue in
-                        var settings = runtime.settings
-                        settings.models.diarization = newValue
-                        runtime.update(settings: settings)
-                    }
-                ))
-                .frame(width: 280)
-            }
-        }
-    }
-
     /// Everything installed or needed, with the one control set that changes it.
     private var modelsOnDiskSection: some View {
         Section("Models on this Mac") {
@@ -219,8 +176,8 @@ struct ProcessingSettingsTab: View {
             case .outdated:
                 Label(
                     "These were downloaded by an older build that pinned different model "
-                        + "revisions. Re-downloading matches the versions this build was "
-                        + "measured against.",
+                        + "revisions. Re-downloading matches the versions this build "
+                        + "expects.",
                     systemImage: "arrow.triangle.2.circlepath"
                 )
                 .font(.caption).foregroundStyle(.secondary)
@@ -272,6 +229,7 @@ struct ProcessingSettingsTab: View {
         case .whisper: "Whisper Large-v3-Turbo"
         case .parakeet: "Parakeet TDT v3"
         case .cohere: "Cohere Transcribe"
+        case .canary: "Canary 1B v2"
         case .ctcAligner: "Timing aligner"
         case .diarizer: "Speaker models"
         case .voiceActivity: "Voice detector"
@@ -310,7 +268,7 @@ struct LocalModelChoicePicker: View {
 
     var body: some View {
         Picker("Model", selection: Binding(get: { selected }, set: select)) {
-            ForEach(LocalTranscriptionModel.offered, id: \.rawValue) { model in
+            ForEach(LocalTranscriptionModel.pickerRows(selected: selected), id: \.rawValue) { model in
                 choice(model)
             }
         }
@@ -330,22 +288,29 @@ struct LocalModelChoicePicker: View {
         case .parakeet: "Parakeet TDT v3"
         case .cohere: "Cohere Transcribe"
         case .whisper: "Whisper Large-v3-Turbo"
+        case .canary: "Canary 1B v2"
+        case .apple: "Apple Speech"
         }
     }
 
     private static func blurb(_ model: LocalTranscriptionModel) -> String {
         switch model {
+        case .apple:
+            "Nothing to download: the speech models come with macOS. "
+                + "Transcribes your first meeting immediately."
         case .parakeet:
-            "Lowest word error rate of the three: it won all 14 meetings of "
-                + "the benchmark. Word timings built in, 25 languages, over "
-                + "100x realtime. 460 MB."
+            "The most accurate engine. Word timings built in, 25 languages, "
+                + "about 50x realtime. 460 MB."
         case .cohere:
-            "Ranks higher than Parakeet on published leaderboards and "
-                + "scored worse over the same 14 meetings. Around 8x "
-                + "realtime. 2.1 GB plus a 600 MB aligner for word timings; "
-                + "the first use takes a few minutes to prepare."
+            // Rendered only on installs that already have it selected.
+            "Slower and larger than Parakeet, with no accuracy advantage. "
+                + "2.1 GB plus a 600 MB aligner."
         case .whisper:
             "The previous engine. 624 MB."
+        case .canary:
+            // Never rendered: not offered. Here because the switch is
+            // exhaustive.
+            "Not offered."
         }
     }
 }

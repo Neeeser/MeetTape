@@ -1,0 +1,457 @@
+import AppKit
+import Foundation
+import Observation
+import PipitCore
+import PipitServices
+import SwiftUI
+
+/// Which part of a meeting the detail pane is showing.
+public enum MeetingDetailTab: String, CaseIterable, Identifiable, Sendable {
+    case transcript
+    case summary
+    case notes
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .transcript: "Transcript"
+        case .summary: "Summary"
+        case .notes: "Notes"
+        }
+    }
+}
+
+/// What the last speaker change did, in one line.
+///
+/// Shown because the change reaches files the user opens in the Finder, and a
+/// rename that silently rewrote `transcript.md` gave no sign it had.
+public struct MeetingReceipt: Sendable, Equatable {
+    public var text: String
+    public var meetingID: String
+}
+
+/// The meetings window: everything ever recorded on the left, one of them on the
+/// right.
+///
+/// Replaces the post-meeting review panel, which only existed for as long as
+/// somebody left it open. A meeting that scrolled out of the menu's recent list
+/// could then only be reached through the Finder, where nothing can rename a
+/// speaker.
+@MainActor
+@Observable
+public final class MeetingsWindowModel {
+    public var rows: [MeetingRow] = []
+    public var filter = MeetingsFilter.all
+    public var query = ""
+    /// Meetings the user has clicked. More than one puts the batch panel in the
+    /// detail pane, as the People window does.
+    public var selection: Set<String> = []
+    public var tab = MeetingDetailTab.transcript
+    public var receipt: MeetingReceipt?
+    /// The focused meeting's own model, which owns reading and editing its
+    /// files. One at a time: a window holding forty transcripts in memory is a
+    /// window that stops scrolling.
+    public var detail: MeetingReviewModel?
+    public var isLoading = true
+    /// Every transcript, lowercased, once the background read has finished.
+    /// Until then a search matches titles, speakers and notes alone.
+    public var searchesTranscripts = false
+
+    @ObservationIgnored private var transcripts: [String: String] = [:]
+    @ObservationIgnored private var indexTask: Task<Void, Never>?
+    /// The meetings the index covers, and how many recordings each entry was
+    /// read from, so one recorded since it was built is noticed rather than
+    /// silently left out of search.
+    ///
+    /// The count is there because an entry holds every recording of a
+    /// conversation. Combining and separating change which words belong to a
+    /// row without changing its identifier, and an entry left alone then
+    /// answered for words the meeting no longer holds.
+    @ObservationIgnored private var indexed: [String: Int] = [:]
+    /// Meetings a rewrite dropped from the index while a batch read was in
+    /// flight. The batch holds their words as they were before the rewrite, so
+    /// it must not put them back.
+    @ObservationIgnored private var droppedWhileReading: Set<String> = []
+    @ObservationIgnored private var loadTask: Task<[MeetingRow], Never>?
+    @ObservationIgnored let runtime: PipitRuntime
+
+    public init(runtime: PipitRuntime) {
+        self.runtime = runtime
+    }
+
+    // MARK: - loading
+
+    /// Reads the archive, keeping whatever is selected selected.
+    ///
+    /// One read at a time. The window asks for one when it appears and again
+    /// whenever it is brought forward, and both arrive together on the first
+    /// open, which read every meeting on disk twice.
+    public func reload() async {
+        if let inFlight = loadTask {
+            // The read already running answers this caller too, and whoever
+            // started it puts the rows on screen.
+            _ = await inFlight.value
+            return
+        }
+        let task = Task { [runtime] in await runtime.meetingRows() }
+        loadTask = task
+        let loaded = await task.value
+        loadTask = nil
+        rows = loaded
+        isLoading = false
+        // The meeting the pane is showing stays selected even when this read
+        // did not see it. A recording that finished after the read began is not
+        // in these rows, and dropping it moved the user off the meeting a
+        // notification had just opened.
+        let present = Set(loaded.map(\.id))
+        selection = selection.filter { present.contains($0) || $0 == detail?.meetingID }
+        if selection.isEmpty, let first = sections.first?.rows.first {
+            select(first.id, extending: false)
+        } else if selection.count == 1, let focused = selection.first,
+            detail?.meetingID != focused {
+            // One at a time, and only what the pane is showing. A set has no
+            // order, so taking the first of several selected rows opened a pane
+            // on whichever one it happened to hand back, behind the panel that
+            // covers a multiple selection.
+            openDetail(focused)
+        } else if let detail {
+            // The pane survives the window being closed and opened again, and
+            // the meeting it holds can have finished processing in between.
+            await detail.reloadAll()
+        }
+        startIndexing()
+    }
+
+    /// Reads the transcripts the index does not hold, in the background, and
+    /// turns on full-text search when they land.
+    ///
+    /// Run again whenever the archive holds a meeting the index does not, so a
+    /// recording made while the window is open is searchable by its words too,
+    /// and whenever a conversation gained or lost a recording. Only the
+    /// meetings it does not already cover, because a rename drops one entry and
+    /// re-reading the archive for it costs a file read per meeting on disk.
+    private func startIndexing() {
+        let counts = Dictionary(
+            rows.map { ($0.id, $0.summary.recordingCount) }, uniquingKeysWith: { first, _ in first }
+        )
+        // An entry whose meeting has left the archive goes with it. Nothing
+        // draws a row for that meeting any more, and a window left open for
+        // weeks would otherwise still hold the words of every meeting deleted
+        // under it.
+        transcripts = transcripts.filter { counts[$0.key] != nil }
+        indexed = indexed.filter { counts[$0.key] != nil }
+        let missing = Set(counts.filter { indexed[$0.key] != $0.value }.keys)
+        guard !missing.isEmpty else {
+            searchesTranscripts = true
+            return
+        }
+        indexTask?.cancel()
+        droppedWhileReading = []
+        indexTask = Task { [weak self] in
+            guard let self else { return }
+            let read = await runtime.transcriptSearchIndex(for: missing)
+            guard !Task.isCancelled else { return }
+            let stale = droppedWhileReading
+            droppedWhileReading = []
+            let admissible = MeetingsDirectoryFilter.admissible(
+                read: read, droppedWhileReading: stale
+            )
+            transcripts.merge(admissible) { _, new in new }
+            // Only the meetings that had words. A recording still being
+            // transcribed has no `transcript.md` yet, and counting it as read
+            // meant its words were never picked up once it had them.
+            for (id, count) in counts where admissible[id] != nil { indexed[id] = count }
+            searchesTranscripts = true
+        }
+    }
+
+    /// Forgets the words held for one meeting, because a change now running
+    /// will rewrite its `transcript.md`.
+    ///
+    /// One meeting rather than the whole index. Dropping everything meant a
+    /// full archive read per click, and the read started before the rewrite it
+    /// was waiting for had landed, so it put the same old words back.
+    private func dropFromIndex(_ meetingID: String) {
+        let conversation = conversationID(of: meetingID)
+        transcripts.removeValue(forKey: conversation)
+        indexed.removeValue(forKey: conversation)
+        droppedWhileReading.insert(conversation)
+    }
+
+    /// The identifier the index answers under.
+    ///
+    /// An entry holds every recording of a conversation under the
+    /// conversation's own identifier, while the pane opened on the half a
+    /// notification named is keyed on that half. Dropping under the pane's
+    /// identifier removed nothing, so a batch read in flight put the
+    /// pre-rewrite words back and search answered from them for the life of
+    /// the window.
+    ///
+    /// Answered from what is already in memory. Resolving it through the
+    /// archive is a directory walk, and naming one person on thirty corrected
+    /// lines would do thirty of them.
+    private func conversationID(of meetingID: String) -> String {
+        if rows.contains(where: { $0.id == meetingID }) { return meetingID }
+        if detail?.meetingID == meetingID, let primary = detail?.recordings.first?.id {
+            return primary
+        }
+        return meetingID
+    }
+
+    /// Whether the index holds this meeting's words. For tests, which cannot
+    /// otherwise tell a read that was skipped from one that found nothing.
+    public func indexHolds(_ meetingID: String) -> Bool {
+        transcripts[meetingID] != nil
+    }
+
+    /// Reads one meeting's words again, once the rewrite has landed.
+    ///
+    /// Merged rather than assigned by the identifier that was asked for. The
+    /// read answers under the conversation's identifier, and a correction made
+    /// on the second half of a dropped call names the second half.
+    private func refreshIndexEntry(_ meetingID: String) async {
+        let read = await runtime.transcriptSearchIndex(for: [meetingID])
+        transcripts.merge(read) { _, new in new }
+        for id in read.keys {
+            // An identifier with no row of its own is left out rather than
+            // recorded as covered, so the next read of the archive picks it up.
+            indexed[id] = rows.first { $0.id == id }?.summary.recordingCount
+        }
+    }
+
+    public func end() {
+        indexTask?.cancel()
+        indexTask = nil
+        detail?.saveEdits()
+    }
+
+    // MARK: - the list
+
+    public var sections: [MeetingsSection] {
+        MeetingsDirectoryFilter.sections(
+            rows, filter: filter, query: query, transcripts: transcripts
+        )
+    }
+
+    public var selectedRows: [MeetingRow] {
+        rows.filter { selection.contains($0.id) }
+    }
+
+    /// Every meeting's total, for the footer.
+    public var totalDuration: Double { PipitRuntime.totalDuration(of: rows) }
+
+    public func select(_ id: String, extending: Bool) {
+        if extending {
+            if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+        } else {
+            selection = [id]
+        }
+        // The detail model writes what was typed into it before the pane shows
+        // another meeting. Without this, moving the selection while a title was
+        // half-edited threw the edit away.
+        if selection.count == 1, let focused = selection.first {
+            openDetail(focused)
+        } else {
+            detail?.saveEdits()
+            detail = nil
+        }
+    }
+
+    /// Opens one meeting, whether or not it is in the list the filter is
+    /// showing. A notification about a meeting that has just finished has to
+    /// land on it even while the sidebar is filtered to Unnamed.
+    public func show(meetingID: String) {
+        let resolved = runtime.repository.logicalMeeting(id: meetingID)?.id ?? meetingID
+        selection = [resolved]
+        openDetail(resolved)
+    }
+
+    private func openDetail(_ id: String) {
+        guard detail?.meetingID != id else { return }
+        detail?.saveEdits()
+        receipt = nil
+        tab = .transcript
+        let opened = MeetingReviewModel(runtime: runtime, meetingID: id)
+        // A title or a note written from the pane changes what the list shows.
+        // The write happens a moment after typing stops, so the row is read
+        // again when it lands rather than when the pane is left.
+        opened.onEditsSaved = { [weak self] in
+            guard let self else { return }
+            Task { await self.refreshRow(id) }
+        }
+        detail = opened
+        Task { [weak self] in await self?.detail?.reloadAll() }
+    }
+
+    /// Reads one meeting again, after processing moved on or somebody changed a
+    /// speaker.
+    ///
+    /// The runtime reports at a stage boundary and after every speaker change,
+    /// so a rename arrives here too. The row is read again with it, because a
+    /// rename rewrites the speaker map the list draws its faces from and the
+    /// stage it is in has not changed.
+    ///
+    /// Whether or not the pane is showing that meeting. The report names
+    /// whichever meeting the change happened to, and a recording finishing while
+    /// the user reads an older one is the ordinary case. Gating this on the pane
+    /// left every other row in the list showing the stage its meeting was in
+    /// when the window opened. One row rather than the archive, because a
+    /// correction on a line reports the same way and there can be one per click.
+    public func refresh(meetingID: String) async {
+        await reread(meetingID)
+    }
+
+    /// Links the meeting the pane is showing to the earlier one it continues,
+    /// then reads the archive again.
+    ///
+    /// The listing hides a folded continuation, so this takes a row out of the
+    /// list rather than changing one, which is more than reading one row back
+    /// can do. The selection moves to the conversation, because the identifier
+    /// the pane was opened on is the half that has just been folded in.
+    public func combineWithEarlier() {
+        guard let detail else { return }
+        let meetingID = detail.meetingID
+        detail.combineWithEarlier()
+        Task { [weak self] in
+            await self?.reload()
+            self?.show(meetingID: meetingID)
+        }
+    }
+
+    /// Undoes that link, then reads the archive again. The recording that comes
+    /// back is a row of its own, and nothing short of a read knows it is there.
+    public func separate(_ recordingID: String) {
+        detail?.detach(recordingID)
+        Task { [weak self] in await self?.reload() }
+    }
+
+    /// Reads one meeting's files again: the pane if it is showing that meeting,
+    /// then the row and the words search holds for it.
+    private func reread(_ meetingID: String) async {
+        if detail?.meetingID == meetingID { await detail?.reloadAll() }
+        await refreshRow(meetingID)
+        await refreshIndexEntry(meetingID)
+    }
+
+    /// Reads one row again, taking the clusters from the pane that is open on
+    /// it. The transcript is the largest file in the folder and the pane has
+    /// just read it.
+    ///
+    /// Placed by the identifier the row came back with rather than the one that
+    /// was asked for. A recording folded into another answers under the
+    /// conversation's identifier, and keying the replacement on the identifier
+    /// of the half that changed put a second row for the same conversation in
+    /// the list.
+    private func refreshRow(_ meetingID: String) async {
+        let clusters = detail?.meetingID == meetingID ? detail?.transcript?.speakers : nil
+        guard let row = await runtime.meetingRow(id: meetingID, clusters: clusters) else { return }
+        if let index = rows.firstIndex(where: { $0.id == row.id }) {
+            rows[index] = row
+        } else {
+            rows.append(row)
+        }
+    }
+
+    // MARK: - speakers
+
+    /// Names a whole cluster and says what it changed.
+    public func assignCluster(_ row: MeetingSpeakerRow, to entry: SpeakerDirectoryEntry) {
+        applyClusterChange(row, name: entry.identity.resolvedName) {
+            self.detail?.assignCluster(row.clusterID, in: row.recordingID, to: entry)
+        }
+    }
+
+    public func assignCluster(_ row: MeetingSpeakerRow, toNewPerson name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        applyClusterChange(row, name: trimmed) {
+            self.detail?.assignCluster(row.clusterID, in: row.recordingID, toNewPerson: trimmed)
+        }
+    }
+
+    public func clearCluster(_ row: MeetingSpeakerRow) {
+        applyClusterChange(row, name: nil) {
+            self.detail?.clearCluster(row.clusterID, in: row.recordingID)
+        }
+    }
+
+    /// Counts the lines before the change, applies it, and records what
+    /// happened. Counted first because the assignment re-resolves the names the
+    /// count is taken from.
+    private func applyClusterChange(
+        _ row: MeetingSpeakerRow, name: String?, _ apply: () -> Void
+    ) {
+        guard let detail else { return }
+        let meetingID = detail.meetingID
+        // The lines of the recording this writes the speaker map of. A cluster
+        // identifier names a speaker inside one recording, and both halves of a
+        // rejoined call number their speakers from zero, so the same identifier
+        // in the other half is somebody else and this change does not reach it.
+        //
+        // A line whose speaker a person set is left out. A correction on the
+        // line beats the cluster's entry, so that line reads the same after
+        // this as before it, and counting it made the receipt claim a line
+        // nothing had changed.
+        let lines = detail.combinedLines.count {
+            $0.recordingID == row.recordingID && $0.utterance.speakerKey == row.clusterID
+                && !$0.isCorrected
+        }
+        apply()
+        let what = name.map { "Named \($0)" } ?? "Cleared the name"
+        receipt = MeetingReceipt(
+            text: "\(what) on \(lines) \(lines == 1 ? "line" : "lines"). "
+                + "transcript.md and the speaker map are rewritten.",
+            meetingID: meetingID
+        )
+        dropFromIndex(meetingID)
+    }
+
+    /// Records a correction made on the words themselves.
+    public func noteLineCorrection(_ name: String, lines: Int) {
+        guard let meetingID = detail?.meetingID else { return }
+        receipt = MeetingReceipt(
+            text: "Gave \(lines) \(lines == 1 ? "line" : "lines") to \(name). "
+                + "transcript.md and the speaker map are rewritten.",
+            meetingID: meetingID
+        )
+        dropFromIndex(meetingID)
+    }
+
+    public func dismissReceipt() { receipt = nil }
+
+    // MARK: - actions on the selection
+
+    public func revealSelection() {
+        for row in selectedRows { runtime.revealInFinder(meetingID: row.id) }
+    }
+
+    public func revealArchive() { runtime.revealArchive() }
+
+    public func rebuildSelection() {
+        for row in selectedRows { rebuild(row.id) }
+    }
+
+    /// Re-assembles the meeting the pane is showing.
+    public func rebuildFocusedMeeting() {
+        guard let detail else { return }
+        rebuild(detail.meetingID)
+    }
+
+    /// Re-assembles one transcript and reads back what it wrote.
+    ///
+    /// Nothing else watches a rebuild finish, and it rewrites the file search
+    /// reads and the speaker map the row draws its faces from. Waiting for the
+    /// next reload left the list and the index describing the transcript the
+    /// meeting used to have.
+    private func rebuild(_ meetingID: String) {
+        dropFromIndex(meetingID)
+        runtime.rebuildTranscript(meetingID: meetingID) { [weak self] in
+            Task { await self?.reread(meetingID) }
+        }
+    }
+
+    public func text(_ keyPath: ReferenceWritableKeyPath<MeetingsWindowModel, String>) -> Binding<String> {
+        Binding(get: { self[keyPath: keyPath] }, set: { self[keyPath: keyPath] = $0 })
+    }
+}

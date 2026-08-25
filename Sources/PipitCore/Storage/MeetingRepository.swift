@@ -161,6 +161,43 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(transcript), to: layout.canonicalTranscript)
     }
 
+    /// Which speakers the transcript holds and how long each of them speaks, in
+    /// the order they first speak.
+    ///
+    /// Decoded without the words behind each line, because a word carries two
+    /// timings and an hour of speech is about a megabyte of them. The meetings
+    /// list reads one of these per meeting on disk, and the boundaries a person
+    /// put in the transcript divide lines rather than move them between
+    /// speakers, so this reads what the assembler wrote.
+    public func readTranscriptSpeakers() throws -> [TranscriptSpeaker] {
+        guard FileManager.default.fileExists(atPath: layout.canonicalTranscript.path) else {
+            return []
+        }
+        let data = try read(layout.canonicalTranscript)
+        let document = try ArchiveCoding.decode(
+            TranscriptSpeakers.self, from: data, path: layout.canonicalTranscript.path
+        )
+        var totals: [String: Double] = [:]
+        var ordered: [String] = []
+        for line in document.utterances {
+            if totals[line.speakerKey] == nil { ordered.append(line.speakerKey) }
+            totals[line.speakerKey, default: 0] += max(0, line.end - line.start)
+        }
+        return ordered.map { TranscriptSpeaker(key: $0, speechSeconds: totals[$0] ?? 0) }
+    }
+
+    /// The speaker and the span of each line of `transcript.json`, and nothing
+    /// else.
+    private struct TranscriptSpeakers: Decodable {
+        struct Line: Decodable {
+            var speakerKey: String
+            var start: Double
+            var end: Double
+        }
+
+        var utterances: [Line]
+    }
+
     public func writeTranscriptMarkdown(_ text: String) throws {
         try AtomicFile.writeText(text, to: layout.transcriptMarkdown)
     }
@@ -502,9 +539,22 @@ public struct MeetingRepository: Sendable {
         )
     }
 
+    /// Every recording of the conversation a summary stands for, in order.
+    ///
+    /// A summary already reports the duration of both halves of a dropped call,
+    /// so anything reading a row's files has to read both too. Falls back to
+    /// the summary's own folder when the conversation cannot be resolved, so a
+    /// row is never left with nothing.
+    public func stores(ofConversation summary: MeetingSummary) -> [MeetingStore] {
+        guard summary.recordingCount > 1, let logical = logicalMeeting(id: summary.id) else {
+            return [MeetingStore(layout: MeetingLayout(root: summary.directory))]
+        }
+        return logical.recordings.map(\.store)
+    }
+
     /// The whole conversation an identifier belongs to.
     ///
-    /// Answers for either half: given a continuation's identifier it resolves up
+    /// Answers for either half. Given a continuation's identifier it resolves up
     /// to the recording the conversation started with, so nothing recorded is
     /// unreachable through an identifier a notification or a link still carries.
     public func logicalMeeting(id: String) -> LogicalMeeting? {

@@ -250,8 +250,12 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         ])
     }
 
+    /// An empty stored name is no name. `assign` removes an entry rather than
+    /// storing a blank one, so this only guards a file written by hand or by an
+    /// older build, where a blank would otherwise render as a nameless speaker.
     public func displayName(for key: String) -> String? {
-        entries[key]?.displayName
+        guard let name = entries[key]?.displayName, !name.isEmpty else { return nil }
+        return name
     }
 
     /// Applies an automatic result. Anything a person set, and anything a

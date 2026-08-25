@@ -24,6 +24,7 @@ suites.append(TranscriptPanelTests.suite)
 suites.append(ReconnectTests.suite)
 suites += SpeakerCorrectionTests.all
 suites += PeopleDirectoryTests.all
+suites += MeetingsWindowTests.all
 suites += BackendSelectionTests.all
 suites.append(CloudModelTests.suite)
 suites += AlignmentTests.all

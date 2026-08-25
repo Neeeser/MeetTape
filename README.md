@@ -31,11 +31,12 @@ confirmed.
 | Unsupported applications | Records provisionally and asks whether to keep the recording |
 | Manual recording | Started from the menu bar and unaffected by provider state |
 | In-person meeting | Microphone only, diarized |
-| Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation |
+| Import a recording | WAV, M4A, MP3, CAF, AIFF and MP4 through AVFoundation, filed under the date the recorder wrote |
 | Transcription | Parakeet, Cohere Transcribe or Whisper on device, or OpenAI |
 | Speaker separation | FluidAudio on device, or OpenAI |
 | Speaker recognition | Local voice profiles, named people and recurring unnamed voices |
-| Speaker names | Editable per speaker and per transcript line |
+| Speaker names | Editable per speaker and per transcript line, from the meetings window |
+| Browsing the archive | Every meeting in one window, searched by title, speaker, notes and transcript |
 | Crash recovery | Interrupted recordings are adopted on the next launch |
 
 FaceTime detection and Safari support are not implemented. The extension builds
@@ -197,7 +198,7 @@ PipitDetection     accessibility, window titles, audio process observation,
                       the browser sensor socket
 PipitIntegrations  OpenAI, Keychain, EventKit, notifications, permissions
 PipitServices      runtime wiring and the processing pipeline
-PipitUI            menu bar, onboarding, settings, meeting review
+PipitUI            menu bar, onboarding, settings, meetings window, people
 ```
 
 Detection code produces evidence about what is happening on the machine.
@@ -352,7 +353,14 @@ segments are deleted. A 72-minute meeting is about 90 MB instead of the 2.4 GB
 the PCM held.
 
 The manifest is the authoritative timeline; audio container headers are not
-trusted. The track archives, the manifest lines, the raw transcription and
+trusted. How long the audio runs is a separate question from when it was
+recorded. For an imported file the manifest answers the first one. It records
+when the bytes were written, which is when the file was copied. The date an
+import is filed under therefore comes from what the recorder said, in order: the
+container's own creation date, a timestamp in the filename, then the file's date
+on this Mac. `metadata.json` records which of the three it was.
+
+The track archives, the manifest lines, the raw transcription and
 diarization output and any imported original file are never modified after they
 are written. The Markdown files, `summary.md` and `recording.m4a` are derived
 from those inputs and can be deleted safely.

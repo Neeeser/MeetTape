@@ -2,7 +2,7 @@ import Foundation
 import PipitCore
 import TestKit
 
-/// The review panel groups consecutive lines by who spoke them, so one person
+/// The transcript pane groups consecutive lines by who spoke them, so one person
 /// talking through five assembler splits reads as one block. Grouping is
 /// display-only: every line keeps its identity and stays individually
 /// correctable.

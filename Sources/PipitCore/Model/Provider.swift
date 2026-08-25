@@ -75,6 +75,18 @@ public enum MeetingSource: String, Codable, Sendable, CaseIterable {
         case .imported: "Imported recording"
         }
     }
+
+    /// The glyph a list draws for this kind of recording. Every video call gets
+    /// the same one. A vendor's own mark is not legible at 13 points, and what
+    /// a row has to say is whether this was a call, a room or a file.
+    public var symbolName: String {
+        switch self {
+        case .slackHuddle, .googleMeet, .zoom, .faceTime, .genericCall: "video"
+        case .manual: "waveform"
+        case .inPerson: "mic"
+        case .imported: "tray.and.arrow.down"
+        }
+    }
 }
 
 /// Which capture stream a segment or utterance belongs to. The distinction is

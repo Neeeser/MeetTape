@@ -21,9 +21,16 @@ public struct SpeakerRangePart: Sendable, Equatable {
     }
 }
 
-/// One speaker in one meeting, as the review panel shows them.
+/// One speaker in one meeting, as the meetings window shows them.
 public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     public var clusterID: String
+    /// The recording this cluster was diarized in.
+    ///
+    /// A cluster identifier only means something inside one recording, and both
+    /// halves of a dropped call number their speakers from zero. Naming one
+    /// therefore has to say which recording it belongs to, or the name lands on
+    /// a different person in the other half.
+    public var recordingID: String
     public var displayName: String
     public var band: SpeakerConfidenceBand
     public var origin: SpeakerAssignmentOrigin
@@ -33,29 +40,47 @@ public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     /// Meetings this identity has been heard in, for the "seen before" context.
     public var meetingCount: Int
 
-    public var id: String { clusterID }
+    /// Whether this cluster is still waiting for a name.
+    ///
+    /// Recorded when the row is built, from whether the meeting's own speaker
+    /// map holds a name for the cluster. Not read back out of `displayName`,
+    /// which falls back to a generated name. The microphone track is named "Me"
+    /// from Settings and the fallback for that key is also "Me", so comparing
+    /// the two drew the user's own voice as a voice asking for a name on every
+    /// meeting recorded with the default name.
+    ///
+    /// Not read from the identity beside it either. A named cluster whose
+    /// identity row could not be read still has a name, and drawing it as
+    /// unnamed would put work in front of the user that they have already done.
+    public var isUnnamed: Bool
+
+    public var id: String { "\(recordingID)/\(clusterID)" }
 
     /// Whether this row is worth putting in front of a reader.
     ///
     /// A diarizer can emit a label that ends up owning no transcript time: one
     /// cloud-diarized meeting listed eleven speakers, six of them showing 0s.
     /// There is nothing a user can do with a speaker who never says anything,
-    /// so the review panel leaves them out. A cluster somebody has already
+    /// so the speaker strip leaves them out. A cluster somebody has already
     /// named stays visible whatever it owns, because hiding it would hide their
-    /// own work. This is display only; the cluster still resolves anywhere an
-    /// operation names it.
+    /// own work. This is display only, and the cluster still resolves anywhere
+    /// an operation names it.
     public var hasSpeechToShow: Bool {
-        // Half a second is where the panel's own rounding puts a row at "0s".
-        speechSeconds >= 0.5 || origin == .human
+        // The same half second the meetings list counts a voice from, so the
+        // list cannot report work this strip refuses to draw.
+        speechSeconds >= TranscriptSpeaker.audibleSeconds || origin == .human
     }
 
     public init(
-        clusterID: String, displayName: String, band: SpeakerConfidenceBand,
+        clusterID: String, recordingID: String, displayName: String, isUnnamed: Bool,
+        band: SpeakerConfidenceBand,
         origin: SpeakerAssignmentOrigin, identity: Identity?, speechSeconds: Double,
         provenance: SpeakerProvenance?, meetingCount: Int
     ) {
         self.clusterID = clusterID
+        self.recordingID = recordingID
         self.displayName = displayName
+        self.isUnnamed = isUnnamed
         self.band = band
         self.origin = origin
         self.identity = identity
@@ -386,45 +411,65 @@ extension PipitRuntime {
 
     // MARK: - meeting speaker review
 
-    /// Every speaker in one meeting, with how it was decided.
+    /// Every speaker in one conversation, with how each was decided.
+    ///
+    /// Every recording of it, not only the first. A call that dropped and was
+    /// rejoined is two recordings and one row in the list, and reading the
+    /// first alone meant a voice that only spoke after the drop had no chip:
+    /// the list counted it as work to do and the strip offered no way to do it.
+    ///
+    /// Each row carries the recording its cluster belongs to, because a cluster
+    /// identifier means nothing outside one recording's own diarization.
     public func speakers(inMeeting meetingID: String) async -> [MeetingSpeakerRow] {
-        guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
-              let transcript = try? found.store.readCanonicalTranscript(),
-              let map = try? found.store.readSpeakerMap()
-        else { return [] }
-
-        var speech: [String: Double] = [:]
-        for utterance in transcript.utterances {
-            speech[utterance.speakerKey, default: 0] += max(0, utterance.end - utterance.start)
+        // Answers for either half of a dropped call, and holds every recording
+        // of the conversation, so nothing on disk is unreachable through an
+        // identifier a notification or a link still carries.
+        guard let recordings = repository.logicalMeeting(id: meetingID)?.recordings else {
+            return []
         }
-
         var rows: [MeetingSpeakerRow] = []
-        for key in transcript.speakerKeys {
-            // Words no interval claimed are not a speaker. Offering the row for
-            // naming would put a name on a scatter of backchannels spoken over
-            // other people, and then feed those spans to the enrolment that
-            // builds that person's voice profile.
-            if key.hasSuffix(SpeakerLabel.unattributed) { continue }
-            let assignment = map.entries[key]
-            var identity: Identity?
-            var heardIn = 0
-            if let identifier = assignment?.identityID, let store = speakerStore {
-                identity = try? await store.current(identifier)
-                heardIn = (try? await store.meetingCount(for: identifier)) ?? 0
+        for (index, recording) in recordings.enumerated() {
+            guard let transcript = try? recording.store.readCanonicalTranscript(),
+                  let map = try? recording.store.readSpeakerMap()
+            else { continue }
+            for speaker in transcript.speakers {
+                let key = speaker.key
+                // Words no interval claimed are not a speaker. Offering the row
+                // for naming would put a name on a scatter of backchannels
+                // spoken over other people, and then feed those spans to the
+                // enrolment that builds that person's voice profile.
+                if key.hasSuffix(SpeakerLabel.unattributed) { continue }
+                let assignment = map.entries[key]
+                let stored = map.displayName(for: key)
+                var identity: Identity?
+                var heardIn = 0
+                if let identifier = assignment?.identityID, let store = speakerStore {
+                    identity = try? await store.current(identifier)
+                    heardIn = (try? await store.meetingCount(for: identifier)) ?? 0
+                }
+                // Both halves call their first speaker the same thing, so a
+                // generated name says which half it came from. A name a person
+                // typed stands on its own.
+                let fallback = recordings.count > 1
+                    ? "\(SpeakerMap.fallbackName(for: key)), part \(index + 1)"
+                    : SpeakerMap.fallbackName(for: key)
+                rows.append(MeetingSpeakerRow(
+                    clusterID: key,
+                    recordingID: recording.metadata.id,
+                    displayName: stored ?? fallback,
+                    isUnnamed: stored == nil,
+                    // Absent provenance means nothing measured this, so it is
+                    // not High. The badge reads a human or microphone-track
+                    // assignment from its origin, and everything else falls
+                    // back honestly.
+                    band: assignment?.provenance?.band ?? .unknown,
+                    origin: assignment?.origin ?? .ai,
+                    identity: identity,
+                    speechSeconds: speaker.speechSeconds,
+                    provenance: assignment?.provenance,
+                    meetingCount: heardIn
+                ))
             }
-            rows.append(MeetingSpeakerRow(
-                clusterID: key,
-                displayName: assignment?.displayName ?? SpeakerMap.fallbackName(for: key),
-                // Absent provenance means nothing measured this, so it is not
-                // High. The badge reads a human or microphone-track assignment
-                // from its origin, and everything else falls back honestly.
-                band: assignment?.provenance?.band ?? .unknown,
-                origin: assignment?.origin ?? .ai,
-                identity: identity,
-                speechSeconds: speech[key] ?? 0,
-                provenance: assignment?.provenance,
-                meetingCount: heardIn
-            ))
         }
         return rows
     }

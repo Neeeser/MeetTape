@@ -32,6 +32,13 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
     /// The detector's speech probability per window on the microphone track, in
     /// whole percent. Empty where no detector ran.
     public var micSpeech: [Int8]
+    /// How much of each window's microphone energy a filtered copy of the far
+    /// end accounts for, in tenths of a decibel. Empty for a meeting with one
+    /// track, and for every meeting measured before this pass existed.
+    ///
+    /// Tenths rather than whole decibels because the readings that matter are
+    /// fractions of one: genuine speech reads 0.01 dB and the gate drops at 0.4.
+    public var micEchoReturnLoss: [Int16]
     /// What produced `micSpeech`, as provenance. Nil where nothing did.
     public var detector: String?
 
@@ -42,6 +49,7 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         micLevels: [Int8],
         remoteLevels: [Int8] = [],
         micSpeech: [Int8] = [],
+        micEchoReturnLoss: [Int16] = [],
         detector: String? = nil
     ) {
         self.version = version
@@ -50,7 +58,25 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         self.micLevels = micLevels
         self.remoteLevels = remoteLevels
         self.micSpeech = micSpeech
+        self.micEchoReturnLoss = micEchoReturnLoss
         self.detector = detector
+    }
+
+    /// Decoded by hand only so that a file written before the echo pass existed
+    /// still reads. Every meeting already on disk has no echo series, and a
+    /// synthesised decoder would reject the file rather than leave the series
+    /// empty.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        levelWindowSeconds = try container.decode(Double.self, forKey: .levelWindowSeconds)
+        speechWindowSeconds = try container.decode(Double.self, forKey: .speechWindowSeconds)
+        micLevels = try container.decode([Int8].self, forKey: .micLevels)
+        remoteLevels = try container.decodeIfPresent([Int8].self, forKey: .remoteLevels) ?? []
+        micSpeech = try container.decodeIfPresent([Int8].self, forKey: .micSpeech) ?? []
+        micEchoReturnLoss =
+            try container.decodeIfPresent([Int16].self, forKey: .micEchoReturnLoss) ?? []
+        detector = try container.decodeIfPresent(String.self, forKey: .detector)
     }
 
     /// What the audio holds over one span of the meeting timeline, from the
@@ -67,8 +93,12 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         let probability = span(micSpeech, windowSeconds: speechWindowSeconds, from: start, to: end)
             .flatMap { $0.max() }
             .map { Double($0) / 100 }
+        let echo = echoReturnLoss(from: start, to: end)
         guard let far, let loudestFar = far.max() else {
-            return SpeechReading(speechProbability: probability, loudestLocalDB: Double(loudestLocal))
+            return SpeechReading(
+                speechProbability: probability, loudestLocalDB: Double(loudestLocal),
+                echoReturnLossDB: echo
+            )
         }
         // Zipped rather than indexed: these are slices, so their indices are
         // positions in the whole recording rather than in the span, and the far
@@ -82,16 +112,45 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
             speechProbability: probability,
             loudestLocalDB: Double(loudestLocal),
             loudestFarDB: Double(loudestFar),
-            medianDifferenceDB: median
+            medianDifferenceDB: median,
+            echoReturnLossDB: echo
         )
+    }
+
+    /// The echo return loss over a span, weighted by where the microphone's
+    /// energy actually is.
+    ///
+    /// A segment's windows are not equally worth measuring. Backend segment
+    /// boundaries are approximate and routinely take in a beat of silence either
+    /// side of the words, and a plain average would let that silence talk down
+    /// the measurement of the words. Weighting by the window's own energy is
+    /// what makes a loud second surrounded by quiet ones report the loud second.
+    private func echoReturnLoss(from start: Double, to end: Double) -> Double? {
+        guard !micEchoReturnLoss.isEmpty,
+              let echo = span(
+                  micEchoReturnLoss, windowSeconds: levelWindowSeconds, from: start, to: end
+              ),
+              let levels = span(micLevels, windowSeconds: levelWindowSeconds, from: start, to: end)
+        else { return nil }
+        var weighted = 0.0
+        var total = 0.0
+        // Zipped rather than indexed: both are slices of the whole recording, and
+        // the echo series ends where the far end's track did.
+        for (value, level) in zip(echo, levels) {
+            let weight = pow(10, Double(level) / 10)
+            weighted += weight * Double(value) / 10
+            total += weight
+        }
+        guard total > 0 else { return nil }
+        return weighted / total
     }
 
     /// The samples covering `[start, end)`, or nil where the series is empty or
     /// the span falls outside it. At least one sample where the span is shorter
     /// than a window.
-    private func span(
-        _ values: [Int8], windowSeconds: Double, from start: Double, to end: Double
-    ) -> ArraySlice<Int8>? {
+    private func span<Value>(
+        _ values: [Value], windowSeconds: Double, from start: Double, to end: Double
+    ) -> ArraySlice<Value>? {
         guard !values.isEmpty, windowSeconds > 0, end >= start else { return nil }
         // A backend supplies these times, and converting a non-finite or
         // astronomically large one to Int traps rather than returning anything.

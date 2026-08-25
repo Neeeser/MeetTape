@@ -82,8 +82,8 @@ jobs:
 
       - name: Build the app
         env:
-          MEETTAPE_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
-          MEETTAPE_BUILD_NUMBER: ${{ github.run_number }}
+          PIPIT_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          PIPIT_BUILD_NUMBER: ${{ github.run_number }}
         run: ./scripts/bundle-app.sh release
 
       - name: Notarize and staple
@@ -92,7 +92,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: ./scripts/notarize.sh dist/MeetTape.app
+        run: ./scripts/notarize.sh dist/Pipit.app
 
       - name: Package
         run: ./scripts/package.sh ${{ steps.version.outputs.version }}
@@ -106,9 +106,9 @@ jobs:
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           files: |
-            dist/MeetTape-${{ steps.version.outputs.version }}.zip
-            dist/MeetTape-${{ steps.version.outputs.version }}.dmg
-            dist/MeetTape-${{ steps.version.outputs.version }}.sha256
+            dist/Pipit-${{ steps.version.outputs.version }}.zip
+            dist/Pipit-${{ steps.version.outputs.version }}.dmg
+            dist/Pipit-${{ steps.version.outputs.version }}.sha256
           draft: true
           generate_release_notes: true
           body: |

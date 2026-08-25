@@ -44,7 +44,7 @@ Each row below covers a failure mode observed during development:
 | A phrase repeated inside one chunk is not treated as overlap | `ProcessingTests` |
 | Remote audio arriving after commit is still written | `HardeningTests` |
 | An unsupported call keeps recording for as long as it runs | `HardeningTests` |
-| Only MeetTape's own relay, launched by a browser, may connect | `HardeningTests` |
+| Only Pipit's own relay, launched by a browser, may connect | `HardeningTests` |
 | An application installed beside a browser is not accepted as one | `HardeningTests` |
 | An unknown call arms the ring before it is confirmed | `DetectionTests` |
 | A provider change between candidate and confirm retargets the tap | `SessionTests` |
@@ -122,7 +122,7 @@ Each row below covers a failure mode observed during development:
 
 ## Exercised against real hardware and the real API
 
-**Capture chain.** `MEETTAPE_LIVE_CAPTURE=1 ./scripts/test.sh --filter LiveCapture`
+**Capture chain.** `PIPIT_LIVE_CAPTURE=1 ./scripts/test.sh --filter LiveCapture`
 runs the shipping `CaptureEngine` with `AVAudioEngine` and a CoreAudio process
 tap for ten seconds. Verified: microphone audio recorded, segments rotated, the
 manifest closed with no open segments, every segment's frame count matching the
@@ -131,7 +131,7 @@ non-zero peak, and the pre-roll captured before commit flushed into the
 recording.
 
 **Manual recording through the runtime.** The same command runs a second live
-test that drives `MeetTapeRuntime` instead of the engine directly. It starts a
+test that drives `PipitRuntime` instead of the engine directly. It starts a
 manual recording, captures for nine seconds, stops, and waits for the archive.
 Verified: one meeting directory written under the configured storage root with
 source `manual`, the manifest closed with no open segments, nine seconds of
@@ -187,7 +187,7 @@ the application logged connect and disconnect. After peer verification was added
 the same test is refused with "the relay was not launched by a browser", which is
 the intended behaviour.
 
-**A 32-minute capture soak.** `MEETTAPE_SOAK_MINUTES=30 ./scripts/test.sh --filter Soak`
+**A 32-minute capture soak.** `PIPIT_SOAK_MINUTES=30 ./scripts/test.sh --filter Soak`
 ran the shipping `CaptureEngine` against real hardware for 1944 seconds: 65
 segments written and closed, resident memory 29 MB at the start and 29 MB at the
 end, zero engine restarts, and every segment's manifest frame count matching the
@@ -199,14 +199,14 @@ low reasoning effort on the metadata requests. All of them passed, which also
 confirms that the responses endpoint accepts that model identifier with a
 `reasoning` parameter.
 
-**Long meeting, live.** `MEETTAPE_LIVE_LONG=1` put 62 minutes of synthesised
+**Long meeting, live.** `PIPIT_LIVE_LONG=1` put 62 minutes of synthesised
 speech through the chunked pipeline against the real API: four diarization
 chunks, three in flight at a time, merged and de-duplicated into one
 transcript. Wall time was 13.7 minutes end to end, including local synthesis,
 the energy profile and the chunk exports. The same pipeline sending chunks one
 at a time took over ten minutes for a 25-minute file.
 
-**Live OpenAI.** `MEETTAPE_LIVE_OPENAI=1` with a locally synthesised
+**Live OpenAI.** `PIPIT_LIVE_OPENAI=1` with a locally synthesised
 three-speaker fixture. Six tests pass: credential and model access, transcription
 with segment timings, diarization separating two remote speakers, the assembled
 transcript keeping the microphone track as the local user and the remote track
@@ -219,7 +219,7 @@ transcript contains several speakers and no local-user claim, since an import ha
 no microphone track, `transcript.md` and `summary.md` exist, the original file is
 preserved byte for byte, and the user's notes are unmodified.
 
-**Long-meeting processing.** `MEETTAPE_LIVE_LONG=1` put a 65-minute recording
+**Long-meeting processing.** `PIPIT_LIVE_LONG=1` put a 65-minute recording
 through the chunked pipeline against the live API, taking 30 minutes. Verified:
 the recording was chunked, no chunk exceeded the model's 1400-second duration
 limit, raw speaker labels stayed distinct per chunk, canonical timestamps stayed
@@ -258,13 +258,13 @@ only an output stream, and Slack's helper releases input immediately and
 output within 12 seconds. Neither application holds a stream that would keep
 producing meeting evidence after a leave.
 
-**On-device models.** `MEETTAPE_LOCAL_MODELS=1 MEETTAPE_LIVE_FIXTURE=... ./scripts/test.sh
+**On-device models.** `PIPIT_LOCAL_MODELS=1 PIPIT_LIVE_FIXTURE=... ./scripts/test.sh
 --filter LocalModels` downloads and loads the real models and runs them against
 the locally synthesised three-voice fixture. Measured on this machine:
 
 | Step | Result |
 |---|---|
-| First install | 246.1 s, 626 MB Whisper plus 21 MB diarizer, into `~/Library/Application Support/MeetTape/Models` |
+| First install | 246.1 s, 626 MB Whisper plus 21 MB diarizer, into `~/Library/Application Support/Pipit/Models` |
 | Transcription of 38.5 s | 5.4 s, word timings present, no special tokens in the text |
 | Diarization of 38.5 s | 0.58 s, RTFx 66, 256-dimension vectors returned, `warmStartFa` recorded as 0.2 |
 | Warm reload with no download | 5.7 s for both models, from a manager with nothing cached in memory |
@@ -436,8 +436,8 @@ these runs prove the machinery, not the accuracy numbers.
 
 Both local engines ran the 14 `ami-core` cases through the full pipeline on an
 M2 Pro with local diarization: 12 six-minute excerpts across three AMI recording
-sites plus two whole meetings. The harness is `meettape-eval bench`
-(`Sources/MeetTapeBench`, driven by `scripts/eval.sh`); the ground truth and the
+sites plus two whole meetings. The harness is `pipit-eval bench`
+(`Sources/PipitBench`, driven by `scripts/eval.sh`); the ground truth and the
 suite roster are in `Benchmarks/`, and the per-case numbers of this run are
 committed as `Benchmarks/baselines.json`.
 
@@ -465,13 +465,13 @@ be assumed to work.
 - **Alignment on real meeting audio.** Every alignment measurement above is
   against synthetic voices, which are exactly the weak-posterior case. Real
   speech should align better, but no real meeting has been through
-  `meettape-eval align`, and word-level attribution for the text-only engines
+  `pipit-eval align`, and word-level attribution for the text-only engines
   (Cohere locally, `gpt-transcribe` in the cloud) inherits whatever error the
   aligner has. The coarse whole-chunk fallback bounds the damage when the
   aligner refuses; it does not detect a wrong-but-confident alignment.
 - **`gpt-transcribe` against the live API.** The request shape (`json` format,
   `keywords[]`) follows the documentation and the parser has tests; no live
-  request has been made. `MEETTAPE_LIVE_OPENAI=1` covers it once run.
+  request has been made. `PIPIT_LIVE_OPENAI=1` covers it once run.
 - **whisper-1 word granularity against the live API.** The parser nests the
   flat `words` array in tests; the live response shape has not been fetched
   since the request changed.
@@ -512,7 +512,7 @@ be assumed to work.
   only through the generic path, if at all.
 - **Voice recognition across real meetings over time.** The thresholds come from
   public corpora and the local corpus of eleven authorized recordings. Nobody has
-  yet been recognized by MeetTape in a meeting weeks after being named in another
+  yet been recognized by Pipit in a meeting weeks after being named in another
   one, which is the feature working end to end. The measured pieces are there;
   the passage of time is not.
 - **The recurring unnamed voice lifecycle in the product.** Creating a candidate,

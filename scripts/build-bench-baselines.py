@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write Benchmarks/baselines.json from a bench run's own output.
 
-`meettape-eval bench --out FILE` writes one JSON object per case, holding the
+`pipit-eval bench --out FILE` writes one JSON object per case, holding the
 configuration it ran under and the score it produced. This reads those objects
 and keeps the six numbers the regression rule reads, keyed
 "<engine>/<diarizer>/<meeting>".
@@ -19,7 +19,7 @@ them survives a regeneration.
 Several rows sharing a key, which is what `--repeats N` writes, are aggregated
 the way the gate aggregates them: the mean over wer, werNoFiller, attribution
 and der, and the worst over repeatedNgrams. That is `BenchAggregate.deciding`
-in `Sources/MeetTapeBench`. Keeping the last row instead recorded run N while
+in `Sources/PipitBench`. Keeping the last row instead recorded run N while
 the gate compared the mean of N.
 """
 

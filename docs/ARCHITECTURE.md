@@ -1,30 +1,30 @@
 # Architecture
 
-MeetTape runs as a single process. Detection, capture, storage and processing are
+Pipit runs as a single process. Detection, capture, storage and processing are
 separate subsystems within it, and the boundaries between them are enforced in
 the module structure.
 
 ## Modules
 
 ```
-MeetTapeApp            LSUIElement executable; owns the application delegate
- └── MeetTapeUI        menu bar, onboarding, settings, meeting review
-      └── MeetTapeServices     runtime wiring, processing pipeline
-           ├── MeetTapeDetection    accessibility, window titles, sensor socket
-           ├── MeetTapeIntegrations OpenAI, Keychain, EventKit, notifications
-           ├── MeetTapeLocalAI      WhisperKit, FluidAudio, model management
-           ├── MeetTapeSpeakers     SQLite voice identity store
-           ├── MeetTapeAudio        AVAudioEngine, process taps, files
-           └── MeetTapeCore         pure logic, Foundation only
-meettape-nativehost    compiled relay between the browser and the application
-meettape-eval          developer tool; not in the bundle
+PipitApp            LSUIElement executable; owns the application delegate
+ └── PipitUI        menu bar, onboarding, settings, meeting review
+      └── PipitServices     runtime wiring, processing pipeline
+           ├── PipitDetection    accessibility, window titles, sensor socket
+           ├── PipitIntegrations OpenAI, Keychain, EventKit, notifications
+           ├── PipitLocalAI      WhisperKit, FluidAudio, model management
+           ├── PipitSpeakers     SQLite voice identity store
+           ├── PipitAudio        AVAudioEngine, process taps, files
+           └── PipitCore         pure logic, Foundation only
+pipit-nativehost    compiled relay between the browser and the application
+pipit-eval          developer tool; not in the bundle
 ```
 
-`MeetTapeSpeakers` does not depend on `MeetTapeLocalAI`. The store holds vectors
+`PipitSpeakers` does not depend on `PipitLocalAI`. The store holds vectors
 and knows nothing about what produced them, which is what lets a cloud diarizer's
 labels be embedded locally and resolved against the same memory.
 
-`MeetTapeCore` imports only Foundation. Every decision that can be made without
+`PipitCore` imports only Foundation. Every decision that can be made without
 I/O is made there, which keeps the interesting failure modes reproducible in unit
 tests.
 
@@ -246,7 +246,7 @@ the count, and under-counting cannot be undone with a merge. The field is reache
 only by the manual "Re-analyze Speakers" control, where the number is the user's
 and is under their review.
 
-Models install under `~/Library/Application Support/MeetTape/Models`. WhisperKit
+Models install under `~/Library/Application Support/Pipit/Models`. WhisperKit
 defaults to `~/Documents/huggingface`, which puts 624 MB where Finder shows it
 and iCloud Drive syncs it, so `downloadBase` is set explicitly. Loading also
 passes `modelFolder` explicitly on every load, because WhisperKit with
@@ -315,7 +315,7 @@ write a vector into a profile. A recognition result, at any confidence, is a
 read. Without that rule a wrong automatic match widens the profile it matched
 against and the error compounds.
 
-Vectors live in `~/Library/Application Support/MeetTape/Speakers/voices.sqlite`,
+Vectors live in `~/Library/Application Support/Pipit/Speakers/voices.sqlite`,
 as Float32 blobs with no vector index: a full scan of 100,000 embeddings measured
 1.6 ms and the realistic store for 100 named people plus 500 recurring voices is
 3.1 MB. Scoring is against a derived centroid only. Taking a maximum over
@@ -377,7 +377,7 @@ as it arrives, and an interrupted run resumes at the chunks that never landed.
 ## Browser sensor
 
 ```
-content script → background → connectNative → meettape-nativehost
+content script → background → connectNative → pipit-nativehost
                                                      │  JSON lines
                                               Unix domain socket
                                                      │
@@ -401,7 +401,7 @@ in-flight recording continues, so losing the extension costs accuracy rather tha
 the recording.
 
 The application accepts a socket connection only from its own relay binary when
-that binary was launched by a browser. MeetTape holds the microphone and
+that binary was launched by a browser. Pipit holds the microphone and
 system-audio grants, so a process able to send a fabricated meeting event could
 obtain a recording without triggering a permission prompt of its own.
 

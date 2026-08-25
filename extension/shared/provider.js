@@ -92,7 +92,7 @@ function scrubURL(href) {
   }
 }
 
-/// Builds the message the native host relays to MeetTape.
+/// Builds the message the native host relays to Pipit.
 export function buildState({ href, title, controls, pageText, tabId, now, participants }) {
   return {
     type: 'state',
@@ -110,7 +110,7 @@ export function buildState({ href, title, controls, pageText, tabId, now, partic
   };
 }
 
-/// True when two snapshots differ in a way MeetTape cares about. Suppresses the
+/// True when two snapshots differ in a way Pipit cares about. Suppresses the
 /// chatter a 500 ms poll would otherwise produce.
 export function isMeaningfulChange(previous, next) {
   if (!previous) return true;

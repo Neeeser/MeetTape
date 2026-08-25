@@ -33,7 +33,9 @@ the menu bar.
 - Records the microphone and meeting application as separate audio tracks
 - Transcribes locally with Apple SpeechAnalyzer or Parakeet
 - Separates speakers and recognizes voices across meetings
-- Imports WAV, M4A, MP3, CAF, AIFF, and MP4 recordings
+- Imports WAV, M4A, MP3, CAF, AIFF, and MP4 recordings, filed under the date the
+  recorder wrote
+- Opens every past meeting in one window, searched by title, speaker, and transcript
 - Saves editable transcripts, summaries, notes, and source audio to disk
 
 ## How it works

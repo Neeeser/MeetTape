@@ -177,12 +177,10 @@ public struct SpeakerRangeTarget: Sendable, Equatable {
 public final class MeetingReviewModel {
     public var metadata: MeetingMetadata?
     public var transcript: CanonicalTranscript?
-    public var speakers = SpeakerMap()
     public var notes = ""
     public var title = ""
     public var summary: String?
     public var errorMessage: String?
-    public var draftNames: [String: String] = [:]
     /// Detected speakers with how each was decided, refreshed alongside the
     /// transcript.
     public var speakerRows: [MeetingSpeakerRow] = []
@@ -190,7 +188,8 @@ public final class MeetingReviewModel {
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
     public var participantDraft = ""
-    public var namingCluster: String?
+    /// The cluster waiting for a typed name, and the recording it belongs to.
+    public var namingCluster: (clusterID: String, recordingID: String)?
     /// The stretch of one track waiting for a name, after a split or a
     /// selection whose speaker is not in the list yet.
     public var namingRange: SpeakerRangeTarget?
@@ -202,6 +201,9 @@ public final class MeetingReviewModel {
 
     @ObservationIgnored let runtime: PipitRuntime
     @ObservationIgnored public let meetingID: String
+    /// Called when a title or a note reached disk, so the list around this pane
+    /// can read the row again.
+    @ObservationIgnored public var onEditsSaved: (() -> Void)?
     /// What the last read put on screen, so an edit made since is recognisable.
     @ObservationIgnored private var lastLoadedTitle = ""
     @ObservationIgnored private var lastLoadedNotes = ""
@@ -238,14 +240,11 @@ public final class MeetingReviewModel {
 
     public var isSplitRecording: Bool { recordings.count > 1 }
 
-    public var speakerKeys: [String] { transcript?.speakerKeys ?? [] }
-
     /// Reloads the files and then the parts that need the identity store.
     ///
-    /// The panel opens as soon as the audio is safe, which is before there is a
-    /// transcript, so a one-shot load left the Speakers card reading "No
-    /// speakers identified yet" for the life of the window and every line's
-    /// menu offering nobody to pick.
+    /// The pane opens as soon as the audio is safe, which is before there is a
+    /// transcript, so a one-shot load left the speaker strip empty for the life
+    /// of the window and every line's menu offering nobody to pick.
     public func reloadAll() async {
         reload()
         await reloadSpeakers()
@@ -260,6 +259,9 @@ public final class MeetingReviewModel {
             errorMessage = "This meeting is no longer on disk."
             return
         }
+        // Cleared on a read that found it, so a meeting that came back, or one
+        // opened after a folder went missing, does not keep the notice.
+        errorMessage = nil
         let found = (metadata: logical.primary.metadata, store: logical.primary.store)
         recordings = logical.recordings.map(\.metadata)
         combinedLines = logical.combinedTranscript()
@@ -282,7 +284,6 @@ public final class MeetingReviewModel {
         if notes == lastLoadedNotes { notes = storedNotes }
         lastLoadedNotes = storedNotes
         summary = found.store.readSummary()
-        speakers = (try? found.store.readSpeakerMap()) ?? SpeakerMap()
         transcript = try? found.store.readCanonicalTranscript()
         expectedParticipants = found.metadata.participants
             .filter { $0.origin == .human }
@@ -295,23 +296,31 @@ public final class MeetingReviewModel {
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 
-    /// Names one speaker's whole cluster. Applies immediately, re-renders the
-    /// transcript, and does not re-run transcription or diarization.
-    public func assignCluster(_ clusterID: String, to entry: SpeakerDirectoryEntry) {
+    /// Names one cluster in the recording it was diarized in. Applies
+    /// immediately, re-renders the transcript, and does not re-run
+    /// transcription or diarization.
+    ///
+    /// The recording rather than the conversation. A call recorded in two
+    /// halves keeps a speaker map per half, and both number their speakers from
+    /// zero, so a name written against the conversation landed on a different
+    /// person in the other half.
+    public func assignCluster(
+        _ clusterID: String, in recordingID: String, to entry: SpeakerDirectoryEntry
+    ) {
         runtime.assignSpeaker(
-            name: entry.identity.resolvedName, key: clusterID, meetingID: meetingID,
+            name: entry.identity.resolvedName, key: clusterID, meetingID: recordingID,
             identityID: entry.id
         )
     }
 
-    public func assignCluster(_ clusterID: String, toNewPerson name: String) {
+    public func assignCluster(_ clusterID: String, in recordingID: String, toNewPerson name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        runtime.assignSpeaker(name: trimmed, key: clusterID, meetingID: meetingID)
+        runtime.assignSpeaker(name: trimmed, key: clusterID, meetingID: recordingID)
     }
 
-    public func clearCluster(_ clusterID: String) {
-        runtime.assignSpeaker(name: "", key: clusterID, meetingID: meetingID)
+    public func clearCluster(_ clusterID: String, in recordingID: String) {
+        runtime.assignSpeaker(name: "", key: clusterID, meetingID: recordingID)
     }
 
     /// Renames every line of one turn.
@@ -352,6 +361,11 @@ public final class MeetingReviewModel {
             combinedLines[index].speakerName = name.isEmpty
                 ? SpeakerMap.fallbackName(for: line.utterance.speakerKey)
                 : name
+            // Written on the line as well as into `correctedLines`, because a
+            // receipt counts the lines the cluster's entry still names. Updating
+            // only the set meant naming the speaker right after correcting a
+            // turn reported that turn's lines, which the entry no longer names.
+            combinedLines[index].isCorrected = !name.isEmpty
         }
     }
 
@@ -400,8 +414,8 @@ public final class MeetingReviewModel {
         reload()
     }
 
-    public func beginNamingCluster(_ clusterID: String) {
-        namingCluster = clusterID
+    public func beginNamingCluster(_ clusterID: String, in recordingID: String) {
+        namingCluster = (clusterID, recordingID)
         namingRange = nil
         namingBlock = nil
         newPersonDraft = ""
@@ -420,7 +434,7 @@ public final class MeetingReviewModel {
         } else if let block = namingBlock {
             assignBlock(block, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
-            assignCluster(cluster, toNewPerson: newPersonDraft)
+            assignCluster(cluster.clusterID, in: cluster.recordingID, toNewPerson: newPersonDraft)
         }
         cancelNaming()
     }
@@ -495,9 +509,14 @@ public final class MeetingReviewModel {
     }
 
     /// Saved straight away, even while transcription is still running.
+    ///
+    /// Through the same write as the debounced save, so it reports what it
+    /// wrote. Writing here directly told nobody, and Return in the title field
+    /// left the row in the list showing the old title, which is the one moment
+    /// the user is watching for it to change. Writing the notes unconditionally
+    /// also threw away a note added from the menu bar while the pane was open.
     public func save() {
-        runtime.saveTitle(title, meetingID: meetingID)
-        runtime.saveNotes(notes, meetingID: meetingID)
+        saveEdits()
         reload()
     }
 
@@ -517,12 +536,21 @@ public final class MeetingReviewModel {
     }
 
     /// Writes the title and notes, each only when the user changed it.
+    ///
+    /// Reports back when either reached disk, because the meetings list draws
+    /// the title and searches the notes.
     public func saveEdits() {
+        var wrote = false
         if title != lastLoadedTitle {
             runtime.saveTitle(title, meetingID: meetingID)
             lastLoadedTitle = title
+            wrote = true
         }
-        saveNotes()
+        if notes != lastLoadedNotes {
+            saveNotes()
+            wrote = true
+        }
+        if wrote { onEditsSaved?() }
     }
 
     /// Writes the notes only when the user changed them.
@@ -537,17 +565,6 @@ public final class MeetingReviewModel {
         lastLoadedNotes = notes
     }
 
-    /// Renaming edits a side file: raw diarization is untouched and no request is
-    /// made.
-    public func commitName(for key: String) {
-        guard let name = draftNames[key], !name.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return
-        }
-        runtime.assignSpeaker(name: name, key: key, meetingID: meetingID)
-        draftNames[key] = nil
-        reload()
-    }
-
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
 
     /// How far the current stage has got, when the backend reports it. A local
@@ -557,13 +574,6 @@ public final class MeetingReviewModel {
 
     public func text(_ keyPath: ReferenceWritableKeyPath<MeetingReviewModel, String>) -> Binding<String> {
         Binding(get: { self[keyPath: keyPath] }, set: { self[keyPath: keyPath] = $0 })
-    }
-
-    /// Re-assembles the transcript from the raw chunks on disk. No API call.
-    public func rebuildTranscript() {
-        runtime.rebuildTranscript(meetingID: meetingID) { [weak self] in
-            self?.reload()
-        }
     }
 
     /// The earlier meeting this one may continue, and why.
@@ -591,13 +601,6 @@ public final class MeetingReviewModel {
 
     public func notesBinding() -> Binding<String> {
         Binding(get: { self.notes }, set: { self.notes = $0; self.scheduleEditSave() })
-    }
-
-    public func nameBinding(for key: String) -> Binding<String> {
-        Binding(
-            get: { self.draftNames[key] ?? self.speakers.displayName(for: key) ?? "" },
-            set: { self.draftNames[key] = $0 }
-        )
     }
 }
 

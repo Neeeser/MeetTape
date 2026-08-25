@@ -233,7 +233,7 @@ public struct Utterance: Codable, Sendable, Equatable, Identifiable {
     /// A positional identifier changes for every line after one that merges or
     /// splits, so re-assembling a transcript renumbered most of it. Nothing
     /// persisted is matched by this identifier, because corrections are anchored
-    /// to a span on the timeline, but the review panel holds one between reading
+    /// to a span on the timeline, but the transcript pane holds one between reading
     /// the transcript and the user clicking, and a renumbering in that window
     /// silently moved the click to a different line. Derived from the chunk, the
     /// track and the times, it either still names the same audio or does not
@@ -314,12 +314,40 @@ public struct CanonicalTranscript: Codable, Sendable, Equatable {
     public var durationSeconds: Double { utterances.map(\.end).max() ?? 0 }
 
     public var speakerKeys: [String] {
-        var seen: Set<String> = []
-        var ordered: [String] = []
-        for utterance in utterances where !seen.contains(utterance.speakerKey) {
-            seen.insert(utterance.speakerKey)
-            ordered.append(utterance.speakerKey)
-        }
-        return ordered
+        speakers.map(\.key)
     }
+
+    /// Every speaker with how long it speaks, in the order they first speak.
+    public var speakers: [TranscriptSpeaker] {
+        var totals: [String: Double] = [:]
+        var ordered: [String] = []
+        for utterance in utterances {
+            if totals[utterance.speakerKey] == nil { ordered.append(utterance.speakerKey) }
+            totals[utterance.speakerKey, default: 0] += max(0, utterance.end - utterance.start)
+        }
+        return ordered.map { TranscriptSpeaker(key: $0, speechSeconds: totals[$0] ?? 0) }
+    }
+}
+
+/// One speaker of a transcript, and how much of it that speaker holds.
+public struct TranscriptSpeaker: Sendable, Equatable {
+    /// Half a second, which is where a duration rounded to seconds reads "0s".
+    public static let audibleSeconds = 0.5
+
+    public var key: String
+    public var speechSeconds: Double
+
+    public init(key: String, speechSeconds: Double) {
+        self.key = key
+        self.speechSeconds = speechSeconds
+    }
+
+    /// Whether this speaker holds enough of the transcript to be worth showing.
+    ///
+    /// A diarizer can emit a label that ends up owning no transcript time: one
+    /// cloud-diarized meeting listed eleven speakers, six of them at 0s. There
+    /// is nothing a person can do with a speaker who never says anything, and
+    /// counting one as a voice waiting for a name puts a meeting under the
+    /// Unnamed filter that holds no work at all.
+    public var isAudible: Bool { speechSeconds >= Self.audibleSeconds }
 }

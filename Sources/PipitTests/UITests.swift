@@ -203,7 +203,7 @@ enum UITests {
                 expect.equal(await lookups.value, 1, "and it is asked once, not per redraw")
             },
 
-            test("the review panel handles a meeting with nothing processed yet") { expect in
+            test("the meetings window handles a meeting with nothing processed yet") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let repository = MeetingRepository(root: root.appendingPathComponent("Meetings"))
@@ -220,11 +220,15 @@ enum UITests {
                     settings.storageRootPath = root.appendingPathComponent("Meetings").path
                     runtime.update(settings: settings)
 
-                    let model = MeetingReviewModel(runtime: runtime, meetingID: created.metadata.id)
+                    let window = MeetingsWindowModel(runtime: runtime)
+                    window.show(meetingID: created.metadata.id)
+                    guard let model = window.detail else {
+                        expect.fail("the window opened no meeting")
+                        return
+                    }
                     expect.equal(model.title, "Engineering huddle")
                     expect.isNil(model.transcript, "nothing has been transcribed yet")
-                    expect.equal(model.speakerKeys, [])
-                    render(MeetingReviewView(model: model), size: NSSize(width: 780, height: 620))
+                    render(MeetingsWindowView(model: window), size: NSSize(width: 1_120, height: 720))
 
                     // Editing the title while processing has not started must stick.
                     model.title = "Q3 planning"
@@ -292,8 +296,8 @@ enum UITests {
                 await MainActor.run {
                     expect.equal(model.speakerRows.count, 1, "the silent cluster is not a row")
                     expect.equal(model.speakerRows[0].clusterID, "mic_chunk_001_speaker_00")
-                    // Hidden for display only: the transcript still holds it.
-                    expect.equal(model.speakerKeys.count, 2)
+                    // Hidden for display only. The transcript still holds it.
+                    expect.equal(model.transcript?.speakerKeys.count, 2)
                 }
             },
 

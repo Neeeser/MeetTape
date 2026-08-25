@@ -6,7 +6,7 @@ import PipitUI
 import SwiftUI
 import TestKit
 
-/// The review panel's transcript, laid out for real.
+/// The meeting pane's transcript, laid out for real.
 ///
 /// A block is an `NSTextView` inside SwiftUI, and a representable that reports
 /// the wrong height renders as a sliver or as nothing at all without failing
@@ -74,11 +74,16 @@ enum TranscriptPanelTests {
                     settings.storageRootPath = root.appendingPathComponent("Meetings").path
                     runtime.update(settings: settings)
 
-                    let model = MeetingReviewModel(runtime: runtime, meetingID: meetingID)
+                    let window = MeetingsWindowModel(runtime: runtime)
+                    window.show(meetingID: meetingID)
+                    guard let model = window.detail else {
+                        expect.fail("the window opened no meeting")
+                        return
+                    }
                     expect.equal(model.combinedLines.count, 8, "eight lines to show")
 
                     let controller = NSHostingController(
-                        rootView: AnyView(MeetingReviewView(model: model))
+                        rootView: AnyView(MeetingDetailView(model: window, detail: model))
                     )
                     controller.view.frame = NSRect(x: 0, y: 0, width: 720, height: 2_000)
                     controller.view.layoutSubtreeIfNeeded()

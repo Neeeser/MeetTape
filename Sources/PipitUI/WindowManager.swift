@@ -18,29 +18,37 @@ public final class WindowManager {
     /// Until when a permission prompt's aftermath should be treated as focus
     /// Pipit is owed rather than as the user choosing another application.
     private var setupRaiseDeadline: Date?
-    private var reviewWindows: [String: NSWindow] = [:]
-    private var reviewModels: [String: MeetingReviewModel] = [:]
+    private var meetingsWindow: NSWindow?
+    private var meetingsModel: MeetingsWindowModel?
     private var provisionalWindow: NSWindow?
     private var provisionalPromptID: String?
 
     public init(runtime: PipitRuntime) {
         self.runtime = runtime
-        // An open review window tracks processing on its own: when the
-        // transcript lands, the window shows it without a manual refresh.
+        // An open meetings window tracks processing on its own. When a
+        // transcript lands, the row and the pane show it without a manual
+        // refresh.
         runtime.onProcessingUpdate = { [weak self] meetingID in
-            guard let self else { return }
+            guard let self, let model = self.meetingsModel else { return }
             // Resolved through the conversation the identifier belongs to. A
-            // panel opened on the first half of a dropped call is keyed by that
+            // pane opened on the first half of a dropped call is keyed by that
             // recording, while the second half finishes processing under its
-            // own: keying the lookup on the raw identifier meant the panel never
+            // own: keying the lookup on the raw identifier meant the pane never
             // picked up the half it was showing.
             let logicalID = runtime.repository.logicalMeeting(id: meetingID)?.id ?? meetingID
-            guard let model = self.reviewModels[logicalID] ?? self.reviewModels[meetingID]
-            else { return }
             // The speaker rows come from the identity store, not the files, so
-            // reloading only the files left the Speakers card empty for a
-            // window opened before the transcript existed.
-            Task { @MainActor in await model.reloadAll() }
+            // reloading only the files left the strip empty for a pane opened
+            // before the transcript existed.
+            Task { @MainActor in
+                await model.refresh(meetingID: logicalID)
+                // Only when the two differ. Each refresh reads the meeting's
+                // files, and for a meeting recorded in one half the two
+                // identifiers are the same, so asking twice did that work
+                // twice.
+                if logicalID != meetingID {
+                    await model.refresh(meetingID: meetingID)
+                }
+            }
         }
     }
 
@@ -230,23 +238,41 @@ public final class WindowManager {
         setupModel = nil
     }
 
-    /// The post-meeting panel. It never steals focus and never blocks processing.
-    public func showReview(meetingID: String) {
-        if let window = reviewWindows[meetingID] {
-            present(window, activating: false)
-            return
+    /// The meetings window: everything ever recorded, and one of them open.
+    ///
+    /// One window rather than a panel per meeting. The panel only existed for as
+    /// long as somebody left it open, so a meeting that scrolled out of the
+    /// menu's recent list could only be reached through the Finder, where
+    /// nothing can rename a speaker.
+    ///
+    /// `select` is what a finished recording passes. It never steals focus:
+    /// saving a meeting should not pull the user out of what they are doing.
+    public func showMeetings(select meetingID: String? = nil, activating: Bool = true) {
+        let model = meetingsModel ?? MeetingsWindowModel(runtime: runtime)
+        meetingsModel = model
+        let window = meetingsWindow ?? {
+            let created = makeWindow(
+                title: "Meetings",
+                size: NSSize(width: 1_120, height: 720),
+                content: MeetingsWindowView(model: model)
+            )
+            created.setFrameAutosaveName("PipitMeetings")
+            created.isReleasedWhenClosed = false
+            meetingsWindow = created
+            return created
+        }()
+        // Reloaded on every open, because meetings recorded since the last one
+        // are not in the list this window is holding.
+        Task { @MainActor in
+            await model.reload()
+            if let meetingID { model.show(meetingID: meetingID) }
         }
-        let model = MeetingReviewModel(runtime: runtime, meetingID: meetingID)
-        reviewModels[meetingID] = model
-        let window = makeWindow(
-            title: "Meeting",
-            size: NSSize(width: 780, height: 620),
-            content: MeetingReviewView(model: model)
-        )
-        window.setFrameAutosaveName("PipitReview")
-        reviewWindows[meetingID] = window
-        window.isReleasedWhenClosed = false
-        present(window, activating: false)
+        present(window, activating: activating)
+    }
+
+    /// Where a finished recording lands.
+    public func showReview(meetingID: String) {
+        showMeetings(select: meetingID, activating: false)
     }
 
     /// Asks whether to keep a recording of an application Pipit does not

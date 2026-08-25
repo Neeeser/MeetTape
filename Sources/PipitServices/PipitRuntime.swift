@@ -553,7 +553,20 @@ public final class PipitRuntime {
     /// Imports an existing recording. The original is copied in and left untouched.
     public func importRecording(from url: URL) async throws -> String {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let started = (attributes?[.creationDate] as? Date) ?? clock.now
+        // What the recorder said, before what the copy said. A file that
+        // arrived by AirDrop, download or a drag off a phone has today's
+        // creation date and last month's audio, and an archive sorted by date
+        // is only useful if the date is the recording's.
+        let recorded = RecordedDatePolicy.choose(
+            metadata: await MediaCreationDateReader().creationDate(of: url),
+            filename: RecordedDatePolicy.dateInFilename(url.lastPathComponent),
+            fileCreated: attributes?[.creationDate] as? Date,
+            now: clock.now
+        )
+        let started = recorded.date
+        Log.app.info(
+            "imported recording dated \(recorded.source.rawValue, privacy: .public)"
+        )
         var titles = TitleCandidates(
             timestampFallback: MeetingRepository.timestampTitle(startedAt: started, source: .imported)
         )
@@ -575,6 +588,7 @@ public final class PipitRuntime {
         metadata.durationSeconds = result.durationSeconds
         metadata.endedAt = started.addingTimeInterval(result.durationSeconds)
         metadata.importedOriginalFilename = result.originalFilename
+        metadata.recordedDateSource = recorded.source
         metadata.runs = [RecordingRun(
             id: "run-001", startedAt: metadata.startedAt, endedAt: metadata.endedAt,
             durationSeconds: result.durationSeconds
@@ -833,7 +847,7 @@ public final class PipitRuntime {
     /// Associates a finished meeting with an earlier one it continues.
     ///
     /// Strong evidence merges on its own; anything weaker is recorded as a
-    /// suggestion for the review panel. Neither path moves or rewrites a source
+    /// suggestion the meetings window offers. Neither path moves or rewrites a source
     /// segment: combining is a link, not a copy.
     @discardableResult
     private func linkContinuation(
@@ -999,10 +1013,9 @@ public final class PipitRuntime {
         let previous = processing[progress.meetingID]?.state
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)
-            // Not for a meeting folded into an earlier one: the review window
-            // resolves through the archive listing, which hides it, so the
-            // notification opened an empty panel. The user already has one for
-            // the meeting this was folded into.
+            // Not for a meeting folded into an earlier one. The notification
+            // for the meeting it was folded into already covers it, and a
+            // second one saying a meeting is ready would open the same pane.
             let isFolded = repository.findMeeting(
                 id: progress.meetingID, includingMerged: true
             )?.metadata.mergedIntoMeetingID != nil

@@ -158,6 +158,26 @@ Line corrections use positions on the meeting timeline. They remain attached to
 the corrected audio when transcript assembly or speaker re-analysis changes line
 and cluster identifiers.
 
+A cluster identifier is only meaningful inside one recording. A call that dropped
+and was rejoined is two recordings under one row, and both number their speakers
+from zero, so every correction names the recording it belongs to.
+
+## Reading the archive
+
+The meetings window lists every recording, grouped by when and searched by title,
+notes, speaker name, and transcript text. The transcripts are read once in the
+background, so search covers titles immediately and words a moment later.
+
+Selecting a meeting opens the same controls that used to appear only when a
+meeting finished. Naming a speaker rewrites `speakers.map.json` and re-renders
+`transcript.md` for the recording it belongs to.
+
+An imported recording is filed under the date the recorder wrote rather than the
+date the file was copied. Pipit reads the container's creation date, then a
+timestamp in the filename, then the file's date on this Mac, and refuses anything
+before 1990 or more than a day ahead. `metadata.json` records which of the three
+it used. The manifest remains the authority on how long the audio runs.
+
 ## Browser sensor
 
 ```text

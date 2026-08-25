@@ -357,7 +357,7 @@ enum PipelineTests {
             test("a rename during processing is not overwritten by a stage") { expect in
                 // The pipeline reads metadata.json, changes its own fields and
                 // writes the whole document back, while the user renames the
-                // meeting from the review panel. Without serialisation the slower
+                // meeting from the meetings window. Without serialisation the slower
                 // writer restores the copy it read and the rename disappears.
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

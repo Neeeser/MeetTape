@@ -1,4 +1,4 @@
-# Releasing MeetTape
+# Releasing Pipit
 
 A release is produced by pushing a version tag. `.github/workflows/release.yml`
 builds the project, runs the test suite, packages a zip and a dmg with checksums,
@@ -71,10 +71,10 @@ base64 -i DeveloperID.p12 | pbcopy
 Then the same build runs signed with no workflow changes:
 
 ```bash
-MEETTAPE_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)" \
+PIPIT_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)" \
   ./scripts/bundle-app.sh release
 APPLE_ID=… APPLE_TEAM_ID=… APPLE_APP_PASSWORD=… \
-  ./scripts/notarize.sh dist/MeetTape.app
+  ./scripts/notarize.sh dist/Pipit.app
 ```
 
 Notarization accounts for most of the wall-clock time; a full pipeline usually
@@ -93,23 +93,23 @@ The intended path is a project-owned tap first, then homebrew-cask once the app
 is stable and notarized:
 
 ```ruby
-cask "meettape" do
+cask "pipit" do
   version "1.2.0"
-  sha256 "…"                      # from MeetTape-1.2.0.sha256
-  url "https://github.com/Neeeser/MeetTape/releases/download/v#{version}/MeetTape-#{version}.zip"
-  name "MeetTape"
+  sha256 "…"                      # from Pipit-1.2.0.sha256
+  url "https://github.com/Neeeser/Pipit/releases/download/v#{version}/Pipit-#{version}.zip"
+  name "Pipit"
   desc "Automatic meeting recorder, transcriber and archive"
-  homepage "https://github.com/Neeeser/MeetTape"
+  homepage "https://github.com/Neeeser/Pipit"
   depends_on macos: ">= :sequoia"
-  app "MeetTape.app"
+  app "Pipit.app"
   zap trash: [
-    "~/Library/Application Support/MeetTape",
-    "~/Library/Application Support/Mozilla/NativeMessagingHosts/com.meettape.sensor.json",
+    "~/Library/Application Support/Pipit",
+    "~/Library/Application Support/Mozilla/NativeMessagingHosts/com.pipit.sensor.json",
   ]
 end
 ```
 
-The `zap` stanza leaves `~/Documents/MeetTape` in place, because uninstalling the
+The `zap` stanza leaves `~/Documents/Pipit` in place, because uninstalling the
 application must not delete recordings.
 
 ### Firefox extension distribution
@@ -117,7 +117,7 @@ application must not delete recordings.
 The extension is loaded as a temporary add-on during development. Publishing it
 on addons.mozilla.org requires a Mozilla account and a signed XPI, and the
 `browser_specific_settings.gecko.id` in `extension/firefox/manifest.json`
-(`sensor@meettape.app`) has to match the listing.
+(`sensor@pipit.app`) has to match the listing.
 
 ## Before the first public release
 

@@ -20,7 +20,7 @@
 # 2. C++ headers. The same installs ship a stub `usr/include/c++/v1` holding
 #    around a dozen headers, which shadows the SDK's real 192-header libc++ and
 #    breaks every C-family target. FluidAudio has two, so the SDK include path
-#    has to be put back in front. The flags land in the MEETTAPE_SWIFT_FLAGS
+#    has to be put back in front. The flags land in the PIPIT_SWIFT_FLAGS
 #    array, which every caller of `swift build` in scripts/ passes through.
 
 set -u
@@ -28,14 +28,14 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- 2. C++ header shadowing -------------------------------------------------
-MEETTAPE_SWIFT_FLAGS=()
+PIPIT_SWIFT_FLAGS=()
 SDK_CXX="$(xcrun --show-sdk-path 2>/dev/null)/usr/include/c++/v1"
 CLT_CXX="/Library/Developer/CommandLineTools/usr/include/c++/v1"
 if [ -d "$CLT_CXX" ] && [ -d "$SDK_CXX" ]; then
     clt_count=$(ls -1 "$CLT_CXX" 2>/dev/null | wc -l | tr -d ' ')
     sdk_count=$(ls -1 "$SDK_CXX" 2>/dev/null | wc -l | tr -d ' ')
     if [ "$clt_count" -lt "$sdk_count" ]; then
-        MEETTAPE_SWIFT_FLAGS=(-Xcxx -I"$SDK_CXX")
+        PIPIT_SWIFT_FLAGS=(-Xcxx -I"$SDK_CXX")
     fi
 fi
 

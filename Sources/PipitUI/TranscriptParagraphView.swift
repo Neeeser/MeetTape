@@ -1,0 +1,199 @@
+import AppKit
+import PipitCore
+import PipitServices
+import SwiftUI
+
+/// What the reader asked for by right-clicking a block.
+enum TranscriptParagraphAction: Equatable {
+    /// Divide the turn at this moment and give everything after it to someone.
+    /// The line named is the one the boundary falls in.
+    case split(atSeconds: Double, utteranceID: String)
+    /// Give this stretch to someone and leave the words either side alone. One
+    /// window per line the selection touched, in that line's own coordinates.
+    case assign(parts: [SelectedLineRange])
+}
+
+/// The words of one line that a selection covered.
+public struct SelectedLineRange: Equatable {
+    public var utteranceID: String
+    public var startSeconds: Double
+    public var endSeconds: Double
+
+    public init(utteranceID: String, startSeconds: Double, endSeconds: Double) {
+        self.utteranceID = utteranceID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+    }
+}
+
+/// One speaker's turn as a paragraph that can be selected, copied and divided.
+///
+/// An `NSTextView` rather than a `Text`, for one reason: SwiftUI can render a
+/// selectable string but cannot say what is selected, and pulling a phrase out
+/// to another speaker is a question about the selection. Left-click keeps its
+/// ordinary meaning, so copying a quote still works, and the two corrections
+/// live on the context menu where a right-click on text is already expected.
+struct TranscriptParagraph: NSViewRepresentable {
+    var text: String
+    var spans: [TranscriptWordSpan]
+    var people: [SpeakerDirectoryEntry]
+    var onAction: (TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void
+    /// Chosen "New person…", so the panel can ask for a name.
+    var onNewPerson: (TranscriptParagraphAction) -> Void
+
+    func makeNSView(context: Context) -> TranscriptTextView {
+        let view = TranscriptTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        // The container is sized from the width SwiftUI proposes rather than
+        // from the view's own frame. A container that tracks the view measures
+        // against whatever width it has at that instant, which during the first
+        // layout pass is nothing, and the block reports a height of zero.
+        view.textContainer?.widthTracksTextView = false
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        return view
+    }
+
+    func updateNSView(_ view: TranscriptTextView, context: Context) {
+        if view.string != text {
+            view.string = text
+            view.invalidateIntrinsicContentSize()
+        }
+        view.font = .preferredFont(forTextStyle: .body)
+        view.textColor = .labelColor
+        view.spans = spans
+        view.people = people
+        view.onAction = onAction
+        view.onNewPerson = onNewPerson
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize, nsView: TranscriptTextView, context: Context
+    ) -> CGSize? {
+        let width = proposal.width ?? nsView.bounds.width
+        guard width > 0, width.isFinite else { return nil }
+        return CGSize(width: width, height: nsView.height(forWidth: width))
+    }
+}
+
+/// The text view behind a block, holding what a click has to be resolved
+/// against.
+public final class TranscriptTextView: NSTextView {
+    /// Every word in the paragraph and the moment behind it. What a click and a
+    /// selection are resolved against.
+    public var spans: [TranscriptWordSpan] = []
+    var people: [SpeakerDirectoryEntry] = []
+    var onAction: ((TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void)?
+    var onNewPerson: ((TranscriptParagraphAction) -> Void)?
+
+    /// The height this paragraph needs at a given width. Laid out rather than
+    /// estimated, because a turn can be one line or twenty.
+    public func height(forWidth width: CGFloat) -> CGFloat {
+        guard let container = textContainer, let manager = layoutManager else { return 0 }
+        container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        manager.ensureLayout(for: container)
+        return ceil(manager.usedRect(for: container).height)
+    }
+
+    /// Wraps at the width it was given, so what is measured is what is drawn.
+    public override func layout() {
+        textContainer?.size = CGSize(width: bounds.width, height: .greatestFiniteMagnitude)
+        super.layout()
+    }
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        guard !spans.isEmpty else { return menu }
+        let selection = selectedRange()
+        let action: TranscriptParagraphAction
+        let title: String
+        if selection.length > 0 {
+            let parts = selectedRanges(selection)
+            guard !parts.isEmpty else { return menu }
+            action = .assign(parts: parts)
+            title = "Assign selection to"
+        } else {
+            let point = convert(event.locationInWindow, from: nil)
+            let index = characterIndexForInsertion(at: point)
+            guard let boundary = nearestBoundary(to: index) else { return menu }
+            action = .split(atSeconds: boundary.startSeconds, utteranceID: boundary.utteranceID)
+            title = "Split here, and this speaker is"
+        }
+
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for person in people {
+            submenu.addItem(ClosureMenuItem(title: person.identity.resolvedName) {
+                [weak self] in self?.onAction?(action, person)
+            })
+        }
+        if !people.isEmpty { submenu.addItem(.separator()) }
+        submenu.addItem(ClosureMenuItem(title: "New person…") {
+            [weak self] in self?.onNewPerson?(action)
+        })
+        item.submenu = submenu
+        menu.insertItem(item, at: 0)
+        menu.insertItem(.separator(), at: 1)
+        return menu
+    }
+
+    /// The word boundary nearest a character index, as the moment it starts.
+    ///
+    /// Nearest rather than the word under the pointer, because the reader is
+    /// aiming at the gap between two words and the gap belongs to both.
+    public func nearestBoundary(to index: Int) -> TranscriptWordSpan? {
+        // From the second word on: splitting before the first would leave one
+        // piece with nothing in it.
+        var best: TranscriptWordSpan?
+        var distance = Int.max
+        for span in spans.dropFirst() where abs(span.location - index) < distance {
+            distance = abs(span.location - index)
+            best = span
+        }
+        return best
+    }
+
+    /// What a selection covers, as one window per line it touched.
+    ///
+    /// Per line, and by the earliest and latest word inside each, because the
+    /// lines of one turn are not in time order: a selection dragged across a
+    /// chunk seam can end at a moment earlier than it started, and one range
+    /// over the pair would be backwards.
+    public func selectedRanges(_ range: NSRange) -> [SelectedLineRange] {
+        var out: [SelectedLineRange] = []
+        for span in spans where span.location < range.location + range.length
+            && range.location < span.location + span.length {
+            if let at = out.firstIndex(where: { $0.utteranceID == span.utteranceID }) {
+                out[at].startSeconds = min(out[at].startSeconds, span.startSeconds)
+                out[at].endSeconds = max(out[at].endSeconds, span.endSeconds)
+            } else {
+                out.append(SelectedLineRange(
+                    utteranceID: span.utteranceID,
+                    startSeconds: span.startSeconds, endSeconds: span.endSeconds
+                ))
+            }
+        }
+        return out
+    }
+}
+
+/// A menu item that runs a closure, so the menu can be built where the context
+/// it needs already is.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func run() { handler() }
+}

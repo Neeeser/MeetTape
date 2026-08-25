@@ -54,11 +54,17 @@ jobs:
 
       - name: Verify the bundle
         run: |
-          test -x dist/MeetTape.app/Contents/MacOS/MeetTape
-          test -x dist/MeetTape.app/Contents/MacOS/meettape-nativehost
-          test -f dist/MeetTape.app/Contents/Resources/extension/firefox/manifest.json
-          codesign --verify --verbose=1 dist/MeetTape.app
-          /usr/libexec/PlistBuddy -c "Print :LSUIElement" dist/MeetTape.app/Contents/Info.plist
+          test -x dist/Pipit.app/Contents/MacOS/Pipit
+          test -x dist/Pipit.app/Contents/MacOS/pipit-nativehost
+          test -f dist/Pipit.app/Contents/Resources/extension/firefox/manifest.json
+          test -f dist/Pipit.app/Contents/Resources/Pipit.icns
+          for state in idle recording paused warning; do
+            test -f "dist/Pipit.app/Contents/Resources/pipit-$state.png"
+            test -f "dist/Pipit.app/Contents/Resources/pipit-$state@2x.png"
+          done
+          codesign --verify --verbose=1 dist/Pipit.app
+          /usr/libexec/PlistBuddy -c "Print :LSUIElement" dist/Pipit.app/Contents/Info.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' dist/Pipit.app/Contents/Info.plist)" = "Pipit.icns"
 
   extension:
     name: Browser extension

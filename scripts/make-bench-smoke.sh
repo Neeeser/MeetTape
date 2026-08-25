@@ -9,7 +9,7 @@
 # Usage: scripts/make-bench-smoke.sh [output-directory]
 set -euo pipefail
 
-OUT_DIR="${1:-${TMPDIR:-/tmp}/meettape-bench-smoke}"
+OUT_DIR="${1:-${TMPDIR:-/tmp}/pipit-bench-smoke}"
 mkdir -p "$OUT_DIR"
 WORK="$OUT_DIR/turns"
 rm -rf "$WORK"

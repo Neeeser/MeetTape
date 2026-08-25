@@ -4,7 +4,45 @@
     "Bed016": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bed016.interaction.wav",
     "Bmr019": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bmr019.interaction.wav",
     "Bsr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Bsr001.interaction.wav",
-    "Btr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Btr001.interaction.wav"
+    "Btr001": "https://groups.inf.ed.ac.uk/ami/ICSIsignals/NXT/Btr001.interaction.wav",
+    "MTG_32000": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG/MTG_32000/sc_meetup_0/ch0.wav",
+    "MTG_32046": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG/MTG_32046/sc_meetup_0/ch0.wav",
+    "MTG_32052": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG/MTG_32052/sc_meetup_0/ch0.wav",
+    "MTG_32093": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG/MTG_32093/sc_meetup_0/ch0.wav",
+    "MTG_32102": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG/MTG_32102/sc_meetup_0/ch0.wav"
+  },
+  "audioFilename": {
+    "MTG_32000": "MTG_32000.sc_meetup_0.wav",
+    "MTG_32046": "MTG_32046.sc_meetup_0.wav",
+    "MTG_32052": "MTG_32052.sc_meetup_0.wav",
+    "MTG_32093": "MTG_32093.sc_meetup_0.wav",
+    "MTG_32102": "MTG_32102.sc_meetup_0.wav"
+  },
+  "notsofar": {
+    "base": "https://huggingface.co/datasets/microsoft/NOTSOFAR/resolve/ba8fd0f034ce185fe4d24f47e53b4b8194795f07/benchmark-datasets/eval_set/240825.1_eval_full_with_GT/MTG",
+    "device": "sc_meetup_0",
+    "groundTruth": {
+      "MTG_32000": {
+        "gt": "fc75f3bf418f527051b904b6ee68ea97b003aba215da95160806392b3eda08bc",
+        "meta": "88afece0ea9f4a5b32d28924eb6675e90ea5416e0abab821656e5bdd8ed33156"
+      },
+      "MTG_32046": {
+        "gt": "cd0e04aecf892be4b2de4509a29868b3d3eee8d1d8aaf3ea873caa02b55f53e2",
+        "meta": "148ca83cedee1be06643e560c157eccc35977901aca2789695dcde457976343f"
+      },
+      "MTG_32052": {
+        "gt": "48a24b22cffaf73f04c0c00cb7e91372cca26789825bc2455d75557073bc1608",
+        "meta": "1a6a7856a99edb532911a987bc51c32f5598ec7145d69927c54ce313b1eec466"
+      },
+      "MTG_32093": {
+        "gt": "28aaec7b965e8a94dd05ddc1e9dad3a1ecdfb695a9743afb66bdae046dede118",
+        "meta": "d761b0de69e0eaa49cf2243ec17635e8849e226eb61c15b578c32c082e843b49"
+      },
+      "MTG_32102": {
+        "gt": "7dc5b618f3c6964f811ea3b14d9ddb6bb942b43db6fb623333ba4f76f984b83a",
+        "meta": "2baf084e722e7b2a348fa517b8bf66df2612c8cc41ccf7c91a8987d22475eb7f"
+      }
+    }
   },
   "annotations": {
     "ami": {
@@ -40,7 +78,26 @@
     "IS1009a": "6eb5a0ede0d9e72794f976ce7bea5b78133eae969f99b4c5418b43c2468d25b1",
     "IS1009c": "f317910070db0f2649315decbb34686d648bbe9dc3f7576710184f4d572bdbcc",
     "TS3005a": "431faf4e85eeeb4653256bc8e4f36aaf06dc71538a58b1b6c1a78f2df81276ea",
-    "TS3009c": "4fe7430b0edc2f414e888eeec32706f2ff67f76a44d88f3a9699fd045a58d465"
+    "TS3009c": "4fe7430b0edc2f414e888eeec32706f2ff67f76a44d88f3a9699fd045a58d465",
+    "MTG_32000": "8b43d41c70b761cae7be761cfec5514d148548c37aa1b4f5ee9820f7f5d33b16",
+    "MTG_32046": "ceef7cfcd543cdb55f2bdf388bba61850e58179d6de378058a372b30da6a2a00",
+    "MTG_32052": "658f627a98b0b92df9f384f64d3e3e80358aad5e29c0f17245e0b31bb80cb24e",
+    "MTG_32093": "b28faff8acd9490aa1613b4e888b556841ecc56aca62b09424f997831332743d",
+    "MTG_32102": "913433449436e84c39e1b7f43a3d3de7e906ef11702e860dbb9f8eb8ce34fd9d"
+  },
+  "partition": {
+    "ES2002a": "ami-train", "ES2002b": "ami-train", "ES2002c": "ami-train",
+    "ES2002d": "ami-train", "ES2003a": "ami-train", "ES2005a": "ami-train",
+    "ES2008b": "ami-train", "ES2015d": "ami-train", "TS3005a": "ami-train",
+    "TS3009c": "ami-train", "IS1003d": "ami-train", "IS1006d": "ami-train",
+    "IN1012": "ami-train",
+    "IS1008a": "ami-dev",
+    "IS1009a": "ami-eval", "IS1009c": "ami-eval",
+    "EN2002a": "ami-eval", "EN2002b": "ami-eval", "EN2002d": "ami-eval",
+    "IB4005": "excluded",
+    "Bed016": "clean", "Bmr019": "clean", "Bsr001": "clean", "Btr001": "clean",
+    "MTG_32000": "clean", "MTG_32046": "clean", "MTG_32052": "clean",
+    "MTG_32093": "clean", "MTG_32102": "clean"
   },
   "suites": {
     "ami-core": [
@@ -57,6 +114,14 @@
     "ami-overlap": [
       "EN2002d", "EN2002b", "IN1012", "IS1003d", "IS1006d", "ES2015d"
     ],
-    "icsi": ["Btr001", "Bmr019", "Bsr001", "Bed016"]
+    "icsi": ["Btr001", "Bmr019", "Bsr001", "Bed016"],
+    "notsofar": [
+      "MTG_32046", "MTG_32000", "MTG_32052", "MTG_32102", "MTG_32093"
+    ],
+    "deciding": [
+      "EN2002a", "EN2002b", "EN2002d", "IS1009a", "IS1009c",
+      "Btr001", "Bmr019", "Bsr001", "Bed016",
+      "MTG_32046", "MTG_32000", "MTG_32052", "MTG_32102", "MTG_32093"
+    ]
   }
 }

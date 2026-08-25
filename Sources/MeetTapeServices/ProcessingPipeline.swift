@@ -1404,7 +1404,10 @@ public actor ProcessingPipeline {
 
             let leadIn = timeline.leadIn(track: run.track)
             let wanted = Set(missing.map(\.id))
-            let intervals = run.intervals
+            // Solo speech only, computed over the whole run before narrowing
+            // to the missing clusters: the voice talking across a cluster is
+            // usually one that already has its vector.
+            let intervals = DiarizationInterval.soloSpeech(run.intervals)
                 .filter { wanted.contains($0.clusterID) }
                 .map {
                     DiarizationInterval(

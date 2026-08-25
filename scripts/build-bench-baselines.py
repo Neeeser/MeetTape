@@ -3,7 +3,7 @@
 
 `meettape-eval bench --out FILE` writes one JSON object per case, holding the
 configuration it ran under and the score it produced. This reads those objects
-and keeps the five numbers the regression rule reads, keyed
+and keeps the six numbers the regression rule reads, keyed
 "<engine>/<diarizer>/<meeting>".
 
     scripts/eval.sh bench --suite ami-core --engine parakeet --diarizer local \
@@ -28,7 +28,7 @@ import json
 import os
 import sys
 
-DEFAULT_TOLERANCES = {"attribution": 1.0, "der": 2.0, "wer": 1.5}
+DEFAULT_TOLERANCES = {"attribution": 1.0, "der": 2.0, "tcpWer": 2.0, "wer": 1.5}
 
 
 def deciding(scores: list[dict]) -> dict:
@@ -39,11 +39,13 @@ def deciding(scores: list[dict]) -> dict:
     `--repeats 3` records what the gate will compute from three runs.
     """
     ders = [score["der"] for score in scores if score.get("der") is not None]
+    tcps = [score["tcpWer"] for score in scores if score.get("tcpWer") is not None]
     return {
         "attribution": mean(score["attribution"] for score in scores),
         "der": mean(ders) if ders else None,
         # The repeat budget a later run may not exceed.
         "repeatedNgrams": max(score.get("repeatedNgrams", 0) for score in scores),
+        "tcpWer": mean(tcps) if tcps else None,
         "wer": mean(score["wer"] for score in scores),
         "werNoFiller": mean(score["werNoFiller"] for score in scores),
     }

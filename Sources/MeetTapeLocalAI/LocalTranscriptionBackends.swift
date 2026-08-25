@@ -67,6 +67,36 @@ public struct CohereTranscriptionBackend: TranscriptionBackend {
     }
 }
 
+/// Canary-1B-v2 behind the transcription protocol.
+///
+/// A benchmark candidate, beta in the pinned FluidAudio, constructed only for
+/// a meeting whose settings name it, which no settings surface offers yet.
+/// Text-only like Cohere, so the alignment stage supplies its timings, and
+/// chunked at Canary's own 15-second model window so the library's overlap
+/// stitching never runs.
+public struct CanaryTranscriptionBackend: TranscriptionBackend {
+    private let models: LocalModelManager
+
+    public init(models: LocalModelManager) {
+        self.models = models
+    }
+
+    public var identifier: String { LocalSpeechStack.canaryBackendIdentifier }
+    public var isLocal: Bool { true }
+    public var limits: BackendAudioLimits {
+        BackendAudioLimits(maximumSeconds: LocalCanaryTuning.chunkSeconds)
+    }
+    public var timing: TranscriptTiming { .text }
+
+    public func transcribe(
+        audio: URL, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> TranscriptionOutput {
+        let text = try await models.transcribeCanary(audio: audio)
+        progress(1)
+        return TranscriptionOutput(segments: [], text: text)
+    }
+}
+
 /// The CTC forced aligner behind the alignment protocol.
 public struct CtcTranscriptAligner: TranscriptAligner {
     private let models: LocalModelManager

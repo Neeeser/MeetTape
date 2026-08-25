@@ -47,7 +47,7 @@ state, the same path Firefox uses without the extension.
 ```
 meeting ends
       ↓
-transcription        Parakeet, Cohere Transcribe or Whisper, on this Mac
+transcription        Apple SpeechAnalyzer or Parakeet on this Mac, or OpenAI
       ↓
 timing alignment     for a model that returns text alone, on this Mac
       ↓
@@ -60,31 +60,62 @@ editable transcript  correct a whole speaker or a single line
 enrichment           optional: titles, summaries and notes from a cloud model
 ```
 
-Nothing before the last step needs an API key or a network connection. The first
-run downloads about 481 MB of speech models into MeetTape's Application Support
-folder; recording works while that happens and meetings queue until it finishes.
+Nothing before the last step needs an API key or a network connection. On
+macOS 26 and later a fresh install downloads about 22 MB and transcribes with
+Apple's system speech models; choosing Parakeet downloads about 481 MB.
+Recording works while a download happens and meetings queue until it finishes.
 
-Transcription and speaker separation are chosen independently in Settings, and
-neither is tied to enrichment. Selecting OpenAI for either one does not move
-voice profiles off the machine: a cloud diarizer returns speaker labels and no
-vectors, so MeetTape extracts them locally over the intervals it reported.
+Settings carry one processing knob. Speaker separation follows the
+transcription choice: local for every engine except `gpt-4o-transcribe-diarize`,
+whose one request also labels the speakers. Neither is tied to enrichment, and
+selecting OpenAI does not move voice profiles off the machine: a cloud diarizer
+returns speaker labels and no vectors, so MeetTape extracts them locally over
+the intervals it reported.
 
 On a 65-minute meeting the whole local pipeline took 4.5 minutes on an M2 Pro,
 peaking under 1 GB and under two of ten cores, with no thermal throttling.
 Capture always outranks processing: a job waits between stages while a recording
 is live, and one meeting is processed at a time.
 
-Three local engines are offered, picked on the Processing page. Parakeet TDT v3
-is the default: fast, with word timings of its own and 25 languages, about
-460 MB. It won filler-stripped word error rate on 14 of 14 AMI meetings run
-through MeetTape's own pipeline, at a median of 20.2% against Cohere's 36.0%.
-Cohere Transcribe is still offered, and is the strongest raw model on published
-meeting-audio leaderboards; it costs 2.1 GB plus the 600 MB aligner, returns
-text with no timings, and scored worse end to end through this pipeline. Whisper
-Large-v3-Turbo remains for installs that already have it; it matches `whisper-1`
-on words and is less consistent about punctuation between passages. Word
-timings, which speaker attribution depends on, are protected in every
-configuration: native from Parakeet and Whisper, aligned for Cohere.
+Two local engines are offered, picked on the Processing page. On macOS 26 and
+later the default is Apple's SpeechAnalyzer: the speech models come with the
+system, so a fresh install transcribes its first meeting with nothing to
+download. Parakeet TDT v3 is the accuracy pick and the default before macOS 26:
+word timings of its own, 25 languages, about 460 MB. Cohere Transcribe and
+Whisper Large-v3-Turbo keep working on installs that already chose them and are
+no longer offered to new ones. In the cloud, `gpt-4o-transcribe-diarize` is the
+default and returns words and speakers from one request; `gpt-transcribe` is
+the alternative for clear recordings and vocabulary hints, with its timings
+aligned on this Mac. Word timings, which speaker attribution depends on, are
+protected in every configuration: native from Apple, Parakeet and Whisper,
+aligned for text-only models.
+
+### How the engines measured
+
+Every offering decision above comes from `meettape-eval bench` runs of the real
+pipeline over the `deciding` suite: 14 meetings from AMI's held-out evaluation
+partition, ICSI and NOTSOFAR-1, none of them in any local candidate's training
+data, spanning 4% to 46% overlapped speech. Medians below; per-speaker tcpWER
+counts every word, overlap included, and lower is better everywhere except
+attribution and RTFx. Local finalists are the mean of three runs per case.
+
+| Engine | tcpWER | WER (no filler) | Attribution | Repeated 8-grams | RTFx | Download |
+|---|---|---|---|---|---|---|
+| Parakeet TDT v3 | 68.6% | 42.6% | 85.1% | 7 | 48 | 0.5 GB |
+| Apple SpeechAnalyzer | 69.9% | 47.3% | 86.5% | 32 | 46 | none |
+| Whisper large-v3-turbo | 70.1% | 48.8% | 85.3% | 31 | 13 | 0.6 GB |
+| gpt-4o-transcribe-diarize (cloud) | 70.5% | 47.8% | 80.3% | 27 | 1.9 | none |
+| whisper-1 (cloud) | 72.5% | 45.3% | 85.0% | 24 | 16 | none |
+| Cohere Transcribe | 88.1% | 54.1% | 86.4% | 178 | 5.7 | 4.6 GB |
+
+whisper-1 through the API beat local Parakeet on zero of the fourteen cases,
+which is why it moved behind Custom. gpt-transcribe returned empty output for
+chunks of the five hardest meetings across two attempts and is scored on its
+nine survivors (84.3% tcpWER); the pipeline retries such a meeting rather than
+filing it with words missing. The one cloud advantage measured is
+`gpt-4o-transcribe-diarize` on extreme overlap, where it beat Parakeet on 9 of
+14 cases while attributing speakers worse and running slower than real time.
+The suites, checksums and scoring rules live in `Benchmarks/`.
 
 ## Speaker recognition
 

@@ -29,6 +29,7 @@ public actor LocalModelManager {
     private var diarizerModels: OfflineDiarizerModels?
     private var parakeetManager: AsrManager?
     private var cohereModels: CoherePipeline.LoadedModels?
+    private var canaryModels: CanaryModels?
     private var alignerModels: (models: CtcModels, tokenizer: CtcTokenizer)?
     private var voiceActivity: VadManager?
     private var installTask: Task<LocalModelSnapshot, Error>?
@@ -129,6 +130,8 @@ public actor LocalModelManager {
             return ModelNames.CohereTranscribe.requiredModels.allSatisfy {
                 manager.fileExists(atPath: directory.appendingPathComponent($0).path)
             }
+        case .canary:
+            return CanaryModels.modelsExist(at: directory, precision: .int4)
         case .ctcAligner:
             return CtcModels.modelsExist(at: directory)
                 && manager.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path)
@@ -307,6 +310,18 @@ public actor LocalModelManager {
                 encoderDir: directory, decoderDir: directory, vocabDir: directory
             )
 
+        case .canary:
+            // ModelHub appends the repository folder itself, and the variant
+            // narrows the download to the INT4 build.
+            try await ModelHub.download(
+                .canary1bV2, to: locations.root, variant: CanaryPrecision.int4.rawValue,
+                progressHandler: { update in
+                    progress(update.fractionCompleted * 0.9, "Downloading Canary")
+                }
+            )
+            progress(0.9, "Preparing Canary")
+            canaryModels = try CanaryModels.load(from: directory, precision: .int4)
+
         case .ctcAligner:
             // tokenizer.json arrives with the repository's root files.
             _ = try await CtcModels.download(to: directory, variant: .ctc06b, force: force)
@@ -358,6 +373,7 @@ public actor LocalModelManager {
         case .whisper: whisper = nil
         case .parakeet: parakeetManager = nil
         case .cohere: cohereModels = nil
+        case .canary: canaryModels = nil
         case .ctcAligner: alignerModels = nil
         case .diarizer: diarizerModels = nil
         case .voiceActivity: voiceActivity = nil
@@ -461,6 +477,15 @@ public actor LocalModelManager {
         return models
     }
 
+    private func loadedCanary() throws -> CanaryModels {
+        if let canaryModels { return canaryModels }
+        guard Self.filesPresent(.canary, locations: locations, receipt: receipts[.canary])
+        else { throw LocalModelError.notInstalled }
+        let models = try CanaryModels.load(from: locations.canaryDirectory, precision: .int4)
+        canaryModels = models
+        return models
+    }
+
     /// The loaded voice detector.
     func loadedVoiceActivity() async throws -> VadManager {
         if let voiceActivity { return voiceActivity }
@@ -520,6 +545,16 @@ public actor LocalModelManager {
         let pipeline = CoherePipeline()
         let result = try await pipeline.transcribeLong(audio: samples, models: models)
         return result.text
+    }
+
+    /// One chunk through Canary. The chunk is one model window long, so the
+    /// manager's own overlap stitching never runs.
+    func transcribeCanary(audio: URL) async throws -> String {
+        let models = try loadedCanary()
+        let samples = try MonoAudioDecoder.loadMono16k(audio)
+        guard !samples.isEmpty else { return "" }
+        let manager = CanaryManager(models: models)
+        return try await manager.transcribe(audio: samples)
     }
 
     /// Silero over one whole track, reporting a probability every 256 ms.

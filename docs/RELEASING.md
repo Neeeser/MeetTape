@@ -1,132 +1,102 @@
 # Releasing Pipit
 
-A release is produced by pushing a version tag. `.github/workflows/release.yml`
-builds the project, runs the test suite, packages a zip and a dmg with checksums,
-and drafts a GitHub release.
+Pipit releases are built from version tags. The release workflow tests the
+project, signs and notarizes the application, creates ZIP and DMG archives,
+writes SHA-256 checksums, and drafts a GitHub release.
 
+## Requirements
+
+The release repository needs these GitHub Actions secrets:
+
+| Secret | Value |
+| --- | --- |
+| `DEVELOPER_ID_CERTIFICATE_P12` | Base64-encoded Developer ID Application certificate |
+| `DEVELOPER_ID_CERTIFICATE_PASSWORD` | Password for the exported certificate |
+| `APPLE_ID` | Apple ID used by the notary service |
+| `APPLE_TEAM_ID` | Apple Developer team identifier |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
+
+The workflow falls back to ad-hoc signing when the certificate is absent. Do
+not publish an ad-hoc signed build. Gatekeeper will reject it on another Mac.
+
+## Prepare the release
+
+Start from an up-to-date `main` branch with a clean working tree. Update
+`VERSION` and run the application and extension tests:
+
+```sh
+printf '1.2.0\n' > VERSION
+./scripts/test.sh
+(cd extension && npm test)
+git add VERSION
+git commit -m "chore: release 1.2.0"
 ```
-tag vX.Y.Z
-   ↓
-clean build + tests
-   ↓
-Developer ID signature        (skipped without secrets)
-   ↓
-notarize + staple             (skipped without secrets)
-   ↓
-zip + dmg + SHA-256
-   ↓
-draft GitHub Release
-   ↓
-Homebrew cask update          (not wired up yet)
-```
 
-## Cutting a release
+Push the version commit through the normal pull request process. After it lands
+on `main`, create and push the matching tag:
 
-```bash
-echo "1.2.0" > VERSION
-git commit -am "chore: 1.2.0"
+```sh
+git switch main
+git pull --ff-only
 git tag v1.2.0
-git push origin main --tags
+git push origin v1.2.0
 ```
 
-The workflow drafts the release instead of publishing it, so the artifacts can be
-checked before they become downloadable.
+The tag starts `.github/workflows/release.yml`. The workflow creates these
+artifacts:
 
-## What is still missing
-
-The remaining work is administrative. The pipeline already contains these steps
-and skips them while the credentials are absent.
-
-### Apple Developer Program
-
-A paid membership ($99/year) and a **Developer ID Application** certificate.
-Without them the build is ad-hoc signed, which has three consequences:
-
-- Gatekeeper refuses to open the application normally on another Mac.
-- TCC pins its grants to the code hash, so every rebuild invalidates Microphone,
-  Accessibility and Screen Recording. A Developer ID signature keeps a stable
-  designated requirement and the grants survive updates.
-- Actionable notifications are refused under an ad-hoc signature
-  (`UNErrorDomain Code=1`), so the "Keep recording?" buttons work only on a
-  signed build.
-
-### Repository secrets to add
-
-| Secret | What it is |
-|---|---|
-| `DEVELOPER_ID_CERTIFICATE_P12` | base64 of the exported `.p12` |
-| `DEVELOPER_ID_CERTIFICATE_PASSWORD` | password used on export |
-| `APPLE_ID` | Apple ID for the notary service |
-| `APPLE_TEAM_ID` | ten-character team identifier |
-| `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password, not the account password |
-
-Export the certificate with:
-
-```bash
-security find-identity -v -p codesigning          # confirm it is installed
-# Keychain Access → export the "Developer ID Application" identity as .p12
-base64 -i DeveloperID.p12 | pbcopy
+```text
+Pipit-1.2.0.zip
+Pipit-1.2.0.dmg
+Pipit-1.2.0.sha256
 ```
 
-Then the same build runs signed with no workflow changes:
+## Review the draft
 
-```bash
+The workflow creates a draft GitHub release. Before publishing it:
+
+1. Confirm that the test, signing, notarization, and packaging steps passed.
+2. Compare the ZIP and DMG checksums with `Pipit-1.2.0.sha256`.
+3. Install the DMG on a Mac that did not build it.
+4. Confirm that Gatekeeper accepts the application.
+5. Complete setup and record a short meeting.
+6. Review the generated release notes and publish the draft.
+
+## Local release build
+
+Use the same scripts when testing credentials locally:
+
+```sh
 PIPIT_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)" \
   ./scripts/bundle-app.sh release
-APPLE_ID=… APPLE_TEAM_ID=… APPLE_APP_PASSWORD=… \
+
+APPLE_ID="name@example.com" \
+APPLE_TEAM_ID="TEAMID" \
+APPLE_APP_PASSWORD="app-password" \
   ./scripts/notarize.sh dist/Pipit.app
+
+./scripts/package.sh 1.2.0
 ```
 
-Notarization accounts for most of the wall-clock time; a full pipeline usually
-takes 10 to 15 minutes.
+`scripts/package.sh` preserves the application signature in both archives.
 
-### Homebrew
+## Update Homebrew
 
-Not published yet. Two constraints apply:
+After the GitHub release is public, update the `pipit` cask with the new version,
+release URL, and ZIP checksum. The cask must leave `~/Documents/Pipit` intact
+when it removes application support files.
 
-- Casks without signing and notarization are deprecated and are removed from the
-  official tap, so notarization is effectively mandatory rather than optional.
-- Since Homebrew 6.0.0 non-official taps must be trusted per machine, which adds
-  a step to the custom-tap route.
+Verify the published cask with:
 
-The intended path is a project-owned tap first, then homebrew-cask once the app
-is stable and notarized:
-
-```ruby
-cask "pipit" do
-  version "1.2.0"
-  sha256 "…"                      # from Pipit-1.2.0.sha256
-  url "https://github.com/Neeeser/Pipit/releases/download/v#{version}/Pipit-#{version}.zip"
-  name "Pipit"
-  desc "Automatic meeting recorder, transcriber and archive"
-  homepage "https://github.com/Neeeser/Pipit"
-  depends_on macos: ">= :sequoia"
-  app "Pipit.app"
-  zap trash: [
-    "~/Library/Application Support/Pipit",
-    "~/Library/Application Support/Mozilla/NativeMessagingHosts/com.pipit.sensor.json",
-  ]
-end
+```sh
+brew update
+brew install --cask pipit
+brew uninstall --cask pipit
 ```
 
-The `zap` stanza leaves `~/Documents/Pipit` in place, because uninstalling the
-application must not delete recordings.
+## Browser extension
 
-### Firefox extension distribution
-
-The extension is loaded as a temporary add-on during development. Publishing it
-on addons.mozilla.org requires a Mozilla account and a signed XPI, and the
-`browser_specific_settings.gecko.id` in `extension/firefox/manifest.json`
-(`sensor@pipit.app`) has to match the listing.
-
-## Before the first public release
-
-Several acceptance criteria from the specification are still unmet:
-
-- a genuine two-hour capture soak;
-- a 30-minute-plus Slack Huddle;
-- a real meeting over an hour through the chunked pipeline;
-- Gatekeeper acceptance of a signed, notarized build on a clean Mac;
-- native messaging verified from the packaged app rather than the build tree.
-
-`docs/VERIFICATION.md` records what has been exercised and what has not.
+The application bundle includes the browser sensor and native host. Firefox
+distribution through addons.mozilla.org uses the extension identifier
+`sensor@pipit.app`. Keep that identifier aligned with
+`extension/firefox/manifest.json` when publishing an updated XPI.

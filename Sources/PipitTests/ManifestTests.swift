@@ -112,6 +112,31 @@ enum ManifestTests {
                 expect.isFalse(gapped.isContiguous(track: .remote))
             },
 
+            test("a restart with no segment after it is still a gap") { expect in
+                // A restart does not force a rotation, so a sleep and wake in
+                // the last thirty seconds leaves the missing audio inside the
+                // final segment, with nothing after it to measure against. The
+                // restart record is the only evidence there is.
+                var result = timelineLines(segments: [
+                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_000.0),
+                ])
+                result = ManifestReadResult(
+                    lines: result.lines + [ManifestLine(
+                        hostTime: 1_020, wallClock: Date(timeIntervalSince1970: 1_020),
+                        event: .captureRestart(.init(
+                            track: .remote, reason: "wake", restartCount: 1
+                        ))
+                    )],
+                    hasTruncatedTail: false, unrecognisedLines: 0
+                )
+                let timeline = ManifestReader.timeline(from: result)
+                expect.isFalse(timeline.isContiguous(track: .remote))
+                expect.isTrue(
+                    timeline.isContiguous(track: .mic), "the other track is unaffected"
+                )
+            },
+
             test("meeting duration is the longer of the two tracks") { expect in
                 let lines = timelineLines(segments: [
                     (track: .mic, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),
@@ -299,7 +324,11 @@ enum ManifestTests {
                 event: .segmentOpen(.init(
                     track: segment.track, index: segment.index,
                     file: String(format: "%@.%04d.caf", segment.track.segmentPrefix, segment.index),
-                    firstFrameHostTime: segment.host, startFrame: 0,
+                    // Nil, the way the writer records it: the host time is only
+                    // known once a buffer has arrived, so the close record
+                    // carries it. Seeding it here would let the gap check pass
+                    // on a value production never has.
+                    firstFrameHostTime: nil, startFrame: 0,
                     sampleRate: segment.rate, channelCount: 1, reason: "rotate"
                 ))
             ))

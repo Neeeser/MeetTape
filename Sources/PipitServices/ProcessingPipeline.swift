@@ -1380,7 +1380,12 @@ public actor ProcessingPipeline {
         var speakers = try store.readSpeakerMap()
         applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &speakers)
         await applySensorHandles(store: store, metadata: metadata, into: &speakers)
-        if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil {
+        // Not where the user cleared it. The microphone track is the local user
+        // by construction, but "Leave unnamed" is offered on that chip like any
+        // other, and writing the name back on the next pass made the control do
+        // nothing there.
+        if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil,
+           !speakers.clearedKeys.contains(SpeakerLabel.localUser) {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,
                 origin: .deterministic,

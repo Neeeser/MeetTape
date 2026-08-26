@@ -113,9 +113,11 @@ public enum SensorAttribution {
     ///
     /// Three facts have to agree before a second of audio reaches a profile.
     /// The turn says the client heard this person holding the floor. The
-    /// matched cluster, found under `attribute`'s coverage and margin guards,
-    /// says which single diarized voice those turns dominate. And `soloSpeech`
-    /// says nobody talked over it. The intersection of all three is embedded.
+    /// matched clusters, found under `attribute`'s coverage and margin guards,
+    /// say which diarized voices those turns dominate, and there can be more
+    /// than one: the clusterer is tuned to split a speaker rather than merge
+    /// two people. And `soloSpeech` says nobody talked over it. The
+    /// intersection of all three is embedded.
     ///
     /// The cluster restriction is not decoration. A turn's end trails the
     /// voice by up to the indicator's release, so its tail can cover the next

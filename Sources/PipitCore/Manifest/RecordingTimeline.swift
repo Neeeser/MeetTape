@@ -125,6 +125,11 @@ public struct RecordingTimeline: Sendable, Equatable {
     /// ended, measured on the capture clock and allowed a rotation's worth of
     /// slack, well above the buffer boundary a rotation actually costs.
     public func isContiguous(track: CaptureTrack, tolerance: Double = 0.5) -> Bool {
+        // A restart is a gap by definition, and it is the only evidence for one
+        // that falls inside the last segment: a restart does not force a
+        // rotation, so a sleep and wake in the final thirty seconds leaves the
+        // missing audio with no following segment to measure it against.
+        if restarts.contains(where: { $0.track == track }) { return false }
         let ordered = segments(track: track)
         for (previous, next) in zip(ordered, ordered.dropFirst()) {
             // A segment whose start was never resolved cannot be compared. It

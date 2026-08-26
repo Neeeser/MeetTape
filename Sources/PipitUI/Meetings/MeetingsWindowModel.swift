@@ -424,16 +424,105 @@ public final class MeetingsWindowModel {
 
     public func dismissReceipt() { receipt = nil }
 
+    // MARK: - archiving and deleting
+
+    /// A deletion, held until the person who asked for it confirms.
+    ///
+    /// Carries the meetings it will delete rather than reading the selection
+    /// back when the button is pressed: the alert clears its own state as it
+    /// dismisses, and a handler that reads it there finds nothing to do.
+    public struct MeetingsDeletion: Identifiable, Equatable {
+        public let id = UUID()
+        public var targets: [String]
+        public var names: [String]
+        /// The folder of each meeting, from the meetings root down, so the
+        /// confirmation names what leaves the disk.
+        public var folders: [String]
+
+        public var title: String {
+            targets.count == 1
+                ? "Delete \(names.first ?? "this meeting")?"
+                : "Delete \(targets.count) meetings?"
+        }
+
+        public var message: String {
+            let what = targets.count == 1
+                ? "The folder \(folders.first ?? "")"
+                : "\(folders.count) meeting folders"
+            return "\(what) and everything in it, the audio included, is deleted from this Mac. "
+                + "This cannot be undone."
+        }
+    }
+
+    public var pendingDeletion: MeetingsDeletion?
+
+    /// What a right-click acts on: the whole selection when the row is part of
+    /// it, and that row alone otherwise. Right-clicking a row outside the
+    /// selection acting on some other row is the way this goes wrong.
+    public func contextTargets(for row: MeetingRow) -> [MeetingRow] {
+        selection.contains(row.id) ? selectedRows : [row]
+    }
+
+    public func confirmDelete(_ rows: [MeetingRow]) {
+        guard !rows.isEmpty else { return }
+        pendingDeletion = MeetingsDeletion(
+            targets: rows.map(\.id),
+            names: rows.map(\.title),
+            folders: rows.map { Self.archivePath(of: $0.summary.directory) }
+        )
+    }
+
+    /// The folder from the meetings root down. The absolute path is long enough
+    /// to push an alert wide, and the part a person recognises is the end.
+    static func archivePath(of directory: URL) -> String {
+        directory.pathComponents.suffix(3).joined(separator: "/")
+    }
+
+    /// Runs a confirmed deletion. Takes it as an argument rather than reading
+    /// `pendingDeletion`, which the alert's dismissal has already cleared.
+    public func performDeletion(_ deletion: MeetingsDeletion) async {
+        pendingDeletion = nil
+        // The pane is holding a read of files that are about to go. Dropped
+        // without saving what is in it: a title typed into a meeting being
+        // deleted has nowhere to land.
+        if let focused = detail?.meetingID, deletion.targets.contains(focused) { detail = nil }
+        for id in deletion.targets {
+            await runtime.deleteMeeting(id: id)
+            transcripts.removeValue(forKey: id)
+            indexed.removeValue(forKey: id)
+        }
+        rows.removeAll { deletion.targets.contains($0.id) }
+        selection.subtract(deletion.targets)
+        await reload()
+    }
+
+    /// Takes meetings out of the list, or puts them back. Nothing on disk
+    /// moves.
+    public func setArchived(_ archived: Bool, _ rows: [MeetingRow]) {
+        guard !rows.isEmpty else { return }
+        let ids = rows.map(\.id)
+        for id in ids { runtime.setArchived(archived, meetingID: id) }
+        // The rows leave whichever list is on screen, so the pane must not stay
+        // open on one of them. Reload selects the first row that is left.
+        if let focused = detail?.meetingID, ids.contains(focused) { detail = nil }
+        selection.subtract(ids)
+        Task { [weak self] in await self?.reload() }
+    }
+
     // MARK: - actions on the selection
 
-    public func revealSelection() {
-        for row in selectedRows { runtime.revealInFinder(meetingID: row.id) }
+    public func revealSelection() { revealTargets(selectedRows) }
+
+    public func revealTargets(_ rows: [MeetingRow]) {
+        for row in rows { runtime.revealInFinder(meetingID: row.id) }
     }
 
     public func revealArchive() { runtime.revealArchive() }
 
-    public func rebuildSelection() {
-        for row in selectedRows { rebuild(row.id) }
+    public func rebuildSelection() { rebuildTargets(selectedRows) }
+
+    public func rebuildTargets(_ rows: [MeetingRow]) {
+        for row in rows { rebuild(row.id) }
     }
 
     /// Re-assembles the meeting the pane is showing.

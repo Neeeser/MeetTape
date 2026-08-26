@@ -1,7 +1,9 @@
+import AppKit
 import Foundation
 import PipitCore
 import PipitServices
 import PipitSpeakers
+import PipitUI
 import SQLite3
 import TestKit
 
@@ -219,6 +221,36 @@ enum PeopleDirectoryTests {
                     PeopleDirectoryFilter.sections(entries).map(\.title),
                     ["Acme", PeopleDirectoryFilter.noOrganizationTitle,
                      PeopleDirectoryFilter.unnamedTitle]
+                )
+            },
+
+            test("a right-click acts on the row under the pointer, not the selection") {
+                expect in try await aRightClickActsOnTheRowUnderIt(expect)
+            },
+
+            test("deleting a meeting stops it counting towards a voice's meetings") { expect in
+                // The occurrence rows outlive the folder, and the People window
+                // counts meetings from them. Left behind, a deleted recording
+                // kept counting towards "heard in 3 meetings" forever.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                for meeting in ["m-1", "m-2"] {
+                    try await store.recordOccurrence(
+                        meetingID: meeting, clusterID: "remote-001_speaker_00", track: .remote,
+                        speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+                        identityID: chris.id, source: .human,
+                        humanVerified: true, wasExpectedParticipant: false
+                    )
+                }
+                expect.equal(try await store.meetingCount(for: chris.id), 2)
+
+                expect.equal(try await store.deleteOccurrences(meetingID: "m-1"), 1)
+
+                expect.equal(try await store.meetingCount(for: chris.id), 1)
+                expect.equal(
+                    try await store.meetingsReferencing(chris.id), ["m-2"],
+                    "and the meeting still on disk is the one that is left"
                 )
             },
 
@@ -548,5 +580,40 @@ enum PeopleDirectoryTests {
     enum MigrationFixtureError: Error {
         case cannotOpen
         case schemaFailed(String)
+    }
+
+    // MARK: - the right-click menu
+
+    /// A right-click on a row that is not selected acts on that row. Acting on
+    /// the selection instead would delete somebody the pointer was never over.
+    @MainActor
+    static func aRightClickActsOnTheRowUnderIt(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = PeopleDirectoryModel(runtime: MeetingsWindowTests.makeRuntime(root: root))
+        model.entries = [
+            entry(1, name: "Chris Fowler"),
+            entry(2, name: "Dana Kwon"),
+            entry(3, name: "Priya Raman"),
+        ]
+        model.select(IdentityID(1), extending: false)
+
+        expect.equal(
+            model.contextTargets(for: model.entries[1]).map(\.id), [IdentityID(2)],
+            "the row under the pointer"
+        )
+
+        model.select(IdentityID(2), extending: true)
+        expect.equal(
+            Set(model.contextTargets(for: model.entries[1]).map(\.id)),
+            [IdentityID(1), IdentityID(2)],
+            "and a row inside the selection acts on all of it"
+        )
+
+        model.confirmDelete(model.contextTargets(for: model.entries[1]))
+        let pending = try expect.unwrap(model.pendingAction)
+        expect.equal(pending.kind, .delete)
+        expect.equal(Set(pending.targets), [IdentityID(1), IdentityID(2)])
+        expect.equal(pending.title, "Delete 2 people?")
     }
 }

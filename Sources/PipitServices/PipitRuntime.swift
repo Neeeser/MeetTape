@@ -679,6 +679,74 @@ public final class PipitRuntime {
         try? found.store.writeNotes(notes)
     }
 
+    /// Takes a meeting out of the list, or puts it back. Nothing on disk moves.
+    ///
+    /// Written on the recording the conversation started with, because the list
+    /// draws one row for a call that dropped and was rejoined. A flag on the
+    /// folded half would hide nothing.
+    public func setArchived(_ archived: Bool, meetingID: String) {
+        guard let logical = repository.logicalMeeting(id: meetingID) else { return }
+        let at: Date? = archived ? clock.now : nil
+        do {
+            _ = try logical.primary.store.updateMetadata { $0.archivedAt = at }
+        } catch {
+            Log.app.error(
+                "archive state not saved: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
+        refreshRecentMeetings()
+    }
+
+    /// Deletes every folder the conversation was recorded in.
+    ///
+    /// Permanent, and it takes the audio with it. Both halves of a rejoined
+    /// call go: the row stands for the conversation, and leaving the second
+    /// half behind would put a recording in the archive that no row can reach.
+    ///
+    /// The meeting being recorded right now is refused. Its folder is open for
+    /// writing, and deleting it under the capture engine loses the audio
+    /// already on disk without stopping the recording.
+    ///
+    /// Returns whether every folder is gone.
+    @discardableResult
+    public func deleteMeeting(id: String) async -> Bool {
+        guard let logical = repository.logicalMeeting(id: id) else { return false }
+        let recordings = logical.recordings
+        let directories = recordings.map(\.store.layout.root)
+        if let recording = currentMeeting, directories.contains(
+            where: { $0.standardizedFileURL == recording.store.layout.root.standardizedFileURL }
+        ) {
+            Log.app.notice("refused to delete the meeting being recorded")
+            return false
+        }
+        // Off the main actor: a long meeting is a few hundred megabytes across
+        // several hundred files, and this actor is also the one arming the next
+        // recording.
+        let deleted = await Task.detached(priority: .userInitiated) {
+            var gone = true
+            for directory in directories {
+                do {
+                    try FileManager.default.removeItem(at: directory)
+                } catch {
+                    gone = gone && !FileManager.default.fileExists(atPath: directory.path)
+                    Log.storage.error(
+                        "meeting folder not deleted: \(logSafeDescription(error), privacy: .public)"
+                    )
+                }
+            }
+            return gone
+        }.value
+        // The voice memory counts meetings by the occurrences it holds, so
+        // without this a deleted meeting kept counting towards "heard in 3
+        // meetings" for everyone who spoke in it.
+        for recording in recordings { await forgetOccurrences(ofMeeting: recording.metadata.id) }
+        Log.app.notice(
+            "deleted a meeting: \(recordings.count, privacy: .public) recordings, complete=\(deleted, privacy: .public)"
+        )
+        refreshRecentMeetings()
+        return deleted
+    }
+
     public func revealInFinder(meetingID: String) {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([found.store.layout.root])

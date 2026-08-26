@@ -22,6 +22,25 @@ public struct MeetingsWindowView: View {
         }
         .frame(minWidth: 900, minHeight: 560)
         .task { await model.reload() }
+        .alert(
+            model.pendingDeletion?.title ?? "",
+            isPresented: Binding(
+                get: { model.pendingDeletion != nil },
+                set: { if !$0 { model.pendingDeletion = nil } }
+            )
+        ) {
+            // Captured here, while the alert still has one. The button's action
+            // runs after the dismissal has cleared `pendingDeletion`, so
+            // reading it back there finds nothing to delete.
+            let deletion = model.pendingDeletion
+            Button("Cancel", role: .cancel) { model.pendingDeletion = nil }
+            Button("Delete", role: .destructive) {
+                guard let deletion else { return }
+                Task { await model.performDeletion(deletion) }
+            }
+        } message: {
+            Text(model.pendingDeletion?.message ?? "")
+        }
         // Writes a half-typed title or note before the window goes away. The
         // model saves 1.5 seconds after typing stops, so without this a close
         // inside that window loses what was typed.
@@ -112,6 +131,13 @@ public struct MeetingsWindowView: View {
                             + "transcript."
                         : "Search covers titles, notes and speaker names. The transcripts are "
                             + "still being read."
+                )
+                .foregroundStyle(.secondary)
+            } else if model.filter == .archived {
+                Text("Nothing archived")
+                Text(
+                    "Right-click a meeting to archive it. It leaves this list and its folder "
+                        + "stays where it is."
                 )
                 .foregroundStyle(.secondary)
             } else {
@@ -206,8 +232,36 @@ struct MeetingRowView: View {
         .onTapGesture {
             model.select(row.id, extending: NSEvent.modifierFlags.contains(.command))
         }
+        .contextMenu { menu }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.title), \(subtitle)")
+    }
+
+    /// What a right-click offers. It acts on the whole selection when this row
+    /// is part of it, and on this row alone otherwise, so the items say how
+    /// many meetings they will reach.
+    @ViewBuilder private var menu: some View {
+        let targets = model.contextTargets(for: row)
+        let many = targets.count > 1
+        Button(many ? "Reveal \(targets.count) in Finder" : "Reveal in Finder") {
+            model.revealTargets(targets)
+        }
+        Button(many ? "Rebuild \(targets.count) transcripts" : "Rebuild transcript") {
+            model.rebuildTargets(targets)
+        }
+        Divider()
+        if targets.allSatisfy(\.isArchived) {
+            Button(many ? "Put \(targets.count) back" : "Put back") {
+                model.setArchived(false, targets)
+            }
+        } else {
+            Button(many ? "Archive \(targets.count) meetings" : "Archive") {
+                model.setArchived(true, targets)
+            }
+        }
+        Button(many ? "Delete \(targets.count) meetings…" : "Delete…", role: .destructive) {
+            model.confirmDelete(targets)
+        }
     }
 
     private var kindIcon: some View {
@@ -311,6 +365,14 @@ struct MeetingsSelectionView: View {
                     HStack(spacing: 8) {
                         Button("Reveal in Finder") { model.revealSelection() }
                         Button("Rebuild transcripts") { model.rebuildSelection() }
+                        if model.selectedRows.allSatisfy(\.isArchived) {
+                            Button("Put back") { model.setArchived(false, model.selectedRows) }
+                        } else {
+                            Button("Archive") { model.setArchived(true, model.selectedRows) }
+                        }
+                        Button("Delete…", role: .destructive) {
+                            model.confirmDelete(model.selectedRows)
+                        }
                         Spacer()
                     }
                 }

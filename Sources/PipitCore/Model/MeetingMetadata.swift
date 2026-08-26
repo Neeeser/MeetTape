@@ -176,6 +176,10 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// Set once the PCM segments have been transcoded to verified archive files
     /// and deleted. Nil while the segments are still the source representation.
     public var audioArchive: AudioArchive?
+    /// When the user took this meeting out of the list. Every file it holds
+    /// stays where it is: archiving is a statement about the list, not about
+    /// the recording.
+    public var archivedAt: Date?
 
     public enum ProvisionalDecision: String, Codable, Sendable {
         case pending
@@ -221,9 +225,12 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.captureWarnings = []
         self.hadOtherAudibleTabs = false
         self.audioArchive = nil
+        self.archivedAt = nil
     }
 
     public var displayTitle: String { titles.resolved }
+
+    public var isArchived: Bool { archivedAt != nil }
 
     public var isProcessingComplete: Bool { processing.state == .complete }
 }

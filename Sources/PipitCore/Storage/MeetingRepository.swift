@@ -343,11 +343,15 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
     /// How many recordings the conversation is held in. More than one when a
     /// call dropped and was rejoined.
     public let recordingCount: Int
+    /// Whether the user took this meeting out of the list. The files are all
+    /// still on disk.
+    public let isArchived: Bool
 
     public init(
         id: String, directory: URL, title: String, startedAt: Date, durationSeconds: Double,
         source: MeetingSource, provider: MeetingProvider, processingState: ProcessingState,
-        wasInterrupted: Bool, hasTranscript: Bool, recordingCount: Int = 1
+        wasInterrupted: Bool, hasTranscript: Bool, recordingCount: Int = 1,
+        isArchived: Bool = false
     ) {
         self.id = id
         self.directory = directory
@@ -360,6 +364,7 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
         self.wasInterrupted = wasInterrupted
         self.hasTranscript = hasTranscript
         self.recordingCount = recordingCount
+        self.isArchived = isArchived
     }
 }
 
@@ -552,7 +557,8 @@ public struct MeetingRepository: Sendable {
             wasInterrupted: metadata.runs.contains(where: \.wasInterrupted)
                 || !continuations.isEmpty,
             hasTranscript: FileManager.default.fileExists(atPath: layout.canonicalTranscript.path),
-            recordingCount: 1 + continuations.count
+            recordingCount: 1 + continuations.count,
+            isArchived: metadata.isArchived
         )
     }
 

@@ -97,7 +97,8 @@ enum MeetingsWindowTests {
         speakers: [(String?, Int64?)] = [],
         notes: String = "",
         source: MeetingSource = .googleMeet,
-        interrupted: Bool = false
+        interrupted: Bool = false,
+        archived: Bool = false
     ) -> MeetingRow {
         MeetingRow(
             summary: MeetingSummary(
@@ -111,7 +112,8 @@ enum MeetingsWindowTests {
                 processingState: state,
                 wasInterrupted: interrupted,
                 hasTranscript: state == .complete,
-                recordingCount: 1
+                recordingCount: 1,
+                isArchived: archived
             ),
             speakers: speakers.enumerated().map { index, speaker in
                 MeetingRowSpeaker(
@@ -334,6 +336,28 @@ enum MeetingsWindowTests {
                     rows, filter: .needsAttention, now: now, calendar: calendar
                 ).flatMap(\.rows)
                 expect.equal(Set(visible.map(\.id)), ["b", "c"])
+            },
+
+            test("an archived meeting is in the archived list and no other") { expect in
+                // Archiving is how a recording is put down. Leaving it under
+                // All would make it a badge, and leaving a failed one under
+                // Attention would keep work in front of the user that they
+                // have already dismissed.
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "Kept", at: now, speakers: [(nil, nil)]),
+                    row("b", title: "Put down", at: now, state: .failed,
+                        speakers: [(nil, nil)], archived: true),
+                ]
+                func visible(_ filter: MeetingsFilter) -> [String] {
+                    MeetingsDirectoryFilter.sections(
+                        rows, filter: filter, now: now, calendar: calendar
+                    ).flatMap(\.rows).map(\.id)
+                }
+                expect.equal(visible(.all), ["a"])
+                expect.equal(visible(.unnamed), ["a"], "and it is not work waiting to be done")
+                expect.equal(visible(.needsAttention), [], "nor a failure still asking for a look")
+                expect.equal(visible(.archived), ["b"])
             },
 
             test("grouping a year of meetings costs about what grouping one month costs") { expect in
@@ -569,6 +593,18 @@ enum MeetingsWindowTests {
                     ["a": "words"],
                     "and an ordinary read is kept whole"
                 )
+            },
+
+            test("deleting takes every folder the conversation was recorded in") {
+                expect in try await deletingRemovesEveryFolder(expect)
+            },
+
+            test("archiving takes the row out of the list and leaves the files alone") {
+                expect in try await archivingKeepsTheFiles(expect)
+            },
+
+            test("a right-click acts on the row under the pointer, not the selection") {
+                expect in try await aRightClickActsOnTheRowUnderIt(expect)
             },
 
             test("a row names the day when its heading does not") { expect in
@@ -1486,6 +1522,121 @@ enum MeetingsWindowTests {
         expect.isTrue(
             strip.contains { $0.isUnnamed && $0.displayName.hasSuffix("part 2") },
             "got \(strip.map(\.displayName))"
+        )
+    }
+
+    // MARK: - archiving and deleting
+
+    /// Both halves of a rejoined call are one row, so deleting that row has to
+    /// take both folders. Leaving the second half behind would put a recording
+    /// in the archive that no row can reach.
+    @MainActor
+    static func deletingRemovesEveryFolder(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repository, meetingID) = try makeRejoinedCall(root: root)
+        let folders = (repository.logicalMeeting(id: meetingID)?.recordings ?? [])
+            .map(\.store.layout.root)
+        expect.equal(folders.count, 2, "a call recorded in two halves")
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        expect.equal(model.rows.map(\.id), [meetingID])
+        guard let target = model.rows.first else { return expect.fail("no row to delete") }
+
+        model.confirmDelete([target])
+        guard let deletion = model.pendingDeletion else {
+            return expect.fail("delete asks first")
+        }
+        expect.isTrue(deletion.title.contains("Weekly sync"), "got \(deletion.title)")
+        expect.isTrue(
+            deletion.message.contains("deleted from this Mac"),
+            "the warning says the files go: got \(deletion.message)"
+        )
+        await model.performDeletion(deletion)
+
+        for folder in folders {
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: folder.path),
+                "\(folder.lastPathComponent) is gone"
+            )
+        }
+        expect.equal(model.rows.count, 0, "and the list has nothing left")
+        expect.isTrue(model.selection.isEmpty)
+        expect.isNil(model.detail, "the pane is not left reading files that are gone")
+        expect.isFalse(model.indexHolds(meetingID), "search does not answer for it either")
+    }
+
+    /// Archiving is about the list. Every file stays exactly where it was, and
+    /// the Archived filter is where the meeting is put back from.
+    @MainActor
+    static func archivingKeepsTheFiles(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let folder = meeting.store.layout.root
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+
+        model.setArchived(true, [target])
+        await waitFor(expect, "the archived row to leave the list") {
+            model.sections.flatMap(\.rows).isEmpty
+        }
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: folder.path), "the folder is untouched"
+        )
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: meeting.store.layout.canonicalTranscript.path),
+            "and so is the transcript"
+        )
+        expect.isTrue(model.selection.isEmpty, "and nothing is selected under All")
+
+        model.filter = .archived
+        expect.equal(
+            model.sections.flatMap(\.rows).map(\.id), [meeting.id],
+            "the archived list is where it went"
+        )
+
+        guard let archived = model.rows.first else { return expect.fail("the row is gone") }
+        expect.isTrue(archived.isArchived)
+        model.setArchived(false, [archived])
+        await waitFor(expect, "the meeting to come back") {
+            model.rows.first?.isArchived == false
+        }
+        model.filter = .all
+        expect.equal(model.sections.flatMap(\.rows).map(\.id), [meeting.id])
+    }
+
+    /// A right-click on a row that is not selected acts on that row. Acting on
+    /// the selection instead would delete meetings the pointer was never over.
+    @MainActor
+    static func aRightClickActsOnTheRowUnderIt(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let started = Date(timeIntervalSince1970: 1_787_070_000)
+        let first = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: started
+        )
+        let second = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Standup",
+            startedAt: started.addingTimeInterval(3_600)
+        )
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        model.select(first.id, extending: false)
+        guard let other = model.rows.first(where: { $0.id == second.id }) else {
+            return expect.fail("the second meeting is not in the list")
+        }
+        expect.equal(model.contextTargets(for: other).map(\.id), [second.id])
+
+        model.select(second.id, extending: true)
+        expect.equal(
+            Set(model.contextTargets(for: other).map(\.id)), [first.id, second.id],
+            "and a row inside the selection acts on all of it"
         )
     }
 }

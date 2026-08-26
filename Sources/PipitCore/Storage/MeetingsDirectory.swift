@@ -49,6 +49,7 @@ public struct MeetingRow: Sendable, Equatable, Identifiable {
     public var isProcessing: Bool {
         summary.processingState != .complete && summary.processingState != .failed
     }
+    public var isArchived: Bool { summary.isArchived }
 
     public init(summary: MeetingSummary, speakers: [MeetingRowSpeaker], notes: String) {
         self.summary = summary
@@ -65,6 +66,9 @@ public enum MeetingsFilter: String, Sendable, CaseIterable, Identifiable {
     case unnamed
     /// Processing failed, or the recording was interrupted.
     case needsAttention
+    /// Meetings the user took out of the list. Every file is still on disk, and
+    /// this is where they are put back from.
+    case archived
 
     public var id: String { rawValue }
 
@@ -72,15 +76,23 @@ public enum MeetingsFilter: String, Sendable, CaseIterable, Identifiable {
         switch self {
         case .all: "All"
         case .unnamed: "Unnamed"
-        case .needsAttention: "Needs attention"
+        // "Needs attention" at four segments squeezes the other three off the
+        // sidebar. The heading over the rows still spells it out.
+        case .needsAttention: "Attention"
+        case .archived: "Archived"
         }
     }
 
+    /// An archived meeting is in one list and one list only. Leaving it under
+    /// All would make archiving a badge rather than a way to put a recording
+    /// down, and leaving it under Attention would keep a failed run that the
+    /// user has already dismissed in front of them.
     public func admits(_ row: MeetingRow) -> Bool {
         switch self {
-        case .all: true
-        case .unnamed: row.unnamedCount > 0
-        case .needsAttention: row.needsAttention
+        case .archived: row.isArchived
+        case .all: !row.isArchived
+        case .unnamed: !row.isArchived && row.unnamedCount > 0
+        case .needsAttention: !row.isArchived && row.needsAttention
         }
     }
 }

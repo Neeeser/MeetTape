@@ -399,6 +399,22 @@ extension PipitRuntime {
         return try? await store.avatar(of: identityID)
     }
 
+    /// Forgets that a meeting was ever heard, after its folder has been deleted.
+    ///
+    /// The confirmed voice material stays. It lives in its own table and was
+    /// built from meetings the user stood behind, so deleting one accidental
+    /// recording must not cost the profile the rest of them built.
+    public func forgetOccurrences(ofMeeting meetingID: String) async {
+        guard let store = speakerStore else { return }
+        do {
+            _ = try await store.deleteOccurrences(meetingID: meetingID)
+        } catch {
+            Log.app.error(
+                "meeting occurrences not deleted: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
+    }
+
     public func deletePeople(_ identityIDs: [IdentityID]) async {
         for identityID in identityIDs { await deletePerson(identityID) }
     }

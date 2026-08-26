@@ -310,6 +310,72 @@ public actor SpeakerStore {
         return try loadIdentity(id)
     }
 
+    /// Binds a platform handle to an identity, moving it if another held it.
+    ///
+    /// Replace rather than ignore: a handle can only be one person, and the
+    /// newest confirmation is the correction of whatever the older one claimed.
+    public func setHandle(_ handle: IdentityHandle, to id: IdentityID, now: Date = Date()) throws {
+        let provider = handle.provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = handle.handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !provider.isEmpty, !value.isEmpty else { return }
+        try database.run(
+            """
+            INSERT INTO identity_handle(provider, handle, identity_id, created_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(provider, handle)
+            DO UPDATE SET identity_id = excluded.identity_id, created_at = excluded.created_at
+            """,
+            [.text(provider), .text(value), .int64(id.rawValue), .date(now)]
+        )
+    }
+
+    /// The person behind a platform handle, resolved through any merges, or
+    /// nil where nobody has been confirmed for it.
+    public func identity(handle: String, provider: String) -> Identity? {
+        var found: IdentityID?
+        try? database.query(
+            "SELECT identity_id FROM identity_handle WHERE provider = ? AND handle = ?",
+            [.text(provider), .text(handle)]
+        ) { row in
+            if let raw = row.optionalInt64(0) { found = IdentityID(raw) }
+        }
+        guard let found else { return nil }
+        return (try? current(found)) ?? nil
+    }
+
+    /// Every handle bound to an identity or to anything merged into it, so the
+    /// People pane shows the links a merge carried in.
+    public func handles(of id: IdentityID) throws -> [IdentityHandle] {
+        var family: [Int64] = [id.rawValue]
+        try database.query(
+            "SELECT id FROM identity WHERE merged_into = ?", [.int64(id.rawValue)]
+        ) { row in
+            if let raw = row.optionalInt64(0) { family.append(raw) }
+        }
+        var out: [IdentityHandle] = []
+        let marks = family.map { _ in "?" }.joined(separator: ",")
+        try database.query(
+            """
+            SELECT provider, handle FROM identity_handle
+            WHERE identity_id IN (\(marks)) ORDER BY provider, handle
+            """,
+            family.map { .int64($0) }
+        ) { row in
+            guard let provider = row.optionalText(0), let handle = row.optionalText(1) else { return }
+            out.append(IdentityHandle(provider: provider, handle: handle))
+        }
+        return out
+    }
+
+    /// Removes one handle binding. The identity and its voice stay; only the
+    /// claim that this platform account is that person goes.
+    public func removeHandle(_ handle: IdentityHandle) throws {
+        try database.run(
+            "DELETE FROM identity_handle WHERE provider = ? AND handle = ?",
+            [.text(handle.provider), .text(handle.handle)]
+        )
+    }
+
     public func addAlias(_ alias: String, to id: IdentityID) throws {
         let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

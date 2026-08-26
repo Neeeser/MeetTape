@@ -309,6 +309,23 @@ extension PipitRuntime {
         }
     }
 
+    /// The platform accounts confirmed as this person, merged family included.
+    public func personHandles(of identityID: IdentityID) async -> [IdentityHandle] {
+        guard let store = speakerStore else { return [] }
+        return (try? await store.handles(of: identityID)) ?? []
+    }
+
+    /// Withdraws the claim that a platform account is this person. Their voice
+    /// and their name stay; only the account link goes.
+    public func unlinkHandle(_ handle: IdentityHandle) async {
+        guard let store = speakerStore else { return }
+        do {
+            try await store.removeHandle(handle)
+        } catch {
+            Log.app.error("unlink failed: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
     public func separateIdentity(_ identityID: IdentityID) async {
         guard let store = speakerStore else { return }
         do {

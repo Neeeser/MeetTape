@@ -155,6 +155,19 @@ public enum SensorAttribution {
         }
     }
 
+    /// The namespace a platform identifier is durable under, or nil where it
+    /// does not outlive one meeting.
+    ///
+    /// Only Slack today. Its user id is workspace-unique and survives every
+    /// meeting, so a handle bound once keeps naming that person. Meet's
+    /// `spaces/{space}/devices/{n}` is per-conference: a stored handle never
+    /// matches a later meeting, and a row that cannot match again only
+    /// misleads. Zoom exposes no identifier at all, so its name-keyed ids are
+    /// already the display name and a handle would add nothing to it.
+    public static func handleProvider(source: String) -> String? {
+        source.hasPrefix("slack") ? "slack" : nil
+    }
+
     public static func attribute(
         intervals: [DiarizationInterval], sensors: RawSensors
     ) -> Result {

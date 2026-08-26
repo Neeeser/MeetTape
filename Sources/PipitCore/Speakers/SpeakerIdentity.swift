@@ -211,3 +211,20 @@ public enum VoiceEnrollmentSource: String, Codable, Sendable, CaseIterable {
     /// Whether this source may write into a named person's profile.
     public var mayEnrolNamedPerson: Bool { self != .anonymousSeed }
 }
+
+/// A platform's own identifier for a person, bound to their identity.
+///
+/// The provider names the namespace the handle is durable in: today only
+/// `slack`, whose user id survives across meetings. A handle is written when a
+/// person confirms who a sensor-attributed speaker is, and read at the start of
+/// every later meeting, so one confirmation names that person deterministically
+/// from then on.
+public struct IdentityHandle: Codable, Sendable, Equatable, Hashable {
+    public var provider: String
+    public var handle: String
+
+    public init(provider: String, handle: String) {
+        self.provider = provider
+        self.handle = handle
+    }
+}

@@ -560,6 +560,15 @@ enum SensorAttributionTests {
                 expect.equal(entries.first?.assignment.origin, .sensor)
             },
 
+            test("only Slack's identifier is durable enough for a handle") { expect in
+                // Slack's user id survives every meeting. Meet's device id is
+                // per-conference, so a stored handle never matches again, and
+                // Zoom's ids are already display names.
+                expect.equal(SensorAttribution.handleProvider(source: "slack-huddle-ax"), "slack")
+                expect.isNil(SensorAttribution.handleProvider(source: "google_meet-dom"))
+                expect.isNil(SensorAttribution.handleProvider(source: "zoom-dom"))
+            },
+
             test("the release trailing past the voice does not steal the next cluster") { expect in
                 // Slack holds the flag about 1.5 s after speech stops. Ada's
                 // turn therefore runs into Grace's first word, and the overlap

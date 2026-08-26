@@ -1091,6 +1091,49 @@ public actor ProcessingPipeline {
         )
     }
 
+    /// Names sensor speakers from the handles earlier confirmations bound.
+    ///
+    /// The strongest naming there is: the platform identifier survived from a
+    /// meeting where a person confirmed who it belongs to, so the name and the
+    /// identity arrive before a second of audio is scored. Written at the same
+    /// `.sensor` origin as the roster name and applied after it, so the name
+    /// the person chose beats the platform's rendering of it, and a human
+    /// correction in this meeting still beats both.
+    private func applySensorHandles(
+        store: MeetingStore, metadata: MeetingMetadata, into speakers: inout SpeakerMap
+    ) async {
+        guard let service = backends.speakers else { return }
+        guard let sensors = sensorRecord(store: store, metadata: metadata),
+              let provider = SensorAttribution.handleProvider(source: sensors.source)
+        else { return }
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        let held = Set(sensors.turns.map(\.participantID)).subtracting(selfIDs)
+        guard !held.isEmpty else { return }
+        let speakerStore = await service.speakerStore
+        var named = 0
+        for participantID in held.sorted() {
+            guard let identity = await speakerStore.identity(
+                handle: participantID, provider: provider
+            ), identity.isNamed else { continue }
+            speakers.applySuggestion(
+                SpeakerAssignment(
+                    displayName: identity.resolvedName,
+                    origin: .sensor,
+                    participantID: participantID,
+                    identityID: identity.id,
+                    provenance: SpeakerProvenance(
+                        source: .sensor, identityID: identity.id, humanVerified: true
+                    )
+                ),
+                for: SpeakerLabel.sensor(participantID: participantID)
+            )
+            named += 1
+        }
+        if named > 0 {
+            Log.processing.info("sensor handles named=\(named, privacy: .public)")
+        }
+    }
+
     /// Measures what the recorded audio holds, once, before the first assembly.
     ///
     /// Only here. Every later assembly reads the file, so a rebuild is free and
@@ -1331,6 +1374,7 @@ public actor ProcessingPipeline {
 
         var speakers = try store.readSpeakerMap()
         applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &speakers)
+        await applySensorHandles(store: store, metadata: metadata, into: &speakers)
         if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,
@@ -1944,6 +1988,21 @@ public actor ProcessingPipeline {
             try await confirmCluster(
                 meetingID: meetingID, clusterID: key, identityID: resolved, settings: settings
             )
+            // A person just said who this platform account belongs to. Where
+            // the platform's identifier outlives the meeting, that binding is
+            // the strongest re-identification there is: every later meeting
+            // names this account's speech from it before any audio is scored.
+            // Only a human statement writes one; an automatic voice match at
+            // any confidence never does.
+            if let participantID = SpeakerLabel.sensorParticipantID(from: key),
+               let source = found.store.readRawSensors()?.source,
+               let provider = SensorAttribution.handleProvider(source: source),
+               let service = backends.speakers {
+                try await service.speakerStore.setHandle(
+                    IdentityHandle(provider: provider, handle: participantID),
+                    to: resolved, now: clock.now
+                )
+            }
             try await refreshCachedNames(for: resolved)
         } else {
             // Leave unknown. Clearing the name used to leave the vector behind,
@@ -2368,6 +2427,7 @@ public actor ProcessingPipeline {
         // re-analysing a meeting silently threw away its names.
         var reNamed = try store.readSpeakerMap()
         applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &reNamed)
+        await applySensorHandles(store: store, metadata: metadata, into: &reNamed)
         try store.writeSpeakerMap(reNamed)
 
         // Deliberately not deleting this meeting's confirmed enrolments here.

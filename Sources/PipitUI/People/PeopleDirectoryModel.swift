@@ -24,6 +24,9 @@ public final class PeopleDirectoryModel {
     /// Loaded when a row is about to be drawn, and kept, because scrolling back
     /// up a list of four hundred people would otherwise re-read every image.
     public var avatars: [IdentityID: NSImage] = [:]
+    /// The focused person's confirmed platform accounts. Loaded with the
+    /// detail pane; empty for everyone else and while nobody is focused.
+    public private(set) var handles: [IdentityHandle] = []
 
     /// The person whose detail pane is on screen, when exactly one is selected.
     public var focused: SpeakerDirectoryEntry? {
@@ -124,6 +127,26 @@ public final class PeopleDirectoryModel {
         selection.formIntersection(live)
         avatars = avatars.filter { live.contains($0.key) }
         if let focused { loadDrafts(from: focused) }
+        refreshHandles()
+    }
+
+    /// Reads the focused person's platform accounts, or clears them when the
+    /// focus is gone. A merge can carry accounts in, so this runs on reload as
+    /// well as on selection.
+    private func refreshHandles() {
+        guard let focused else { handles = []; return }
+        let id = focused.id
+        Task { [weak self] in
+            guard let self else { return }
+            let fetched = await runtime.personHandles(of: id)
+            if self.focused?.id == id { self.handles = fetched }
+        }
+    }
+
+    /// Withdraws one account link. The person and their voice stay.
+    public func unlink(_ handle: IdentityHandle) async {
+        await runtime.unlinkHandle(handle)
+        refreshHandles()
     }
 
     public func avatarImage(for entry: SpeakerDirectoryEntry) -> NSImage? {
@@ -150,6 +173,7 @@ public final class PeopleDirectoryModel {
             selection = [id]
         }
         if let focused { loadDrafts(from: focused) } else { draftOwner = nil }
+        refreshHandles()
     }
 
     private func loadDrafts(from entry: SpeakerDirectoryEntry) {

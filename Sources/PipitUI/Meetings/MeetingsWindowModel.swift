@@ -74,6 +74,11 @@ public final class MeetingsWindowModel {
     /// it must not put them back.
     @ObservationIgnored private var droppedWhileReading: Set<String> = []
     @ObservationIgnored private var loadTask: Task<[MeetingRow], Never>?
+    /// Counts the changes this window has made to the archive itself: combining,
+    /// separating, archiving and deleting. A read that started before one of
+    /// them holds the archive as it was, and assigning it put the rows back
+    /// that the user had just taken out.
+    @ObservationIgnored private var archiveChanges = 0
     @ObservationIgnored let runtime: PipitRuntime
 
     public init(runtime: PipitRuntime) {
@@ -94,10 +99,18 @@ public final class MeetingsWindowModel {
             _ = await inFlight.value
             return
         }
-        let task = Task { [runtime] in await runtime.meetingRows() }
-        loadTask = task
-        let loaded = await task.value
-        loadTask = nil
+        var loaded: [MeetingRow] = []
+        while true {
+            let changes = archiveChanges
+            let task = Task { [runtime] in await runtime.meetingRows() }
+            loadTask = task
+            loaded = await task.value
+            loadTask = nil
+            // Read again rather than drawing an archive that has changed under
+            // the read. One more read per change the user made, and only while
+            // one was already running.
+            if changes == archiveChanges { break }
+        }
         rows = loaded
         isLoading = false
         // The meeting the pane is showing stays selected even when this read
@@ -238,8 +251,13 @@ public final class MeetingsWindowModel {
         rows.filter { selection.contains($0.id) }
     }
 
-    /// Every meeting's total, for the footer.
-    public var totalDuration: Double { PipitRuntime.totalDuration(of: rows) }
+    /// The rows this filter holds, before the search query narrows them. What
+    /// the footer counts against, because with anything archived the archive's
+    /// own total is a number no list on screen adds up to.
+    public var filteredRows: [MeetingRow] { rows.filter { filter.admits($0) } }
+
+    /// The total of the meetings this filter holds, for the footer.
+    public var totalDuration: Double { PipitRuntime.totalDuration(of: filteredRows) }
 
     public func select(_ id: String, extending: Bool) {
         if extending {
@@ -319,6 +337,7 @@ public final class MeetingsWindowModel {
         guard let detail else { return }
         let meetingID = detail.meetingID
         detail.combineWithEarlier()
+        archiveChanges += 1
         show(meetingID: meetingID)
         Task { [weak self] in await self?.reload() }
     }
@@ -327,6 +346,7 @@ public final class MeetingsWindowModel {
     /// back is a row of its own, and nothing short of a read knows it is there.
     public func separate(_ recordingID: String) {
         detail?.detach(recordingID)
+        archiveChanges += 1
         Task { [weak self] in await self?.reload() }
     }
 
@@ -478,6 +498,11 @@ public final class MeetingsWindowModel {
         directory.pathComponents.suffix(3).joined(separator: "/")
     }
 
+    /// What a deletion could not do, for the one case a person has to be told
+    /// about: the meeting being recorded is refused, and a folder the system
+    /// will not remove stays where it is.
+    public var deletionProblem: String?
+
     /// Runs a confirmed deletion. Takes it as an argument rather than reading
     /// `pendingDeletion`, which the alert's dismissal has already cleared.
     public func performDeletion(_ deletion: MeetingsDeletion) async {
@@ -486,14 +511,38 @@ public final class MeetingsWindowModel {
         // without saving what is in it: a title typed into a meeting being
         // deleted has nowhere to land.
         if let focused = detail?.meetingID, deletion.targets.contains(focused) { detail = nil }
-        for id in deletion.targets {
-            await runtime.deleteMeeting(id: id)
-            transcripts.removeValue(forKey: id)
-            indexed.removeValue(forKey: id)
+        var refused: [String] = []
+        var gone: Set<String> = []
+        for (index, id) in deletion.targets.enumerated() {
+            dropFromIndex(id)
+            if await runtime.deleteMeeting(id: id) {
+                gone.insert(id)
+            } else {
+                refused.append(deletion.names.indices.contains(index) ? deletion.names[index] : id)
+            }
         }
-        rows.removeAll { deletion.targets.contains($0.id) }
-        selection.subtract(deletion.targets)
+        // Only what actually went. A meeting that was refused keeps its row and
+        // its place in the selection, and reload opens the pane on it again.
+        rows.removeAll { gone.contains($0.id) }
+        selection.subtract(gone)
+        archiveChanges += 1
+        deletionProblem = Self.deletionProblem(refused)
         await reload()
+    }
+
+    /// One line naming what is still on disk. Nil when everything went.
+    ///
+    /// A recording in progress is the case this exists for: the row is offered
+    /// like any other, and without this the meeting simply came back a moment
+    /// later with nothing said.
+    static func deletionProblem(_ refused: [String]) -> String? {
+        guard !refused.isEmpty else { return nil }
+        if refused.count == 1 {
+            return "\(refused[0]) was not deleted. A meeting being recorded is kept until the "
+                + "recording stops."
+        }
+        return "\(refused.count) meetings were not deleted. A meeting being recorded is kept "
+            + "until the recording stops."
     }
 
     /// Takes meetings out of the list, or puts them back. Nothing on disk
@@ -502,9 +551,15 @@ public final class MeetingsWindowModel {
         guard !rows.isEmpty else { return }
         let ids = rows.map(\.id)
         for id in ids { runtime.setArchived(archived, meetingID: id) }
+        archiveChanges += 1
         // The rows leave whichever list is on screen, so the pane must not stay
-        // open on one of them. Reload selects the first row that is left.
-        if let focused = detail?.meetingID, ids.contains(focused) { detail = nil }
+        // open on one of them. What was typed into it is written first: the
+        // files stay where they are, so a title half-typed when the row was
+        // archived still belongs to a meeting.
+        if let focused = detail?.meetingID, ids.contains(focused) {
+            detail?.saveEdits()
+            detail = nil
+        }
         selection.subtract(ids)
         Task { [weak self] in await self?.reload() }
     }

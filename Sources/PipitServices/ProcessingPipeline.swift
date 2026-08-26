@@ -60,6 +60,12 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
+    /// Meetings whose folders were deleted while a job was running.
+    ///
+    /// Every write here goes through `AtomicFile`, which creates the
+    /// directories it needs, so a job that carried on after the delete put the
+    /// meeting back as a row holding no audio and no transcript.
+    private var deletedWhileRunning: Set<String> = []
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -101,6 +107,30 @@ public actor ProcessingPipeline {
         self.chunking = chunking
     }
 
+    /// Removes what a stage wrote into a folder that is no longer meant to
+    /// exist, and says whether the job should stop.
+    ///
+    /// A stage already running when the delete landed finishes and writes its
+    /// output through `AtomicFile`, which creates the directories it needs. The
+    /// meeting is put back together here rather than guarded at every write.
+    private func discardIfDeleted(_ meetingID: String, store: MeetingStore) -> Bool {
+        guard deletedWhileRunning.remove(meetingID) != nil else { return false }
+        try? FileManager.default.removeItem(at: store.layout.root)
+        scratch.discard(meetingID: meetingID)
+        Log.processing.notice("meeting deleted while it was processing: job stopped")
+        return true
+    }
+
+    /// Stops the job on a meeting whose folder has just been deleted.
+    ///
+    /// The window offers Delete as soon as the recording is over, which is
+    /// minutes before transcription finishes. The job notices at its next stage
+    /// boundary, removes whatever it wrote in the meantime, and stops.
+    public func forget(meetingID: String) {
+        guard running.contains(meetingID) else { return }
+        deletedWhileRunning.insert(meetingID)
+    }
+
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
     /// flight is left alone.
     public func process(meetingID: String) async {
@@ -125,6 +155,7 @@ public actor ProcessingPipeline {
         let settings = settingsProvider()
 
         while let stage = metadata.processing.resumeStage, stage != .complete {
+            if discardIfDeleted(metadata.id, store: store) { return }
             do {
                 // Capture always wins. A job started before a meeting parks here
                 // between stages rather than competing for the microphone, the
@@ -236,9 +267,13 @@ public actor ProcessingPipeline {
                 onFailure(metadata.id, failure)
                 // Nothing else will read the decoded working copies now.
                 scratch.discard(meetingID: metadata.id)
+                _ = discardIfDeleted(metadata.id, store: store)
                 return
             }
         }
+        // The last stage advances to complete, which ends the loop without
+        // coming back to the check at the top of it.
+        _ = discardIfDeleted(metadata.id, store: store)
 
         // Compaction runs strictly after `complete`: every model has read the
         // PCM at full fidelity by now. A failure leaves the segments as the
@@ -347,6 +382,10 @@ public actor ProcessingPipeline {
     /// silently discard that edit.
     private func persist(_ metadata: MeetingMetadata, to store: MeetingStore) throws {
         guard (try? store.readMetadata()) != nil else {
+            // No metadata.json is either a job whose first write this is, or a
+            // meeting somebody deleted underneath it. The folder tells the two
+            // apart, and writing into a deleted meeting recreates it.
+            guard FileManager.default.fileExists(atPath: store.layout.root.path) else { return }
             try store.writeMetadata(metadata)
             return
         }

@@ -607,6 +607,14 @@ enum MeetingsWindowTests {
                 expect in try await aRightClickActsOnTheRowUnderIt(expect)
             },
 
+            test("deleting a meeting stops its voices counting it") {
+                expect in try await deletingDropsTheOccurrences(expect)
+            },
+
+            test("archiving survives the next write to the meeting's metadata") {
+                expect in try await archivingSurvivesAMetadataWrite(expect)
+            },
+
             test("a row names the day when its heading does not") { expect in
                 // Only Today and Yesterday name a day. Under a month heading a
                 // clock time alone left no way to tell which day a meeting was
@@ -1638,5 +1646,49 @@ enum MeetingsWindowTests {
             Set(model.contextTargets(for: other).map(\.id)), [first.id, second.id],
             "and a row inside the selection acts on all of it"
         )
+    }
+
+    /// The wiring from the window's delete through to the voice memory. Without
+    /// it a deleted meeting kept counting towards "heard in 3 meetings".
+    @MainActor
+    static func deletingDropsTheOccurrences(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let runtime = makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let chris = try await store.createPerson(name: "Chris")
+        try await store.recordOccurrence(
+            meetingID: meeting.id, clusterID: "remote-001_speaker_00", track: .remote,
+            speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+            identityID: chris.id, source: .human,
+            humanVerified: true, wasExpectedParticipant: false
+        )
+        expect.equal(try await store.meetingCount(for: chris.id), 1)
+
+        expect.isTrue(await runtime.deleteMeeting(id: meeting.id), "the folder went")
+
+        expect.equal(try await store.meetingCount(for: chris.id), 0)
+    }
+
+    /// The archived flag lives in `metadata.json`, which the pipeline rewrites
+    /// at every stage boundary. `updateMetadata` reads, changes and writes the
+    /// whole document, so a field it does not know about has to survive that.
+    @MainActor
+    static func archivingSurvivesAMetadataWrite(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let runtime = makeRuntime(root: root)
+
+        runtime.setArchived(true, meetingID: meeting.id)
+        _ = try meeting.store.updateMetadata { $0.durationSeconds = 900 }
+
+        expect.isTrue(try meeting.store.readMetadata().isArchived)
+        let summary = runtime.repository.summary(forDirectory: meeting.store.layout.root)
+        expect.isTrue(summary?.isArchived == true, "and the list reads it back")
+
+        runtime.setArchived(false, meetingID: meeting.id)
+        expect.isFalse(try meeting.store.readMetadata().isArchived)
     }
 }

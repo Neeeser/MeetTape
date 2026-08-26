@@ -712,13 +712,23 @@ public final class PipitRuntime {
     public func deleteMeeting(id: String) async -> Bool {
         guard let logical = repository.logicalMeeting(id: id) else { return false }
         let recordings = logical.recordings
-        let directories = recordings.map(\.store.layout.root)
+        // Continuations first, the recording the conversation started with
+        // last. A folder that will not delete leaves a row that can still reach
+        // it: taking the first half out first would have left the second half
+        // on disk with nothing in the list pointing at it, which is the outcome
+        // this whole path exists to prevent.
+        let directories = (logical.continuations + [logical.primary]).map(\.store.layout.root)
         if let recording = currentMeeting, directories.contains(
             where: { $0.standardizedFileURL == recording.store.layout.root.standardizedFileURL }
         ) {
             Log.app.notice("refused to delete the meeting being recorded")
             return false
         }
+        // Before the folders go. A job that was mid-stage when this ran writes
+        // its output through AtomicFile, which creates the directories it
+        // needs, so a transcription finishing a moment later would put the
+        // meeting back as a row holding nothing.
+        for recording in recordings { await pipeline.forget(meetingID: recording.metadata.id) }
         // Off the main actor: a long meeting is a few hundred megabytes across
         // several hundred files, and this actor is also the one arming the next
         // recording.

@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Synchronization
 import PipitAudio
 import PipitCore
 import PipitIntegrations
@@ -75,8 +76,73 @@ enum PipelineTests {
         )
     }
 
+    /// A transcriber that runs one piece of work before it answers, so a test
+    /// can make something happen while a stage is in flight.
+    final class InterferingTranscriber: TranscriptionBackend, @unchecked Sendable {
+        var identifier = "stub-interfering"
+        var isLocal = true
+        var limits = BackendAudioLimits.none
+        var timing = TranscriptTiming.text
+        let interference = Mutex<(@Sendable () async -> Void)?>(nil)
+
+        func transcribe(
+            audio: URL, progress: @escaping @Sendable (Double) -> Void
+        ) async throws -> TranscriptionOutput {
+            if let work = interference.withLock({ $0 }) { await work() }
+            progress(1)
+            return TranscriptionOutput(segments: [], text: "we ship friday", durationSeconds: 6)
+        }
+    }
+
     static var suite: Suite {
         Suite("ProcessingPipeline", [
+            test("a meeting deleted while it is transcribing does not come back") { expect in
+                // Every write goes through AtomicFile, which creates the
+                // directories it needs. A job that carried on after the folder
+                // was deleted put the meeting back as a row holding no audio
+                // and no transcript, and nothing said where it came from.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                let folder = meeting.store.layout.root
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let transcriber = InterferingTranscriber()
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: transcriber,
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: resolved,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+                transcriber.interference.withLock {
+                    $0 = { [pipeline] in
+                        await pipeline.forget(meetingID: meetingID)
+                        try? FileManager.default.removeItem(at: folder)
+                    }
+                }
+
+                await pipeline.process(meetingID: meetingID)
+
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the folder the user deleted is still deleted"
+                )
+                expect.isNil(
+                    meeting.repository.findMeeting(id: meetingID, includingMerged: true)?.metadata,
+                    "and no row comes back for it"
+                )
+            },
+
             test("a chunk that came back with words is accepted without reading its audio") { expect in
                 // The level only separates silence from a lost transcript, so
                 // decoding on the success path costs a full converter pass per

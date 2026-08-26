@@ -41,6 +41,17 @@ public struct MeetingsWindowView: View {
         } message: {
             Text(model.pendingDeletion?.message ?? "")
         }
+        .alert(
+            "Not everything was deleted",
+            isPresented: Binding(
+                get: { model.deletionProblem != nil },
+                set: { if !$0 { model.deletionProblem = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { model.deletionProblem = nil }
+        } message: {
+            Text(model.deletionProblem ?? "")
+        }
         // Writes a half-typed title or note before the window goes away. The
         // model saves 1.5 seconds after typing stops, so without this a close
         // inside that window loses what was typed.
@@ -169,14 +180,17 @@ public struct MeetingsWindowView: View {
     }
 
     private func footerText(visible: Int) -> String {
+        // Against what the filter holds rather than the whole archive: with
+        // anything archived, All never shows every row and the footer read
+        // "14 of 15" with nothing typed in the search field.
+        let held = model.filteredRows.count
         if model.selection.count > 1 {
-            return "\(visible) of \(model.rows.count) · \(model.selection.count) selected"
+            return "\(visible) of \(held) · \(model.selection.count) selected"
         }
-        if visible != model.rows.count {
-            return "\(visible) of \(model.rows.count)"
+        if visible != held {
+            return "\(visible) of \(held)"
         }
-        let count = model.rows.count
-        return "\(count) \(count == 1 ? "meeting" : "meetings") · "
+        return "\(held) \(held == 1 ? "meeting" : "meetings") · "
             + Format.shortDuration(model.totalDuration)
     }
 
@@ -262,6 +276,9 @@ struct MeetingRowView: View {
         Button(many ? "Delete \(targets.count) meetings…" : "Delete…", role: .destructive) {
             model.confirmDelete(targets)
         }
+        // A recording still being written is kept until it stops. Offering it
+        // meant a confirmation naming files, then nothing happening.
+        .disabled(targets.allSatisfy { $0.summary.processingState == .recording })
     }
 
     private var kindIcon: some View {

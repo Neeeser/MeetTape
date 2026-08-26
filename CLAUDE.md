@@ -57,6 +57,13 @@ constructs `PipitRuntime`, `SetupModel`, or `LocalModelManager`.
 - What the meetings list counts as work, the speaker strip has to offer. A voice
   the strip will not draw is a voice the list must not count, or the Unnamed
   filter fills with meetings nothing can clear.
+- The meeting client names speakers, it never moves boundaries. Slack marks one
+  speaker at a time and releases about 1.5 s after the voice stops, so a sensor
+  turn says who held the floor, not where an utterance began. The diarizer keeps
+  boundaries and overlap.
+- A sensor that is wrong must read as a sensor that is silent. Name nobody rather
+  than name badly: an empty name asks to be filled in, a confident wrong one does
+  not.
 - An imported recording is dated from what the recorder wrote: the container's
   creation date, then a timestamp in the filename, then the file's date on this
   Mac. The manifest still owns how long the audio runs.

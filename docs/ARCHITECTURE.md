@@ -98,6 +98,7 @@ meeting/
     ├── metadata.json
     ├── transcript.raw.json
     ├── diarization.raw.json
+    ├── sensors.raw.json
     ├── speakers.map.json
     └── transcript.json
 ```
@@ -148,6 +149,21 @@ the recording and transcript available for retry.
 Diarization writes immutable speaker intervals. `speakers.map.json` adds mutable
 cluster mappings, line corrections, and transcript boundaries above that raw
 output. Re-analysis appends another diarization run and keeps the previous run.
+
+`sensors.raw.json` records what the meeting client itself said: the roster keyed
+by the platform's own identifier, who was unmuted, and who held the floor when.
+It is immutable like the diarization beside it, because it is evidence about a
+recording rather than a conclusion about one.
+
+Two things read it. Cluster naming matches a cluster to whoever held the floor
+through it, at an origin ranked above a voice match and below the microphone
+track. Speaker count re-clusters the diarizer at the number of people who
+actually spoke, off cached embeddings.
+
+Both are advisory. A cluster split evenly between two people is named for
+neither, and a timeline covering too little of the diarized speech names nobody,
+which is what disagreeing clocks look like. A sensor that reports nothing leaves
+naming exactly as it was before, which is by voice alone.
 
 Named people and recurring unnamed voices share one identity store. A confirmed
 speaker name can add meeting audio to a profile. Automatic recognition reads the

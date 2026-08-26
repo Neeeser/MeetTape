@@ -92,8 +92,78 @@ function scrubURL(href) {
   }
 }
 
+/// Collapses raw tiles into one entry per person.
+///
+/// A tile with no identifier is dropped rather than given a placeholder. The
+/// identifier is what ties a person to a voice downstream, so inventing one puts
+/// a name on somebody else's words, which is worse than leaving the cluster
+/// blank for a human to fill in.
+///
+/// The same person appears more than once, in the grid and again in the people
+/// panel, and a name can render a beat after the tile does. So entries merge and
+/// a real name always beats a missing one.
+export function rosterFromTiles(tiles) {
+  const byID = new Map();
+  for (const tile of tiles || []) {
+    const id = tile && typeof tile.id === 'string' ? tile.id.trim() : '';
+    if (!id) continue;
+    const name = tile.name ? String(tile.name).trim().slice(0, 80) : '';
+    const existing = byID.get(id);
+    if (existing) {
+      if (!existing.name && name) existing.name = name;
+      if (tile.isSelf) existing.isSelf = true;
+      if (typeof tile.muted === 'boolean') existing.muted = tile.muted;
+      continue;
+    }
+    byID.set(id, {
+      id: id.slice(0, 200),
+      name: name || undefined,
+      isSelf: !!tile.isSelf,
+      muted: typeof tile.muted === 'boolean' ? tile.muted : undefined,
+    });
+  }
+  return [...byID.values()].slice(0, 50);
+}
+
+/// Decides who holds the floor from a per-participant level meter.
+///
+/// Meet animates a meter inside each participant's tile while that person is
+/// audible and lets it settle when they stop, measured at about 50 ms from the
+/// start of speech. Reading the animation rather than a class name is the point:
+/// the class names are obfuscated and rotate, but a meter that keeps changing is
+/// a meter with audio behind it whatever its classes are called.
+///
+/// The hold covers the gaps between frames, so a natural pause inside a sentence
+/// does not read as the floor being given up.
+export function createSpeakingTracker({ holdMs = 400 } = {}) {
+  const lastMeter = new Map();
+  const lastChange = new Map();
+  return {
+    update(tiles, now) {
+      for (const tile of tiles || []) {
+        if (!tile || !tile.id) continue;
+        const meter = String(tile.meter ?? '');
+        if (lastMeter.has(tile.id) && lastMeter.get(tile.id) !== meter) {
+          lastChange.set(tile.id, now);
+        }
+        lastMeter.set(tile.id, meter);
+      }
+      let floor = null;
+      let mostRecent = -Infinity;
+      for (const [id, at] of lastChange) {
+        if (now - at > holdMs) continue;
+        if (at > mostRecent) { mostRecent = at; floor = id; }
+      }
+      return floor;
+    },
+  };
+}
+
 /// Builds the message the native host relays to Pipit.
-export function buildState({ href, title, controls, pageText, tabId, now, participants }) {
+export function buildState({
+  href, title, controls, pageText, tabId, now, participants, people, activeSpeaker,
+}) {
+  const roster = people && people.length ? rosterFromTiles(people) : null;
   return {
     type: 'state',
     provider: providerForURL(href),
@@ -105,6 +175,10 @@ export function buildState({ href, title, controls, pageText, tabId, now, partic
     participants: participants && participants.length
       ? participants.slice(0, 30).map((name) => String(name).slice(0, 80))
       : undefined,
+    // Absent rather than empty when the page said nothing. An empty roster is a
+    // claim that the room is empty, which the app would then act on.
+    people: roster && roster.length ? roster : undefined,
+    activeSpeaker: activeSpeaker || undefined,
     tabId,
     sentAt: now,
   };
@@ -114,8 +188,14 @@ export function buildState({ href, title, controls, pageText, tabId, now, partic
 /// chatter a 500 ms poll would otherwise produce.
 export function isMeaningfulChange(previous, next) {
   if (!previous) return true;
-  const keys = ['provider', 'state', 'meetingId', 'url', 'title', 'muted', 'otherAudibleTabs'];
-  return keys.some((key) => previous[key] !== next[key]);
+  const keys = [
+    'provider', 'state', 'meetingId', 'url', 'title', 'muted', 'otherAudibleTabs',
+    // The floor moving is the whole point of the roster, and a 4 s heartbeat
+    // would round a short turn away entirely.
+    'activeSpeaker',
+  ];
+  if (keys.some((key) => previous[key] !== next[key])) return true;
+  return (previous.people || []).length !== (next.people || []).length;
 }
 
 /// How long a tab may stay silent before the app stops counting it as reporting.

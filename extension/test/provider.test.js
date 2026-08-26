@@ -9,6 +9,8 @@ import {
   isMeaningfulChange,
   shouldSend,
   HEARTBEAT_MS,
+  rosterFromTiles,
+  createSpeakingTracker,
 } from '../shared/provider.js';
 
 const leaveControl = { ariaLabel: 'Leave call' };
@@ -135,4 +137,103 @@ test('an unchanged call still reports before the app stops trusting it', () => {
   assert.equal(shouldSend(state, { ...state, state: 'ended' }, 1000, 1001), true);
   // The first snapshot of a tab always sends.
   assert.equal(shouldSend(null, state, 0, 500), true);
+});
+
+// --- roster -----------------------------------------------------------------
+
+test('a tile without an identifier is dropped rather than guessed at', () => {
+  // The identifier is what ties a person to a voice. A made-up one ties them
+  // to the wrong voice, which is worse than leaving the cluster unnamed.
+  const people = rosterFromTiles([
+    { id: 'spaces/x/devices/406', name: 'Ada' },
+    { id: '', name: 'Nameless' },
+    { name: 'No id at all' },
+  ]);
+  assert.equal(people.length, 1);
+  assert.equal(people[0].id, 'spaces/x/devices/406');
+});
+
+test('a duplicate tile collapses to one person', () => {
+  // Meet renders a participant in the grid and again in the people panel.
+  const people = rosterFromTiles([
+    { id: 'd406', name: 'Ada' },
+    { id: 'd406', name: 'Ada' },
+    { id: 'd409', name: 'Grace' },
+  ]);
+  assert.equal(people.length, 2);
+});
+
+test('a name arriving later fills in a blank one', () => {
+  const people = rosterFromTiles([{ id: 'd406' }, { id: 'd406', name: 'Ada' }]);
+  assert.equal(people[0].name, 'Ada');
+});
+
+test('a meter that changed recently is speaking, one that settled is not', () => {
+  // Meet animates a per-participant level meter while someone talks and lets it
+  // settle when they stop. Reading the animation rather than a class name means
+  // no selector has to be kept in step with whatever Meet renames next.
+  const tracker = createSpeakingTracker({ holdMs: 400 });
+  assert.equal(tracker.update([{ id: 'd406', meter: 'a' }], 0), null);
+  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 100), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 300), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 800), null);
+});
+
+test('the floor goes to whoever changed most recently', () => {
+  const tracker = createSpeakingTracker({ holdMs: 400 });
+  tracker.update([{ id: 'a', meter: '1' }, { id: 'b', meter: '1' }], 0);
+  tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '1' }], 100);
+  assert.equal(tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '2' }], 200), 'b');
+});
+
+test('a roster of one is still a roster', () => {
+  // A call can legitimately hold one person, and reporting nothing would read
+  // as the sensor being broken.
+  assert.equal(rosterFromTiles([{ id: 'd406', name: 'Ada' }]).length, 1);
+});
+
+test('the roster rides along in the state message', () => {
+  const state = buildState({
+    href: 'https://meet.google.com/abc-defg-hij',
+    title: 'Meet',
+    controls: [leaveControl],
+    pageText: '',
+    tabId: 3,
+    now: 1000,
+    people: [{ id: 'd406', name: 'Ada', isSelf: true, muted: false }],
+    activeSpeaker: 'd406',
+  });
+  assert.equal(state.people.length, 1);
+  assert.equal(state.activeSpeaker, 'd406');
+});
+
+test('no roster leaves the fields off entirely', () => {
+  // Absent means the page did not say. An empty array would claim an empty room.
+  const state = buildState({
+    href: 'https://meet.google.com/abc-defg-hij',
+    title: 'Meet',
+    controls: [leaveControl],
+    pageText: '',
+    tabId: 3,
+    now: 1000,
+  });
+  assert.equal(state.people, undefined);
+  assert.equal(state.activeSpeaker, undefined);
+});
+
+test('the floor moving is a change worth sending', () => {
+  const base = {
+    provider: 'meet', state: 'in_call', meetingId: 'abc', url: 'u', title: 't',
+    muted: false, activeSpeaker: 'a', people: [{ id: 'a' }, { id: 'b' }],
+  };
+  assert.equal(isMeaningfulChange(base, { ...base, activeSpeaker: 'b' }), true);
+  assert.equal(isMeaningfulChange(base, { ...base }), false);
+});
+
+test('someone joining is a change worth sending', () => {
+  const base = { provider: 'meet', state: 'in_call', people: [{ id: 'a' }] };
+  assert.equal(
+    isMeaningfulChange(base, { ...base, people: [{ id: 'a' }, { id: 'b' }] }),
+    true
+  );
 });

@@ -12,6 +12,10 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
     case anonymousVoice = "anonymous_voice"
     /// A named voice profile matched at High confidence.
     case voiceProfile = "voice_profile"
+    /// The meeting client's own account of who held the floor. Stronger than a
+    /// voice match, because it reads the roster rather than inferring it, and
+    /// weaker than the microphone track, which is true by construction.
+    case sensor
     /// True by construction: the microphone track is the local user.
     case deterministic
     /// Set by the user. Never overwritten by anything else.
@@ -22,8 +26,9 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
         case .ai: 0
         case .anonymousVoice: 1
         case .voiceProfile: 2
-        case .deterministic: 3
-        case .human: 4
+        case .sensor: 3
+        case .deterministic: 4
+        case .human: 5
         }
     }
 
@@ -37,6 +42,7 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
         switch self {
         case .human: "You set this"
         case .deterministic: "From the microphone track"
+        case .sensor: "From the meeting"
         case .voiceProfile: "Recognized voice"
         case .anonymousVoice: "Voice heard before"
         case .ai: "Suggested"

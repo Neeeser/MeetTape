@@ -933,9 +933,77 @@ public actor ProcessingPipeline {
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
 
-        try await recordOccurrences(
-            meetingID: metadata.id, run: run, chunkEmbeddings: output.chunkEmbeddings
+        let settled = try await constrainToSensorCount(
+            store: store, metadata: metadata, track: track,
+            audio: audio, leadIn: leadIn, run: run
         )
+
+        try await recordOccurrences(
+            meetingID: metadata.id, run: settled, chunkEmbeddings: output.chunkEmbeddings
+        )
+    }
+
+    /// Re-clusters at the number of people who actually took the floor.
+    ///
+    /// Over- and under-clustering is what diarization gets wrong, and the count
+    /// is the one thing the meeting client knows for certain and the clusterer
+    /// is only guessing at. Re-clustering runs off cached embeddings, so it
+    /// costs a fraction of the first pass and never re-reads the audio.
+    ///
+    /// Deliberately narrow. It runs only when the sensor saw turns, only when
+    /// its count disagrees with the clustering, and it keeps the original run on
+    /// disk either way, so a wrong hint is a re-analysis away from being undone.
+    /// A hint of one is ignored: collapsing every voice into a single speaker is
+    /// the one outcome renaming cannot recover from.
+    private func constrainToSensorCount(
+        store: MeetingStore, metadata: MeetingMetadata,
+        track: CaptureTrack, audio: URL, leadIn: Double, run: DiarizationRun
+    ) async throws -> DiarizationRun {
+        guard let reanalyze = backends.reanalyzeDiarization else { return run }
+        guard let sensors = store.readRawSensors() else { return run }
+        let scoped = sensors.excludingSelf()
+        let result = SensorAttribution.attribute(intervals: run.intervals, sensors: scoped)
+        guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
+            return run
+        }
+        // A timeline that does not describe this recording must not be allowed
+        // to choose its speaker count either.
+        guard result.coverage >= SensorAttribution.minimumTimelineCoverage else { return run }
+
+        Log.processing.info(
+            "sensor speaker count clustered=\(run.speakerCount, privacy: .public) hint=\(hint, privacy: .public)"
+        )
+        do {
+            let output = try await reanalyze(metadata.id, audio, hint)
+            var diarization = try store.readRawDiarization()
+            var configuration = output.configuration
+            configuration["sensorSpeakerCount"] = String(hint)
+            let constrained = DiarizationRun(
+                id: diarization.nextRunID(track: track),
+                track: track,
+                backend: LocalSpeechStack.diarizerBackendIdentifier,
+                producedAt: clock.now,
+                timelineOffset: leadIn,
+                configuration: configuration,
+                clusters: output.clusters,
+                intervals: output.intervals.map {
+                    DiarizationInterval(
+                        start: $0.start + leadIn, end: $0.end + leadIn,
+                        clusterID: $0.clusterID, quality: $0.quality
+                    )
+                }
+            )
+            diarization.setActive(constrained)
+            try store.writeRawDiarization(diarization)
+            return constrained
+        } catch {
+            // The first clustering is already on disk and already active. A
+            // failed refinement leaves the meeting exactly as it was.
+            Log.processing.notice(
+                "sensor recluster skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return run
+        }
     }
 
     /// Writes one row per cluster into the local identity store, with the vector
@@ -988,7 +1056,25 @@ public actor ProcessingPipeline {
     /// Never throws. The words are already safe on disk as raw chunks, and a
     /// meeting that cannot be measured assembles the way it did before this
     /// existed: every segment kept. Failing the stage instead would turn an
-    /// unreadable track into a meeting with no markdown and no mixdown.
+    /// Names clusters from what the meeting client said, where it said enough.
+    ///
+    /// The decision lives in `SensorAttribution.assignments`, which is pure and
+    /// tested on its own. Writing through `applySuggestion` is what keeps a
+    /// person's own correction and the microphone track's deterministic name
+    /// above this, and stops a later voice match from overwriting it.
+    private func applySensorNames(
+        store: MeetingStore, diarization: RawDiarization, into speakers: inout SpeakerMap
+    ) {
+        guard let sensors = store.readRawSensors() else { return }
+        let entries = SensorAttribution.assignments(diarization: diarization, sensors: sensors)
+        for entry in entries {
+            speakers.applySuggestion(entry.assignment, for: entry.key)
+        }
+        Log.processing.info(
+            "sensor naming source=\(sensors.source, privacy: .public) named=\(entries.count, privacy: .public)"
+        )
+    }
+
     private func measureSpeech(store: MeetingStore, metadata: MeetingMetadata) async {
         guard metadata.source.micTrackIsLocalUser else { return }
         guard store.readSpeechEvidence() == nil else { return }
@@ -1212,6 +1298,7 @@ public actor ProcessingPipeline {
         try store.writeCanonicalTranscript(transcript)
 
         var speakers = try store.readSpeakerMap()
+        applySensorNames(store: store, diarization: diarization, into: &speakers)
         if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,

@@ -16,17 +16,23 @@ public struct SlackAccessibilityObservation: Sendable, Equatable {
     public let accessibilityUnavailable: Bool
     public let isMuted: Bool?
     public let windowTitle: String?
+    /// One entry per person in the huddle grid. Empty where the walk found no
+    /// grid, which is every read outside a huddle and any truncated read inside
+    /// one, so it carries the same "no information" meaning as `subtreeWasEmpty`.
+    public let tiles: [SlackHuddleTile]
 
     public init(
         hasLeaveHuddleControl: Bool, subtreeWasEmpty: Bool,
         isMuted: Bool? = nil, windowTitle: String? = nil,
-        accessibilityUnavailable: Bool = false
+        accessibilityUnavailable: Bool = false,
+        tiles: [SlackHuddleTile] = []
     ) {
         self.hasLeaveHuddleControl = hasLeaveHuddleControl
         self.subtreeWasEmpty = subtreeWasEmpty
         self.isMuted = isMuted
         self.windowTitle = windowTitle
         self.accessibilityUnavailable = accessibilityUnavailable
+        self.tiles = tiles
     }
 
     public static let empty = SlackAccessibilityObservation(

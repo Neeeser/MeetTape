@@ -127,6 +127,10 @@ public final class PipitRuntime {
     @ObservationIgnored private(set) var pipeline: ProcessingPipeline!
     @ObservationIgnored private var powerObserver: PowerEventObserver?
     @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
+    /// What the meeting client said while this recording ran. Started when a
+    /// meeting is committed and written once at the end, because the artifact is
+    /// immutable and a half-written one would be worse than none.
+    @ObservationIgnored private var sensorRecorder: SensorRecorder?
     @ObservationIgnored private var onStatusChange: (@MainActor @Sendable () -> Void)?
     @ObservationIgnored private let relay = RuntimeRelay()
 
@@ -391,6 +395,7 @@ public final class PipitRuntime {
     func detectionDidUpdate(_ snapshot: DetectionSnapshot) {
         status.sensorConnection = snapshot.browserSensor
         status.slackState = snapshot.slackState
+        if let reading = snapshot.roster { recordSensorReading(reading) }
 
         // Unsupported calls arrive as ordinary evidence rather than a one-shot
         // event, so the session lifecycle governs them like any other provider.
@@ -741,6 +746,9 @@ public final class PipitRuntime {
                 layout: created.store.layout, meetingID: metadata.id, source: request.source
             )
             currentMeeting = (metadata, created.store)
+            sensorRecorder = SensorRecorder(
+                anchorMonotonic: clock.monotonicSeconds, anchorDate: clock.now
+            )
             refreshRecentMeetings()
             return true
         } catch {
@@ -749,10 +757,47 @@ public final class PipitRuntime {
             // A half-created meeting must not be left for recovery to adopt.
             if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
             currentMeeting = nil
+            sensorRecorder = nil
             _ = sessionController.stop(reason: "commit_failed")
             syncStatusFromSession()
             refreshRecentMeetings()
             return false
+        }
+    }
+
+
+    /// Folds one reading of the meeting client into this recording's timeline.
+    ///
+    /// Silently ignored when nothing is being recorded, which is most of the
+    /// time. The sensor never decides that a meeting is happening; it only
+    /// describes one that already is.
+    private func recordSensorReading(_ reading: SensorReading) {
+        sensorRecorder?.record(reading)
+    }
+
+    /// Writes what the meeting client said, once, at the end of the recording.
+    ///
+    /// Never throws into the caller. A sensor that produced nothing usable must
+    /// not cost anyone their recording, which is the same rule the browser
+    /// extension already follows.
+    private func writeSensors(store: MeetingStore, timeline: RecordingTimeline) {
+        guard var recorder = sensorRecorder else { return }
+        sensorRecorder = nil
+        let raw = recorder.finish(
+            at: clock.monotonicSeconds, recordingStartedAt: timeline.startedAt
+        )
+        guard !raw.participants.isEmpty else { return }
+        do {
+            try store.writeRawSensors(raw)
+            Log.app.info(
+                """
+                sensors written source=\(raw.source, privacy: .public) \
+                people=\(raw.participants.count, privacy: .public) \
+                turns=\(raw.turns.count, privacy: .public)
+                """
+            )
+        } catch {
+            Log.app.error("sensor write failed: \(logSafeDescription(error), privacy: .public)")
         }
     }
 
@@ -788,6 +833,7 @@ public final class PipitRuntime {
             // A provisional recording the user declined leaves nothing behind.
             try? FileManager.default.removeItem(at: meeting.store.layout.root)
             currentMeeting = nil
+            sensorRecorder = nil
             refreshRecentMeetings()
         }
         provisionalPrompt = nil
@@ -801,6 +847,7 @@ public final class PipitRuntime {
 
         do {
             let timeline = try meeting.store.readTimeline()
+            writeSensors(store: meeting.store, timeline: timeline)
             let updated = try meeting.store.updateMetadata { metadata in
                 metadata.endedAt = self.clock.now
                 metadata.durationSeconds = timeline.duration

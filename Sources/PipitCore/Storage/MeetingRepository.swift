@@ -106,6 +106,23 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(diarization), to: layout.rawDiarization)
     }
 
+    /// Nil where no sensor watched this meeting, which is every recording made
+    /// before this existed and every one where the client was never readable.
+    /// Naming then falls back to the voice alone, which is what those meetings
+    /// already do.
+    public func readRawSensors() -> RawSensors? {
+        guard FileManager.default.fileExists(atPath: layout.rawSensors.path),
+              let data = try? read(layout.rawSensors)
+        else { return nil }
+        return try? ArchiveCoding.decode(
+            RawSensors.self, from: data, path: layout.rawSensors.path
+        )
+    }
+
+    public func writeRawSensors(_ sensors: RawSensors) throws {
+        try AtomicFile.write(try ArchiveCoding.encode(sensors), to: layout.rawSensors)
+    }
+
     /// Nil where nothing measured this meeting, which is every meeting
     /// processed before the evidence existed. The assembler then keeps every
     /// segment, which is what those meetings already show.

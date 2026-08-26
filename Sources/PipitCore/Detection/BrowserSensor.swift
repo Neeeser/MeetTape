@@ -13,6 +13,28 @@ public enum BrowserMeetingState: String, Codable, Sendable, CaseIterable {
     public var isActiveCall: Bool { self == .inCall }
 }
 
+/// One person a page reports, with the page's own identifier for them.
+///
+/// Meet names participants `spaces/{space}/devices/{device}`, which is stable
+/// for a conference and per device. A display name is a cache beside it, because
+/// two people share one and one person changes theirs.
+public struct BrowserParticipant: Codable, Sendable, Equatable {
+    public var id: String
+    public var displayName: String?
+    public var isSelf: Bool
+    /// Nil where the page does not say, which is most of Zoom.
+    public var isMuted: Bool?
+
+    public init(
+        id: String, displayName: String? = nil, isSelf: Bool = false, isMuted: Bool? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.isSelf = isSelf
+        self.isMuted = isMuted
+    }
+}
+
 /// The provider-neutral event a browser extension emits.
 ///
 /// Nothing downstream knows this came from Firefox. A Chrome sensor speaking the
@@ -31,6 +53,11 @@ public struct BrowserMeetingEvent: Codable, Sendable, Equatable {
     /// Optional enrichment. Absent rather than guessed when the page does not
     /// expose it reliably.
     public var participants: [String]?
+    /// The identified roster. Carried beside `participants` rather than
+    /// replacing it, so an older extension that only knows how to send names
+    /// keeps working.
+    public var people: [BrowserParticipant]?
+    /// The identifier of whoever holds the floor, matching an entry in `people`.
     public var activeSpeaker: String?
     /// Another tab in the same browser is playing audio, which the process tap
     /// cannot separate from the meeting.
@@ -40,6 +67,7 @@ public struct BrowserMeetingEvent: Codable, Sendable, Equatable {
         browser: BrowserKind, provider: MeetingProvider, state: BrowserMeetingState,
         timestamp: Double, url: String? = nil, meetingID: String? = nil, title: String? = nil,
         muted: Bool? = nil, tabID: Int? = nil, participants: [String]? = nil,
+        people: [BrowserParticipant]? = nil,
         activeSpeaker: String? = nil, otherAudibleTabs: Int? = nil
     ) {
         self.browser = browser
@@ -52,6 +80,7 @@ public struct BrowserMeetingEvent: Codable, Sendable, Equatable {
         self.muted = muted
         self.tabID = tabID
         self.participants = participants
+        self.people = people
         self.activeSpeaker = activeSpeaker
         self.otherAudibleTabs = otherAudibleTabs
     }

@@ -32,6 +32,11 @@ public struct MeetingLayout: Sendable, Equatable {
     /// assembly rather than measured again.
     public var speechEvidence: URL { raw.appendingPathComponent("speech.json") }
     public var speakerMap: URL { raw.appendingPathComponent("speakers.map.json") }
+    /// What the meeting client said about the call: the roster, who unmuted,
+    /// and who held the floor when. Immutable like the diarization beside it,
+    /// because it is evidence about a recording rather than a conclusion about
+    /// one, and re-analysing speakers reads it again.
+    public var rawSensors: URL { raw.appendingPathComponent("sensors.raw.json") }
     public var canonicalTranscript: URL { raw.appendingPathComponent("transcript.json") }
     public var transcriptMarkdown: URL { root.appendingPathComponent("transcript.md") }
     public var notes: URL { root.appendingPathComponent("notes.md") }

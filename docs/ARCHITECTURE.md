@@ -151,7 +151,10 @@ cluster mappings, line corrections, and transcript boundaries above that raw
 output. Re-analysis appends another diarization run and keeps the previous run.
 
 `sensors.raw.json` records what the meeting client itself said: the roster keyed
-by the platform's own identifier, who was unmuted, and who held the floor when.
+by the platform's own identifier, who was seen unmuted, and who held the floor
+when. Mute state is kept as a record of what the client reported and is not
+consulted when deciding who spoke, because holding the floor settles that and a
+tile whose overlay never resolved would otherwise outrank it.
 It is immutable like the diarization beside it, because it is evidence about a
 recording rather than a conclusion about one.
 
@@ -160,9 +163,14 @@ through it, at an origin ranked above a voice match and below the microphone
 track. Speaker count re-clusters the diarizer at the number of people who
 actually spoke, off cached embeddings.
 
-Both are advisory. A cluster split evenly between two people is named for
-neither, and a timeline covering too little of the diarized speech names nobody,
-which is what disagreeing clocks look like. A sensor that reports nothing leaves
+Both are advisory, and the second is narrower than the first. Re-clustering
+cannot be undone by renaming, so it runs only where the client names the local
+user structurally, which today is Slack alone. Naming runs everywhere.
+
+A cluster split evenly between two people is named for neither, a timeline
+covering too little of the diarized speech names nobody, which is what
+disagreeing clocks look like, and a floor nobody confirmed ends at the last
+reading that saw it rather than running to the end of the call. A sensor that reports nothing leaves
 naming exactly as it was before, which is by voice alone.
 
 Named people and recurring unnamed voices share one identity store. A confirmed

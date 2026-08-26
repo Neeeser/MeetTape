@@ -57,48 +57,53 @@ public struct RawSensors: Codable, Sendable, Equatable {
     public var source: String
     public var participants: [SensorParticipant]
     public var turns: [SensorTurn]
-    /// Everyone seen unmuted at least once. Someone muted for the whole call is
-    /// in the room and not in the transcript.
+    /// Everyone seen unmuted at least once. Recorded as evidence of what the
+    /// client said, and deliberately not consulted when deciding who spoke:
+    /// holding the floor for forty seconds settles that, and a tile whose
+    /// overlay never resolved would otherwise outrank it.
     public var unmutedIDs: [String]
+    /// Whether the local user was named by the platform rather than inferred.
+    ///
+    /// Only Slack is authoritative: its tile identifier literally reads
+    /// `huddle-grid-gridcell-self_U…`, which is measured and structural. Meet
+    /// has no such marker. What the extension does there is test whether a
+    /// tile's name is the English word "You", which is a reasonable guess and
+    /// still a guess: it fails in every other language, and it fires on a person
+    /// whose name happens to be You.
+    ///
+    /// This gates re-clustering, which is the one irreversible step. Naming runs
+    /// regardless, because a wrong name is a rename away from right, and a
+    /// wrongly merged pair of speakers is not.
+    public var selfIsAuthoritative: Bool
 
     public init(
         version: Int = RawSensors.currentVersion,
         source: String,
         participants: [SensorParticipant] = [],
         turns: [SensorTurn] = [],
-        unmutedIDs: [String] = []
+        unmutedIDs: [String] = [],
+        selfIsAuthoritative: Bool = false
     ) {
         self.version = version
         self.source = source
         self.participants = participants
         self.turns = turns
         self.unmutedIDs = unmutedIDs
+        self.selfIsAuthoritative = selfIsAuthoritative
     }
 
     public func participant(_ id: String) -> SensorParticipant? {
         participants.first { $0.id == id }
     }
 
-    /// Whether the local user could only be found by matching a display name.
+    /// Whether the local user is known well enough to re-cluster on.
     ///
-    /// Paired with `markingSelf`, which declines to mark anyone once the
-    /// platform has named the local user. The two answer the same question and
-    /// have to agree: this one reports the guess, that one makes it.
-    ///
-    /// The platform's own flag is trustworthy: Slack marks the tile `self_`, and
-    /// Meet marks its own tile. A name match is a guess, and two people called
-    /// Andrew in one call is not a rare event. So a name match is allowed to
-    /// suppress a name, which is safe, and never to drive the speaker count,
-    /// which is not: dropping a real speaker from the count re-clusters the
-    /// recording one short and merges two voices into one, and a merge cannot be
-    /// undone by renaming.
-    public func selfIsOnlyAGuess(localUserName: String) -> Bool {
-        let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty, !participants.contains(where: \.isSelf) else { return false }
-        return participants.contains { person in
-            guard let name = person.displayName else { return false }
-            return name.caseInsensitiveCompare(wanted) == .orderedSame
-        }
+    /// Two ways to be unsure, and both end the same way. The reader may not be
+    /// authoritative about self at all, which is everything except Slack. Or it
+    /// may be authoritative and have found nobody, which means the local user is
+    /// unaccounted for and the count is short by however many turns are theirs.
+    public var canDecideSpeakerCount: Bool {
+        selfIsAuthoritative && participants.contains(where: \.isSelf)
     }
 
     /// The same record with the local user marked by name as well as by flag.
@@ -107,12 +112,16 @@ public struct RawSensors: Codable, Sendable, Equatable {
     /// English word, so a client in any other language reports nobody as self,
     /// and Zoom marks nobody at all. The app does know who its user is.
     public func markingSelf(named localUserName: String) -> RawSensors {
-        // A fallback, not a supplement. Where the platform already named the
-        // local user, somebody else carrying the same display name is a
+        // A fallback, not a supplement. Where the reader authoritatively named
+        // the local user, somebody else carrying the same display name is a
         // different person, and marking them too was the whole bug: they left
         // the speaker count, the recording re-clustered one voice short, and two
         // people were merged into one.
-        guard !participants.contains(where: \.isSelf) else { return self }
+        //
+        // Where the reader only guessed, a second guess costs nothing: the count
+        // is already off the table, and the only effect is to leave another
+        // cluster unnamed.
+        guard !(selfIsAuthoritative && participants.contains(where: \.isSelf)) else { return self }
         let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return self }
         var marked = self
@@ -170,6 +179,20 @@ public struct SensorObservation: Sendable, Equatable {
 /// Pure and incremental so the recording path can hand it one reading at a time
 /// and the result can be tested without a meeting.
 public struct SensorTimelineBuilder: Sendable {
+    /// How long a floor may go unconfirmed before the turn ends.
+    ///
+    /// A turn says somebody held the floor between two readings that said so. It
+    /// is not a claim about a stretch nobody looked at. Readings arrive twice a
+    /// second, and Slack's subtree reads empty intermittently during a confirmed
+    /// live huddle, so a gap is expected rather than exceptional.
+    ///
+    /// Without this an unclosed turn ran to the end of the recording, and one
+    /// person's name landed on every cluster after the sensor went quiet, at
+    /// full coverage and with no runner-up to trip the margin rule. Six missed
+    /// readings is well past ordinary jitter and far short of anything a person
+    /// would call a turn.
+    public static let maximumGapSeconds: Double = 3
+
     private let source: String
     private var order: [String] = []
     private var known: [String: SensorParticipant] = [:]
@@ -192,6 +215,9 @@ public struct SensorTimelineBuilder: Sendable {
         // open turn at a moment before it began, dropping it entirely.
         guard observation.at >= lastAt else { return }
 
+        // Nothing was watching across a long gap, so the floor is only known to
+        // have been held up to the last reading that saw it.
+        if observation.at - lastAt > Self.maximumGapSeconds { closeTurn(at: lastAt) }
         lastAt = observation.at
         for person in observation.participants {
             if var existing = known[person.id] {
@@ -230,8 +256,12 @@ public struct SensorTimelineBuilder: Sendable {
     }
 
     /// Closes whatever is open and returns the record to write.
+    ///
+    /// The last reading, not the end of the recording. A call can run for an
+    /// hour after the sensor stops answering, and claiming the floor was held
+    /// throughout would be inventing evidence rather than reporting it.
     public mutating func finish(at moment: Double) -> RawSensors {
-        closeTurn(at: max(moment, lastAt))
+        closeTurn(at: lastAt)
         return RawSensors(
             source: source,
             participants: order.compactMap { known[$0] },
@@ -254,6 +284,9 @@ public struct SensorReading: Sendable, Equatable {
     /// Which reader produced it, for example `slack-huddle-ax` or
     /// `google_meet-dom`.
     public var source: String
+    /// Whether this reader names the local user structurally rather than by
+    /// inference. True for Slack, whose tile identifier carries `self_`.
+    public var selfIsAuthoritative: Bool
     /// Which meeting provider it describes. A recording only folds in readings
     /// about the meeting it is recording.
     public var provider: MeetingProvider
@@ -269,9 +302,11 @@ public struct SensorReading: Sendable, Equatable {
     public init(
         source: String, provider: MeetingProvider, at: Double,
         participants: [SensorParticipant], meetingID: String? = nil,
-        speakingID: String? = nil, unmutedIDs: Set<String> = []
+        speakingID: String? = nil, unmutedIDs: Set<String> = [],
+        selfIsAuthoritative: Bool = false
     ) {
         self.source = source
+        self.selfIsAuthoritative = selfIsAuthoritative
         self.provider = provider
         self.meetingID = meetingID
         self.at = at
@@ -303,6 +338,7 @@ public struct SensorReading: Sendable, Equatable {
 public struct SensorRecorder: Sendable {
     private var builder: SensorTimelineBuilder?
     private var source: String?
+    private var selfIsAuthoritative = false
     private let anchorMonotonic: Double
     private var lastMonotonic: Double
 
@@ -318,6 +354,7 @@ public struct SensorRecorder: Sendable {
         // and it keeps the file's `source` field true to its contents.
         if let source, source != reading.source { return }
         source = reading.source
+        selfIsAuthoritative = reading.selfIsAuthoritative
         lastMonotonic = max(lastMonotonic, reading.at)
         var current = builder ?? SensorTimelineBuilder(source: reading.source)
         current.record(reading.observation(relativeTo: anchorMonotonic))
@@ -333,7 +370,8 @@ public struct SensorRecorder: Sendable {
         at monotonic: Double, timelineOriginHostTime: Double?
     ) -> RawSensors? {
         guard var builder else { return nil }
-        let raw = builder.finish(at: max(monotonic, lastMonotonic) - anchorMonotonic)
+        var raw = builder.finish(at: max(monotonic, lastMonotonic) - anchorMonotonic)
+        raw.selfIsAuthoritative = selfIsAuthoritative
         self.builder = nil
         guard let origin = timelineOriginHostTime else { return nil }
         return raw.shifted(by: anchorMonotonic - origin)

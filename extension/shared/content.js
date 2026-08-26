@@ -93,10 +93,15 @@ function readZoomTiles() {
   // voice, so a synthesised one is worse than none.
   const tiles = [];
   for (const doc of readDocuments()) {
-    // Scoped to the participants panel. `data-user-id` alone also matches chat
-    // rows and reaction senders, which are not people in the call.
-    const panel = doc.querySelector('[class*="participants-"], [aria-label*="articipants"]');
-    if (!panel) continue;
+    // Scoped to the participants panel, because `data-user-id` alone also
+    // matches chat rows and reaction senders, who are not in the call. Every
+    // candidate container is searched rather than the first: the toolbar button
+    // that opens the panel is also labelled "Participants" and comes first in
+    // the document, so taking one match found a button containing nobody.
+    const containers = doc.querySelectorAll(
+      '[class*="participants-"],[aria-label*="articipants"]'
+    );
+    for (const panel of containers) {
     for (const node of panel.querySelectorAll('[data-participant-id],[data-user-id]')) {
       const id = node.getAttribute('data-participant-id') || node.getAttribute('data-user-id');
       if (!id) continue;
@@ -108,6 +113,7 @@ function readZoomTiles() {
         name: label.split(',')[0].split('\n')[0].trim().slice(0, 80) || undefined,
         muted: /\bmuted\b/i.test(label) ? true : undefined,
       });
+    }
     }
   }
   return tiles;

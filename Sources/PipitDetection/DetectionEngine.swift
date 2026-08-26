@@ -116,7 +116,10 @@ public final class DetectionEngine: @unchecked Sendable {
                 // At most one tile carries the flag, and it moves atomically, so
                 // the first one holding it is the floor.
                 speakingID: slack.tiles.first(where: \.isSpeaking)?.userID,
-                unmutedIDs: Set(slack.tiles.filter { $0.isMuted == false }.map(\.userID))
+                unmutedIDs: Set(slack.tiles.filter { $0.isMuted == false }.map(\.userID)),
+                // Slack's tile identifier carries `self_`, which is structural
+                // rather than inferred from anything the interface renders.
+                selfIsAuthoritative: true
             )
         }
         for kind in [BrowserKind.firefox, .chrome] {

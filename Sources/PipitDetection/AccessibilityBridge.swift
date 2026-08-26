@@ -210,7 +210,13 @@ public struct SlackAccessibilityReader: Sendable {
                     tileOrder.append(entry.userID)
                 }
             }
-            if budget < 0 { truncated = true }
+            // Exhaustion, not a strict overrun: the walk stops decrementing at
+            // zero, so zero is the only evidence there is. A walk that happens
+            // to finish on its last node is reported truncated too, which reads
+            // as "no information" and is the safe direction. Testing for a
+            // negative budget made this unreachable and left an exhausted walk
+            // claiming there was no huddle, which ends a recording.
+            if budget <= 0 { truncated = true }
         }
 
         // A truncated walk proves nothing about the control's absence.

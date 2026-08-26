@@ -50,17 +50,20 @@ enum SensorAttributionTests {
                 let turn = try expect.unwrap(raw.turns.first)
                 expect.equal(turn.participantID, "U1")
                 expect.close(turn.start, 0, tolerance: 0.001)
-                expect.close(turn.end, 2.25, tolerance: 0.001)
+                // The last reading that saw the floor, not the end of the call.
+                expect.close(turn.end, 2, tolerance: 0.001)
             },
 
             test("the floor moving to someone else closes the turn") { expect in
                 var builder = SensorTimelineBuilder(source: "slack")
                 let roster = [participant("U1"), participant("U2")]
-                builder.record(SensorObservation(at: 0, participants: roster, speakingID: "U1"))
-                builder.record(SensorObservation(at: 1, participants: roster, speakingID: "U1"))
-                builder.record(SensorObservation(at: 2, participants: roster, speakingID: "U2"))
-                builder.record(SensorObservation(at: 3, participants: roster, speakingID: "U2"))
-                let raw = builder.finish(at: 4)
+                for tick in stride(from: 0.0, to: 2.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                for tick in stride(from: 2.0, through: 3.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U2"))
+                }
+                let raw = builder.finish(at: 3.5)
                 expect.equal(raw.turns.count, 2)
                 expect.equal(raw.turns.first?.participantID, "U1")
                 expect.equal(raw.turns.last?.participantID, "U2")
@@ -73,13 +76,19 @@ enum SensorAttributionTests {
             test("nobody speaking closes the turn and leaves a gap") { expect in
                 var builder = SensorTimelineBuilder(source: "slack")
                 let roster = [participant("U1")]
-                builder.record(SensorObservation(at: 0, participants: roster, speakingID: "U1"))
-                builder.record(SensorObservation(at: 1, participants: roster, speakingID: nil))
-                builder.record(SensorObservation(at: 5, participants: roster, speakingID: "U1"))
-                let raw = builder.finish(at: 6)
+                for tick in stride(from: 0.0, to: 1.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                for tick in stride(from: 1.0, to: 3.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: nil))
+                }
+                for tick in stride(from: 3.0, through: 4.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                let raw = builder.finish(at: 4.5)
                 expect.equal(raw.turns.count, 2)
                 expect.close(try expect.unwrap(raw.turns.first).end, 1, tolerance: 0.001)
-                expect.close(try expect.unwrap(raw.turns.last).start, 5, tolerance: 0.001)
+                expect.close(try expect.unwrap(raw.turns.last).start, 3, tolerance: 0.001)
             },
 
             test("the roster is the union across the call, not the last read") { expect in
@@ -136,13 +145,46 @@ enum SensorAttributionTests {
                 // dropped it outright.
                 var builder = SensorTimelineBuilder(source: "slack")
                 let roster = [participant("U1", "Ada")]
-                builder.record(SensorObservation(at: 0, participants: roster, speakingID: "U1"))
-                builder.record(SensorObservation(at: 10, participants: roster, speakingID: "U1"))
+                for tick in stride(from: 0.0, through: 3.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
                 // Out of order: an older reading arriving after a newer one.
-                builder.record(SensorObservation(at: 4, participants: roster, speakingID: nil))
-                let raw = builder.finish(at: 12)
+                builder.record(SensorObservation(at: 1.5, participants: roster, speakingID: nil))
+                let raw = builder.finish(at: 3.5)
                 expect.equal(raw.turns.count, 1)
-                expect.close(try expect.unwrap(raw.turns.first).end, 12, tolerance: 0.001)
+                expect.close(try expect.unwrap(raw.turns.first).end, 3, tolerance: 0.001)
+            },
+
+            test("a floor nobody confirmed does not run to the end of the call") { expect in
+                // The failure this prevents: the sensor goes quiet mid-call with
+                // somebody holding the floor, the turn never closes, and that
+                // one name lands on every cluster after it at full coverage with
+                // no runner-up to trip the margin rule.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                for tick in stride(from: 0.0, through: 10.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                // Slack goes blind. Nothing arrives for the rest of the hour.
+                let raw = builder.finish(at: 3_600)
+                let turn = try expect.unwrap(raw.turns.first)
+                expect.close(turn.end, 10, tolerance: 0.001)
+            },
+
+            test("a gap in the readings ends the turn at the last one that saw it") { expect in
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada"), participant("U2", "Grace")]
+                for tick in stride(from: 0.0, through: 5.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                // Sixty seconds unwatched, then Grace has the floor.
+                for tick in stride(from: 65.0, through: 70.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U2"))
+                }
+                let raw = builder.finish(at: 75)
+                expect.equal(raw.turns.count, 2)
+                expect.close(try expect.unwrap(raw.turns.first).end, 5, tolerance: 0.001)
+                expect.close(try expect.unwrap(raw.turns.last).start, 65, tolerance: 0.001)
             },
 
             test("a read with no roster does not erase the one we have") { expect in
@@ -192,15 +234,14 @@ enum SensorAttributionTests {
 
                 var recorder = SensorRecorder(anchorMonotonic: commit)
                 let roster = [participant("U1", "Ada")]
-                // Ada talks from 20 s to 30 s after the commit.
-                recorder.record(SensorReading(
-                    source: "slack-huddle-ax", provider: .slack, at: commit + 20, participants: roster,
-                    speakingID: "U1"
-                ))
-                recorder.record(SensorReading(
-                    source: "slack-huddle-ax", provider: .slack, at: commit + 30, participants: roster,
-                    speakingID: nil
-                ))
+                // Ada talks from 20 s to 30 s after the commit, read twice a
+                // second the way detection actually reads.
+                for tick in stride(from: 20.0, through: 30.0, by: 0.5) {
+                    recorder.record(SensorReading(
+                        source: "slack-huddle-ax", provider: .slack, at: commit + tick,
+                        participants: roster, speakingID: "U1"
+                    ))
+                }
                 let raw = try expect.unwrap(
                     recorder.finish(at: commit + 31, timelineOriginHostTime: origin)
                 )
@@ -521,8 +562,45 @@ enum SensorAttributionTests {
                     participants: [participant("U2", "Andrew"), participant("U3", "Grace")],
                     turns: [("U2", 0, 30), ("U3", 30, 60)]
                 )
-                expect.isTrue(raw.selfIsOnlyAGuess(localUserName: "andrew"))
-                expect.isFalse(raw.selfIsOnlyAGuess(localUserName: "Priya"))
+                // Nobody was named by the platform, so the count is off the
+                // table whatever the names say.
+                expect.isFalse(raw.canDecideSpeakerCount)
+            },
+
+            test("only a structural self flag can decide the speaker count") { expect in
+                // Slack names the local user in the tile identifier. Meet has no
+                // such marker: the extension tests whether a tile is named the
+                // English word "You", which fails in every other language and
+                // fires on a person actually called You. A guess must not drive
+                // the one step renaming cannot undo.
+                let guessed = RawSensors(
+                    source: "google_meet-dom",
+                    participants: [
+                        participant("d1", "You", isSelf: true), participant("d2", "Ada"),
+                    ],
+                    turns: [SensorTurn(start: 0, end: 30, participantID: "d2")]
+                )
+                expect.isFalse(guessed.canDecideSpeakerCount)
+
+                let structural = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [
+                        participant("me", "Andrew", isSelf: true), participant("U2", "Ada"),
+                    ],
+                    turns: [SensorTurn(start: 0, end: 30, participantID: "U2")],
+                    selfIsAuthoritative: true
+                )
+                expect.isTrue(structural.canDecideSpeakerCount)
+
+                // Authoritative and yet nobody is marked: the local user is
+                // unaccounted for, so the count is short by whatever is theirs.
+                let missing = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [participant("U2", "Ada")],
+                    turns: [SensorTurn(start: 0, end: 30, participantID: "U2")],
+                    selfIsAuthoritative: true
+                )
+                expect.isFalse(missing.canDecideSpeakerCount)
             },
 
             test("a namesake beside a real self flag is still a speaker") { expect in
@@ -540,7 +618,9 @@ enum SensorAttributionTests {
                     ],
                     turns: [("me", 0, 30), ("U2", 30, 60), ("U3", 60, 90), ("U4", 90, 120)]
                 )
-                let marked = raw.markingSelf(named: "Andrew")
+                var authoritative = raw
+                authoritative.selfIsAuthoritative = true
+                let marked = authoritative.markingSelf(named: "Andrew")
                 expect.equal(
                     marked.participants.filter(\.isSelf).count, 1,
                     "the platform already said who the local user is"

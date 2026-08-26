@@ -974,9 +974,11 @@ public actor ProcessingPipeline {
         // enrolled. So it runs only where the reader names the local user
         // structurally, which today is Slack alone. Naming still runs
         // everywhere, because a wrong name is a rename away from right.
+        // The record already names the local user, which is what
+        // `canDecideSpeakerCount` just required, so there is nothing for the
+        // display-name fallback to add here.
         guard sensors.canDecideSpeakerCount else { return unchanged }
-        let scoped = sensors.markingSelf(named: settingsProvider().localUserName)
-        let result = SensorAttribution.attribute(intervals: run.intervals, sensors: scoped)
+        let result = SensorAttribution.attribute(intervals: run.intervals, sensors: sensors)
         guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
             return unchanged
         }

@@ -798,7 +798,6 @@ public final class PipitRuntime {
         // Without an origin the readings cannot be placed, and a timeline at an
         // unknown offset would still overlap clusters and name people wrongly.
         guard let raw = recorder.finish(
-            at: clock.monotonicSeconds,
             timelineOriginHostTime: timeline.timelineOriginHostTime
         ) else { return }
         guard !raw.participants.isEmpty else { return }

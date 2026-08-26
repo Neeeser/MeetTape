@@ -92,6 +92,26 @@ public struct RawSensors: Codable, Sendable, Equatable {
         self.selfIsAuthoritative = selfIsAuthoritative
     }
 
+    /// Decoded field by field so that a record written before a field existed
+    /// still reads. The synthesised decoder throws on a missing key, and this
+    /// artifact is read through `try?`, so one added field would have silently
+    /// turned naming off for every meeting recorded before it.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version)
+            ?? RawSensors.currentVersion
+        source = try container.decodeIfPresent(String.self, forKey: .source) ?? "unknown"
+        participants = try container.decodeIfPresent(
+            [SensorParticipant].self, forKey: .participants
+        ) ?? []
+        turns = try container.decodeIfPresent([SensorTurn].self, forKey: .turns) ?? []
+        unmutedIDs = try container.decodeIfPresent([String].self, forKey: .unmutedIDs) ?? []
+        // Absent means unknown, and unknown must not licence re-clustering.
+        selfIsAuthoritative = try container.decodeIfPresent(
+            Bool.self, forKey: .selfIsAuthoritative
+        ) ?? false
+    }
+
     public func participant(_ id: String) -> SensorParticipant? {
         participants.first { $0.id == id }
     }
@@ -179,19 +199,28 @@ public struct SensorObservation: Sendable, Equatable {
 /// Pure and incremental so the recording path can hand it one reading at a time
 /// and the result can be tested without a meeting.
 public struct SensorTimelineBuilder: Sendable {
-    /// How long a floor may go unconfirmed before the turn ends.
+    /// The shortest silence that counts as the sensor having stopped watching.
     ///
     /// A turn says somebody held the floor between two readings that said so. It
-    /// is not a claim about a stretch nobody looked at. Readings arrive twice a
-    /// second, and Slack's subtree reads empty intermittently during a confirmed
-    /// live huddle, so a gap is expected rather than exceptional.
+    /// is not a claim about a stretch nobody looked at. Without an upper bound an
+    /// unclosed turn ran to the end of the recording, and one person's name
+    /// landed on every cluster after the sensor went quiet, at full coverage and
+    /// with no runner-up to trip the margin rule.
+    public static let minimumGapSeconds: Double = 3
+    /// How many times the established cadence a silence has to exceed.
     ///
-    /// Without this an unclosed turn ran to the end of the recording, and one
-    /// person's name landed on every cluster after the sensor went quiet, at
-    /// full coverage and with no runner-up to trip the margin rule. Six missed
-    /// readings is well past ordinary jitter and far short of anything a person
-    /// would call a turn.
-    public static let maximumGapSeconds: Double = 3
+    /// Measured against the cadence rather than against a fixed duration,
+    /// because the reader's own speed is not a constant. Detection asks twice a
+    /// second, but the accessibility walk crosses a process boundary and slows
+    /// when Slack is busy. A fixed three second rule looked right at a 0.5 s
+    /// cadence and silently destroyed every turn at a four second one: each
+    /// reading tripped the rule, each turn closed at its own start, and the
+    /// recording ended with a full roster, no turns, and nothing distinguishing
+    /// that from nobody having spoken.
+    ///
+    /// A discontinuity is what actually matters. Steady readings never trip this
+    /// however slow they are, and a blackout trips it however fast they were.
+    public static let gapCadenceMultiple: Double = 6
 
     private let source: String
     private var order: [String] = []
@@ -201,6 +230,10 @@ public struct SensorTimelineBuilder: Sendable {
     private var openID: String?
     private var openStart: Double = 0
     private var lastAt: Double = 0
+    private var sawFirstReading = false
+    /// The cadence this reader has actually been managing, not the one it was
+    /// asked for.
+    private var typicalInterval: Double?
 
     public init(source: String) { self.source = source }
 
@@ -217,7 +250,19 @@ public struct SensorTimelineBuilder: Sendable {
 
         // Nothing was watching across a long gap, so the floor is only known to
         // have been held up to the last reading that saw it.
-        if observation.at - lastAt > Self.maximumGapSeconds { closeTurn(at: lastAt) }
+        let interval = observation.at - lastAt
+        if sawFirstReading {
+            let cadence = typicalInterval ?? interval
+            let allowed = max(Self.minimumGapSeconds, cadence * Self.gapCadenceMultiple)
+            if interval > allowed { closeTurn(at: lastAt) }
+            // A gap is not evidence about the cadence, so it does not move the
+            // estimate. Ordinary readings pull it slowly, which keeps one slow
+            // walk from being mistaken for a new normal.
+            if interval <= allowed {
+                typicalInterval = ((typicalInterval ?? interval) * 3 + interval) / 4
+            }
+        }
+        sawFirstReading = true
         lastAt = observation.at
         for person in observation.participants {
             if var existing = known[person.id] {
@@ -260,7 +305,7 @@ public struct SensorTimelineBuilder: Sendable {
     /// The last reading, not the end of the recording. A call can run for an
     /// hour after the sensor stops answering, and claiming the floor was held
     /// throughout would be inventing evidence rather than reporting it.
-    public mutating func finish(at moment: Double) -> RawSensors {
+    public mutating func finish() -> RawSensors {
         closeTurn(at: lastAt)
         return RawSensors(
             source: source,
@@ -340,11 +385,9 @@ public struct SensorRecorder: Sendable {
     private var source: String?
     private var selfIsAuthoritative = false
     private let anchorMonotonic: Double
-    private var lastMonotonic: Double
 
     public init(anchorMonotonic: Double) {
         self.anchorMonotonic = anchorMonotonic
-        self.lastMonotonic = anchorMonotonic
     }
 
     public mutating func record(_ reading: SensorReading) {
@@ -355,7 +398,6 @@ public struct SensorRecorder: Sendable {
         if let source, source != reading.source { return }
         source = reading.source
         selfIsAuthoritative = reading.selfIsAuthoritative
-        lastMonotonic = max(lastMonotonic, reading.at)
         var current = builder ?? SensorTimelineBuilder(source: reading.source)
         current.record(reading.observation(relativeTo: anchorMonotonic))
         builder = current
@@ -366,11 +408,9 @@ public struct SensorRecorder: Sendable {
     /// Without an origin the turns are dropped rather than written at an unknown
     /// offset. A timeline nobody can place is worse than no timeline: it still
     /// overlaps clusters, so it would name people confidently and wrongly.
-    public mutating func finish(
-        at monotonic: Double, timelineOriginHostTime: Double?
-    ) -> RawSensors? {
+    public mutating func finish(timelineOriginHostTime: Double?) -> RawSensors? {
         guard var builder else { return nil }
-        var raw = builder.finish(at: max(monotonic, lastMonotonic) - anchorMonotonic)
+        var raw = builder.finish()
         raw.selfIsAuthoritative = selfIsAuthoritative
         self.builder = nil
         guard let origin = timelineOriginHostTime else { return nil }

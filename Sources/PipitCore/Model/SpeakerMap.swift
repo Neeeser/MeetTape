@@ -272,7 +272,16 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
             return
         }
         if let existing = entries[key], existing.origin > assignment.origin { return }
-        entries[key] = assignment
+        var incoming = assignment
+        // An identity is not part of the suggestion being replaced. Re-running a
+        // stage over a cluster it already named would otherwise drop the link a
+        // later stage attached, leaving a name with no person behind it: no face
+        // in the list, no profile to learn from, nothing for the next meeting to
+        // recognise.
+        if incoming.identityID == nil, let existing = entries[key] {
+            incoming.identityID = existing.identityID
+        }
+        entries[key] = incoming
     }
 
     /// Attaches a voice identity to a cluster whose name already agrees with it.

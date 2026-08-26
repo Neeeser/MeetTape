@@ -82,7 +82,7 @@ enum LiveSlackHuddleTests {
                 // Origin zero: this test folds readings that were stamped from
                 // zero, so the shift is a no-op and the fold is what is under test.
                 let raw = try expect.unwrap(
-                    recorder.finish(at: 2, timelineOriginHostTime: 0),
+                    recorder.finish(timelineOriginHostTime: 0),
                     "a reading was taken but no record came out"
                 )
                 expect.isFalse(raw.participants.isEmpty, "no roster survived the fold")

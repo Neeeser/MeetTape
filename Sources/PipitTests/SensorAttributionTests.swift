@@ -45,7 +45,7 @@ enum SensorAttributionTests {
                         unmutedIDs: ["U1", "U2"]
                     ))
                 }
-                let raw = builder.finish(at: 2.25)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 1)
                 let turn = try expect.unwrap(raw.turns.first)
                 expect.equal(turn.participantID, "U1")
@@ -63,7 +63,7 @@ enum SensorAttributionTests {
                 for tick in stride(from: 2.0, through: 3.0, by: 0.5) {
                     builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U2"))
                 }
-                let raw = builder.finish(at: 3.5)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 2)
                 expect.equal(raw.turns.first?.participantID, "U1")
                 expect.equal(raw.turns.last?.participantID, "U2")
@@ -85,7 +85,7 @@ enum SensorAttributionTests {
                 for tick in stride(from: 3.0, through: 4.0, by: 0.5) {
                     builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
                 }
-                let raw = builder.finish(at: 4.5)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 2)
                 expect.close(try expect.unwrap(raw.turns.first).end, 1, tolerance: 0.001)
                 expect.close(try expect.unwrap(raw.turns.last).start, 3, tolerance: 0.001)
@@ -104,7 +104,7 @@ enum SensorAttributionTests {
                 builder.record(SensorObservation(
                     at: 2, participants: [participant("U1", "Ada")], speakingID: nil
                 ))
-                let raw = builder.finish(at: 3)
+                let raw = builder.finish()
                 expect.equal(raw.participants.count, 2)
                 expect.isTrue(raw.participants.contains { $0.id == "U2" })
             },
@@ -117,7 +117,7 @@ enum SensorAttributionTests {
                 builder.record(SensorObservation(
                     at: 1, participants: [participant("d406", "Priya")], speakingID: nil
                 ))
-                let raw = builder.finish(at: 2)
+                let raw = builder.finish()
                 expect.equal(raw.participants.first?.displayName, "Priya")
             },
 
@@ -134,7 +134,7 @@ enum SensorAttributionTests {
                 builder.record(SensorObservation(
                     at: 5, participants: roster, speakingID: "d999"
                 ))
-                let raw = builder.finish(at: 10)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 0)
                 expect.equal(raw.participants.count, 1)
             },
@@ -150,7 +150,7 @@ enum SensorAttributionTests {
                 }
                 // Out of order: an older reading arriving after a newer one.
                 builder.record(SensorObservation(at: 1.5, participants: roster, speakingID: nil))
-                let raw = builder.finish(at: 3.5)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 1)
                 expect.close(try expect.unwrap(raw.turns.first).end, 3, tolerance: 0.001)
             },
@@ -166,7 +166,7 @@ enum SensorAttributionTests {
                     builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
                 }
                 // Slack goes blind. Nothing arrives for the rest of the hour.
-                let raw = builder.finish(at: 3_600)
+                let raw = builder.finish()
                 let turn = try expect.unwrap(raw.turns.first)
                 expect.close(turn.end, 10, tolerance: 0.001)
             },
@@ -181,10 +181,67 @@ enum SensorAttributionTests {
                 for tick in stride(from: 65.0, through: 70.0, by: 0.5) {
                     builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U2"))
                 }
-                let raw = builder.finish(at: 75)
+                let raw = builder.finish()
                 expect.equal(raw.turns.count, 2)
                 expect.close(try expect.unwrap(raw.turns.first).end, 5, tolerance: 0.001)
                 expect.close(try expect.unwrap(raw.turns.last).start, 65, tolerance: 0.001)
+            },
+
+            test("a slow reader still produces turns") { expect in
+                // The rule that broke this was a fixed three second gap. The
+                // accessibility walk crosses a process boundary and slows when
+                // Slack is busy, and at a four second cadence every reading
+                // tripped it: each turn closed at its own start and the
+                // recording ended with a full roster, no turns, and nothing to
+                // distinguish that from nobody having spoken.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                for tick in stride(from: 0.0, through: 40.0, by: 4.0) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                let raw = builder.finish()
+                expect.equal(raw.turns.count, 1)
+                expect.close(try expect.unwrap(raw.turns.first).end, 40, tolerance: 0.001)
+            },
+
+            test("a blackout ends the turn however fast the reader was") { expect in
+                // The same rule the other way round. At a fast cadence a long
+                // silence is unmistakable, and the turn has to end at the last
+                // reading that saw the floor.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                for tick in stride(from: 0.0, through: 5.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                // Five minutes later the reader comes back and Ada is talking
+                // again. That is a second turn, not a continuation of the first.
+                for tick in stride(from: 300.0, through: 305.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                let raw = builder.finish()
+                expect.equal(raw.turns.count, 2)
+                expect.close(try expect.unwrap(raw.turns.first).end, 5, tolerance: 0.001)
+                expect.close(try expect.unwrap(raw.turns.last).start, 300, tolerance: 0.001)
+            },
+
+            test("a record written before a field existed still reads") { expect in
+                // The artifact is read through `try?`, so a decoder that threw on
+                // a missing key would silently turn naming off for every meeting
+                // recorded before the field was added.
+                let json = """
+                {"version":1,"source":"slack-huddle-ax",
+                 "participants":[{"id":"U1","displayName":"Ada","isSelf":false}],
+                 "turns":[{"start":0,"end":10,"participantID":"U1"}],
+                 "unmutedIDs":["U1"]}
+                """
+                let decoded = try JSONDecoder().decode(
+                    RawSensors.self, from: Data(json.utf8)
+                )
+                expect.equal(decoded.participants.count, 1)
+                expect.equal(decoded.turns.count, 1)
+                // Unknown is not permission to re-cluster.
+                expect.isFalse(decoded.selfIsAuthoritative)
+                expect.isFalse(decoded.canDecideSpeakerCount)
             },
 
             test("a read with no roster does not erase the one we have") { expect in
@@ -199,7 +256,7 @@ enum SensorAttributionTests {
                 builder.record(SensorObservation(
                     at: 2, participants: [participant("U1", "Ada")], speakingID: "U1"
                 ))
-                let raw = builder.finish(at: 3)
+                let raw = builder.finish()
                 expect.equal(raw.participants.count, 1)
             },
         ])
@@ -243,7 +300,7 @@ enum SensorAttributionTests {
                     ))
                 }
                 let raw = try expect.unwrap(
-                    recorder.finish(at: commit + 31, timelineOriginHostTime: origin)
+                    recorder.finish(timelineOriginHostTime: origin)
                 )
                 let turn = try expect.unwrap(raw.turns.first)
                 // On the audio timeline that is 35 s to 45 s, because the audio
@@ -260,7 +317,7 @@ enum SensorAttributionTests {
                     source: "slack-huddle-ax", provider: .slack, at: 101,
                     participants: [participant("U1", "Ada")], speakingID: "U1"
                 ))
-                expect.isNil(recorder.finish(at: 110, timelineOriginHostTime: nil))
+                expect.isNil(recorder.finish(timelineOriginHostTime: nil))
             },
 
             test("no offset leaves the record untouched") { expect in
@@ -447,6 +504,21 @@ enum SensorAttributionTests {
                 expect.equal(map.entries["remote-001_speaker_01"]?.displayName, "Ada")
             },
 
+            test("re-running a stage keeps the identity a later one attached") { expect in
+                // applySuggestion replaces on equal origin, and a sensor
+                // assignment carries no identity. Re-applying over a cluster
+                // that had already been linked dropped the link and left a name
+                // with no person behind it.
+                var map = SpeakerMap()
+                let assignment = SpeakerAssignment(displayName: "Ada", origin: .sensor)
+                map.applySuggestion(assignment, for: "remote-001_speaker_01")
+                map.linkIdentity(IdentityID(101), to: "remote-001_speaker_01", named: "Ada")
+                map.applySuggestion(assignment, for: "remote-001_speaker_01")
+                expect.equal(
+                    map.entries["remote-001_speaker_01"]?.identityID, IdentityID(101)
+                )
+            },
+
             test("an unnamed voice is always safe to link") { expect in
                 // It carries no name to impose, and the link is what lets a
                 // recurring voice accumulate until somebody names it once.
@@ -495,7 +567,7 @@ enum SensorAttributionTests {
                     source: "slack-huddle-ax", provider: .slack, at: 2,
                     participants: [participant("U1", "Someone else")], speakingID: "U1"
                 ))
-                let raw = try expect.unwrap(recorder.finish(at: 3, timelineOriginHostTime: 0))
+                let raw = try expect.unwrap(recorder.finish(timelineOriginHostTime: 0))
                 expect.equal(raw.source, "meet-dom")
                 expect.equal(raw.participants.count, 1)
                 expect.equal(raw.participants.first?.id, "d406")

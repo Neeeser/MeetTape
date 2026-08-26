@@ -10,6 +10,7 @@ import {
   shouldSend,
   HEARTBEAT_MS,
   rosterFromTiles,
+  zoomParticipantFromLabel,
   createSpeakingTracker,
 } from '../shared/provider.js';
 
@@ -253,4 +254,39 @@ test('someone joining is a change worth sending', () => {
     isMeaningfulChange(base, { ...base, people: [{ id: 'a' }, { id: 'b' }] }),
     true
   );
+});
+
+test('a zoom row label yields name, self and mute state', () => {
+  // Measured on the web client: the label is the whole surface. The row id is
+  // a list position and no element carries a participant identifier.
+  assert.deepEqual(
+    zoomParticipantFromLabel('Andrew Neeser (Host, me),computer audio muted,video off'),
+    { name: 'Andrew Neeser', isSelf: true, muted: true }
+  );
+  assert.deepEqual(
+    zoomParticipantFromLabel('A 2 (Guest),computer audio unmuted,video off'),
+    { name: 'A 2', isSelf: false, muted: false }
+  );
+});
+
+test('a zoom label without an audio clause still names the person', () => {
+  assert.deepEqual(
+    zoomParticipantFromLabel('Grace Hopper (Co-host)'),
+    { name: 'Grace Hopper', isSelf: false, muted: undefined }
+  );
+});
+
+test('a zoom name containing parentheses keeps them', () => {
+  // Only a trailing role list is stripped, and only a role reading exactly
+  // "me" marks the local user: a person named Me Someone does not.
+  assert.deepEqual(
+    zoomParticipantFromLabel('Ada (she/her) (Guest),computer audio muted,video off'),
+    { name: 'Ada (she/her)', isSelf: false, muted: true }
+  );
+});
+
+test('an empty or roleless-empty zoom label is nobody', () => {
+  assert.equal(zoomParticipantFromLabel(''), null);
+  assert.equal(zoomParticipantFromLabel('   '), null);
+  assert.equal(zoomParticipantFromLabel('(Host, me),computer audio muted,video off'), null);
 });

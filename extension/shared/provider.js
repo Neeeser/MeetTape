@@ -163,6 +163,36 @@ export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
   };
 }
 
+/// Reads one participants-panel row out of Zoom's accessible label.
+///
+/// Measured on the web client (PWA 7.1.0), a row reads
+/// `Andrew Neeser (Host, me),computer audio muted,video off`. The label is the
+/// whole surface: the row's DOM id is a list position, and no element in the
+/// document carries a participant identifier. The parenthesised role list ends
+/// in `me` on the local user's own row, and the audio clause tracks the mute
+/// switch, nothing else: the active-speaker highlight is painted into canvas,
+/// so Zoom has no speaking signal to read.
+export function zoomParticipantFromLabel(label) {
+  const text = String(label || '').trim();
+  if (!text) return null;
+  const audio = text.match(/computer audio (muted|unmuted)/i);
+  let namePart = audio ? text.slice(0, text.search(/,\s*computer audio/i)) : text;
+  namePart = namePart.trim();
+  if (!namePart) return null;
+  let isSelf = false;
+  const roles = namePart.match(/\(([^)]*)\)\s*$/);
+  if (roles) {
+    isSelf = roles[1].split(',').some((role) => role.trim().toLowerCase() === 'me');
+    namePart = namePart.slice(0, roles.index).trim();
+  }
+  if (!namePart) return null;
+  return {
+    name: namePart.slice(0, 80),
+    isSelf,
+    muted: audio ? audio[1].toLowerCase() === 'muted' : undefined,
+  };
+}
+
 /// Builds the message the native host relays to Pipit.
 export function buildState({
   href, title, controls, pageText, tabId, now, participants, people, activeSpeaker,

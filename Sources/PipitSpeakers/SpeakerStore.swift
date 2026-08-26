@@ -344,14 +344,11 @@ public actor SpeakerStore {
     }
 
     /// Every handle bound to an identity or to anything merged into it, so the
-    /// People pane shows the links a merge carried in.
+    /// People pane shows the links a merge carried in. The whole family, not
+    /// one hop: merges chain, and a handle two merges deep still names this
+    /// person, so it has to be visible where it can be withdrawn.
     public func handles(of id: IdentityID) throws -> [IdentityHandle] {
-        var family: [Int64] = [id.rawValue]
-        try database.query(
-            "SELECT id FROM identity WHERE merged_into = ?", [.int64(id.rawValue)]
-        ) { row in
-            if let raw = row.optionalInt64(0) { family.append(raw) }
-        }
+        let family = try identityFamily(id)
         var out: [IdentityHandle] = []
         let marks = family.map { _ in "?" }.joined(separator: ",")
         try database.query(

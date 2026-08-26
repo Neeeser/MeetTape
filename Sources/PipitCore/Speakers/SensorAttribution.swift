@@ -63,6 +63,15 @@ public enum SensorAttribution {
     /// voice is embedded. Below ten seconds a genuine-score comparison is
     /// unreliable, and a profile seeded from a cough misidentifies its owner.
     public static let minimumEnrollmentSeconds: Double = 6
+    /// How much of a turn's end is conceded to the diarizer when attributing
+    /// words.
+    ///
+    /// A turn's end is where the client's indicator moved, sampled at 0.5 s and
+    /// released up to 1.5 s after the voice stopped, so the words at the tail
+    /// can be the next speaker's first words. Inside this margin the diarizer
+    /// decides, because it hears the voice change; a word the diarizer cannot
+    /// place either stays unattributed, which is the safe direction.
+    public static let wordAttributionTailSeconds: Double = 1
 
     /// The sensor timeline as intervals the assembler can align words against.
     ///
@@ -78,11 +87,17 @@ public enum SensorAttribution {
     public static func wordIntervals(sensors: RawSensors) -> [DiarizationInterval] {
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
         return sensors.turns
-            .filter { !selfIDs.contains($0.participantID) && $0.duration > 0 }
-            .map {
-                DiarizationInterval(
-                    start: $0.start, end: $0.end,
-                    clusterID: SpeakerLabel.sensor(participantID: $0.participantID)
+            .filter { !selfIDs.contains($0.participantID) }
+            .compactMap { turn -> DiarizationInterval? in
+                // The tail belongs to the diarizer. A turn shorter than the
+                // tail vanishes entirely, which is right: an interjection that
+                // brief is mostly indicator lag, and its words are exactly the
+                // ones the audio has to decide.
+                let end = turn.end - wordAttributionTailSeconds
+                guard end > turn.start else { return nil }
+                return DiarizationInterval(
+                    start: turn.start, end: end,
+                    clusterID: SpeakerLabel.sensor(participantID: turn.participantID)
                 )
             }
             .sorted { $0.start < $1.start }
@@ -90,12 +105,18 @@ public enum SensorAttribution {
 
     /// The stretches safe to embed as one participant's voice.
     ///
-    /// A turn says the client heard this person holding the floor. The diarized
-    /// intervals say where the track actually carries speech, and `soloSpeech`
-    /// narrows that to stretches where only one cluster speaks. The
-    /// intersection is audio the client attributed to one person and the
-    /// diarizer heard as one voice: no release tail, no silence, no overlap
-    /// bleeding somebody else into the profile.
+    /// Three facts have to agree before a second of audio reaches a profile.
+    /// The turn says the client heard this person holding the floor. The
+    /// matched cluster, found under `attribute`'s coverage and margin guards,
+    /// says which single diarized voice those turns dominate. And `soloSpeech`
+    /// says nobody talked over it. The intersection of all three is embedded.
+    ///
+    /// The cluster restriction is not decoration. A turn's end trails the
+    /// voice by up to the indicator's release, so its tail can cover the next
+    /// speaker's first words: solo speech of a *different* cluster inside the
+    /// turn is exactly that tail, and folding it into this person's centroid
+    /// puts somebody else's voice in their profile. A participant whose turns
+    /// dominate no cluster enrolls nothing.
     ///
     /// Returned keyed with `SpeakerLabel.sensor`, on the meeting timeline.
     /// Participants below `minimumEnrollmentSeconds` of usable audio are left
@@ -104,10 +125,15 @@ public enum SensorAttribution {
         sensors: RawSensors, diarized: [DiarizationInterval]
     ) -> [DiarizationInterval] {
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        var clusterOf: [String: String] = [:]
+        for match in attribute(intervals: diarized, sensors: sensors).matches {
+            clusterOf[match.participantID] = match.clusterID
+        }
         let solo = DiarizationInterval.soloSpeech(diarized)
         var byParticipant: [String: [DiarizationInterval]] = [:]
         for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
-            for interval in solo {
+            guard let cluster = clusterOf[turn.participantID] else { continue }
+            for interval in solo where interval.clusterID == cluster {
                 let start = max(turn.start, interval.start)
                 let end = min(turn.end, interval.end)
                 guard end > start else { continue }

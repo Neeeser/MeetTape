@@ -83,6 +83,23 @@ enum ManifestTests {
                 )
             },
 
+            test("a restarted track is not contiguous") { expect in
+                // The meeting timeline splices segments together without the
+                // gap between them, so anything placed by a single host-time
+                // shift, which is how sensor readings land, is only valid for
+                // a track recorded in one stretch.
+                let single = ManifestReader.timeline(from: timelineLines(segments: [
+                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),
+                ]))
+                expect.isTrue(single.isContiguous(track: .remote))
+                let restarted = ManifestReader.timeline(from: timelineLines(segments: [
+                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),
+                    (track: .remote, index: 2, rate: 48_000.0, frames: Int64(48_000 * 30)),
+                ]))
+                expect.isFalse(restarted.isContiguous(track: .remote))
+                expect.isTrue(restarted.isContiguous(track: .mic), "the other track is unaffected")
+            },
+
             test("meeting duration is the longer of the two tracks") { expect in
                 let lines = timelineLines(segments: [
                     (track: .mic, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),

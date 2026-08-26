@@ -1550,6 +1550,15 @@ enum SpeakerIdentityTests {
                 try await store.merge(source.id, into: target.id)
                 let listed = try await store.handles(of: target.id)
                 expect.equal(listed, [IdentityHandle(provider: "slack", handle: "U0CHRIS")])
+
+                // Merges chain, and a handle two hops deep still names this
+                // person, so it has to be visible where it can be withdrawn.
+                let survivor = try await store.createPerson(name: "Christopher")
+                try await store.merge(target.id, into: survivor.id)
+                expect.equal(
+                    try await store.handles(of: survivor.id),
+                    [IdentityHandle(provider: "slack", handle: "U0CHRIS")]
+                )
             },
 
             test("a provider and handle are namespaced apart") { expect in

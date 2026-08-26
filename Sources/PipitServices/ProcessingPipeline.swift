@@ -1506,33 +1506,13 @@ public actor ProcessingPipeline {
                 ))
             }
         }
-        // The sensor keys join on the same terms. Their vectors are already a
-        // known person's voice, so resolution is how they meet the identities
-        // that voice built in earlier meetings: the face in the list, the
-        // meeting count, and a name someone confirmed once.
-        if let sensors = sensorRecord(store: store, metadata: metadata) {
-            for run in diarization.activeRuns where run.track == .remote {
-                var spansByKey: [String: [AudioSpan]] = [:]
-                for interval in SensorAttribution.enrollmentIntervals(
-                    sensors: sensors, diarized: run.intervals
-                ) {
-                    spansByKey[interval.clusterID, default: []].append(
-                        AudioSpan(start: interval.start, end: interval.end)
-                    )
-                }
-                for (key, spans) in spansByKey.sorted(by: { $0.key < $1.key }) {
-                    guard let vector = try await speakerStore.occurrenceEmbedding(
-                        meetingID: metadata.id, clusterID: key
-                    ) else { continue }
-                    clusters.append(SpeakerClusterInput(
-                        clusterID: key, track: run.track,
-                        speechSeconds: AudioSpan.totalDuration(spans),
-                        centroid: vector,
-                        spans: spans, analysisID: run.id
-                    ))
-                }
-            }
-        }
+        // Sensor keys are deliberately not submitted. Their spans are a subset
+        // of some cluster's spans, so resolution would see one voice claiming
+        // the same seconds twice: the concurrency rule then refuses the second
+        // claim its own identity and mints an anonymous twin of a known voice,
+        // and the twin splits every future margin. Sensor keys get their
+        // identities from handles and from a person confirming a name; their
+        // occurrence rows exist so that confirmation has a vector to enrol.
         guard !clusters.isEmpty else { return }
 
         // Expected participants are a soft prior, and only a person or a
@@ -2011,6 +1991,18 @@ public actor ProcessingPipeline {
             // 1.0, the next resolution pass wrote the cleared name straight back
             // at High confidence.
             try await retractCluster(meetingID: meetingID, clusterID: key)
+            // The handle binding is the same shape of leftover: naming this
+            // speaker bound their platform account, so clearing the name has to
+            // withdraw the binding too, or the next meeting with this account,
+            // and a re-analysis of this one, writes the cleared name back.
+            if let participantID = SpeakerLabel.sensorParticipantID(from: key),
+               let source = found.store.readRawSensors()?.source,
+               let provider = SensorAttribution.handleProvider(source: source),
+               let service = backends.speakers {
+                try await service.speakerStore.removeHandle(
+                    IdentityHandle(provider: provider, handle: participantID)
+                )
+            }
         }
         return resolved
     }

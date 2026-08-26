@@ -795,6 +795,16 @@ public final class PipitRuntime {
     private func writeSensors(store: MeetingStore, timeline: RecordingTimeline) {
         guard var recorder = sensorRecorder else { return }
         sensorRecorder = nil
+        // The readings are placed with one constant host-time shift, which is
+        // only true of a track recorded in one unbroken stretch. A capture
+        // restart mid-call splices the audio together without the gap, so
+        // every later turn would sit late by the gap's length and name the
+        // wrong stretch. No record is the safe answer; the diarizer still
+        // covers the whole recording.
+        guard timeline.isContiguous(track: .remote) else {
+            Log.app.info("sensors dropped: remote capture restarted mid-recording")
+            return
+        }
         // Without an origin the readings cannot be placed, and a timeline at an
         // unknown offset would still overlap clusters and name people wrongly.
         guard let raw = recorder.finish(

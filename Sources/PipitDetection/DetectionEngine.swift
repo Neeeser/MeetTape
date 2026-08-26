@@ -249,6 +249,11 @@ public final class DetectionEngine: @unchecked Sendable {
         // Read accessibility before taking the lock: the walk crosses into
         // another process and can block for seconds when Slack is busy.
         let slackObservation = slackReader.read()
+        // Stamped after the walk, because the tiles describe the call as of
+        // when the read finished. Stamping with the poll's start put every turn
+        // boundary early by however long the walk took, and inflated the
+        // cadence estimate that decides when a silence ends a turn.
+        let observedAt = clock.monotonicSeconds
 
         lock.lock()
 
@@ -327,7 +332,7 @@ public final class DetectionEngine: @unchecked Sendable {
             browserSensor: browserDetectors[.firefox]?.sensor.connection ?? .absent,
             hasAccessibility: AccessibilityBridge.isTrusted,
             hasWindowTitles: !titles.isEmpty || windowReader.hasTitleAccess,
-            roster: reading(slack: slackObservation, browsers: browserDetectors, at: now)
+            roster: reading(slack: slackObservation, browsers: browserDetectors, at: observedAt)
         )
         let labels = evidence.map { item in
             "\(item.provider.rawValue):\(item.confidence.rawValue):\(item.source.rawValue)"

@@ -111,6 +111,17 @@ public struct RecordingTimeline: Sendable, Equatable {
         CaptureTrack.allCases.compactMap { firstFrameHostTime(track: $0) }.min()
     }
 
+    /// Whether one track's audio is a single unbroken stretch.
+    ///
+    /// The meeting timeline is concatenated-audio time: segments are joined
+    /// with nothing between them, so after a capture restart everything later
+    /// sits earlier on the timeline than in host time by the length of the gap.
+    /// Anything placed by a single host-time shift is only valid while this
+    /// holds.
+    public func isContiguous(track: CaptureTrack) -> Bool {
+        segments(track: track).count <= 1
+    }
+
     /// How long after the meeting started this track's first frame arrived.
     ///
     /// The two sources start at different moments. The remote writer opens on the

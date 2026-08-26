@@ -506,6 +506,45 @@ enum SensorAttributionTests {
                 expect.close(ada.first?.end ?? -1, 20, tolerance: 0.001)
             },
 
+            test("the release tail cannot put the next voice in a profile") { expect in
+                // Ada's turn trails 1.5 s past her voice, and Grace's first
+                // words sit inside that tail as their own solo cluster. Only
+                // the cluster Ada's turns dominate is embeddable as Ada, so
+                // the tail slice of Grace's cluster contributes nothing.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 31.5), ("U2", 31.5, 60)]
+                )
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw,
+                    diarized: [
+                        interval("a", 2, 30),
+                        interval("b", 30.5, 59),
+                    ]
+                )
+                let ada = enrolled.filter {
+                    $0.clusterID == SpeakerLabel.sensor(participantID: "U1")
+                }
+                expect.isTrue(
+                    ada.allSatisfy { $0.end <= 30 },
+                    "a slice of Grace's cluster reached Ada's profile: \(ada)"
+                )
+            },
+
+            test("a participant whose turns dominate no cluster enrolls nothing") { expect in
+                // Two people splitting one cluster evenly means the diarizer
+                // merged them, and embedding either half would put a two-voice
+                // centroid in somebody's profile.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 30), ("U2", 30, 60)]
+                )
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw, diarized: [interval("a", 0, 60)]
+                )
+                expect.equal(enrolled, [])
+            },
+
             test("a fragment is not enough to enrol a voice") { expect in
                 // A profile seeded from a cough misidentifies its owner in the
                 // next meeting, and nothing retracts an automatic vector.
@@ -951,6 +990,38 @@ extension SensorAttributionTests {
                     transcript.utterances.map(\.speakerKey),
                     [SpeakerLabel.sensor(participantID: "U_ADA")]
                 )
+            },
+
+            test("words in a turn's tail go to the diarizer, not the last holder") { expect in
+                // A turn's end is where the indicator moved: sampled at 0.5 s
+                // and released late, so the next speaker's first words can sit
+                // inside it. The tail is conceded to the diarizer, which hears
+                // the voice change.
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    // Inside Ada's turn on paper, and inside Grace's cluster
+                    // in the audio.
+                    RawTranscriptWord(start: 10.1, end: 10.4, text: "actually."),
+                ]
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U_ADA", displayName: "Ada")],
+                    turns: [SensorTurn(start: 0, end: 10.6, participantID: "U_ADA")]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: run([
+                        DiarizationInterval(start: 1, end: 9.5, clusterID: "1"),
+                        DiarizationInterval(start: 10, end: 14, clusterID: "2"),
+                    ]),
+                    sensors: sensors,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let keys = transcript.utterances.map(\.speakerKey)
+                expect.equal(keys.count, 2, "got \(keys)")
+                expect.equal(keys.first, SpeakerLabel.sensor(participantID: "U_ADA"))
+                expect.equal(keys.last, "remote-001_speaker_02", "the audio decides the tail")
             },
 
             test("a self turn does not capture far-end words") { expect in

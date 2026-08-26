@@ -697,6 +697,19 @@ public final class PipitRuntime {
         refreshRecentMeetings()
     }
 
+    /// What became of a deletion, in the words the window needs to say it.
+    public enum MeetingDeletionOutcome: Sendable, Equatable {
+        case deleted
+        /// No meeting with that identifier. The row asking was already stale.
+        case notFound
+        /// The meeting is being recorded now, so its folder is open for
+        /// writing.
+        case refusedWhileRecording
+        /// A folder would not delete, and what is left of the meeting is still
+        /// on disk.
+        case folderNotDeleted
+    }
+
     /// Deletes every folder the conversation was recorded in.
     ///
     /// Permanent, and it takes the audio with it. Both halves of a rejoined
@@ -706,11 +719,9 @@ public final class PipitRuntime {
     /// The meeting being recorded right now is refused. Its folder is open for
     /// writing, and deleting it under the capture engine loses the audio
     /// already on disk without stopping the recording.
-    ///
-    /// Returns whether every folder is gone.
     @discardableResult
-    public func deleteMeeting(id: String) async -> Bool {
-        guard let logical = repository.logicalMeeting(id: id) else { return false }
+    public func deleteMeeting(id: String) async -> MeetingDeletionOutcome {
+        guard let logical = repository.logicalMeeting(id: id) else { return .notFound }
         let recordings = logical.recordings
         // Continuations first, the recording the conversation started with
         // last. A folder that will not delete leaves a row that can still reach
@@ -722,7 +733,7 @@ public final class PipitRuntime {
             where: { $0.standardizedFileURL == recording.store.layout.root.standardizedFileURL }
         ) {
             Log.app.notice("refused to delete the meeting being recorded")
-            return false
+            return .refusedWhileRecording
         }
         // Before the folders go. A job that was mid-stage when this ran writes
         // its output through AtomicFile, which creates the directories it
@@ -733,18 +744,22 @@ public final class PipitRuntime {
         // several hundred files, and this actor is also the one arming the next
         // recording.
         let deleted = await Task.detached(priority: .userInitiated) {
-            var gone = true
             for directory in directories {
                 do {
                     try FileManager.default.removeItem(at: directory)
                 } catch {
-                    gone = gone && !FileManager.default.fileExists(atPath: directory.path)
                     Log.storage.error(
                         "meeting folder not deleted: \(logSafeDescription(error), privacy: .public)"
                     )
+                    // Something already removed it, which is the result asked
+                    // for.
+                    guard FileManager.default.fileExists(atPath: directory.path) else { continue }
+                    // Stop before the recording the conversation started with.
+                    // Its row is the only way back to the folders still here.
+                    return false
                 }
             }
-            return gone
+            return true
         }.value
         // The voice memory counts meetings by the occurrences it holds, so
         // without this a deleted meeting kept counting towards "heard in 3
@@ -754,7 +769,7 @@ public final class PipitRuntime {
             "deleted a meeting: \(recordings.count, privacy: .public) recordings, complete=\(deleted, privacy: .public)"
         )
         refreshRecentMeetings()
-        return deleted
+        return deleted ? .deleted : .folderNotDeleted
     }
 
     public func revealInFinder(meetingID: String) {

@@ -273,12 +273,13 @@ struct MeetingRowView: View {
                 model.setArchived(true, targets)
             }
         }
+        // Offered on every row, including one that says it is recording. That
+        // state also belongs to a meeting a crash left behind, and refusing
+        // those is how a row becomes permanent. A recording in progress is
+        // refused by the runtime, and the alert says which meeting and why.
         Button(many ? "Delete \(targets.count) meetings…" : "Delete…", role: .destructive) {
             model.confirmDelete(targets)
         }
-        // A recording still being written is kept until it stops. Offering it
-        // meant a confirmation naming files, then nothing happening.
-        .disabled(targets.allSatisfy { $0.summary.processingState == .recording })
     }
 
     private var kindIcon: some View {

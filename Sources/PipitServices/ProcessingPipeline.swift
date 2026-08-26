@@ -147,6 +147,9 @@ public actor ProcessingPipeline {
         var holdsSlot = true
         defer {
             running.remove(meetingID)
+            // Nothing writes after this, and a flag left set would delete the
+            // folder out from under a later job on the same meeting.
+            deletedWhileRunning.remove(meetingID)
             if holdsSlot { jobLock.release() }
         }
 
@@ -273,7 +276,7 @@ public actor ProcessingPipeline {
         }
         // The last stage advances to complete, which ends the loop without
         // coming back to the check at the top of it.
-        _ = discardIfDeleted(metadata.id, store: store)
+        if discardIfDeleted(metadata.id, store: store) { return }
 
         // Compaction runs strictly after `complete`: every model has read the
         // PCM at full fidelity by now. A failure leaves the segments as the
@@ -296,6 +299,11 @@ public actor ProcessingPipeline {
                 }
             }
             await compactQuietly(store: store)
+            // Compaction is minutes of transcoding on a long meeting, and it
+            // writes the archives through AtomicFile like everything else, so
+            // a delete landing inside it recreated the folder holding nothing
+            // but audio.
+            _ = discardIfDeleted(metadata.id, store: store)
         }
     }
 

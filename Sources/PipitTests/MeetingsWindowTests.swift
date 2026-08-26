@@ -615,6 +615,37 @@ enum MeetingsWindowTests {
                 expect in try await archivingSurvivesAMetadataWrite(expect)
             },
 
+            test("archiving writes what was typed into the pane before it closes it") {
+                expect in try await archivingSavesTheEdit(expect)
+            },
+
+            test("the footer counts the meetings the filter holds") {
+                expect in try await theFooterCountsWhatTheFilterHolds(expect)
+            },
+
+            test("what a deletion could not do is said one cause at a time") { expect in
+                // Every refusal used to read as a recording in progress, which
+                // sent the reader looking for a call that had already ended.
+                expect.isNil(MeetingsWindowModel.problemText(recording: [], failed: []))
+                let one = try expect.unwrap(
+                    MeetingsWindowModel.problemText(recording: ["Standup"], failed: [])
+                )
+                expect.isTrue(one.contains("Standup is being recorded"), "got \(one)")
+                let other = try expect.unwrap(
+                    MeetingsWindowModel.problemText(recording: [], failed: ["Design review"])
+                )
+                expect.isTrue(
+                    other.contains("would not delete") && !other.contains("being recorded"),
+                    "a folder that would not delete is not a recording: got \(other)"
+                )
+                let both = try expect.unwrap(
+                    MeetingsWindowModel.problemText(
+                        recording: ["Standup"], failed: ["Design review"]
+                    )
+                )
+                expect.isTrue(both.contains("Standup") && both.contains("Design review"))
+            },
+
             test("a row names the day when its heading does not") { expect in
                 // Only Today and Yesterday name a day. Under a month heading a
                 // clock time alone left no way to tell which day a meeting was
@@ -1666,7 +1697,7 @@ enum MeetingsWindowTests {
         )
         expect.equal(try await store.meetingCount(for: chris.id), 1)
 
-        expect.isTrue(await runtime.deleteMeeting(id: meeting.id), "the folder went")
+        expect.equal(await runtime.deleteMeeting(id: meeting.id), .deleted, "the folder went")
 
         expect.equal(try await store.meetingCount(for: chris.id), 0)
     }
@@ -1690,5 +1721,65 @@ enum MeetingsWindowTests {
 
         runtime.setArchived(false, meetingID: meeting.id)
         expect.isFalse(try meeting.store.readMetadata().isArchived)
+    }
+
+    /// Archiving leaves every file where it is, so a title half-typed when the
+    /// row was archived still belongs to a meeting.
+    @MainActor
+    static func archivingSavesTheEdit(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        await waitFor(expect, "the pane to open") { model.detail?.title.isEmpty == false }
+        model.detail?.title = "Renamed while archiving"
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+
+        model.setArchived(true, [target])
+
+        expect.equal(
+            try meeting.store.readMetadata().displayTitle, "Renamed while archiving",
+            "the title reached disk before the pane was dropped"
+        )
+    }
+
+    /// The footer counts against what the filter holds. Against the archive it
+    /// read "1 of 2" under All with nothing typed in the search field.
+    @MainActor
+    static func theFooterCountsWhatTheFilterHolds(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let started = Date(timeIntervalSince1970: 1_787_070_000)
+        _ = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: started
+        )
+        _ = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Standup",
+            startedAt: started.addingTimeInterval(3_600)
+        )
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        expect.equal(model.filteredRows.count, 2)
+        let both = model.totalDuration
+
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+        model.setArchived(true, [target])
+        await waitFor(expect, "the archived row to leave the list") {
+            model.filteredRows.count == 1
+        }
+        expect.equal(
+            model.sections.flatMap(\.rows).count, model.filteredRows.count,
+            "so the footer says one meeting rather than one of two"
+        )
+        expect.isTrue(
+            model.totalDuration < both, "and the total is the time the list adds up to"
+        )
+
+        model.filter = .archived
+        expect.equal(model.filteredRows.count, 1)
     }
 }

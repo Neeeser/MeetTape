@@ -498,27 +498,33 @@ public final class MeetingsWindowModel {
         directory.pathComponents.suffix(3).joined(separator: "/")
     }
 
-    /// What a deletion could not do, for the one case a person has to be told
-    /// about: the meeting being recorded is refused, and a folder the system
-    /// will not remove stays where it is.
+    /// What a deletion could not do. The window says it in an alert, because
+    /// the row simply coming back says nothing at all.
     public var deletionProblem: String?
 
     /// Runs a confirmed deletion. Takes it as an argument rather than reading
     /// `pendingDeletion`, which the alert's dismissal has already cleared.
     public func performDeletion(_ deletion: MeetingsDeletion) async {
         pendingDeletion = nil
-        // The pane is holding a read of files that are about to go. Dropped
-        // without saving what is in it: a title typed into a meeting being
-        // deleted has nowhere to land.
-        if let focused = detail?.meetingID, deletion.targets.contains(focused) { detail = nil }
-        var refused: [String] = []
+        // The pane is holding a read of files that are about to go. What was
+        // typed into it is written first anyway, because a deletion can be
+        // refused and the meeting is then still there to hold it.
+        if let focused = detail?.meetingID, deletion.targets.contains(focused) {
+            detail?.saveEdits()
+            detail = nil
+        }
+        var recording: [String] = []
+        var failed: [String] = []
         var gone: Set<String> = []
         for (index, id) in deletion.targets.enumerated() {
             dropFromIndex(id)
-            if await runtime.deleteMeeting(id: id) {
-                gone.insert(id)
-            } else {
-                refused.append(deletion.names.indices.contains(index) ? deletion.names[index] : id)
+            let name = deletion.names.indices.contains(index) ? deletion.names[index] : id
+            switch await runtime.deleteMeeting(id: id) {
+            // Nothing of it is left either way. A meeting nothing can find was
+            // already gone before this row was drawn.
+            case .deleted, .notFound: gone.insert(id)
+            case .refusedWhileRecording: recording.append(name)
+            case .folderNotDeleted: failed.append(name)
             }
         }
         // Only what actually went. A meeting that was refused keeps its row and
@@ -526,23 +532,34 @@ public final class MeetingsWindowModel {
         rows.removeAll { gone.contains($0.id) }
         selection.subtract(gone)
         archiveChanges += 1
-        deletionProblem = Self.deletionProblem(refused)
+        deletionProblem = Self.problemText(recording: recording, failed: failed)
         await reload()
     }
 
-    /// One line naming what is still on disk. Nil when everything went.
+    /// What is still on disk, and why. Nil when everything went.
     ///
-    /// A recording in progress is the case this exists for: the row is offered
-    /// like any other, and without this the meeting simply came back a moment
-    /// later with nothing said.
-    static func deletionProblem(_ refused: [String]) -> String? {
-        guard !refused.isEmpty else { return nil }
-        if refused.count == 1 {
-            return "\(refused[0]) was not deleted. A meeting being recorded is kept until the "
-                + "recording stops."
+    /// Each cause gets its own sentence. A folder that would not delete,
+    /// reported as a recording in progress, sent the reader looking for a call
+    /// that had already ended.
+    public nonisolated static func problemText(
+        recording: [String], failed: [String]
+    ) -> String? {
+        var sentences: [String] = []
+        if recording.count == 1 {
+            sentences.append(
+                "\(recording[0]) is being recorded, and is kept until the recording stops."
+            )
+        } else if recording.count > 1 {
+            sentences.append(
+                "\(recording.count) meetings are being recorded, and are kept until they stop."
+            )
         }
-        return "\(refused.count) meetings were not deleted. A meeting being recorded is kept "
-            + "until the recording stops."
+        if failed.count == 1 {
+            sentences.append("\(failed[0]) has a folder this Mac would not delete.")
+        } else if failed.count > 1 {
+            sentences.append("\(failed.count) meetings have folders this Mac would not delete.")
+        }
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
     /// Takes meetings out of the list, or puts them back. Nothing on disk

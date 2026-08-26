@@ -288,10 +288,12 @@ public struct SensorTimelineBuilder: Sendable {
         }
         unmuted.formUnion(observation.unmutedIDs)
 
-        // The floor can only be held by someone the same reading listed. A page
-        // that reports an identifier it did not put in its roster would
+        // The floor can only be held by someone this call has listed at some
+        // point. A page reporting an identifier it never put in a roster would
         // otherwise create a participant nothing can name, which still counts
-        // towards the speaker count and still re-clusters the audio.
+        // towards the speaker count and still re-clusters the audio. Someone who
+        // left earlier still passes, which is correct: they were here, and a
+        // recording of them is still a recording of them.
         let speaking = observation.speakingID.flatMap { known[$0] != nil ? $0 : nil }
         if speaking != openID {
             closeTurn(at: observation.at)

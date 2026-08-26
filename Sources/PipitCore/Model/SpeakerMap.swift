@@ -300,9 +300,12 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     /// words are relabelled Grace. Where the two disagree, one of them is wrong
     /// and the disagreement is the useful fact. It stays visible.
     ///
-    /// An unnamed identity is always safe to link. It carries no name to impose,
-    /// and linking is what lets a recurring voice accumulate until someone names
-    /// it once.
+    /// An unnamed identity carries no name to impose today, and linking is what
+    /// lets a recurring voice accumulate until someone names it once. It is not
+    /// free forever: naming that voice later rewrites this entry too, because
+    /// `refreshName` follows the identity and does not ask what set the name. A
+    /// roster name can therefore be replaced by a name a person chose in another
+    /// meeting, which is recoverable by renaming and is the price of the link.
     public mutating func linkIdentity(
         _ identityID: IdentityID, to key: String, named identityName: String?
     ) {

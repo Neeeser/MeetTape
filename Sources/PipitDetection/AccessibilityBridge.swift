@@ -139,11 +139,19 @@ public struct SlackAccessibilityReader: Sendable {
         webTrees.withLock { ($0[pid]?.failures ?? 0) < webTreeAttemptLimit }
     }
 
-    /// Forgets a process, so a Slack with no huddle running goes back to the
-    /// cheap walk. The attribute itself cannot be unset from here, but nothing
-    /// outside a huddle needs what it exposes.
+    /// Drops the record that a process's tree was built, so a Slack with no
+    /// huddle running goes back to the cheap walk. The attribute itself cannot
+    /// be unset from here, but nothing outside a huddle needs what it exposes.
+    ///
+    /// Failures are kept. Slack's subtree reads empty intermittently during a
+    /// live huddle, so clearing the whole entry re-armed every retry on each of
+    /// those reads and the limit bounded nothing.
     static func forgetWebTree(pid: pid_t) {
-        webTrees.withLock { $0[pid] = nil }
+        webTrees.withLock { states in
+            guard var state = states[pid] else { return }
+            state.isBuilt = false
+            states[pid] = state
+        }
     }
 
     private static func enableWebTree(_ application: AXUIElement, pid: pid_t) {

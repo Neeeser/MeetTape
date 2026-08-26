@@ -1,11 +1,21 @@
 import Foundation
 
-/// Names diarization clusters from what the meeting client reported.
+/// Attributes speech from what the meeting client reported.
 ///
-/// The division of labour is the whole design. The diarizer decides where one
-/// voice stops and the next begins, because it hears the audio. The sensor
-/// decides whose voice it was, because it can read the roster. Nothing here
-/// moves a boundary or invents a speaker.
+/// The sensor timeline is an observation, not a prediction: the client marked
+/// who held the floor while the audio was recorded. So it labels words first,
+/// directly, and the diarizer covers what the sensor did not see: gaps in the
+/// readings, overlap, and every recording made without a readable client.
+///
+/// Three products, all pure so they can be tested without audio or a meeting.
+///
+/// - `wordIntervals` turns the timeline into intervals the transcript assembler
+///   aligns words against, keyed on the platform's participant identifier.
+/// - `enrollmentIntervals` picks the stretches safe to embed as one person's
+///   voice, for the profile that recognises them next time.
+/// - `attribute` matches diarization clusters to participants, which names the
+///   fallback stretches: a cluster mostly covered by one person's turns names
+///   that person's uncovered words too.
 ///
 /// Every rule below exists to make a wrong answer read as no answer. A blank
 /// name asks to be filled in; a confident wrong one does not.
@@ -30,17 +40,12 @@ public enum SensorAttribution {
 
     public struct Result: Sendable, Equatable {
         public var matches: [Match]
-        /// How many people actually took the floor, for the diarizer to cluster
-        /// towards. Absent rather than zero when the sensor saw no turns: zero
-        /// would claim nobody spoke, absent says the sensor does not know.
-        public var speakerCountHint: Int?
         /// Share of all diarized speech that any turn covered. The guard against
         /// two clocks that disagree.
         public var coverage: Double
 
-        public init(matches: [Match] = [], speakerCountHint: Int? = nil, coverage: Double = 0) {
+        public init(matches: [Match] = [], coverage: Double = 0) {
             self.matches = matches
-            self.speakerCountHint = speakerCountHint
             self.coverage = coverage
         }
     }
@@ -54,17 +59,101 @@ public enum SensorAttribution {
     /// Below this share of speech covered, the two clocks do not describe the
     /// same call and nothing is named.
     public static let minimumTimelineCoverage: Double = 0.15
-    /// How long a single turn has to run before its owner counts as a speaker.
+    /// Seconds of solo, sensor-owned speech a participant needs before their
+    /// voice is embedded. Below ten seconds a genuine-score comparison is
+    /// unreliable, and a profile seeded from a cough misidentifies its owner.
+    public static let minimumEnrollmentSeconds: Double = 6
+
+    /// The sensor timeline as intervals the assembler can align words against.
     ///
-    /// Slack's flag releases about 1.5 s after the voice stops, so a cough, a
-    /// "mhm" or a one-word "yeah" all produce a turn. Counting those would tell
-    /// the diarizer to find a cluster for everyone who ever made a noise, and
-    /// re-clustering a two-voice track into five splits the two real speakers
-    /// apart.
+    /// Keyed with `SpeakerLabel.sensor`, so speech lands on the platform's own
+    /// identifier for the person rather than on a cluster that a re-analysis
+    /// renumbers.
     ///
-    /// The longest turn, not the sum. Four "mhm"s across an hour add up past any
-    /// threshold while still describing somebody who never held the floor.
-    public static let minimumSpeakerSeconds: Double = 6
+    /// The local user's turns are dropped, not because they are wrong but
+    /// because the far-end track cannot contain them: it is a mixdown of
+    /// everyone else. A span inside a self turn falls through to the diarizer,
+    /// which hears the audio and is the right authority on speech the sensor
+    /// cannot explain.
+    public static func wordIntervals(sensors: RawSensors) -> [DiarizationInterval] {
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        return sensors.turns
+            .filter { !selfIDs.contains($0.participantID) && $0.duration > 0 }
+            .map {
+                DiarizationInterval(
+                    start: $0.start, end: $0.end,
+                    clusterID: SpeakerLabel.sensor(participantID: $0.participantID)
+                )
+            }
+            .sorted { $0.start < $1.start }
+    }
+
+    /// The stretches safe to embed as one participant's voice.
+    ///
+    /// A turn says the client heard this person holding the floor. The diarized
+    /// intervals say where the track actually carries speech, and `soloSpeech`
+    /// narrows that to stretches where only one cluster speaks. The
+    /// intersection is audio the client attributed to one person and the
+    /// diarizer heard as one voice: no release tail, no silence, no overlap
+    /// bleeding somebody else into the profile.
+    ///
+    /// Returned keyed with `SpeakerLabel.sensor`, on the meeting timeline.
+    /// Participants below `minimumEnrollmentSeconds` of usable audio are left
+    /// out entirely rather than enrolled from a fragment.
+    public static func enrollmentIntervals(
+        sensors: RawSensors, diarized: [DiarizationInterval]
+    ) -> [DiarizationInterval] {
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        let solo = DiarizationInterval.soloSpeech(diarized)
+        var byParticipant: [String: [DiarizationInterval]] = [:]
+        for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
+            for interval in solo {
+                let start = max(turn.start, interval.start)
+                let end = min(turn.end, interval.end)
+                guard end > start else { continue }
+                byParticipant[turn.participantID, default: []].append(
+                    DiarizationInterval(
+                        start: start, end: end,
+                        clusterID: SpeakerLabel.sensor(participantID: turn.participantID)
+                    )
+                )
+            }
+        }
+        var out: [DiarizationInterval] = []
+        for (_, intervals) in byParticipant {
+            let total = intervals.reduce(0) { $0 + $1.duration }
+            guard total >= minimumEnrollmentSeconds else { continue }
+            out.append(contentsOf: intervals)
+        }
+        return out.sorted { $0.start < $1.start }
+    }
+
+    /// The speaker-map entries behind the sensor keys word attribution writes.
+    ///
+    /// One entry per non-self participant who held the floor and whose name the
+    /// client rendered. A participant the client never named gets no entry: the
+    /// key still appears in the transcript, renders through the fallback, and
+    /// waits for a person to fill it in.
+    public static func speakerEntries(
+        sensors: RawSensors
+    ) -> [(key: String, assignment: SpeakerAssignment)] {
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        let held = Set(sensors.turns.map(\.participantID)).subtracting(selfIDs)
+        return held.sorted().compactMap { id in
+            let name = (sensors.participant(id)?.displayName ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return nil }
+            return (
+                key: SpeakerLabel.sensor(participantID: id),
+                assignment: SpeakerAssignment(
+                    displayName: name,
+                    origin: .sensor,
+                    participantID: id,
+                    provenance: SpeakerProvenance(source: .sensor)
+                )
+            )
+        }
+    }
 
     public static func attribute(
         intervals: [DiarizationInterval], sensors: RawSensors
@@ -72,26 +161,11 @@ public enum SensorAttribution {
         // The local user is not in the far-end mixdown, so they are not one of
         // the voices to be found there. Their turns stay in the overlap below,
         // where they can still stop somebody else's name landing on the local
-        // user's speech, but they never become a name and never a count.
+        // user's speech, but they never become a name.
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
-        var longestTurn: [String: Double] = [:]
-        for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
-            longestTurn[turn.participantID] = max(
-                longestTurn[turn.participantID] ?? 0, turn.duration
-            )
-        }
-        // Held the floor, therefore unmuted. Mute state is recorded as evidence
-        // and deliberately not consulted here: a tile whose overlay never
-        // resolved reads as never-unmuted, and letting that outrank forty
-        // seconds of holding the floor removed a real speaker from the count and
-        // merged them into somebody else.
-        let speakers = longestTurn.filter { $0.value >= minimumSpeakerSeconds }.count
-        // Absent rather than zero: the sensor saw turns and none of them was a
-        // real turn, which is not the same as knowing nobody spoke.
-        let countHint = speakers > 0 ? speakers : nil
 
         guard !intervals.isEmpty, !sensors.turns.isEmpty else {
-            return Result(speakerCountHint: countHint, coverage: 0)
+            return Result(coverage: 0)
         }
 
         var perCluster: [String: [String: Double]] = [:]
@@ -114,7 +188,7 @@ public enum SensorAttribution {
 
         let coverage = totalSpeech > 0 ? min(1, totalCovered / totalSpeech) : 0
         guard coverage >= minimumTimelineCoverage else {
-            return Result(speakerCountHint: countHint, coverage: coverage)
+            return Result(coverage: coverage)
         }
 
         var matches: [Match] = []
@@ -143,13 +217,19 @@ public enum SensorAttribution {
             ))
         }
         matches.sort { $0.clusterID < $1.clusterID }
-        return Result(matches: matches, speakerCountHint: countHint, coverage: coverage)
+        return Result(matches: matches, coverage: coverage)
     }
 }
 
 extension SensorAttribution {
-    /// The speaker-map entries a sensor record justifies, keyed the way the map
-    /// keys them.
+    /// The speaker-map entries a sensor record justifies for diarization
+    /// clusters, keyed the way the map keys them.
+    ///
+    /// This is the fallback half of naming. Word attribution already put sensor
+    /// keys on every span a turn covered; what remains keyed to a cluster is
+    /// speech the sensor did not see. A cluster one person's turns dominate is
+    /// still that person's voice where the readings went dark, so the name
+    /// carries over to those stretches too.
     ///
     /// Pure on purpose. The decision of who gets named is the part worth testing,
     /// and keeping it out of the pipeline means it can be tested without audio,

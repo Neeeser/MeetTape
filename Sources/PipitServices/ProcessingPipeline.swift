@@ -933,94 +933,79 @@ public actor ProcessingPipeline {
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
 
-        let settled = await constrainToSensorCount(
-            store: store, metadata: metadata, track: track,
-            audio: audio, leadIn: leadIn, run: run, embeddings: output.chunkEmbeddings
-        )
-
-        // The embeddings have to be the ones that produced this run's clusters.
-        // Re-clustering renumbers, so pairing a constrained run with the first
-        // pass's vectors files one person's voice under another's cluster and
-        // then enrols it into their permanent profile.
         try await recordOccurrences(
-            meetingID: metadata.id, run: settled.run, chunkEmbeddings: settled.embeddings
+            meetingID: metadata.id, run: run, chunkEmbeddings: output.chunkEmbeddings
+        )
+        await recordSensorOccurrences(
+            store: store, meetingID: metadata.id, track: track,
+            audio: audio, leadIn: leadIn, run: run
         )
     }
 
-    /// Re-clusters at the number of people who actually took the floor.
+    /// Embeds each participant's sensor-owned speech and records the vector
+    /// under their sensor key.
     ///
-    /// Over- and under-clustering is what diarization gets wrong, and the count
-    /// is the one thing the meeting client knows for certain and the clusterer
-    /// is only guessing at. Re-clustering runs off cached embeddings, so it
-    /// costs a fraction of the first pass and never re-reads the audio.
+    /// The stretches come from `SensorAttribution.enrollmentIntervals`: the
+    /// participant's turns cut to the solo speech the diarizer heard inside
+    /// them. The client attributed that audio to one person while it was
+    /// recorded, so the vector is a known voice rather than a cluster's guess,
+    /// and voice memory can recognise them next time without anyone confirming
+    /// a name first.
     ///
-    /// Deliberately narrow. It runs only when the sensor saw turns, only when
-    /// its count disagrees with the clustering, and it keeps the original run on
-    /// disk either way, so a wrong hint is a re-analysis away from being undone.
-    /// A hint of one is ignored: collapsing every voice into a single speaker is
-    /// the one outcome renaming cannot recover from.
-    private func constrainToSensorCount(
-        store: MeetingStore, metadata: MeetingMetadata,
-        track: CaptureTrack, audio: URL, leadIn: Double, run: DiarizationRun,
-        embeddings: [DiarizationChunkEmbedding]
-    ) async -> (run: DiarizationRun, embeddings: [DiarizationChunkEmbedding]) {
-        // Every path that declines to re-cluster hands back the run and the
-        // vectors that produced it, untouched.
-        let unchanged = (run: run, embeddings: embeddings)
-        guard let reanalyze = backends.reanalyzeDiarization else { return unchanged }
-        guard let sensors = store.readRawSensors() else { return unchanged }
-        // Re-clustering is the one step here that renaming cannot undo: too low
-        // a count merges two people into a single voice, and that voice is then
-        // enrolled. So it runs only where the reader names the local user
-        // structurally, which today is Slack alone. Naming still runs
-        // everywhere, because a wrong name is a rename away from right.
-        // The record already names the local user, which is what
-        // `canDecideSpeakerCount` just required, so there is nothing for the
-        // display-name fallback to add here.
-        guard sensors.canDecideSpeakerCount else { return unchanged }
-        let result = SensorAttribution.attribute(intervals: run.intervals, sensors: sensors)
-        guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
-            return unchanged
+    /// Never throws into the caller. A voice that cannot be embedded is a voice
+    /// learned later through a confirmation, exactly as before this existed.
+    private func recordSensorOccurrences(
+        store: MeetingStore, meetingID: String, track: CaptureTrack,
+        audio: URL, leadIn: Double, run: DiarizationRun
+    ) async {
+        guard let service = backends.speakers, let extractor = backends.embeddings else { return }
+        guard let sensors = store.readRawSensors() else { return }
+        let marked = sensors.markingSelf(named: settingsProvider().localUserName)
+        // The extractor reads the submitted audio, whose zero is the track's
+        // own first frame rather than the meeting timeline's.
+        let intervals = SensorAttribution.enrollmentIntervals(
+            sensors: marked, diarized: run.intervals
+        ).map {
+            DiarizationInterval(
+                start: max(0, $0.start - leadIn), end: max(0, $0.end - leadIn),
+                clusterID: $0.clusterID, quality: $0.quality
+            )
         }
-        // A timeline that does not describe this recording must not be allowed
-        // to choose its speaker count either.
-        guard result.coverage >= SensorAttribution.minimumTimelineCoverage else {
-            return unchanged
-        }
-
-        Log.processing.info(
-            "sensor speaker count clustered=\(run.speakerCount, privacy: .public) hint=\(hint, privacy: .public)"
-        )
+        guard !intervals.isEmpty else { return }
         do {
-            let output = try await reanalyze(metadata.id, audio, hint)
-            var diarization = try store.readRawDiarization()
-            var configuration = output.configuration
-            configuration["sensorSpeakerCount"] = String(hint)
-            let constrained = DiarizationRun(
-                id: diarization.nextRunID(track: track),
-                track: track,
-                backend: LocalSpeechStack.diarizerBackendIdentifier,
-                producedAt: clock.now,
-                timelineOffset: leadIn,
-                configuration: configuration,
-                clusters: output.clusters,
-                intervals: output.intervals.map {
-                    DiarizationInterval(
-                        start: $0.start + leadIn, end: $0.end + leadIn,
-                        clusterID: $0.clusterID, quality: $0.quality
-                    )
-                }
+            let embeddings = try await extractor.embed(audio: audio, intervals: intervals)
+            var vectors: [String: [[Float]]] = [:]
+            for embedding in embeddings {
+                vectors[embedding.clusterID, default: []].append(embedding.vector)
+            }
+            var seconds: [String: Double] = [:]
+            for interval in intervals {
+                seconds[interval.clusterID, default: 0] += interval.duration
+            }
+            let speakerStore = await service.speakerStore
+            for (key, collected) in vectors {
+                try await speakerStore.recordOccurrence(
+                    meetingID: meetingID,
+                    clusterID: key,
+                    track: track,
+                    speechSeconds: seconds[key] ?? 0,
+                    embedding: VoiceVector.centroid(collected),
+                    model: extractor.model,
+                    resolution: nil,
+                    identityID: nil,
+                    source: .sensor,
+                    humanVerified: false,
+                    wasExpectedParticipant: false,
+                    now: clock.now
+                )
+            }
+            Log.processing.info(
+                "sensor voices embedded people=\(vectors.count, privacy: .public)"
             )
-            diarization.setActive(constrained)
-            try store.writeRawDiarization(diarization)
-            return (run: constrained, embeddings: output.chunkEmbeddings)
         } catch {
-            // The first clustering is already on disk and already active. A
-            // failed refinement leaves the meeting exactly as it was.
             Log.processing.notice(
-                "sensor recluster skipped: \(logSafeDescription(error), privacy: .public)"
+                "sensor voice embedding skipped: \(logSafeDescription(error), privacy: .public)"
             )
-            return unchanged
         }
     }
 
@@ -1061,25 +1046,48 @@ public actor ProcessingPipeline {
     }
 
 
-    /// Names clusters from what the meeting client said, where it said enough.
+    /// The sensor record with the local user marked, where a meeting has one.
     ///
-    /// The decision lives in `SensorAttribution.assignments`, which is pure and
-    /// tested on its own. Writing through `applySuggestion` is what keeps a
-    /// person's own correction and the microphone track's deterministic name
-    /// above this, and stops a later voice match from overwriting it.
+    /// Only remote meetings: the record describes the far-end track, and an
+    /// in-person or imported recording has none by construction.
+    private func sensorRecord(store: MeetingStore, metadata: MeetingMetadata) -> RawSensors? {
+        guard metadata.source.micTrackIsLocalUser else { return nil }
+        guard let sensors = store.readRawSensors() else { return nil }
+        return sensors.markingSelf(named: settingsProvider().localUserName)
+    }
+
+    /// Names speakers from what the meeting client said, where it said enough.
+    ///
+    /// Two kinds of key. The sensor keys word attribution wrote get one entry
+    /// per participant who held the floor, carrying the name the client
+    /// rendered. Cluster keys cover the fallback stretches: a cluster one
+    /// person's turns dominate names that person's uncovered words too.
+    ///
+    /// The decisions live in `SensorAttribution`, which is pure and tested on
+    /// its own. Writing through `applySuggestion` is what keeps a person's own
+    /// correction and the microphone track's deterministic name above this, and
+    /// stops a later voice match from overwriting it.
     private func applySensorNames(
-        store: MeetingStore, diarization: RawDiarization, into speakers: inout SpeakerMap
+        store: MeetingStore, metadata: MeetingMetadata,
+        diarization: RawDiarization, into speakers: inout SpeakerMap
     ) {
-        guard let sensors = store.readRawSensors() else { return }
-        let entries = SensorAttribution.assignments(
-            diarization: diarization, sensors: sensors,
-            localUserName: settingsProvider().localUserName
+        guard let marked = sensorRecord(store: store, metadata: metadata) else { return }
+        let people = SensorAttribution.speakerEntries(sensors: marked)
+        for entry in people {
+            speakers.applySuggestion(entry.assignment, for: entry.key)
+        }
+        let clusters = SensorAttribution.assignments(
+            diarization: diarization, sensors: marked
         )
-        for entry in entries {
+        for entry in clusters {
             speakers.applySuggestion(entry.assignment, for: entry.key)
         }
         Log.processing.info(
-            "sensor naming source=\(sensors.source, privacy: .public) named=\(entries.count, privacy: .public)"
+            """
+            sensor naming source=\(marked.source, privacy: .public) \
+            people=\(people.count, privacy: .public) \
+            clusters=\(clusters.count, privacy: .public)
+            """
         )
     }
 
@@ -1316,12 +1324,13 @@ public actor ProcessingPipeline {
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
             speech: store.readSpeechEvidence(),
+            sensors: sensorRecord(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
 
         var speakers = try store.readSpeakerMap()
-        applySensorNames(store: store, diarization: diarization, into: &speakers)
+        applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &speakers)
         if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,
@@ -1388,6 +1397,37 @@ public actor ProcessingPipeline {
         return nil
     }
 
+    /// The audio behind any speaker key: a cluster's intervals, or for a sensor
+    /// key the participant's turns cut to the solo speech heard inside them.
+    ///
+    /// What a confirmation enrols and a retraction takes back, so both kinds of
+    /// key move through those paths on the same terms.
+    private func audioBehind(
+        _ key: String, store: MeetingStore, metadata: MeetingMetadata
+    ) throws -> (run: DiarizationRun, spans: [AudioSpan])? {
+        let diarization = try store.readRawDiarization()
+        return clusterAudio(key, in: diarization)
+            ?? sensorAudio(key, store: store, metadata: metadata, diarization: diarization)
+    }
+
+    private func sensorAudio(
+        _ key: String, store: MeetingStore, metadata: MeetingMetadata,
+        diarization: RawDiarization
+    ) -> (run: DiarizationRun, spans: [AudioSpan])? {
+        guard SpeakerLabel.sensorParticipantID(from: key) != nil,
+              let sensors = sensorRecord(store: store, metadata: metadata)
+        else { return nil }
+        for run in diarization.activeRuns where run.track == .remote {
+            let spans = SensorAttribution.enrollmentIntervals(
+                sensors: sensors, diarized: run.intervals
+            )
+            .filter { $0.clusterID == key }
+            .map { AudioSpan(start: $0.start, end: $0.end) }
+            if !spans.isEmpty { return (run, AudioSpan.union(spans)) }
+        }
+        return nil
+    }
+
     /// Matches every cluster against the local voice memory.
     ///
     /// A read, in every case. Nothing here writes a vector into a profile at any
@@ -1420,6 +1460,33 @@ public actor ProcessingPipeline {
                     quality: cluster.quality,
                     spans: clusterSpans(cluster.id, in: run), analysisID: run.id
                 ))
+            }
+        }
+        // The sensor keys join on the same terms. Their vectors are already a
+        // known person's voice, so resolution is how they meet the identities
+        // that voice built in earlier meetings: the face in the list, the
+        // meeting count, and a name someone confirmed once.
+        if let sensors = sensorRecord(store: store, metadata: metadata) {
+            for run in diarization.activeRuns where run.track == .remote {
+                var spansByKey: [String: [AudioSpan]] = [:]
+                for interval in SensorAttribution.enrollmentIntervals(
+                    sensors: sensors, diarized: run.intervals
+                ) {
+                    spansByKey[interval.clusterID, default: []].append(
+                        AudioSpan(start: interval.start, end: interval.end)
+                    )
+                }
+                for (key, spans) in spansByKey.sorted(by: { $0.key < $1.key }) {
+                    guard let vector = try await speakerStore.occurrenceEmbedding(
+                        meetingID: metadata.id, clusterID: key
+                    ) else { continue }
+                    clusters.append(SpeakerClusterInput(
+                        clusterID: key, track: run.track,
+                        speechSeconds: AudioSpan.totalDuration(spans),
+                        centroid: vector,
+                        spans: spans, analysisID: run.id
+                    ))
+                }
             }
         }
         guard !clusters.isEmpty else { return }
@@ -1814,6 +1881,7 @@ public actor ProcessingPipeline {
             raw: raw,
             diarization: diarization,
             speech: found.store.readSpeechEvidence(),
+            sensors: sensorRecord(store: found.store, metadata: found.metadata),
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )
@@ -1904,7 +1972,9 @@ public actor ProcessingPipeline {
         guard let service = backends.speakers else { return }
         let store = await service.speakerStore
         if let found = repository.findMeeting(id: meetingID, includingMerged: true),
-           let audio = clusterAudio(clusterID, in: try found.store.readRawDiarization()) {
+           let audio = try audioBehind(
+               clusterID, store: found.store, metadata: found.metadata
+           ) {
             // Nobody is claiming the audio, so nothing is exempt: every vector
             // that stood on it loses it. Leaving it behind used to mean the
             // person the name was taken away from kept the voice, and because
@@ -2292,12 +2362,12 @@ public actor ProcessingPipeline {
         try store.writeRawDiarization(diarization)
 
         // Re-clustering renumbers, so every name keyed to the old clusters is
-        // now keyed to nothing. The meeting client's account of the call is
-        // still on disk and still true, so it is applied again here. Without
-        // this, re-analysing a meeting silently threw away its names, including
-        // when re-analysing was the remedy for a bad speaker count.
+        // now keyed to nothing. Sensor keys survive by construction, and the
+        // client's account of the call is still on disk and still true, so the
+        // cluster-level fallback names are applied again here. Without this,
+        // re-analysing a meeting silently threw away its names.
         var reNamed = try store.readSpeakerMap()
-        applySensorNames(store: store, diarization: diarization, into: &reNamed)
+        applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &reNamed)
         try store.writeSpeakerMap(reNamed)
 
         // Deliberately not deleting this meeting's confirmed enrolments here.
@@ -2325,11 +2395,11 @@ public actor ProcessingPipeline {
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
             speech: store.readSpeechEvidence(),
+            sensors: sensorRecord(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)
-        let speakers = try store.readSpeakerMap()
         try await rerenderMarkdown(store: store, metadata: metadataCopy)
     }
 
@@ -2350,7 +2420,6 @@ public actor ProcessingPipeline {
         try await recognizeVoices(
             store: found.store, metadata: &metadata, settings: settingsProvider()
         )
-        let speakers = try found.store.readSpeakerMap()
         try await rerenderMarkdown(store: found.store, metadata: metadata)
     }
 
@@ -2429,8 +2498,8 @@ public actor ProcessingPipeline {
         // nothing to retract later, so the confirmation writes the name and
         // learns no voice from it.
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
-              let audio = clusterAudio(
-                  clusterID, in: try found.store.readRawDiarization()
+              let audio = try audioBehind(
+                  clusterID, store: found.store, metadata: found.metadata
               ), !audio.spans.isEmpty
         else { return }
         // Minus the lines inside it a person has already given to somebody else.

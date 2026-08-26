@@ -71,9 +71,10 @@ public struct RawSensors: Codable, Sendable, Equatable {
     /// still a guess: it fails in every other language, and it fires on a person
     /// whose name happens to be You.
     ///
-    /// This gates re-clustering, which is the one irreversible step. Naming runs
-    /// regardless, because a wrong name is a rename away from right, and a
-    /// wrongly merged pair of speakers is not.
+    /// Recorded as evidence of how the local user was identified. Where the
+    /// platform said so, a namesake in the roster is a different person and the
+    /// display-name fallback stands down; where it only guessed, the fallback
+    /// may mark a second participant, which costs at most one unnamed cluster.
     public var selfIsAuthoritative: Bool
 
     public init(
@@ -106,7 +107,7 @@ public struct RawSensors: Codable, Sendable, Equatable {
         ) ?? []
         turns = try container.decodeIfPresent([SensorTurn].self, forKey: .turns) ?? []
         unmutedIDs = try container.decodeIfPresent([String].self, forKey: .unmutedIDs) ?? []
-        // Absent means unknown, and unknown must not licence re-clustering.
+        // Absent means unknown, which reads as a guess rather than a fact.
         selfIsAuthoritative = try container.decodeIfPresent(
             Bool.self, forKey: .selfIsAuthoritative
         ) ?? false
@@ -114,16 +115,6 @@ public struct RawSensors: Codable, Sendable, Equatable {
 
     public func participant(_ id: String) -> SensorParticipant? {
         participants.first { $0.id == id }
-    }
-
-    /// Whether the local user is known well enough to re-cluster on.
-    ///
-    /// Two ways to be unsure, and both end the same way. The reader may not be
-    /// authoritative about self at all, which is everything except Slack. Or it
-    /// may be authoritative and have found nobody, which means the local user is
-    /// unaccounted for and the count is short by however many turns are theirs.
-    public var canDecideSpeakerCount: Bool {
-        selfIsAuthoritative && participants.contains(where: \.isSelf)
     }
 
     /// The same record with the local user marked by name as well as by flag.

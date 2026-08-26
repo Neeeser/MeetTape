@@ -113,13 +113,23 @@ public struct TranscriptAssembler: Sendable {
     ///   the local user said the words written on their track. Nil for a
     ///   meeting processed before the evidence existed, and there every segment
     ///   is kept, which is what those meetings already show.
+    /// - Parameter sensors: what the meeting client said about the call. Words
+    ///   on the remote track go to the sensor turn covering them first, keyed on
+    ///   the platform's participant identifier, because the client observed who
+    ///   held the floor rather than inferring it. The diarizer attributes only
+    ///   what no turn covers. Nil for every recording made without a readable
+    ///   client, which attributes exactly as before.
     public func assemble(
         raw: RawTranscript,
         diarization: RawDiarization,
         speech: SpeechEvidence? = nil,
+        sensors: RawSensors? = nil,
         micTrackIsLocalUser: Bool,
         generatedAt: Date
     ) -> CanonicalTranscript {
+        // Sensor turns describe the far end alone: the local user's own track
+        // never needs them, and an in-person recording never has them.
+        let sensorIntervals = sensors.map { SensorAttribution.wordIntervals(sensors: $0) } ?? []
         // The diarized tracks are assembled first so that the local track can be
         // checked against them. A user without headphones plays the remote side
         // through speakers, the microphone records it, and the transcription
@@ -171,7 +181,10 @@ public struct TranscriptAssembler: Sendable {
             } ?? false
             let attributed = (treatAsLocalUser || (carriesSpeakers && !reanalysed && !separateDiarizer))
                 ? chunks
-                : attribute(chunks, using: activeRun)
+                : attribute(
+                    chunks, using: activeRun,
+                    sensors: track == .remote ? sensorIntervals : []
+                )
             let assembled = assembleTrack(
                 attributed,
                 treatAsLocalUser: treatAsLocalUser,
@@ -201,32 +214,77 @@ public struct TranscriptAssembler: Sendable {
     /// run stays with the words around it rather than being invented into a
     /// speaker or dropped.
     private func attribute(
-        _ chunks: [RawTranscriptChunk], using run: DiarizationRun?
+        _ chunks: [RawTranscriptChunk], using run: DiarizationRun?,
+        sensors: [DiarizationInterval] = []
     ) -> [RawTranscriptChunk] {
-        guard let run, !run.intervals.isEmpty else { return chunks }
+        guard run?.intervals.isEmpty == false || !sensors.isEmpty else { return chunks }
         return chunks.map { chunk in
             var updated = chunk
             updated.segments = chunk.segments.flatMap { segment in
-                attribute(segment, chunkOffset: chunk.timelineOffset, run: run)
+                attribute(
+                    segment, chunkOffset: chunk.timelineOffset, run: run, sensors: sensors
+                )
             }
             return updated
         }
     }
 
+    /// Assigns each span to the sensor turn covering it, then to a diarization
+    /// cluster where no turn does.
+    ///
+    /// The order is the design. A turn is the meeting client's observation of
+    /// who held the floor, so where one covers a word it decides. The diarizer
+    /// heard the audio and covers what the client did not see: gaps in the
+    /// readings, overlap, and every meeting recorded without a readable client.
+    private func assignSpans(
+        _ spans: [TimedSpan], sensors: [DiarizationInterval],
+        clusters: [DiarizationInterval]
+    ) -> [String?] {
+        var assigned: [String?]
+        if sensors.isEmpty {
+            assigned = Array(repeating: nil, count: spans.count)
+        } else {
+            // No nearest-interval fallback for the sensor tier: a word near a
+            // turn but outside it is exactly the release-tail ambiguity the
+            // diarizer resolves better, because it hears the voice change.
+            (assigned, _) = SpeakerAlignment.assign(
+                spans: spans, to: sensors, nearestWithinSeconds: 0
+            )
+        }
+        guard !clusters.isEmpty else { return assigned }
+        let leftover = spans.indices.filter { assigned[$0] == nil }
+        guard !leftover.isEmpty else { return assigned }
+        let (filled, _) = SpeakerAlignment.assign(
+            spans: leftover.map { spans[$0] }, to: clusters
+        )
+        for (position, index) in leftover.enumerated() {
+            assigned[index] = filled[position]
+        }
+        return assigned
+    }
+
     private func attribute(
-        _ segment: RawTranscriptSegment, chunkOffset: Double, run: DiarizationRun
+        _ segment: RawTranscriptSegment, chunkOffset: Double, run: DiarizationRun?,
+        sensors: [DiarizationInterval]
     ) -> [RawTranscriptSegment] {
         // Intervals are stored on the meeting timeline; segment times are
         // relative to their chunk, so both are compared in chunk-relative
         // seconds.
         // The run identifier goes into the key, so re-analysing a meeting
         // produces new clusters rather than silently reusing names that
-        // belonged to the previous clustering.
-        let intervals = run.intervals.map {
+        // belonged to the previous clustering. A sensor key carries no run:
+        // it names a person, and a re-analysis does not change who spoke.
+        let intervals = (run?.intervals ?? []).map {
             DiarizationInterval(
                 start: $0.start - chunkOffset, end: $0.end - chunkOffset,
-                clusterID: SpeakerLabel.namespaced(chunkID: run.id, rawLabel: $0.clusterID),
+                clusterID: SpeakerLabel.namespaced(chunkID: run?.id ?? "", rawLabel: $0.clusterID),
                 quality: $0.quality
+            )
+        }
+        let sensorIntervals = sensors.map {
+            DiarizationInterval(
+                start: $0.start - chunkOffset, end: $0.end - chunkOffset,
+                clusterID: $0.clusterID, quality: $0.quality
             )
         }
 
@@ -234,8 +292,9 @@ public struct TranscriptAssembler: Sendable {
             // No word timings: the whole segment goes to whichever cluster it
             // overlaps most. Coarser, and the only option a backend that
             // reports segments alone leaves open.
-            let (clusters, _) = SpeakerAlignment.assign(
-                spans: [TimedSpan(start: segment.start, end: segment.end)], to: intervals
+            let clusters = assignSpans(
+                [TimedSpan(start: segment.start, end: segment.end)],
+                sensors: sensorIntervals, clusters: intervals
             )
             var labelled = segment
             labelled.speaker = clusters.first ?? nil
@@ -243,7 +302,7 @@ public struct TranscriptAssembler: Sendable {
         }
 
         let spans = words.map { TimedSpan(start: $0.start, end: $0.end) }
-        let (clusters, _) = SpeakerAlignment.assign(spans: spans, to: intervals)
+        let clusters = assignSpans(spans, sensors: sensorIntervals, clusters: intervals)
 
         var pieces: [RawTranscriptSegment] = []
         var currentSpeaker: String?

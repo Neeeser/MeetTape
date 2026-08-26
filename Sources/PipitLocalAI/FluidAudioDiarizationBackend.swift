@@ -63,19 +63,11 @@ extension LocalModelManager {
         var config = OfflineDiarizerConfig.default
         config.exposeChunkEmbeddings = true
         config.clustering.warmStartFa = LocalDiarizationTuning.warmStartFa
-        // Two callers, and the rule is the same for both: a number too low
+        // Never set from a participant list, a calendar or a guess. Only a
+        // person asking for a specific count on the re-analysis control reaches
+        // this, and then it is their number under their review. A count too low
         // merges two real voices into one cluster, renaming cannot split them
         // again, and the merged voice is then enrolled into somebody's profile.
-        //
-        // A person asking for a specific count on the re-analysis control. That
-        // is their number under their review.
-        //
-        // And the meeting client's own count of who took the floor, which is
-        // still not a calendar and still not a participant list: it is who was
-        // heard holding the floor, and it is only trusted where the client names
-        // the local user structurally, which today is Slack alone. Every way it
-        // has been seen to come out low is guarded, and the guards are the
-        // interesting part rather than the count. See `constrainToSensorCount`.
         config.clustering.numSpeakers = speakerCount
         return config
     }

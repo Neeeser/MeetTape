@@ -455,6 +455,9 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public static func fallbackName(for key: String) -> String {
         if key == SpeakerLabel.localUser { return "Me" }
         if key.hasSuffix(SpeakerLabel.unattributed) { return "Unattributed" }
+        // A sensor speaker the client never named. The key is an opaque
+        // platform identifier and must not render as one.
+        if SpeakerLabel.sensorParticipantID(from: key) != nil { return "Participant" }
         guard let range = key.range(of: "_speaker_") else { return key }
         let suffix = String(key[range.upperBound...])
         let number = Int(suffix).map { "\($0 + 1)" } ?? suffix.uppercased()

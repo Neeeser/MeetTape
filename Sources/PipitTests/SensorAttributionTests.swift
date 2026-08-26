@@ -297,9 +297,8 @@ enum SensorAttributionTests {
                 )
                 expect.equal(decoded.participants.count, 1)
                 expect.equal(decoded.turns.count, 1)
-                // Unknown is not permission to re-cluster.
+                // Absent means unknown, which reads as a guess rather than a fact.
                 expect.isFalse(decoded.selfIsAuthoritative)
-                expect.isFalse(decoded.canDecideSpeakerCount)
             },
 
             test("a read with no roster does not erase the one we have") { expect in
@@ -456,61 +455,109 @@ enum SensorAttributionTests {
                 expect.isTrue(result.coverage < 0.1)
             },
 
-            test("the speaker count counts who talked, not who attended") { expect in
+            test("word intervals carry the person, not a cluster") { expect in
                 let raw = sensors(
-                    participants: [
-                        participant("U1", "Ada"), participant("U2", "Grace"),
-                        participant("U3", "Silent"), participant("U4", "AlsoSilent"),
-                    ],
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
                     turns: [("U1", 0, 10), ("U2", 10, 20)]
                 )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 9)], sensors: raw
-                )
-                expect.equal(result.speakerCountHint, 2)
+                let intervals = SensorAttribution.wordIntervals(sensors: raw)
+                expect.equal(intervals.count, 2)
+                expect.equal(intervals.first?.clusterID, SpeakerLabel.sensor(participantID: "U1"))
+                expect.equal(intervals.last?.clusterID, SpeakerLabel.sensor(participantID: "U2"))
             },
 
-            test("a one-word interjection does not make somebody a speaker") { expect in
-                // Slack's flag releases about 1.5 s after the voice stops, so a
-                // cough or a "yeah" produces a turn. Counting those told the
-                // diarizer to find a cluster per person who made a noise, which
-                // splits the people who were actually talking.
+            test("the local user's turns produce no word intervals") { expect in
+                // The far-end track is a mixdown of everyone else, so a self
+                // turn cannot explain a word heard there. The span falls to the
+                // diarizer, which hears the audio.
                 let raw = sensors(
                     participants: [
-                        participant("U1", "Ada"), participant("U2", "Grace"),
-                        participant("U3", "Nods"), participant("U4", "AlsoNods"),
+                        participant("me", "Andrew", isSelf: true), participant("U2", "Ada"),
                     ],
-                    turns: [
-                        ("U1", 0, 200), ("U2", 200, 400),
-                        ("U3", 400, 401.6), ("U4", 401.6, 403),
+                    turns: [("me", 0, 10), ("U2", 10, 20)]
+                )
+                let intervals = SensorAttribution.wordIntervals(sensors: raw)
+                expect.equal(intervals.count, 1)
+                expect.equal(intervals.first?.clusterID, SpeakerLabel.sensor(participantID: "U2"))
+            },
+
+            test("enrollment takes only solo speech inside a turn") { expect in
+                // The intersection is audio the client attributed to one person
+                // and the diarizer heard as a single voice: no release tail, no
+                // silence, no overlap bleeding somebody else into the profile.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 30), ("U2", 30, 60)]
+                )
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw,
+                    diarized: [
+                        // Ada's speech, with Grace overlapping the last stretch.
+                        interval("a", 2, 28), interval("b", 20, 28),
+                        interval("b", 32, 58),
                     ]
                 )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 199)], sensors: raw
-                )
-                expect.equal(result.speakerCountHint, 2)
+                let ada = enrolled.filter {
+                    $0.clusterID == SpeakerLabel.sensor(participantID: "U1")
+                }
+                // The overlapped 20-28 stretch is cut: only 2-20 remains.
+                expect.equal(ada.count, 1)
+                expect.close(ada.first?.start ?? -1, 2, tolerance: 0.001)
+                expect.close(ada.first?.end ?? -1, 20, tolerance: 0.001)
             },
 
-            test("nothing but interjections gives no count rather than zero") { expect in
+            test("a fragment is not enough to enrol a voice") { expect in
+                // A profile seeded from a cough misidentifies its owner in the
+                // next meeting, and nothing retracts an automatic vector.
                 let raw = sensors(
-                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 1.2)]
+                    participants: [participant("U1", "Ada"), participant("U2", "Nods")],
+                    turns: [("U1", 0, 30), ("U2", 30, 32)]
                 )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 0, 1)], sensors: raw
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw,
+                    diarized: [interval("a", 1, 29), interval("b", 30.2, 31.8)]
                 )
-                expect.isNil(result.speakerCountHint)
+                expect.isTrue(enrolled.contains {
+                    $0.clusterID == SpeakerLabel.sensor(participantID: "U1")
+                })
+                expect.isFalse(enrolled.contains {
+                    $0.clusterID == SpeakerLabel.sensor(participantID: "U2")
+                })
             },
 
-            test("no turns at all gives no count rather than zero") { expect in
-                // Zero would be a claim that nobody spoke. Absent is the truth:
-                // the sensor saw a roster and never saw the floor taken.
+            test("the local user's voice is never enrolled from the far end") { expect in
                 let raw = sensors(
-                    participants: [participant("U1", "Ada")], turns: []
+                    participants: [
+                        participant("me", "Andrew", isSelf: true), participant("U2", "Ada"),
+                    ],
+                    turns: [("me", 0, 30), ("U2", 30, 60)]
                 )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 9)], sensors: raw
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw,
+                    diarized: [interval("a", 1, 29), interval("b", 31, 59)]
                 )
-                expect.isNil(result.speakerCountHint)
+                expect.isFalse(enrolled.contains {
+                    $0.clusterID == SpeakerLabel.sensor(participantID: "me")
+                })
+            },
+
+            test("speaker entries cover who held the floor and got a name") { expect in
+                let raw = sensors(
+                    participants: [
+                        participant("me", "Andrew", isSelf: true),
+                        participant("U2", "Ada"),
+                        participant("U3", nil),
+                        participant("U4", "Silent"),
+                    ],
+                    turns: [("me", 0, 10), ("U2", 10, 20), ("U3", 20, 30)]
+                )
+                let entries = SensorAttribution.speakerEntries(sensors: raw)
+                // Ada held the floor and has a name. The local user is excluded,
+                // U3 has no name to write, and U4 never held the floor.
+                expect.equal(entries.count, 1)
+                expect.equal(entries.first?.key, SpeakerLabel.sensor(participantID: "U2"))
+                expect.equal(entries.first?.assignment.displayName, "Ada")
+                expect.equal(entries.first?.assignment.origin, .sensor)
             },
 
             test("the release trailing past the voice does not steal the next cluster") { expect in
@@ -680,65 +727,15 @@ enum SensorAttributionTests {
                 let result = SensorAttribution.attribute(
                     intervals: [interval("a", 31, 59)], sensors: raw
                 )
-                expect.equal(result.speakerCountHint, 2)
+                expect.equal(result.matches.count, 1)
+                expect.equal(result.matches.first?.displayName, "Grace")
             },
 
-            test("a namesake of the local user is a guess, not a fact") { expect in
-                // Two people called Andrew in one call is not rare. Acting on
-                // the name would drop a real speaker from the count, merge two
-                // voices into one, and rename one of them, which no later stage
-                // can undo.
-                let raw = sensors(
-                    participants: [participant("U2", "Andrew"), participant("U3", "Grace")],
-                    turns: [("U2", 0, 30), ("U3", 30, 60)]
-                )
-                // Nobody was named by the platform, so the count is off the
-                // table whatever the names say.
-                expect.isFalse(raw.canDecideSpeakerCount)
-            },
-
-            test("only a structural self flag can decide the speaker count") { expect in
-                // Slack names the local user in the tile identifier. Meet has no
-                // such marker: the extension tests whether a tile is named the
-                // English word "You", which fails in every other language and
-                // fires on a person actually called You. A guess must not drive
-                // the one step renaming cannot undo.
-                let guessed = RawSensors(
-                    source: "google_meet-dom",
-                    participants: [
-                        participant("d1", "You", isSelf: true), participant("d2", "Ada"),
-                    ],
-                    turns: [SensorTurn(start: 0, end: 30, participantID: "d2")]
-                )
-                expect.isFalse(guessed.canDecideSpeakerCount)
-
-                let structural = RawSensors(
-                    source: "slack-huddle-ax",
-                    participants: [
-                        participant("me", "Andrew", isSelf: true), participant("U2", "Ada"),
-                    ],
-                    turns: [SensorTurn(start: 0, end: 30, participantID: "U2")],
-                    selfIsAuthoritative: true
-                )
-                expect.isTrue(structural.canDecideSpeakerCount)
-
-                // Authoritative and yet nobody is marked: the local user is
-                // unaccounted for, so the count is short by whatever is theirs.
-                let missing = RawSensors(
-                    source: "slack-huddle-ax",
-                    participants: [participant("U2", "Ada")],
-                    turns: [SensorTurn(start: 0, end: 30, participantID: "U2")],
-                    selfIsAuthoritative: true
-                )
-                expect.isFalse(missing.canDecideSpeakerCount)
-            },
-
-            test("a namesake beside a real self flag is still a speaker") { expect in
-                // The case that shipped broken twice. Slack and Meet both name
-                // the local user, so the guess guard cleared, and the name match
-                // then marked the colleague as well. He left the speaker count,
-                // the recording re-clustered one voice short, and two people
-                // were merged into one and enrolled as one voice.
+            test("a namesake beside a real self flag keeps their own turns") { expect in
+                // The case that shipped broken twice under the old design.
+                // Where the platform said who the local user is, a colleague
+                // wearing the same display name is a different person: their
+                // turns still attribute, and their name still lands.
                 let raw = sensors(
                     participants: [
                         participant("me", "Andrew", isSelf: true),
@@ -761,7 +758,6 @@ enum SensorAttributionTests {
                     ],
                     sensors: marked
                 )
-                expect.equal(result.speakerCountHint, 3, "three remote voices, three speakers")
                 let named = Dictionary(
                     uniqueKeysWithValues: result.matches.map { ($0.clusterID, $0.displayName) }
                 )
@@ -772,9 +768,8 @@ enum SensorAttributionTests {
 
             test("a missing mute reading cannot unmake a speaker") { expect in
                 // A tile whose overlay never resolved reads as never-unmuted.
-                // Letting that outrank forty seconds of holding the floor
-                // removed a real speaker from the count and merged them into
-                // somebody else.
+                // Holding the floor is the evidence; mute state is recorded and
+                // not consulted, so both people still name their clusters.
                 let raw = RawSensors(
                     source: "slack-huddle-ax",
                     participants: [participant("U1", "Ada"), participant("U2", "Grace")],
@@ -787,26 +782,7 @@ enum SensorAttributionTests {
                 let result = SensorAttribution.attribute(
                     intervals: [interval("a", 1, 39), interval("b", 41, 79)], sensors: raw
                 )
-                expect.equal(result.speakerCountHint, 2)
-            },
-
-            test("four interjections do not add up to a speaker") { expect in
-                // The longest turn decides, not the sum. Slack releases about
-                // 1.5 s after a voice stops, so repeated "mhm"s accumulate past
-                // any threshold while describing somebody who never held the
-                // floor.
-                let raw = sensors(
-                    participants: [participant("U1", "Ada"), participant("U2", "Nods")],
-                    turns: [
-                        ("U1", 0, 60),
-                        ("U2", 100, 101.6), ("U2", 200, 201.6),
-                        ("U2", 300, 301.6), ("U2", 400, 401.6),
-                    ]
-                )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 59)], sensors: raw
-                )
-                expect.equal(result.speakerCountHint, 1)
+                expect.equal(result.matches.count, 2)
             },
 
         ])
@@ -879,7 +855,7 @@ enum SensorAttributionTests {
 
     static var all: [Suite] {
         [
-            builderSuite, shiftSuite, attributionSuite,
+            builderSuite, shiftSuite, attributionSuite, assemblySuite,
             linkSuite, selfSuite, slackTileSuite, roundTripSuite,
         ]
     }
@@ -889,6 +865,152 @@ extension SensorAttributionTests {
     /// The whole path a real meeting takes, minus the audio: a sensor record and
     /// a diarization run go into a meeting folder, and names come out of the
     /// speaker map under the right keys and the right origin.
+    private static func remoteChunk(words: [RawTranscriptWord]) -> RawTranscriptChunk {
+        RawTranscriptChunk(
+            id: "remote_chunk_001", track: .remote, timelineOffset: 0, durationSeconds: 600,
+            model: "test", responseFormat: "verbose_json",
+            segments: [RawTranscriptSegment(
+                start: words.first?.start ?? 0, end: words.last?.end ?? 0,
+                text: words.map(\.text).joined(), speaker: nil, words: words
+            )]
+        )
+    }
+
+    private static func run(_ intervals: [DiarizationInterval]) -> RawDiarization {
+        var diarization = RawDiarization()
+        diarization.setActive(DiarizationRun(
+            id: "remote-001", track: .remote, backend: "test",
+            producedAt: Date(timeIntervalSince1970: 0), timelineOffset: 0,
+            intervals: intervals
+        ))
+        return diarization
+    }
+
+    static var assemblySuite: Suite {
+        Suite("SensorAssembly", [
+            test("words inside a turn take the person, the rest the cluster") { expect in
+                // The order is the design: a turn is the client's observation of
+                // who held the floor, so where one covers a word it decides. The
+                // diarizer attributes only what no turn covers.
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    RawTranscriptWord(start: 3, end: 4, text: "there. "),
+                    RawTranscriptWord(start: 15, end: 16, text: "Later "),
+                    RawTranscriptWord(start: 16, end: 17, text: "words."),
+                ]
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U_ADA", displayName: "Ada")],
+                    turns: [SensorTurn(start: 0, end: 10, participantID: "U_ADA")]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: run([
+                        DiarizationInterval(start: 1, end: 9, clusterID: "1"),
+                        DiarizationInterval(start: 14, end: 18, clusterID: "1"),
+                    ]),
+                    sensors: sensors,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let keys = transcript.utterances.map(\.speakerKey)
+                expect.equal(keys.count, 2, "got \(keys)")
+                expect.equal(keys.first, SpeakerLabel.sensor(participantID: "U_ADA"))
+                expect.equal(keys.last, "remote-001_speaker_01")
+            },
+
+            test("a turn outranks the cluster where both cover a word") { expect in
+                // The cluster is the diarizer's guess about the same seconds the
+                // client observed. Observation wins.
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    RawTranscriptWord(start: 3, end: 4, text: "there."),
+                ]
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U_ADA", displayName: "Ada")],
+                    turns: [SensorTurn(start: 0, end: 10, participantID: "U_ADA")]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: run([DiarizationInterval(start: 1, end: 9, clusterID: "1")]),
+                    sensors: sensors,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(
+                    transcript.utterances.map(\.speakerKey),
+                    [SpeakerLabel.sensor(participantID: "U_ADA")]
+                )
+            },
+
+            test("a self turn does not capture far-end words") { expect in
+                // The far-end track cannot contain the local user, so a span
+                // their turn covers goes to the diarizer, which heard the audio.
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    RawTranscriptWord(start: 3, end: 4, text: "there."),
+                ]
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [
+                        SensorParticipant(id: "U_ME", displayName: "Andrew", isSelf: true),
+                    ],
+                    turns: [SensorTurn(start: 0, end: 10, participantID: "U_ME")]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: run([DiarizationInterval(start: 1, end: 9, clusterID: "1")]),
+                    sensors: sensors,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(transcript.utterances.map(\.speakerKey), ["remote-001_speaker_01"])
+            },
+
+            test("no sensors attributes exactly as before") { expect in
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    RawTranscriptWord(start: 3, end: 4, text: "there."),
+                ]
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: run([DiarizationInterval(start: 1, end: 9, clusterID: "1")]),
+                    sensors: nil,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(transcript.utterances.map(\.speakerKey), ["remote-001_speaker_01"])
+            },
+
+            test("turns alone attribute a track the diarizer has not run on") { expect in
+                // A sensor is evidence in its own right. A meeting whose
+                // diarization produced nothing still gets its words attributed
+                // where the client saw the floor held.
+                let words = [
+                    RawTranscriptWord(start: 2, end: 3, text: "Hello "),
+                    RawTranscriptWord(start: 3, end: 4, text: "there."),
+                ]
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U_ADA", displayName: "Ada")],
+                    turns: [SensorTurn(start: 0, end: 10, participantID: "U_ADA")]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remoteChunk(words: words)]),
+                    diarization: RawDiarization(),
+                    sensors: sensors,
+                    micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                expect.equal(
+                    transcript.utterances.map(\.speakerKey),
+                    [SpeakerLabel.sensor(participantID: "U_ADA")]
+                )
+            },
+        ])
+    }
+
     static var roundTripSuite: Suite {
         Suite("SensorRoundTrip", [
             test("a sensor record on disk names the clusters it explains") { expect in

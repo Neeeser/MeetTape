@@ -158,14 +158,19 @@ tile whose overlay never resolved would otherwise outrank it.
 It is immutable like the diarization beside it, because it is evidence about a
 recording rather than a conclusion about one.
 
-Two things read it. Cluster naming matches a cluster to whoever held the floor
-through it, at an origin ranked above a voice match and below the microphone
-track. Speaker count re-clusters the diarizer at the number of people who
-actually spoke, off cached embeddings.
+Three things read it. Word attribution assigns each transcribed word on the
+remote track to the sensor turn covering it, keyed on the platform's own
+participant identifier, and the diarizer attributes only the words no turn
+covers: gaps in the readings, overlap, and every meeting recorded without a
+readable client. Voice enrollment embeds each participant's turns cut to the
+solo speech the diarizer heard inside them, so voice memory learns a
+known-identity voice without waiting for a confirmation. Cluster naming matches
+a diarization cluster to whoever's turns dominate it, which carries the name
+onto the stretches the sensor did not see.
 
-Both are advisory, and the second is narrower than the first. Re-clustering
-cannot be undone by renaming, so it runs only where the client names the local
-user structurally, which today is Slack alone. Naming runs everywhere.
+Sensor names sit at an origin above a voice match and below the microphone
+track, so a person's own correction always wins. The sensor never sets the
+diarizer's speaker count and never moves a boundary.
 
 A cluster split evenly between two people is named for neither, a timeline
 covering too little of the diarized speech names nobody, which is what

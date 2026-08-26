@@ -309,14 +309,18 @@ public final class MeetingsWindowModel {
     /// list rather than changing one, which is more than reading one row back
     /// can do. The selection moves to the conversation, because the identifier
     /// the pane was opened on is the half that has just been folded in.
+    ///
+    /// Moved before the archive read, in the same turn as the combine. The
+    /// merge is already on disk when `combineWithEarlier` returns, so the
+    /// folded identifier resolves to the conversation immediately. Moving it
+    /// after the read left the selection dangling on the folded row for as
+    /// long as the pane took to reload, which the archive read waits on.
     public func combineWithEarlier() {
         guard let detail else { return }
         let meetingID = detail.meetingID
         detail.combineWithEarlier()
-        Task { [weak self] in
-            await self?.reload()
-            self?.show(meetingID: meetingID)
-        }
+        show(meetingID: meetingID)
+        Task { [weak self] in await self?.reload() }
     }
 
     /// Undoes that link, then reads the archive again. The recording that comes

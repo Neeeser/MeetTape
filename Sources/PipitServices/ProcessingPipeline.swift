@@ -969,7 +969,9 @@ public actor ProcessingPipeline {
         let unchanged = (run: run, embeddings: embeddings)
         guard let reanalyze = backends.reanalyzeDiarization else { return unchanged }
         guard let sensors = store.readRawSensors() else { return unchanged }
-        let scoped = sensors.excludingSelf()
+        let scoped = sensors
+            .markingSelf(named: settingsProvider().localUserName)
+            .excludingSelf()
         let result = SensorAttribution.attribute(intervals: run.intervals, sensors: scoped)
         guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
             return unchanged
@@ -1063,7 +1065,10 @@ public actor ProcessingPipeline {
         store: MeetingStore, diarization: RawDiarization, into speakers: inout SpeakerMap
     ) {
         guard let sensors = store.readRawSensors() else { return }
-        let entries = SensorAttribution.assignments(diarization: diarization, sensors: sensors)
+        let entries = SensorAttribution.assignments(
+            diarization: diarization, sensors: sensors,
+            localUserName: settingsProvider().localUserName
+        )
         for entry in entries {
             speakers.applySuggestion(entry.assignment, for: entry.key)
         }
@@ -1456,7 +1461,10 @@ public actor ProcessingPipeline {
             // which the meeting client's own account of the call does. The
             // identity is not a name and is linked either way, so a cluster
             // named from the roster still has a person behind it.
-            speakers.linkIdentity(identity.id, to: result.clusterID)
+            speakers.linkIdentity(
+                identity.id, to: result.clusterID,
+                named: identity.isNamed ? identity.resolvedName : nil
+            )
             if identity.isNamed,
                !metadata.participants.contains(where: { $0.displayName == identity.resolvedName }) {
                 metadata.participants.append(Participant(

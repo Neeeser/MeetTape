@@ -113,15 +113,18 @@ public struct SlackAccessibilityReader: Sendable {
     private static let enabledPIDs = OSAllocatedUnfairLock<Set<pid_t>>(initialState: [])
 
     private static func enableWebTree(_ application: AXUIElement, pid: pid_t) {
-        let alreadyEnabled = enabledPIDs.withLock { pids -> Bool in
-            if pids.contains(pid) { return true }
-            pids.insert(pid)
-            return false
-        }
+        let alreadyEnabled = enabledPIDs.withLock { $0.contains(pid) }
         guard !alreadyEnabled else { return }
-        AXUIElementSetAttributeValue(
+        let result = AXUIElementSetAttributeValue(
             application, "AXManualAccessibility" as CFString, kCFBooleanTrue
         )
+        // Only a set that worked counts. Slack's accessibility server is not up
+        // the instant the app launches, and recording the attempt regardless
+        // meant one early failure left the web tree unbuilt for the life of that
+        // process: every tile identifier empty, the roster silently dead, and
+        // nothing to see until the user restarted Slack.
+        guard result == .success else { return }
+        enabledPIDs.withLock { $0.insert(pid) }
     }
 
     public func read() -> SlackAccessibilityObservation {
@@ -149,7 +152,14 @@ public struct SlackAccessibilityReader: Sendable {
         var truncated = false
         // Each window gets its own budget, so a large workspace window cannot
         // consume the whole allowance before the huddle window is reached.
-        let budgetPerWindow = 4_000
+        //
+        // Raised with the depth limit. The walk goes to 24 now because the
+        // huddle tiles sit deeper than the controls do, and a depth-first walk
+        // spends budget on depth before breadth, so holding the old allowance
+        // would have reached fewer sibling subtrees than before. A whole Slack
+        // process measured 708 nodes with the web tree built, so this is a wide
+        // margin rather than a tuned number.
+        let budgetPerWindow = 20_000
 
         var tiles: [String: SlackHuddleTile] = [:]
         var tileOrder: [String] = []
@@ -161,6 +171,11 @@ public struct SlackAccessibilityReader: Sendable {
                 title = AccessibilityBridge.string(window, kAXTitleAttribute as String)
             }
             var budget = budgetPerWindow
+            // Tiles are collected during the walk and read after it. Reading a
+            // subtree from inside the walk would borrow the same budget twice,
+            // and the walk has to finish anyway before the huddle controls are
+            // known to be present or absent.
+            var found: [(element: AXUIElement, userID: String, isSelf: Bool, description: String)] = []
             AccessibilityBridge.walkElements(window, maxDepth: 24, budget: &budget) { element, node in
                 visitedNodes += 1
                 let haystack = "\(node.description) \(node.title)".lowercased()
@@ -171,20 +186,26 @@ public struct SlackAccessibilityReader: Sendable {
                 guard let userID = SlackHuddleTileParser.userID(from: node.domIdentifier) else {
                     return true
                 }
-                // A tile's own subtree carries its state, so it is read here and
-                // its children are not walked again by the outer pass.
-                let tile = readTile(
-                    element, userID: userID,
+                found.append((
+                    element: element, userID: userID,
                     isSelf: SlackHuddleTileParser.isSelf(node.domIdentifier),
                     description: node.description
-                )
-                if let existing = tiles[userID] {
-                    tiles[userID] = merge(existing, tile)
-                } else {
-                    tiles[userID] = tile
-                    tileOrder.append(userID)
-                }
+                ))
+                // A tile's state lives in its own subtree, which is read below,
+                // so the outer walk does not descend into it.
                 return false
+            }
+            for entry in found {
+                let tile = readTile(
+                    entry.element, userID: entry.userID, isSelf: entry.isSelf,
+                    description: entry.description, budget: &budget
+                )
+                if let existing = tiles[entry.userID] {
+                    tiles[entry.userID] = merge(existing, tile)
+                } else {
+                    tiles[entry.userID] = tile
+                    tileOrder.append(entry.userID)
+                }
             }
             if budget <= 0 { truncated = true }
         }
@@ -213,15 +234,20 @@ public struct SlackAccessibilityReader: Sendable {
         )
     }
 
+    /// Reads one tile from its own subtree, spending the caller's budget.
+    ///
+    /// Sharing the budget rather than taking a fresh one per tile is the point:
+    /// a twenty-person huddle would otherwise add thousands of uncounted
+    /// cross-process reads to a walk that runs twice a second.
     private func readTile(
-        _ element: AXUIElement, userID: String, isSelf: Bool, description: String
+        _ element: AXUIElement, userID: String, isSelf: Bool, description: String,
+        budget: inout Int
     ) -> SlackHuddleTile {
         var name = SlackHuddleTileParser.displayName(from: description)
         var muted: Bool?
         var speaking = false
         // Bounded hard: a tile subtree is small, and the poll runs twice a
         // second beside everything else detection does.
-        var budget = 240
         AccessibilityBridge.walkElements(element, maxDepth: 8, budget: &budget) { _, node in
             if name == nil { name = SlackHuddleTileParser.displayName(from: node.description) }
             if SlackHuddleTileParser.isSpeaking(classList: node.domClassList) { speaking = true }

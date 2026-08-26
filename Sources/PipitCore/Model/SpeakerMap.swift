@@ -275,7 +275,7 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         entries[key] = assignment
     }
 
-    /// Attaches a voice identity to a cluster without touching its name.
+    /// Attaches a voice identity to a cluster whose name already agrees with it.
     ///
     /// Naming and identity are two different facts, and only naming has a
     /// precedence order. A cluster the meeting client named outranks a voice
@@ -284,10 +284,24 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     /// person behind it: no face in the meetings list, no profile to learn from,
     /// and nothing for a later meeting to recognise.
     ///
-    /// Only fills an empty link. Whoever set the name is not overruled here, and
-    /// a link a person confirmed is never replaced by a guess.
-    public mutating func linkIdentity(_ identityID: IdentityID, to key: String) {
+    /// Agreement is required because a link is not inert. `refreshName` rewrites
+    /// the name of every entry carrying an identity, with no regard for what set
+    /// it, so linking a voice called Grace to a cluster the roster called Ada
+    /// does not merely add an avatar: the next time anyone touches Grace, Ada's
+    /// words are relabelled Grace. Where the two disagree, one of them is wrong
+    /// and the disagreement is the useful fact. It stays visible.
+    ///
+    /// An unnamed identity is always safe to link. It carries no name to impose,
+    /// and linking is what lets a recurring voice accumulate until someone names
+    /// it once.
+    public mutating func linkIdentity(
+        _ identityID: IdentityID, to key: String, named identityName: String?
+    ) {
         guard var existing = entries[key], existing.identityID == nil else { return }
+        if let identityName, !identityName.isEmpty,
+           existing.displayName.caseInsensitiveCompare(identityName) != .orderedSame {
+            return
+        }
         existing.identityID = identityID
         entries[key] = existing
     }

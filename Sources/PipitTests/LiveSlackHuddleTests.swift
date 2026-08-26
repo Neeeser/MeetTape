@@ -66,7 +66,7 @@ enum LiveSlackHuddleTests {
                     let observation = reader.read()
                     guard !observation.tiles.isEmpty else { continue }
                     recorder.record(SensorReading(
-                        source: "slack-huddle-ax",
+                        source: "slack-huddle-ax", provider: .slack,
                         at: Double(tick) * 0.5,
                         participants: observation.tiles.map {
                             SensorParticipant(

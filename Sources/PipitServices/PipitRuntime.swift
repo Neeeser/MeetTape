@@ -770,6 +770,13 @@ public final class PipitRuntime {
     /// time. The sensor never decides that a meeting is happening; it only
     /// describes one that already is.
     private func recordSensorReading(_ reading: SensorReading) {
+        // Only readings about the meeting being recorded. A room conversation
+        // recorded in person while a colleague sits in a Meet call on the same
+        // Mac would otherwise take the Meet roster as its own: the far end's two
+        // names on the room's voices, and the room re-clustered down to two.
+        guard let meeting = currentMeeting, meeting.metadata.provider == reading.provider else {
+            return
+        }
         sensorRecorder?.record(reading)
     }
 

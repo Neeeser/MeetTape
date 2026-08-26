@@ -96,6 +96,33 @@ public struct RawSensors: Codable, Sendable, Equatable {
         return scoped
     }
 
+    /// The same record with the local user marked by name as well as by flag.
+    ///
+    /// The page's own answer is not enough. Meet marks the local tile by writing
+    /// "You" into it, which is a English string, so a client in any other
+    /// language reports nobody as self and the exclusion below quietly stops
+    /// working. Zoom marks nobody at all.
+    ///
+    /// The app does know who its user is, so the name it was configured with is
+    /// the second mechanism. Matching a display name is weaker than matching an
+    /// identifier and it is used only to widen who counts as the local user,
+    /// never to narrow it, so the worst case is losing one person's turns rather
+    /// than putting the wrong name on someone.
+    public func markingSelf(named localUserName: String) -> RawSensors {
+        let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty else { return self }
+        var marked = self
+        marked.participants = participants.map { person in
+            guard !person.isSelf, let name = person.displayName,
+                  name.caseInsensitiveCompare(wanted) == .orderedSame
+            else { return person }
+            var updated = person
+            updated.isSelf = true
+            return updated
+        }
+        return marked
+    }
+
     /// The same record moved onto a different origin.
     ///
     /// Capture is armed before a meeting is committed and keeps the pre-roll, so
@@ -222,16 +249,21 @@ public struct SensorTimelineBuilder: Sendable {
 public struct SensorReading: Sendable, Equatable {
     /// Which reader produced it, for example `slack-huddle-ax` or `meet-dom`.
     public var source: String
+    /// Which meeting provider it describes. A recording only folds in readings
+    /// about the meeting it is recording.
+    public var provider: MeetingProvider
     public var at: Double
     public var participants: [SensorParticipant]
     public var speakingID: String?
     public var unmutedIDs: Set<String>
 
     public init(
-        source: String, at: Double, participants: [SensorParticipant],
+        source: String, provider: MeetingProvider, at: Double,
+        participants: [SensorParticipant],
         speakingID: String? = nil, unmutedIDs: Set<String> = []
     ) {
         self.source = source
+        self.provider = provider
         self.at = at
         self.participants = participants
         self.speakingID = speakingID
@@ -260,6 +292,7 @@ public struct SensorReading: Sendable, Equatable {
 /// uniform shift leaves overlap high, no coverage guard would have caught it.
 public struct SensorRecorder: Sendable {
     private var builder: SensorTimelineBuilder?
+    private var source: String?
     private let anchorMonotonic: Double
     private var lastMonotonic: Double
 
@@ -269,6 +302,11 @@ public struct SensorRecorder: Sendable {
     }
 
     public mutating func record(_ reading: SensorReading) {
+        // One recording, one reader. A Slack huddle opening beside a Meet call
+        // would otherwise fold Slack user ids into a record labelled `meet-dom`,
+        // and nothing downstream could tell the two apart.
+        if let source, source != reading.source { return }
+        source = reading.source
         lastMonotonic = max(lastMonotonic, reading.at)
         var current = builder ?? SensorTimelineBuilder(source: reading.source)
         current.record(reading.observation(relativeTo: anchorMonotonic))

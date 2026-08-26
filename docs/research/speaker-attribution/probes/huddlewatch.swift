@@ -7,8 +7,8 @@
 //   xcrun swiftc -O huddlewatch.swift -o /tmp/huddlewatch && /tmp/huddlewatch 120
 //
 // Signals read per tile:
-//   AXDOMIdentifier   huddle-grid-gridcell-self_U0BP21MJ90B  (Slack user id)
-//   AXDescription     View Andrew Neeser's profile           (display name)
+//   AXDOMIdentifier   huddle-grid-gridcell-self_U03SOLOUSER  (Slack user id)
+//   AXDescription     View Ada Lovelace's profile           (display name)
 //   AXDescription     video is off, audio is on              (mute state)
 //   AXDOMClassList    p-huddle_peer_tile__overlay--active_speaker
 
@@ -69,8 +69,8 @@ func findTiles() -> [String: Tile] {
         budget -= 1
         if let id = str(e, "AXDOMIdentifier"), id.hasPrefix(tilePrefix),
            !id.contains("a11y_huddle_peer_tile_description") {
-            // Own tile:    huddle-grid-gridcell-self_U0BSR53NYHG
-            // Other tile:  huddle-grid-gridcell-<session-uuid>_U0BSR50GN82
+            // Own tile:    huddle-grid-gridcell-self_U01SELFUSER
+            // Other tile:  huddle-grid-gridcell-<session-uuid>_U02OTHERUSR
             // The user id is what follows the last underscore either way. The
             // prefix is the session, so one person on two devices is two tiles
             // carrying one id.

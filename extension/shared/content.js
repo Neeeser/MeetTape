@@ -55,16 +55,19 @@ function readMeetTiles() {
   // local user held the floor cannot explain a voice heard there. Without this
   // flag their turns compete for remote clusters and put their own name on
   // whoever they talked over.
-  const selfID = readMeetSelfID();
   const tiles = [];
   for (const node of document.querySelectorAll('[data-participant-id]')) {
     const id = node.getAttribute('data-participant-id');
     if (!id) continue;
     const meter = node.querySelector('[jsname="QgSmzd"]');
+    const text = (node.innerText || '').trim();
     tiles.push({
       id,
-      name: (node.innerText || '').trim().split('\n')[0] || undefined,
-      isSelf: !!selfID && id === selfID,
+      name: text.split('\n')[0] || undefined,
+      // Meet writes "You" into the local user's own tile. English only, so the
+      // app marks the local user by configured name as well; this is a hint,
+      // never the only mechanism.
+      isSelf: /\byou\b/i.test(`${node.getAttribute('aria-label') || ''} ${text}`),
       // getAttribute, not className: on an SVG element className is an
       // SVGAnimatedString whose toString is a constant, which would make the
       // meter look permanently still and kill speaking detection silently.
@@ -74,28 +77,6 @@ function readMeetTiles() {
   return tiles;
 }
 
-// The local user's participant id, from the tile Meet labels as theirs.
-//
-// Meet writes "You" into the local tile's own name. Nothing here falls back to
-// a guess: an unknown self is reported as unknown, and the app then keeps the
-// local user out of naming by other means rather than picking the wrong tile.
-function readMeetSelfID() {
-  for (const node of document.querySelectorAll('[data-participant-id]')) {
-    const id = node.getAttribute('data-participant-id');
-    if (!id) continue;
-    const label = `${node.getAttribute('aria-label') || ''} ${node.innerText || ''}`;
-    if (/\byou\b/i.test(label)) return id;
-  }
-  return null;
-}
-
-// Zoom's roster, when it is on screen at all.
-//
-// The client decodes in WebAssembly and paints video into a canvas, so there is
-// no per-participant element to read while the participants panel is closed, and
-// no speaking indicator was found in the DOM at all. This reports names when the
-// panel is open and nothing when it is not, which is the honest shape of what
-// Zoom offers.
 function readZoomTiles() {
   // Zoom gives less than the other two, and the reason is architectural. It
   // decodes in WebAssembly and paints video into a canvas, so a 98 second

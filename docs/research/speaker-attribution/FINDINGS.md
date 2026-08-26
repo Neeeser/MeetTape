@@ -56,8 +56,8 @@ comment says is unavailable turned out to be there.
 A tile identifies its person and its session. Own tile against someone else's:
 
 ```
-huddle-grid-gridcell-self_U0BSR53NYHG
-huddle-grid-gridcell-0a5e5133-729a-48f9-b964-00b1690d7b37_U0BSR50GN82
+huddle-grid-gridcell-self_U01SELFUSER
+huddle-grid-gridcell-3f9c1a20-0000-4000-8000-abcdefabcdef_U02OTHERUSR
 ```
 
 The user id follows the last underscore in both. The prefix is the session, so
@@ -74,8 +74,8 @@ splitting.
 A huddle tile looks like this:
 
 ```
-AXCell   desc=View Andrew Neeser's profile
-         domid=huddle-grid-gridcell-self_U0BP21MJ90B
+AXCell   desc=View Ada Lovelace's profile
+         domid=huddle-grid-gridcell-self_U03SOLOUSER
          class=p-huddle_peer_tile
          ChromeAXNodeId=246230
   AXButton  desc=video is off, audio is on
@@ -88,7 +88,7 @@ AXCell   desc=View Andrew Neeser's profile
 
 So one walk gives four things per person:
 
-- **Slack user id**, from the tile's `AXDOMIdentifier`. `U0BP21MJ90B` is
+- **Slack user id**, from the tile's `AXDOMIdentifier`. `U03SOLOUSER` is
   workspace-unique and stable across meetings, which is a far better identity key
   than a display name.
 - **Display name**, from the tile description.
@@ -143,11 +143,11 @@ tiles. Instead the flag swapped, atomically, inside a single 50 ms poll:
 
 ```
  3.565  self (…525)     speaking=false
- 3.565  Andrew N        speaking=true
- 9.807  Andrew N        speaking=true
+ 3.565  Ada L        speaking=true
+ 9.807  Ada L        speaking=true
  9.807  self (…525)     speaking=false
 16.567  self (…525)     speaking=true
-16.567  Andrew N        speaking=false
+16.567  Ada L        speaking=false
 ```
 
 So this is a dominant-speaker flag, and overlapping speech is invisible to it.
@@ -204,12 +204,12 @@ the SFU parking the current speaker in one slot and idling the rest.
 The DOM names participants in Google's own resource format:
 
 ```
-data-participant-id="spaces/2jH7RPd9IRgB/devices/406"
+data-participant-id="spaces/EXAMPLESPACE/devices/406"
 ```
 
 That is per-device and structured, so it is the Meet-side identity key, the
 counterpart to Slack's user id. Remote mute state is reachable too, though only
-indirectly. The control reading `Mute Andrew Neeser's microphone` exists while
+indirectly. The control reading `Mute Ada Lovelace's microphone` exists while
 that person is unmuted, and no tile carries an aria-label for it.
 
 Two mechanics for anyone wiring this up. The hook has to be installed before any
@@ -400,7 +400,7 @@ accessibility-tree strings. Slack's own accessibility changelog says huddle
 captions carry the speaker name too, which would add words to the timeline, and
 that is untested.
 
-The user id is the part worth dwelling on. `U0BP21MJ90B` is workspace-unique and
+The user id is the part worth dwelling on. `U03SOLOUSER` is workspace-unique and
 stable across every meeting, so it is a real identity key. A display name is not:
 two people share one, and one person changes theirs. Nothing else in this
 research produces an identifier of that quality. Meet's CSRC is stable for one

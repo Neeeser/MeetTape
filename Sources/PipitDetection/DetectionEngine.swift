@@ -108,6 +108,7 @@ public final class DetectionEngine: @unchecked Sendable {
         if !slack.tiles.isEmpty {
             return SensorReading(
                 source: "slack-huddle-ax",
+                provider: .slack,
                 at: now,
                 participants: slack.tiles.map {
                     SensorParticipant(id: $0.userID, displayName: $0.displayName, isSelf: $0.isSelf)
@@ -130,6 +131,7 @@ public final class DetectionEngine: @unchecked Sendable {
             else { continue }
             return SensorReading(
                 source: "\(event.provider.rawValue)-dom",
+                provider: event.provider,
                 at: now,
                 participants: people.map {
                     SensorParticipant(id: $0.id, displayName: $0.displayName, isSelf: $0.isSelf)

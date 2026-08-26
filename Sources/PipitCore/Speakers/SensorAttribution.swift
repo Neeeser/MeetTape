@@ -143,9 +143,9 @@ extension SensorAttribution {
     /// floor cannot explain a voice heard there, and letting it try put their
     /// name on whoever they talked over.
     public static func assignments(
-        diarization: RawDiarization, sensors: RawSensors
+        diarization: RawDiarization, sensors: RawSensors, localUserName: String = ""
     ) -> [(key: String, assignment: SpeakerAssignment)] {
-        let scoped = sensors.excludingSelf()
+        let scoped = sensors.markingSelf(named: localUserName).excludingSelf()
         guard !scoped.turns.isEmpty else { return [] }
 
         var out: [(key: String, assignment: SpeakerAssignment)] = []

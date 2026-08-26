@@ -194,11 +194,11 @@ enum SensorAttributionTests {
                 let roster = [participant("U1", "Ada")]
                 // Ada talks from 20 s to 30 s after the commit.
                 recorder.record(SensorReading(
-                    source: "slack-huddle-ax", at: commit + 20, participants: roster,
+                    source: "slack-huddle-ax", provider: .slack, at: commit + 20, participants: roster,
                     speakingID: "U1"
                 ))
                 recorder.record(SensorReading(
-                    source: "slack-huddle-ax", at: commit + 30, participants: roster,
+                    source: "slack-huddle-ax", provider: .slack, at: commit + 30, participants: roster,
                     speakingID: nil
                 ))
                 let raw = try expect.unwrap(
@@ -216,7 +216,7 @@ enum SensorAttributionTests {
                 // would name people confidently and wrongly.
                 var recorder = SensorRecorder(anchorMonotonic: 100)
                 recorder.record(SensorReading(
-                    source: "slack-huddle-ax", at: 101,
+                    source: "slack-huddle-ax", provider: .slack, at: 101,
                     participants: [participant("U1", "Ada")], speakingID: "U1"
                 ))
                 expect.isNil(recorder.finish(at: 110, timelineOriginHostTime: nil))
@@ -417,6 +417,85 @@ enum SensorAttributionTests {
         ])
     }
 
+    static var linkSuite: Suite {
+        Suite("SensorIdentityLink", [
+            test("a voice identity that agrees with the name is linked") { expect in
+                var map = SpeakerMap()
+                map.applySuggestion(
+                    SpeakerAssignment(displayName: "Ada", origin: .sensor),
+                    for: "remote-001_speaker_01"
+                )
+                let identity = IdentityID(101)
+                map.linkIdentity(identity, to: "remote-001_speaker_01", named: "Ada")
+                expect.equal(map.entries["remote-001_speaker_01"]?.identityID, identity)
+                expect.equal(map.entries["remote-001_speaker_01"]?.displayName, "Ada")
+            },
+
+            test("a voice identity that disagrees is not linked") { expect in
+                // A link is not inert: refreshName rewrites the name of every
+                // entry carrying an identity, whatever set it. Linking Grace's
+                // voice to a cluster the roster called Ada would relabel Ada's
+                // words the next time anyone touched Grace.
+                var map = SpeakerMap()
+                map.applySuggestion(
+                    SpeakerAssignment(displayName: "Ada", origin: .sensor),
+                    for: "remote-001_speaker_01"
+                )
+                map.linkIdentity(IdentityID(202), to: "remote-001_speaker_01", named: "Grace")
+                expect.isNil(map.entries["remote-001_speaker_01"]?.identityID)
+                expect.equal(map.entries["remote-001_speaker_01"]?.displayName, "Ada")
+            },
+
+            test("an unnamed voice is always safe to link") { expect in
+                // It carries no name to impose, and the link is what lets a
+                // recurring voice accumulate until somebody names it once.
+                var map = SpeakerMap()
+                map.applySuggestion(
+                    SpeakerAssignment(displayName: "Ada", origin: .sensor),
+                    for: "remote-001_speaker_01"
+                )
+                let identity = IdentityID(303)
+                map.linkIdentity(identity, to: "remote-001_speaker_01", named: nil)
+                expect.equal(map.entries["remote-001_speaker_01"]?.identityID, identity)
+            },
+
+            test("the local user is excluded by configured name, not only by flag") { expect in
+                // Meet marks its own tile with the English word "You", so a
+                // client in any other language reports nobody as self.
+                let raw = sensors(
+                    participants: [
+                        participant("d406", "Andrew Neeser"),
+                        participant("d409", "Grace"),
+                    ],
+                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                )
+                let scoped = raw.markingSelf(named: "andrew neeser").excludingSelf()
+                expect.equal(scoped.participants.count, 1)
+                expect.equal(scoped.turns.count, 1)
+                expect.equal(scoped.turns.first?.participantID, "d409")
+            },
+
+            test("a reader cannot change mid-recording") { expect in
+                // A Slack huddle opening beside a Meet call would otherwise fold
+                // Slack user ids into a record labelled meet-dom, and nothing
+                // downstream could tell the two apart.
+                var recorder = SensorRecorder(anchorMonotonic: 0)
+                recorder.record(SensorReading(
+                    source: "meet-dom", provider: .googleMeet, at: 1,
+                    participants: [participant("d406", "Ada")], speakingID: "d406"
+                ))
+                recorder.record(SensorReading(
+                    source: "slack-huddle-ax", provider: .slack, at: 2,
+                    participants: [participant("U1", "Someone else")], speakingID: "U1"
+                ))
+                let raw = try expect.unwrap(recorder.finish(at: 3, timelineOriginHostTime: 0))
+                expect.equal(raw.source, "meet-dom")
+                expect.equal(raw.participants.count, 1)
+                expect.equal(raw.participants.first?.id, "d406")
+            },
+        ])
+    }
+
     static var slackTileSuite: Suite {
         Suite("SlackHuddleTile", [
             test("the user id is what follows the last underscore") { expect in
@@ -483,7 +562,10 @@ enum SensorAttributionTests {
     }
 
     static var all: [Suite] {
-        [builderSuite, shiftSuite, attributionSuite, trackSuite, slackTileSuite, roundTripSuite]
+        [
+            builderSuite, shiftSuite, attributionSuite, trackSuite,
+            linkSuite, slackTileSuite, roundTripSuite,
+        ]
     }
 }
 

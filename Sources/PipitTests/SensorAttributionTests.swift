@@ -204,6 +204,64 @@ enum SensorAttributionTests {
                 expect.close(try expect.unwrap(raw.turns.first).end, 40, tolerance: 0.001)
             },
 
+            test("a blackout on the second reading is still a blackout") { expect in
+                // The threshold used to be derived from the very interval being
+                // judged, which made the first one unjudgeable: a five minute
+                // silence set a thirty minute threshold and passed, so one turn
+                // covered the whole silence and named every cluster in it.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                builder.record(SensorObservation(at: 0, participants: roster, speakingID: "U1"))
+                for tick in stride(from: 300.0, through: 305.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                let raw = builder.finish()
+                // The first reading alone never established a span, so what
+                // survives is the second stretch, not one turn across the gap.
+                expect.equal(raw.turns.count, 1)
+                expect.close(try expect.unwrap(raw.turns.first).start, 300, tolerance: 0.001)
+            },
+
+            test("a reader that slows mid-call keeps producing turns") { expect in
+                // The estimate used to learn only from intervals that fit, so a
+                // reader which abruptly slowed never caught up: it froze at the
+                // old rate, every later reading tripped the rule, and every turn
+                // was closed at its own start and discarded for the rest of the
+                // call. A huddle growing from two people to ten steps the walk
+                // cost up in exactly one jump.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                for tick in stride(from: 0.0, through: 10.0, by: 0.5) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                for tick in stride(from: 15.0, through: 60.0, by: 5.0) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                let raw = builder.finish()
+                let covered = raw.turns.reduce(0) { $0 + $1.duration }
+                // The transition itself is a real gap and costs one boundary.
+                // Everything after it has to be turns again.
+                expect.isTrue(
+                    covered >= 50, "only \(covered)s of 60 survived the slowdown"
+                )
+                expect.close(try expect.unwrap(raw.turns.last).end, 60, tolerance: 0.001)
+            },
+
+            test("a degraded reader still recognises a real blackout") { expect in
+                // The ceiling. Without it a reader that slowed far enough would
+                // set a threshold long enough to swallow any silence.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                for tick in stride(from: 0.0, through: 200.0, by: 10.0) {
+                    builder.record(SensorObservation(at: tick, participants: roster, speakingID: "U1"))
+                }
+                builder.record(SensorObservation(at: 900, participants: roster, speakingID: "U1"))
+                builder.record(SensorObservation(at: 910, participants: roster, speakingID: "U1"))
+                let raw = builder.finish()
+                expect.isTrue(raw.turns.count >= 2, "the blackout did not end a turn")
+                expect.close(try expect.unwrap(raw.turns.first).end, 200, tolerance: 0.001)
+            },
+
             test("a blackout ends the turn however fast the reader was") { expect in
                 // The same rule the other way round. At a fast cadence a long
                 // silence is unmistakable, and the turn has to end at the last

@@ -933,7 +933,7 @@ public actor ProcessingPipeline {
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
 
-        let settled = try await constrainToSensorCount(
+        let settled = await constrainToSensorCount(
             store: store, metadata: metadata, track: track,
             audio: audio, leadIn: leadIn, run: run, embeddings: output.chunkEmbeddings
         )
@@ -963,7 +963,7 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: MeetingMetadata,
         track: CaptureTrack, audio: URL, leadIn: Double, run: DiarizationRun,
         embeddings: [DiarizationChunkEmbedding]
-    ) async throws -> (run: DiarizationRun, embeddings: [DiarizationChunkEmbedding]) {
+    ) async -> (run: DiarizationRun, embeddings: [DiarizationChunkEmbedding]) {
         // Every path that declines to re-cluster hands back the run and the
         // vectors that produced it, untouched.
         let unchanged = (run: run, embeddings: embeddings)

@@ -199,7 +199,7 @@ public struct SensorObservation: Sendable, Equatable {
 /// Pure and incremental so the recording path can hand it one reading at a time
 /// and the result can be tested without a meeting.
 public struct SensorTimelineBuilder: Sendable {
-    /// The shortest silence that counts as the sensor having stopped watching.
+    /// The floor under the silence that ends a turn.
     ///
     /// A turn says somebody held the floor between two readings that said so. It
     /// is not a claim about a stretch nobody looked at. Without an upper bound an
@@ -207,20 +207,19 @@ public struct SensorTimelineBuilder: Sendable {
     /// landed on every cluster after the sensor went quiet, at full coverage and
     /// with no runner-up to trip the margin rule.
     public static let minimumGapSeconds: Double = 3
+    /// The ceiling, so a long silence always ends a turn no matter how slow the
+    /// reader had become. Without it a reader that degraded far enough would
+    /// stop recognising a blackout as one.
+    public static let maximumGapSeconds: Double = 30
     /// How many times the established cadence a silence has to exceed.
-    ///
-    /// Measured against the cadence rather than against a fixed duration,
-    /// because the reader's own speed is not a constant. Detection asks twice a
-    /// second, but the accessibility walk crosses a process boundary and slows
-    /// when Slack is busy. A fixed three second rule looked right at a 0.5 s
-    /// cadence and silently destroyed every turn at a four second one: each
-    /// reading tripped the rule, each turn closed at its own start, and the
-    /// recording ended with a full roster, no turns, and nothing distinguishing
-    /// that from nobody having spoken.
-    ///
-    /// A discontinuity is what actually matters. Steady readings never trip this
-    /// however slow they are, and a blackout trips it however fast they were.
     public static let gapCadenceMultiple: Double = 6
+    /// What the reader is expected to manage before it has managed anything.
+    ///
+    /// Detection asks twice a second. The estimate starts here rather than at
+    /// the first observed interval, because deriving the first threshold from
+    /// the very gap being judged makes that gap unjudgeable: a five minute
+    /// silence would set a thirty minute threshold and pass.
+    public static let defaultIntervalSeconds: Double = 0.5
 
     private let source: String
     private var order: [String] = []
@@ -232,10 +231,15 @@ public struct SensorTimelineBuilder: Sendable {
     private var lastAt: Double = 0
     private var sawFirstReading = false
     /// The cadence this reader has actually been managing, not the one it was
-    /// asked for.
-    private var typicalInterval: Double?
+    /// asked for. The walk crosses a process boundary and slows when Slack is
+    /// busy, so the rate readings arrive at is not the rate they were requested
+    /// at.
+    private var typicalInterval: Double
 
-    public init(source: String) { self.source = source }
+    public init(source: String, expectedInterval: Double = defaultIntervalSeconds) {
+        self.source = source
+        self.typicalInterval = max(0.05, expectedInterval)
+    }
 
     public mutating func record(_ observation: SensorObservation) {
         // An empty roster is no information, not an empty room. Slack's
@@ -252,15 +256,21 @@ public struct SensorTimelineBuilder: Sendable {
         // have been held up to the last reading that saw it.
         let interval = observation.at - lastAt
         if sawFirstReading {
-            let cadence = typicalInterval ?? interval
-            let allowed = max(Self.minimumGapSeconds, cadence * Self.gapCadenceMultiple)
+            let allowed = min(
+                Self.maximumGapSeconds,
+                max(Self.minimumGapSeconds, typicalInterval * Self.gapCadenceMultiple)
+            )
             if interval > allowed { closeTurn(at: lastAt) }
-            // A gap is not evidence about the cadence, so it does not move the
-            // estimate. Ordinary readings pull it slowly, which keeps one slow
-            // walk from being mistaken for a new normal.
-            if interval <= allowed {
-                typicalInterval = ((typicalInterval ?? interval) * 3 + interval) / 4
-            }
+            // Every interval moves the estimate, including one that just ended a
+            // turn. Learning only from intervals that fit meant a reader which
+            // abruptly slowed never caught up: the estimate froze at the old
+            // rate, every later reading tripped, and every turn was closed at
+            // its own start and discarded for the rest of the call.
+            //
+            // A gap contributes only what the threshold allowed, so a blackout
+            // drags the estimate a little rather than redefining the cadence
+            // around itself, and the ceiling above bounds where that can end up.
+            typicalInterval = (typicalInterval * 3 + min(interval, allowed)) / 4
         }
         sawFirstReading = true
         lastAt = observation.at

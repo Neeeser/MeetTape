@@ -114,27 +114,53 @@ public struct SlackAccessibilityReader: Sendable {
         self.bundleIdentifier = bundleIdentifier
     }
 
-    /// Processes already asked to build their web tree. Keyed by pid, so a
-    /// relaunched Slack is asked again.
-    private static let enabledPIDs = OSAllocatedUnfairLock<Set<pid_t>>(initialState: [])
+    /// What is known about each Slack process's web tree. Keyed by pid, so a
+    /// relaunched Slack starts over.
+    private struct WebTreeState {
+        var isBuilt = false
+        /// Sets that did not take. Slack's accessibility server is not up the
+        /// instant the app launches, so a first failure is worth retrying, and
+        /// retrying twice a second forever is not.
+        var failures = 0
+    }
+
+    private static let webTrees =
+        OSAllocatedUnfairLock<[pid_t: WebTreeState]>(initialState: [:])
+    /// After this many failed sets, stop paying for the second walk that only
+    /// exists to populate a tree this process is never going to get.
+    private static let webTreeAttemptLimit = 5
 
     static func webTreeIsBuilt(pid: pid_t) -> Bool {
-        enabledPIDs.withLock { $0.contains(pid) }
+        webTrees.withLock { $0[pid]?.isBuilt ?? false }
+    }
+
+    /// Whether asking again is still worth a walk.
+    static func webTreeIsWorthRetrying(pid: pid_t) -> Bool {
+        webTrees.withLock { ($0[pid]?.failures ?? 0) < webTreeAttemptLimit }
+    }
+
+    /// Forgets a process, so a Slack with no huddle running goes back to the
+    /// cheap walk. The attribute itself cannot be unset from here, but nothing
+    /// outside a huddle needs what it exposes.
+    static func forgetWebTree(pid: pid_t) {
+        webTrees.withLock { $0[pid] = nil }
     }
 
     private static func enableWebTree(_ application: AXUIElement, pid: pid_t) {
-        let alreadyEnabled = enabledPIDs.withLock { $0.contains(pid) }
+        let alreadyEnabled = webTreeIsBuilt(pid: pid)
         guard !alreadyEnabled else { return }
         let result = AXUIElementSetAttributeValue(
             application, "AXManualAccessibility" as CFString, kCFBooleanTrue
         )
-        // Only a set that worked counts. Slack's accessibility server is not up
-        // the instant the app launches, and recording the attempt regardless
-        // meant one early failure left the web tree unbuilt for the life of that
-        // process: every tile identifier empty, the roster silently dead, and
-        // nothing to see until the user restarted Slack.
-        guard result == .success else { return }
-        enabledPIDs.withLock { $0.insert(pid) }
+        // Only a set that worked counts as built. Recording the attempt
+        // regardless meant one early failure left the web tree unbuilt for the
+        // life of that process: every tile identifier empty, the roster silently
+        // dead, and nothing to see until the user restarted Slack.
+        webTrees.withLock { states in
+            var state = states[pid] ?? WebTreeState()
+            if result == .success { state.isBuilt = true } else { state.failures += 1 }
+            states[pid] = state
+        }
     }
 
     public func read() -> SlackAccessibilityObservation {
@@ -157,22 +183,6 @@ public struct SlackAccessibilityReader: Sendable {
             return SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: true)
         }
 
-        var hasLeave = false
-        var muted: Bool?
-        var title: String?
-        var visitedNodes = 0
-        var truncated = false
-        // Each window gets its own budget, so a large workspace window cannot
-        // consume the whole allowance before the huddle window is reached.
-        //
-        // Raised with the depth limit. The walk goes to 24 now because the
-        // huddle tiles sit deeper than the controls do, and a depth-first walk
-        // spends budget on depth before breadth, so holding the old allowance
-        // would have reached fewer sibling subtrees than before. A whole Slack
-        // process measured 708 nodes with the web tree built, so this is a wide
-        // margin rather than a tuned number.
-        let budgetPerWindow = 20_000
-
         // Tiles exist only inside a huddle, and their identifiers only once
         // Chromium has been asked to build the web tree. Outside a huddle both
         // are pure cost on a walk that runs twice a second, so the first pass
@@ -181,13 +191,21 @@ public struct SlackAccessibilityReader: Sendable {
 
         // A huddle was found and this pass was not looking for tiles, which is
         // the first poll of every huddle and of every launch. Ask for the tree
-        // and look again rather than reporting a huddle with nobody in it: one
-        // extra walk, once, against a roster that would otherwise arrive a poll
-        // late every time the app restarts mid-call.
-        if pass.hasLeave, !pass.wantedTiles {
+        // and look again rather than reporting a huddle with nobody in it,
+        // rather than letting the roster arrive a poll late every time the app
+        // restarts mid-call.
+        //
+        // Normally one extra walk on the first poll of a huddle. Where the set
+        // never takes it would be one extra walk on every poll, which is what
+        // the retry limit bounds.
+        if pass.hasLeave, !pass.wantedTiles, Self.webTreeIsWorthRetrying(pid: pid) {
             Self.enableWebTree(application, pid: pid)
             pass = scan(windows: windows, wantsTiles: true)
         }
+        // No huddle, so nothing needs the deep walk or the identifiers it reads.
+        // Without this the first huddle of a Slack session left every later poll
+        // paying for a tree with nothing in it.
+        if !pass.hasLeave { Self.forgetWebTree(pid: pid) }
 
         return SlackAccessibilityObservation(
             hasLeaveHuddleControl: pass.hasLeave,

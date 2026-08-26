@@ -31,7 +31,11 @@ function readDocuments() {
   const documents = [document];
   for (const frame of document.querySelectorAll('iframe')) {
     try {
-      if (frame.contentDocument) documents.push(frame.contentDocument);
+      // Reading through a frame that is being torn down throws, and an
+      // exception here would abort the whole tick, so the tab would report no
+      // lifecycle state at all rather than a slightly stale roster.
+      const doc = frame.contentDocument;
+      if (doc && typeof doc.querySelectorAll === 'function') documents.push(doc);
     } catch {
       // Cross-origin. Nothing to read and nothing to report.
     }
@@ -46,6 +50,12 @@ function readDocuments() {
 // obfuscated and rotate, so what gets reported is the class string itself and
 // the tracker decides who is talking from whether it keeps changing.
 function readMeetTiles() {
+  // Meet marks the local user's own tile, and finding it matters more than it
+  // looks. The far-end track is a mixdown of everyone else, so a turn saying the
+  // local user held the floor cannot explain a voice heard there. Without this
+  // flag their turns compete for remote clusters and put their own name on
+  // whoever they talked over.
+  const selfID = readMeetSelfID();
   const tiles = [];
   for (const node of document.querySelectorAll('[data-participant-id]')) {
     const id = node.getAttribute('data-participant-id');
@@ -54,10 +64,29 @@ function readMeetTiles() {
     tiles.push({
       id,
       name: (node.innerText || '').trim().split('\n')[0] || undefined,
-      meter: meter ? (meter.className || '').toString() : undefined,
+      isSelf: !!selfID && id === selfID,
+      // getAttribute, not className: on an SVG element className is an
+      // SVGAnimatedString whose toString is a constant, which would make the
+      // meter look permanently still and kill speaking detection silently.
+      meter: meter ? (meter.getAttribute('class') || '') : undefined,
     });
   }
   return tiles;
+}
+
+// The local user's participant id, from the tile Meet labels as theirs.
+//
+// Meet writes "You" into the local tile's own name. Nothing here falls back to
+// a guess: an unknown self is reported as unknown, and the app then keeps the
+// local user out of naming by other means rather than picking the wrong tile.
+function readMeetSelfID() {
+  for (const node of document.querySelectorAll('[data-participant-id]')) {
+    const id = node.getAttribute('data-participant-id');
+    if (!id) continue;
+    const label = `${node.getAttribute('aria-label') || ''} ${node.innerText || ''}`;
+    if (/\byou\b/i.test(label)) return id;
+  }
+  return null;
 }
 
 // Zoom's roster, when it is on screen at all.
@@ -68,17 +97,29 @@ function readMeetTiles() {
 // panel is open and nothing when it is not, which is the honest shape of what
 // Zoom offers.
 function readZoomTiles() {
+  // Zoom gives less than the other two, and the reason is architectural. It
+  // decodes in WebAssembly and paints video into a canvas, so a 98 second
+  // two-person probe found no participant element, no roster and no speaking
+  // indicator anywhere in the DOM. What it does render, while the participants
+  // panel is open, is a row per person.
+  //
+  // Only a real identifier is accepted. Zoom's accessible label mixes the name
+  // with role and mute state, so it changes when someone mutes; keying a person
+  // on it produced several entries for one person across a call and merged two
+  // people who share a display name. An identifier is what ties a person to a
+  // voice, so a synthesised one is worse than none.
   const tiles = [];
   for (const doc of readDocuments()) {
-    for (const node of doc.querySelectorAll('[class*="participants-item"]')) {
+    for (const node of doc.querySelectorAll('[data-participant-id],[data-user-id]')) {
+      const id = node.getAttribute('data-participant-id') || node.getAttribute('data-user-id');
+      if (!id) continue;
       const label = (node.getAttribute('aria-label') || node.textContent || '').trim();
-      if (!label) continue;
-      const name = label.split('\n')[0].slice(0, 80);
-      if (!name) continue;
       tiles.push({
-        id: `zoom:${name}`,
-        name,
-        muted: /(^|[^n])muted/i.test(label) ? true : undefined,
+        id: `zoom:${id}`,
+        // The label carries state as well as the name, so only the part before
+        // the first comma is treated as the name.
+        name: label.split(',')[0].split('\n')[0].trim().slice(0, 80) || undefined,
+        muted: /\bmuted\b/i.test(label) ? true : undefined,
       });
     }
   }
@@ -86,8 +127,15 @@ function readZoomTiles() {
 }
 
 function readTiles(provider) {
-  if (provider === 'meet') return readMeetTiles();
-  if (provider === 'zoom') return readZoomTiles();
+  // A page the extension does not control can throw from any of this. A tick
+  // that reports no roster is a meeting named by voice alone; a tick that throws
+  // reports no lifecycle either, and the app stops trusting the sensor.
+  try {
+    if (provider === 'meet') return readMeetTiles();
+    if (provider === 'zoom') return readZoomTiles();
+  } catch {
+    return [];
+  }
   return [];
 }
 

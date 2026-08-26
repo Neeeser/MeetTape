@@ -746,9 +746,7 @@ public final class PipitRuntime {
                 layout: created.store.layout, meetingID: metadata.id, source: request.source
             )
             currentMeeting = (metadata, created.store)
-            sensorRecorder = SensorRecorder(
-                anchorMonotonic: clock.monotonicSeconds, anchorDate: clock.now
-            )
+            sensorRecorder = SensorRecorder(anchorMonotonic: clock.monotonicSeconds)
             refreshRecentMeetings()
             return true
         } catch {
@@ -783,9 +781,12 @@ public final class PipitRuntime {
     private func writeSensors(store: MeetingStore, timeline: RecordingTimeline) {
         guard var recorder = sensorRecorder else { return }
         sensorRecorder = nil
-        let raw = recorder.finish(
-            at: clock.monotonicSeconds, recordingStartedAt: timeline.startedAt
-        )
+        // Without an origin the readings cannot be placed, and a timeline at an
+        // unknown offset would still overlap clusters and name people wrongly.
+        guard let raw = recorder.finish(
+            at: clock.monotonicSeconds,
+            timelineOriginHostTime: timeline.timelineOriginHostTime
+        ) else { return }
         guard !raw.participants.isEmpty else { return }
         do {
             try store.writeRawSensors(raw)
@@ -842,8 +843,9 @@ public final class PipitRuntime {
     private func finish(reason: String) async {
         let snapshot = await captureEngine.stop(reason: reason)
         provisionalPrompt = nil
-        guard let meeting = currentMeeting else { return }
+        guard let meeting = currentMeeting else { sensorRecorder = nil; return }
         currentMeeting = nil
+        defer { sensorRecorder = nil }
 
         do {
             let timeline = try meeting.store.readTimeline()

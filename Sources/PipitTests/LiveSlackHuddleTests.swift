@@ -46,10 +46,13 @@ enum LiveSlackHuddleTests {
                     observation.tiles.filter(\.isSelf).count, 1,
                     "exactly one tile is the local user"
                 )
-                let summary = observation.tiles
-                    .map { "\($0.displayName ?? "?") self=\($0.isSelf) muted=\(String(describing: $0.isMuted)) speaking=\($0.isSpeaking)" }
-                    .joined(separator: " | ")
-                print("    huddle: \(summary)")
+                // Counts and states only. A display name is meeting content and
+                // does not belong on a console any more than in a log.
+                print(
+                    "    huddle: \(observation.tiles.count) tiles, "
+                        + "\(observation.tiles.filter { $0.isMuted == false }.count) unmuted, "
+                        + "\(observation.tiles.filter(\.isSpeaking).count) speaking"
+                )
             },
 
             test("a reading folds into a timeline the attribution can use") { expect in
@@ -57,7 +60,7 @@ enum LiveSlackHuddleTests {
                     throw TestSkip("set PIPIT_LIVE_SLACK=1 with a huddle running")
                 }
                 let reader = SlackAccessibilityReader()
-                var recorder = SensorRecorder(anchorMonotonic: 0, anchorDate: Date())
+                var recorder = SensorRecorder(anchorMonotonic: 0)
                 // Two seconds of real polling at the rate detection uses.
                 for tick in 0..<4 {
                     let observation = reader.read()
@@ -76,7 +79,12 @@ enum LiveSlackHuddleTests {
                         )
                     ))
                 }
-                let raw = recorder.finish(at: 2, recordingStartedAt: nil)
+                // Origin zero: this test folds readings that were stamped from
+                // zero, so the shift is a no-op and the fold is what is under test.
+                let raw = try expect.unwrap(
+                    recorder.finish(at: 2, timelineOriginHostTime: 0),
+                    "a reading was taken but no record came out"
+                )
                 expect.isFalse(raw.participants.isEmpty, "no roster survived the fold")
                 print("    timeline: \(raw.participants.count) people, \(raw.turns.count) turns")
             },

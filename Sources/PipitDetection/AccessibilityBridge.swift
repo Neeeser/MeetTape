@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 import Foundation
 import PipitCore
 
@@ -86,26 +87,6 @@ public enum AccessibilityBridge {
         }
     }
 
-    /// Depth- and node-bounded walk. Returns false from `visit` to stop early.
-    ///
-    /// Returns false when the budget ran out, which the caller must treat as "no
-    /// information" rather than "not present": Slack's tree is large enough that a
-    /// truncated walk can miss the huddle window entirely.
-    static func walk(
-        _ element: AXUIElement, maxDepth: Int, budget: inout Int, depth: Int = 0,
-        visit: (Node) -> Bool
-    ) -> Bool {
-        guard budget > 0 else { return false }
-        budget -= 1
-        if !visit(snapshot(element)) { return false }
-        guard depth < maxDepth else { return true }
-        for child in children(element) {
-            if !walk(child, maxDepth: maxDepth, budget: &budget, depth: depth + 1, visit: visit) {
-                return false
-            }
-        }
-        return true
-    }
 }
 
 /// Reads Slack's huddle controls and its roster.
@@ -127,6 +108,22 @@ public struct SlackAccessibilityReader: Sendable {
         self.bundleIdentifier = bundleIdentifier
     }
 
+    /// Processes already asked to build their web tree. Keyed by pid, so a
+    /// relaunched Slack is asked again.
+    private static let enabledPIDs = OSAllocatedUnfairLock<Set<pid_t>>(initialState: [])
+
+    private static func enableWebTree(_ application: AXUIElement, pid: pid_t) {
+        let alreadyEnabled = enabledPIDs.withLock { pids -> Bool in
+            if pids.contains(pid) { return true }
+            pids.insert(pid)
+            return false
+        }
+        guard !alreadyEnabled else { return }
+        AXUIElementSetAttributeValue(
+            application, "AXManualAccessibility" as CFString, kCFBooleanTrue
+        )
+    }
+
     public func read() -> SlackAccessibilityObservation {
         guard AccessibilityBridge.isTrusted else { return .unavailable }
         guard let pid = AccessibilityBridge.processID(forBundleIdentifier: bundleIdentifier) else {
@@ -135,10 +132,11 @@ public struct SlackAccessibilityReader: Sendable {
 
         let application = AXUIElement.forApplication(pid: pid)
         // Chromium only builds the web tree once a client asks for it, and the
-        // tile identifiers live in that tree.
-        AXUIElementSetAttributeValue(
-            application, "AXManualAccessibility" as CFString, kCFBooleanTrue
-        )
+        // tile identifiers live in that tree. The flag latches, so it is set
+        // once per Slack process rather than on every poll: asking twice a
+        // second makes Slack rebuild and maintain a full accessibility tree
+        // whether or not a huddle is running.
+        Self.enableWebTree(application, pid: pid)
         let windows = AccessibilityBridge.children(application)
         guard !windows.isEmpty else {
             return SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: true)

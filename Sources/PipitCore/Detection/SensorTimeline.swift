@@ -156,6 +156,10 @@ public struct SensorTimelineBuilder: Sendable {
         // live huddle, and treating that as everyone leaving would chop every
         // turn into fragments.
         guard !observation.participants.isEmpty else { return }
+        // Detection delivers snapshots as independent tasks, which gives no
+        // ordering guarantee. An earlier reading arriving late would close the
+        // open turn at a moment before it began, dropping it entirely.
+        guard observation.at >= lastAt else { return }
 
         lastAt = observation.at
         for person in observation.participants {
@@ -172,7 +176,11 @@ public struct SensorTimelineBuilder: Sendable {
         }
         unmuted.formUnion(observation.unmutedIDs)
 
-        let speaking = observation.speakingID
+        // The floor can only be held by someone the same reading listed. A page
+        // that reports an identifier it did not put in its roster would
+        // otherwise create a participant nothing can name, which still counts
+        // towards the speaker count and still re-clusters the audio.
+        let speaking = observation.speakingID.flatMap { known[$0] != nil ? $0 : nil }
         if speaking != openID {
             closeTurn(at: observation.at)
             if let speaking {
@@ -238,22 +246,25 @@ public struct SensorReading: Sendable, Equatable {
     }
 }
 
-/// Accumulates readings across one recording and rebases them at the end.
+/// Accumulates readings across one recording and rebases them onto its timeline.
 ///
-/// Two clocks meet here. Readings are stamped with monotonic host time, the same
-/// clock every audio buffer carries, and the manifest records when the recording
-/// began as a date. Capture is armed before a meeting is committed and keeps the
-/// pre-roll it already had, so the recording is older than the sensor's own
-/// count of the call. The gap is one constant, measured once at the end.
+/// One clock, deliberately. Readings and audio buffers are both stamped with
+/// monotonic host time, so placing a reading on the meeting timeline is a
+/// subtraction rather than a correlation, and a long call cannot drift.
+///
+/// The origin is the earliest frame any track recorded, which is what every
+/// diarization interval is measured from. It is not the moment the meeting was
+/// committed: capture is armed first and keeps the pre-roll it had already
+/// buffered, so the recording can be a good fifteen seconds older than the
+/// commit. Anchoring on the commit put every turn that far early, and because a
+/// uniform shift leaves overlap high, no coverage guard would have caught it.
 public struct SensorRecorder: Sendable {
     private var builder: SensorTimelineBuilder?
     private let anchorMonotonic: Double
-    private let anchorDate: Date
     private var lastMonotonic: Double
 
-    public init(anchorMonotonic: Double, anchorDate: Date) {
+    public init(anchorMonotonic: Double) {
         self.anchorMonotonic = anchorMonotonic
-        self.anchorDate = anchorDate
         self.lastMonotonic = anchorMonotonic
     }
 
@@ -265,11 +276,17 @@ public struct SensorRecorder: Sendable {
     }
 
     /// The record to write, on the recording's own timeline.
-    public mutating func finish(at monotonic: Double, recordingStartedAt: Date?) -> RawSensors {
-        guard var builder else { return RawSensors(source: "none") }
+    ///
+    /// Without an origin the turns are dropped rather than written at an unknown
+    /// offset. A timeline nobody can place is worse than no timeline: it still
+    /// overlaps clusters, so it would name people confidently and wrongly.
+    public mutating func finish(
+        at monotonic: Double, timelineOriginHostTime: Double?
+    ) -> RawSensors? {
+        guard var builder else { return nil }
         let raw = builder.finish(at: max(monotonic, lastMonotonic) - anchorMonotonic)
         self.builder = nil
-        guard let start = recordingStartedAt else { return raw }
-        return raw.shifted(by: anchorDate.timeIntervalSince(start))
+        guard let origin = timelineOriginHostTime else { return nil }
+        return raw.shifted(by: anchorMonotonic - origin)
     }
 }

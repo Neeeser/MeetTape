@@ -97,6 +97,20 @@ public struct RecordingTimeline: Sendable, Equatable {
         segments(track: track).compactMap(\.resolvedFirstFrameHostTime).first
     }
 
+    /// Host time of the meeting timeline's own zero.
+    ///
+    /// Every interval on the meeting timeline is measured from the earliest
+    /// frame any track recorded, which is what `leadIn` is relative to. This is
+    /// that moment on the capture clock, so anything else stamped with host time
+    /// can be placed on the same timeline.
+    ///
+    /// Not `startedAt`. That is the wall clock when the session was committed,
+    /// and capture keeps a pre-roll it had already buffered, so the recording is
+    /// older than the commit by as much as the pre-roll window.
+    public var timelineOriginHostTime: Double? {
+        CaptureTrack.allCases.compactMap { firstFrameHostTime(track: $0) }.min()
+    }
+
     /// How long after the meeting started this track's first frame arrived.
     ///
     /// The two sources start at different moments. The remote writer opens on the

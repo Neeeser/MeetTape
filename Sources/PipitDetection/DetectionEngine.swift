@@ -119,7 +119,12 @@ public final class DetectionEngine: @unchecked Sendable {
             )
         }
         for kind in [BrowserKind.firefox, .chrome] {
-            guard let event = browsers[kind]?.sensor.lastEvent,
+            // currentEvent, not lastEvent. The latter is whatever arrived most
+            // recently from any tab, so a second Meet tab sitting on a landing
+            // page reporting `browsing` would hide the roster of the call being
+            // recorded, and a dead content script would leave a stale event
+            // latched. currentEvent weighs tabs and drops the untrustworthy.
+            guard let event = browsers[kind]?.sensor.currentEvent(at: now),
                   event.state.isActiveCall,
                   let people = event.people, !people.isEmpty
             else { continue }

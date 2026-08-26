@@ -275,6 +275,23 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         entries[key] = assignment
     }
 
+    /// Attaches a voice identity to a cluster without touching its name.
+    ///
+    /// Naming and identity are two different facts, and only naming has a
+    /// precedence order. A cluster the meeting client named outranks a voice
+    /// match, so the match's assignment is rejected, and with it went the only
+    /// thing carrying `identityID`. The cluster then showed a name with no
+    /// person behind it: no face in the meetings list, no profile to learn from,
+    /// and nothing for a later meeting to recognise.
+    ///
+    /// Only fills an empty link. Whoever set the name is not overruled here, and
+    /// a link a person confirmed is never replaced by a guess.
+    public mutating func linkIdentity(_ identityID: IdentityID, to key: String) {
+        guard var existing = entries[key], existing.identityID == nil else { return }
+        existing.identityID = identityID
+        entries[key] = existing
+    }
+
     /// Applies a human correction to a whole cluster, which always wins.
     public mutating func assign(
         _ name: String, to key: String, participantID: String? = nil, identityID: IdentityID? = nil

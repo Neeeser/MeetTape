@@ -54,6 +54,14 @@ public enum SensorAttribution {
     /// Below this share of speech covered, the two clocks do not describe the
     /// same call and nothing is named.
     public static let minimumTimelineCoverage: Double = 0.15
+    /// How long someone has to hold the floor before they count as a speaker.
+    ///
+    /// Slack's flag releases about 1.5 s after the voice stops, so a cough, a
+    /// "mhm" or a one-word "yeah" all produce a turn. Counting those would tell
+    /// the diarizer to find a cluster for every person who ever made a noise,
+    /// and re-clustering a two-voice track into five splits the two real
+    /// speakers apart.
+    public static let minimumSpeakerSeconds: Double = 6
 
     public static func attribute(
         intervals: [DiarizationInterval],
@@ -62,8 +70,12 @@ public enum SensorAttribution {
         minimumMargin: Double = minimumMargin,
         minimumTimelineCoverage: Double = minimumTimelineCoverage
     ) -> Result {
-        let speaking = Set(sensors.turns.map(\.participantID))
-        let countHint = speaking.isEmpty ? nil : speaking.count
+        var heldFor: [String: Double] = [:]
+        for turn in sensors.turns { heldFor[turn.participantID, default: 0] += turn.duration }
+        let speakers = heldFor.filter { $0.value >= minimumSpeakerSeconds }.count
+        // Absent rather than zero: the sensor saw turns and none of them was a
+        // real turn, which is not the same as knowing nobody spoke.
+        let countHint = speakers > 0 ? speakers : nil
 
         guard !intervals.isEmpty, !sensors.turns.isEmpty else {
             return Result(speakerCountHint: countHint, coverage: 0)

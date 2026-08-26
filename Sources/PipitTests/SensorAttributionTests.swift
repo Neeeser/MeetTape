@@ -112,6 +112,39 @@ enum SensorAttributionTests {
                 expect.equal(raw.participants.first?.displayName, "Priya")
             },
 
+            test("a speaker nobody listed cannot hold the floor") { expect in
+                // A page reporting an identifier it did not put in its own
+                // roster would create a participant nothing can name, which
+                // still counts towards the speaker count and still re-clusters
+                // the audio.
+                var builder = SensorTimelineBuilder(source: "meet")
+                let roster = [participant("d406", "Ada")]
+                builder.record(SensorObservation(
+                    at: 0, participants: roster, speakingID: "d999"
+                ))
+                builder.record(SensorObservation(
+                    at: 5, participants: roster, speakingID: "d999"
+                ))
+                let raw = builder.finish(at: 10)
+                expect.equal(raw.turns.count, 0)
+                expect.equal(raw.participants.count, 1)
+            },
+
+            test("a reading that arrives late does not swallow the open turn") { expect in
+                // Detection delivers snapshots as independent tasks, so ordering
+                // is not guaranteed. Closing a turn at a moment before it began
+                // dropped it outright.
+                var builder = SensorTimelineBuilder(source: "slack")
+                let roster = [participant("U1", "Ada")]
+                builder.record(SensorObservation(at: 0, participants: roster, speakingID: "U1"))
+                builder.record(SensorObservation(at: 10, participants: roster, speakingID: "U1"))
+                // Out of order: an older reading arriving after a newer one.
+                builder.record(SensorObservation(at: 4, participants: roster, speakingID: nil))
+                let raw = builder.finish(at: 12)
+                expect.equal(raw.turns.count, 1)
+                expect.close(try expect.unwrap(raw.turns.first).end, 12, tolerance: 0.001)
+            },
+
             test("a read with no roster does not erase the one we have") { expect in
                 // Slack's accessibility subtree comes back empty intermittently
                 // during a confirmed live huddle, so an empty read means no
@@ -145,6 +178,48 @@ enum SensorAttributionTests {
                 expect.close(try expect.unwrap(moved.turns.first).start, 14.5, tolerance: 0.001)
                 expect.close(try expect.unwrap(moved.turns.first).end, 24.5, tolerance: 0.001)
                 expect.equal(moved.participants, raw.participants)
+            },
+
+            test("readings land on the audio timeline, not on the commit") { expect in
+                // Capture is armed before a meeting is committed and keeps the
+                // pre-roll it already buffered, so the recording starts earlier
+                // than the sensor began counting. Anchoring on the commit put
+                // every turn that far early, and a uniform shift keeps overlap
+                // high, so no coverage guard would have caught it.
+                let preRoll = 15.0
+                let origin = 1_000.0            // host time of the first frame
+                let commit = origin + preRoll   // host time when the meeting committed
+
+                var recorder = SensorRecorder(anchorMonotonic: commit)
+                let roster = [participant("U1", "Ada")]
+                // Ada talks from 20 s to 30 s after the commit.
+                recorder.record(SensorReading(
+                    source: "slack-huddle-ax", at: commit + 20, participants: roster,
+                    speakingID: "U1"
+                ))
+                recorder.record(SensorReading(
+                    source: "slack-huddle-ax", at: commit + 30, participants: roster,
+                    speakingID: nil
+                ))
+                let raw = try expect.unwrap(
+                    recorder.finish(at: commit + 31, timelineOriginHostTime: origin)
+                )
+                let turn = try expect.unwrap(raw.turns.first)
+                // On the audio timeline that is 35 s to 45 s, because the audio
+                // began 15 s before the commit did.
+                expect.close(turn.start, 35, tolerance: 0.001)
+                expect.close(turn.end, 45, tolerance: 0.001)
+            },
+
+            test("no origin means no record rather than one at an unknown offset") { expect in
+                // A timeline nobody can place still overlaps clusters, so it
+                // would name people confidently and wrongly.
+                var recorder = SensorRecorder(anchorMonotonic: 100)
+                recorder.record(SensorReading(
+                    source: "slack-huddle-ax", at: 101,
+                    participants: [participant("U1", "Ada")], speakingID: "U1"
+                ))
+                expect.isNil(recorder.finish(at: 110, timelineOriginHostTime: nil))
             },
 
             test("no offset leaves the record untouched") { expect in
@@ -237,6 +312,37 @@ enum SensorAttributionTests {
                     intervals: [interval("a", 1, 9)], sensors: raw
                 )
                 expect.equal(result.speakerCountHint, 2)
+            },
+
+            test("a one-word interjection does not make somebody a speaker") { expect in
+                // Slack's flag releases about 1.5 s after the voice stops, so a
+                // cough or a "yeah" produces a turn. Counting those told the
+                // diarizer to find a cluster per person who made a noise, which
+                // splits the people who were actually talking.
+                let raw = sensors(
+                    participants: [
+                        participant("U1", "Ada"), participant("U2", "Grace"),
+                        participant("U3", "Nods"), participant("U4", "AlsoNods"),
+                    ],
+                    turns: [
+                        ("U1", 0, 200), ("U2", 200, 400),
+                        ("U3", 400, 401.6), ("U4", 401.6, 403),
+                    ]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 1, 199)], sensors: raw
+                )
+                expect.equal(result.speakerCountHint, 2)
+            },
+
+            test("nothing but interjections gives no count rather than zero") { expect in
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 1.2)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 1)], sensors: raw
+                )
+                expect.isNil(result.speakerCountHint)
             },
 
             test("no turns at all gives no count rather than zero") { expect in

@@ -935,11 +935,15 @@ public actor ProcessingPipeline {
 
         let settled = try await constrainToSensorCount(
             store: store, metadata: metadata, track: track,
-            audio: audio, leadIn: leadIn, run: run
+            audio: audio, leadIn: leadIn, run: run, embeddings: output.chunkEmbeddings
         )
 
+        // The embeddings have to be the ones that produced this run's clusters.
+        // Re-clustering renumbers, so pairing a constrained run with the first
+        // pass's vectors files one person's voice under another's cluster and
+        // then enrols it into their permanent profile.
         try await recordOccurrences(
-            meetingID: metadata.id, run: settled, chunkEmbeddings: output.chunkEmbeddings
+            meetingID: metadata.id, run: settled.run, chunkEmbeddings: settled.embeddings
         )
     }
 
@@ -957,18 +961,24 @@ public actor ProcessingPipeline {
     /// the one outcome renaming cannot recover from.
     private func constrainToSensorCount(
         store: MeetingStore, metadata: MeetingMetadata,
-        track: CaptureTrack, audio: URL, leadIn: Double, run: DiarizationRun
-    ) async throws -> DiarizationRun {
-        guard let reanalyze = backends.reanalyzeDiarization else { return run }
-        guard let sensors = store.readRawSensors() else { return run }
+        track: CaptureTrack, audio: URL, leadIn: Double, run: DiarizationRun,
+        embeddings: [DiarizationChunkEmbedding]
+    ) async throws -> (run: DiarizationRun, embeddings: [DiarizationChunkEmbedding]) {
+        // Every path that declines to re-cluster hands back the run and the
+        // vectors that produced it, untouched.
+        let unchanged = (run: run, embeddings: embeddings)
+        guard let reanalyze = backends.reanalyzeDiarization else { return unchanged }
+        guard let sensors = store.readRawSensors() else { return unchanged }
         let scoped = sensors.excludingSelf()
         let result = SensorAttribution.attribute(intervals: run.intervals, sensors: scoped)
         guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
-            return run
+            return unchanged
         }
         // A timeline that does not describe this recording must not be allowed
         // to choose its speaker count either.
-        guard result.coverage >= SensorAttribution.minimumTimelineCoverage else { return run }
+        guard result.coverage >= SensorAttribution.minimumTimelineCoverage else {
+            return unchanged
+        }
 
         Log.processing.info(
             "sensor speaker count clustered=\(run.speakerCount, privacy: .public) hint=\(hint, privacy: .public)"
@@ -995,14 +1005,14 @@ public actor ProcessingPipeline {
             )
             diarization.setActive(constrained)
             try store.writeRawDiarization(diarization)
-            return constrained
+            return (run: constrained, embeddings: output.chunkEmbeddings)
         } catch {
             // The first clustering is already on disk and already active. A
             // failed refinement leaves the meeting exactly as it was.
             Log.processing.notice(
                 "sensor recluster skipped: \(logSafeDescription(error), privacy: .public)"
             )
-            return run
+            return unchanged
         }
     }
 
@@ -1042,20 +1052,7 @@ public actor ProcessingPipeline {
         }
     }
 
-    /// Measures what the recorded audio holds, once, before the first assembly.
-    ///
-    /// Only here. Every later assembly reads the file, so a rebuild is free and
-    /// gives the same answer: re-measuring would decode both tracks again on
-    /// every re-analysis, and on a machine whose detector has since been
-    /// deleted it would put the fabricated lines back.
-    ///
-    /// Only for a meeting whose microphone track is the local user, which is
-    /// the only track the gate judges. Imported audio would otherwise pay a
-    /// full decode and a detector pass to write a file nothing reads.
-    ///
-    /// Never throws. The words are already safe on disk as raw chunks, and a
-    /// meeting that cannot be measured assembles the way it did before this
-    /// existed: every segment kept. Failing the stage instead would turn an
+
     /// Names clusters from what the meeting client said, where it said enough.
     ///
     /// The decision lives in `SensorAttribution.assignments`, which is pure and
@@ -1075,6 +1072,21 @@ public actor ProcessingPipeline {
         )
     }
 
+    /// Measures what the recorded audio holds, once, before the first assembly.
+    ///
+    /// Only here. Every later assembly reads the file, so a rebuild is free and
+    /// gives the same answer: re-measuring would decode both tracks again on
+    /// every re-analysis, and on a machine whose detector has since been
+    /// deleted it would put the fabricated lines back.
+    ///
+    /// Only for a meeting whose microphone track is the local user, which is
+    /// the only track the gate judges. Imported audio would otherwise pay a
+    /// full decode and a detector pass to write a file nothing reads.
+    ///
+    /// Never throws. The words are already safe on disk as raw chunks, and a
+    /// meeting that cannot be measured assembles the way it did before this
+    /// existed: every segment kept. Failing the stage instead would turn an
+    /// unmeasurable meeting into an unreadable one.
     private func measureSpeech(store: MeetingStore, metadata: MeetingMetadata) async {
         guard metadata.source.micTrackIsLocalUser else { return }
         guard store.readSpeechEvidence() == nil else { return }
@@ -1440,6 +1452,11 @@ public actor ProcessingPipeline {
                 ),
                 for: result.clusterID
             )
+            // The name may have been declined because something outranks this,
+            // which the meeting client's own account of the call does. The
+            // identity is not a name and is linked either way, so a cluster
+            // named from the roster still has a person behind it.
+            speakers.linkIdentity(identity.id, to: result.clusterID)
             if identity.isNamed,
                !metadata.participants.contains(where: { $0.displayName == identity.resolvedName }) {
                 metadata.participants.append(Participant(
@@ -2259,6 +2276,15 @@ public actor ProcessingPipeline {
         )
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
+
+        // Re-clustering renumbers, so every name keyed to the old clusters is
+        // now keyed to nothing. The meeting client's account of the call is
+        // still on disk and still true, so it is applied again here. Without
+        // this, re-analysing a meeting silently threw away its names, including
+        // when re-analysing was the remedy for a bad speaker count.
+        var reNamed = try store.readSpeakerMap()
+        applySensorNames(store: store, diarization: diarization, into: &reNamed)
+        try store.writeSpeakerMap(reNamed)
 
         // Deliberately not deleting this meeting's confirmed enrolments here.
         // The clusters they came from no longer exist under these identifiers,

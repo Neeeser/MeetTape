@@ -69,6 +69,13 @@ public struct RecordingTimeline: Sendable, Equatable {
     public let endReason: String?
     public let segments: [RecordedSegment]
     public let restarts: [ManifestEvent.CaptureRestart]
+    /// When each restart happened, on the capture clock.
+    ///
+    /// The restart payload carries no time of its own, and the only question
+    /// worth asking about a restart is where it falls: one before a track's
+    /// audio began cost that track nothing, and one inside the last segment is
+    /// the single gap no segment boundary can reveal.
+    public let restartMoments: [(track: CaptureTrack, hostTime: Double)]
     public let formatChanges: [ManifestEvent.FormatChange]
     public let markers: [(date: Date, label: String)]
     public let preRollFlushes: [ManifestEvent.PreRollFlushed]
@@ -125,12 +132,21 @@ public struct RecordingTimeline: Sendable, Equatable {
     /// ended, measured on the capture clock and allowed a rotation's worth of
     /// slack, well above the buffer boundary a rotation actually costs.
     public func isContiguous(track: CaptureTrack, tolerance: Double = 0.5) -> Bool {
-        // A restart is a gap by definition, and it is the only evidence for one
-        // that falls inside the last segment: a restart does not force a
-        // rotation, so a sleep and wake in the final thirty seconds leaves the
-        // missing audio with no following segment to measure it against.
-        if restarts.contains(where: { $0.track == track }) { return false }
         let ordered = segments(track: track)
+        // A restart inside the last segment is the one gap no boundary can
+        // show: a restart does not force a rotation, so the frames stop and
+        // resume inside the same file with nothing after it to measure.
+        //
+        // Only that restart. Rebinding the tap is ordinary and mostly costs no
+        // audio at all: it happens once before a track's first frame on the
+        // path where a generic call becomes a recognised one, and again
+        // whenever a browser's helper processes come and go. Those are caught
+        // by the boundary check below if they cost anything, and treating every
+        // restart as a gap threw the record away for most real meetings.
+        if let last = ordered.last, let start = last.resolvedFirstFrameHostTime,
+           restartMoments.contains(where: { $0.track == track && $0.hostTime > start }) {
+            return false
+        }
         for (previous, next) in zip(ordered, ordered.dropFirst()) {
             // A segment whose start was never resolved cannot be compared. It
             // is also not evidence of a gap, and refusing on it would drop the
@@ -237,6 +253,7 @@ public enum ManifestReader {
         var segmentsByKey: [SegmentKey: RecordedSegment] = [:]
         var order: [SegmentKey] = []
         var restarts: [ManifestEvent.CaptureRestart] = []
+        var restartMoments: [(track: CaptureTrack, hostTime: Double)] = []
         var formatChanges: [ManifestEvent.FormatChange] = []
         var markers: [(date: Date, label: String)] = []
         var preRolls: [ManifestEvent.PreRollFlushed] = []
@@ -273,6 +290,7 @@ public enum ManifestReader {
                 formatChanges.append(payload)
             case .captureRestart(let payload):
                 restarts.append(payload)
+                restartMoments.append((track: payload.track, hostTime: line.hostTime))
             case .marker(let payload):
                 markers.append((date: line.wallClock, label: payload.label))
             case .preRollFlushed(let payload):
@@ -289,6 +307,7 @@ public enum ManifestReader {
         return RecordingTimeline(
             meetingID: meetingID, source: source, startedAt: startedAt, endedAt: endedAt,
             endReason: endReason, segments: segments, restarts: restarts,
+            restartMoments: restartMoments,
             formatChanges: formatChanges, markers: markers, preRollFlushes: preRolls,
             hasTruncatedTail: result.hasTruncatedTail
         )

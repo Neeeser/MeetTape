@@ -112,28 +112,43 @@ enum ManifestTests {
                 expect.isFalse(gapped.isContiguous(track: .remote))
             },
 
-            test("a restart with no segment after it is still a gap") { expect in
+            test("a restart inside the last segment is a gap, an earlier one is not") { expect in
                 // A restart does not force a rotation, so a sleep and wake in
                 // the last thirty seconds leaves the missing audio inside the
                 // final segment, with nothing after it to measure against. The
                 // restart record is the only evidence there is.
-                var result = timelineLines(segments: [
-                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30),
-                     host: 1_000.0),
-                ])
-                result = ManifestReadResult(
-                    lines: result.lines + [ManifestLine(
-                        hostTime: 1_020, wallClock: Date(timeIntervalSince1970: 1_020),
-                        event: .captureRestart(.init(
-                            track: .remote, reason: "wake", restartCount: 1
-                        ))
-                    )],
-                    hasTruncatedTail: false, unrecognisedLines: 0
-                )
-                let timeline = ManifestReader.timeline(from: result)
-                expect.isFalse(timeline.isContiguous(track: .remote))
+                func withRestart(at hostTime: Double) -> RecordingTimeline {
+                    let result = timelineLines(segments: [
+                        (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30),
+                         host: 1_000.0),
+                        (track: .remote, index: 2, rate: 48_000.0, frames: Int64(48_000 * 30),
+                         host: 1_030.0),
+                    ])
+                    return ManifestReader.timeline(from: ManifestReadResult(
+                        lines: result.lines + [ManifestLine(
+                            hostTime: hostTime, wallClock: Date(timeIntervalSince1970: hostTime),
+                            event: .captureRestart(.init(
+                                track: .remote, reason: "wake", restartCount: 1
+                            ))
+                        )],
+                        hasTruncatedTail: false, unrecognisedLines: 0
+                    ))
+                }
+
+                expect.isFalse(withRestart(at: 1_045).isContiguous(track: .remote))
+                // Rebinding the tap is ordinary and usually costs no audio: it
+                // happens before a track's first frame when a generic call
+                // becomes a recognised one, and whenever a browser's helper
+                // processes come and go. Where it does cost audio, the segment
+                // boundary shows it; treating every restart as a gap threw the
+                // record away for most real meetings.
                 expect.isTrue(
-                    timeline.isContiguous(track: .mic), "the other track is unaffected"
+                    withRestart(at: 1_010).isContiguous(track: .remote),
+                    "an earlier restart the boundaries already cover"
+                )
+                expect.isTrue(
+                    withRestart(at: 1_045).isContiguous(track: .mic),
+                    "the other track is unaffected"
                 )
             },
 

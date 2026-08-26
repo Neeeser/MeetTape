@@ -69,6 +69,13 @@ public struct RecordingTimeline: Sendable, Equatable {
     public let endReason: String?
     public let segments: [RecordedSegment]
     public let restarts: [ManifestEvent.CaptureRestart]
+    /// When each restart happened, on the capture clock.
+    ///
+    /// The restart payload carries no time of its own, and the only question
+    /// worth asking about a restart is where it falls: one before a track's
+    /// audio began cost that track nothing, and one inside the last segment is
+    /// the single gap no segment boundary can reveal.
+    public let restartMoments: [(track: CaptureTrack, hostTime: Double)]
     public let formatChanges: [ManifestEvent.FormatChange]
     public let markers: [(date: Date, label: String)]
     public let preRollFlushes: [ManifestEvent.PreRollFlushed]
@@ -95,6 +102,63 @@ public struct RecordingTimeline: Sendable, Equatable {
     /// Host time of a track's first recorded frame.
     public func firstFrameHostTime(track: CaptureTrack) -> Double? {
         segments(track: track).compactMap(\.resolvedFirstFrameHostTime).first
+    }
+
+    /// Host time of the meeting timeline's own zero.
+    ///
+    /// Every interval on the meeting timeline is measured from the earliest
+    /// frame any track recorded, which is what `leadIn` is relative to. This is
+    /// that moment on the capture clock, so anything else stamped with host time
+    /// can be placed on the same timeline.
+    ///
+    /// Not `startedAt`. That is the wall clock when the session was committed,
+    /// and capture keeps a pre-roll it had already buffered, so the recording is
+    /// older than the commit by as much as the pre-roll window.
+    public var timelineOriginHostTime: Double? {
+        CaptureTrack.allCases.compactMap { firstFrameHostTime(track: $0) }.min()
+    }
+
+    /// Whether one track's audio runs without a gap in it.
+    ///
+    /// The meeting timeline is concatenated-audio time: segments are joined
+    /// with nothing between them, so a stretch of missing audio makes
+    /// everything after it sit earlier on the timeline than in host time by the
+    /// length of the gap. Anything placed by a single host-time shift, which is
+    /// how sensor readings land, is only valid while this holds.
+    ///
+    /// Segment count says nothing about this. The writer rotates every thirty
+    /// seconds, so a five minute call is ten segments recorded back to back.
+    /// What matters is whether each segment begins where the one before it
+    /// ended, measured on the capture clock and allowed a rotation's worth of
+    /// slack, well above the buffer boundary a rotation actually costs.
+    public func isContiguous(track: CaptureTrack, tolerance: Double = 0.5) -> Bool {
+        let ordered = segments(track: track)
+        // A restart inside the last segment is the one gap no boundary can
+        // show: a restart does not force a rotation, so the frames stop and
+        // resume inside the same file with nothing after it to measure.
+        //
+        // Only that restart. Rebinding the tap is ordinary and mostly costs no
+        // audio at all: it happens once before a track's first frame on the
+        // path where a generic call becomes a recognised one, and again
+        // whenever a browser's helper processes come and go. Those are caught
+        // by the boundary check below if they cost anything, and treating every
+        // restart as a gap threw the record away for most real meetings.
+        if let last = ordered.last, let start = last.resolvedFirstFrameHostTime,
+           restartMoments.contains(where: { $0.track == track && $0.hostTime > start }) {
+            return false
+        }
+        for (previous, next) in zip(ordered, ordered.dropFirst()) {
+            // A segment whose start was never resolved cannot be compared. It
+            // is also not evidence of a gap, and refusing on it would drop the
+            // record for a recording that is very likely fine.
+            guard let start = previous.resolvedFirstFrameHostTime,
+                  let following = next.resolvedFirstFrameHostTime
+            else { continue }
+            let recorded = previous.seconds
+            guard recorded > 0 else { continue }
+            if following - (start + recorded) > tolerance { return false }
+        }
+        return true
     }
 
     /// How long after the meeting started this track's first frame arrived.
@@ -189,6 +253,7 @@ public enum ManifestReader {
         var segmentsByKey: [SegmentKey: RecordedSegment] = [:]
         var order: [SegmentKey] = []
         var restarts: [ManifestEvent.CaptureRestart] = []
+        var restartMoments: [(track: CaptureTrack, hostTime: Double)] = []
         var formatChanges: [ManifestEvent.FormatChange] = []
         var markers: [(date: Date, label: String)] = []
         var preRolls: [ManifestEvent.PreRollFlushed] = []
@@ -225,6 +290,7 @@ public enum ManifestReader {
                 formatChanges.append(payload)
             case .captureRestart(let payload):
                 restarts.append(payload)
+                restartMoments.append((track: payload.track, hostTime: line.hostTime))
             case .marker(let payload):
                 markers.append((date: line.wallClock, label: payload.label))
             case .preRollFlushed(let payload):
@@ -241,6 +307,7 @@ public enum ManifestReader {
         return RecordingTimeline(
             meetingID: meetingID, source: source, startedAt: startedAt, endedAt: endedAt,
             endReason: endReason, segments: segments, restarts: restarts,
+            restartMoments: restartMoments,
             formatChanges: formatChanges, markers: markers, preRollFlushes: preRolls,
             hasTruncatedTail: result.hasTruncatedTail
         )

@@ -449,6 +449,7 @@ struct SpeakerChips: View {
         switch row.origin {
         case .human: parts.append("you set this")
         case .deterministic: parts.append("your microphone track")
+        case .sensor: parts.append("named by the meeting")
         case .voiceProfile: parts.append("matched a saved voice, \(row.band.displayName.lowercased())")
         case .anonymousVoice:
             parts.append(

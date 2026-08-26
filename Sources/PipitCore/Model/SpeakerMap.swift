@@ -12,6 +12,10 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
     case anonymousVoice = "anonymous_voice"
     /// A named voice profile matched at High confidence.
     case voiceProfile = "voice_profile"
+    /// The meeting client's own account of who held the floor. Stronger than a
+    /// voice match, because it reads the roster rather than inferring it, and
+    /// weaker than the microphone track, which is true by construction.
+    case sensor
     /// True by construction: the microphone track is the local user.
     case deterministic
     /// Set by the user. Never overwritten by anything else.
@@ -22,8 +26,9 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
         case .ai: 0
         case .anonymousVoice: 1
         case .voiceProfile: 2
-        case .deterministic: 3
-        case .human: 4
+        case .sensor: 3
+        case .deterministic: 4
+        case .human: 5
         }
     }
 
@@ -37,6 +42,7 @@ public enum SpeakerAssignmentOrigin: String, Codable, Sendable, Comparable, Case
         switch self {
         case .human: "You set this"
         case .deterministic: "From the microphone track"
+        case .sensor: "From the meeting"
         case .voiceProfile: "Recognized voice"
         case .anonymousVoice: "Voice heard before"
         case .ai: "Suggested"
@@ -206,17 +212,28 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public var utteranceOverrides: [UtteranceOverride]
     /// Where a person said one line is really two.
     public var lineCuts: [LineCut]
+    /// Speakers a person deliberately left unnamed.
+    ///
+    /// Clearing a name removes its entry, which leaves nothing to outrank the
+    /// automatic stage that wrote it, so the next pass put the same name back.
+    /// That is invisible for a name derived from audio, because re-deriving it
+    /// is the point, and wrong for one the meeting client hands over ready
+    /// made: the client says "Chris" every time, so without this a person can
+    /// never take "Chris" off that speaker.
+    public var clearedKeys: Set<String>
 
     public init(
         version: Int = SpeakerMap.currentVersion,
         entries: [String: SpeakerAssignment] = [:],
         utteranceOverrides: [UtteranceOverride] = [],
-        lineCuts: [LineCut] = []
+        lineCuts: [LineCut] = [],
+        clearedKeys: Set<String> = []
     ) {
         self.version = version
         self.entries = entries
         self.utteranceOverrides = utteranceOverrides
         self.lineCuts = lineCuts
+        self.clearedKeys = clearedKeys
     }
 
     /// A map written before line-level corrections existed decodes with none of
@@ -228,6 +245,7 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         utteranceOverrides =
             try container.decodeIfPresent([UtteranceOverride].self, forKey: .utteranceOverrides) ?? []
         lineCuts = try container.decodeIfPresent([LineCut].self, forKey: .lineCuts) ?? []
+        clearedKeys = try container.decodeIfPresent(Set<String>.self, forKey: .clearedKeys) ?? []
     }
 
     /// Records a boundary, ignoring one that falls where a boundary already is.
@@ -265,8 +283,54 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
             assign(assignment, to: key)
             return
         }
+        // A person took this name off deliberately. Nothing automatic puts one
+        // back until they say otherwise.
+        if clearedKeys.contains(key) { return }
         if let existing = entries[key], existing.origin > assignment.origin { return }
-        entries[key] = assignment
+        var incoming = assignment
+        // An identity is not part of the suggestion being replaced. Re-running a
+        // stage over a cluster it already named would otherwise drop the link a
+        // later stage attached, leaving a name with no person behind it: no face
+        // in the list, no profile to learn from, nothing for the next meeting to
+        // recognise.
+        if incoming.identityID == nil, let existing = entries[key] {
+            incoming.identityID = existing.identityID
+        }
+        entries[key] = incoming
+    }
+
+    /// Attaches a voice identity to a cluster whose name already agrees with it.
+    ///
+    /// Naming and identity are two different facts, and only naming has a
+    /// precedence order. A cluster the meeting client named outranks a voice
+    /// match, so the match's assignment is rejected, and with it went the only
+    /// thing carrying `identityID`. The cluster then showed a name with no
+    /// person behind it: no face in the meetings list, no profile to learn from,
+    /// and nothing for a later meeting to recognise.
+    ///
+    /// Agreement is required because a link is not inert. `refreshName` rewrites
+    /// the name of every entry carrying an identity, with no regard for what set
+    /// it, so linking a voice called Grace to a cluster the roster called Ada
+    /// does not merely add an avatar: the next time anyone touches Grace, Ada's
+    /// words are relabelled Grace. Where the two disagree, one of them is wrong
+    /// and the disagreement is the useful fact. It stays visible.
+    ///
+    /// An unnamed identity carries no name to impose today, and linking is what
+    /// lets a recurring voice accumulate until someone names it once. It is not
+    /// free forever: naming that voice later rewrites this entry too, because
+    /// `refreshName` follows the identity and does not ask what set the name. A
+    /// roster name can therefore be replaced by a name a person chose in another
+    /// meeting, which is recoverable by renaming and is the price of the link.
+    public mutating func linkIdentity(
+        _ identityID: IdentityID, to key: String, named identityName: String?
+    ) {
+        guard var existing = entries[key], existing.identityID == nil else { return }
+        if let identityName, !identityName.isEmpty,
+           existing.displayName.caseInsensitiveCompare(identityName) != .orderedSame {
+            return
+        }
+        existing.identityID = identityID
+        entries[key] = existing
     }
 
     /// Applies a human correction to a whole cluster, which always wins.
@@ -276,8 +340,12 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             entries.removeValue(forKey: key)
+            // Remembered, so an automatic stage cannot write the same name back
+            // on the next pass. A person naming this speaker again clears it.
+            clearedKeys.insert(key)
             return
         }
+        clearedKeys.remove(key)
         entries[key] = SpeakerAssignment(
             displayName: trimmed, origin: .human, participantID: participantID,
             identityID: identityID, provenance: .human()
@@ -406,6 +474,9 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public static func fallbackName(for key: String) -> String {
         if key == SpeakerLabel.localUser { return "Me" }
         if key.hasSuffix(SpeakerLabel.unattributed) { return "Unattributed" }
+        // A sensor speaker the client never named. The key is an opaque
+        // platform identifier and must not render as one.
+        if SpeakerLabel.sensorParticipantID(from: key) != nil { return "Participant" }
         guard let range = key.range(of: "_speaker_") else { return key }
         let suffix = String(key[range.upperBound...])
         let number = Int(suffix).map { "\($0 + 1)" } ?? suffix.uppercased()

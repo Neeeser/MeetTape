@@ -936,6 +936,82 @@ public actor ProcessingPipeline {
         try await recordOccurrences(
             meetingID: metadata.id, run: run, chunkEmbeddings: output.chunkEmbeddings
         )
+        await recordSensorOccurrences(
+            store: store, meetingID: metadata.id, track: track,
+            audio: audio, leadIn: leadIn, run: run
+        )
+    }
+
+    /// Embeds each participant's sensor-owned speech and records the vector
+    /// under their sensor key.
+    ///
+    /// The stretches come from `SensorAttribution.enrollmentIntervals`: the
+    /// participant's turns cut to the solo speech of the clusters those turns
+    /// dominate. The client attributed that audio to one person while it was
+    /// recorded, so the vector is a known voice rather than a cluster's guess.
+    ///
+    /// Stored, not resolved. Nothing matches this vector against the profiles
+    /// on its own, because a sensor key covers the same seconds as the cluster
+    /// beside it and two claims on one voice is what mints an anonymous twin.
+    /// It waits here so that confirming a name has a vector to enrol, and so
+    /// that a handle bound to this account can carry a person's profile
+    /// forward without re-deriving it from audio.
+    ///
+    /// Never throws into the caller. A voice that cannot be embedded is a voice
+    /// learned later through a confirmation, exactly as before this existed.
+    private func recordSensorOccurrences(
+        store: MeetingStore, meetingID: String, track: CaptureTrack,
+        audio: URL, leadIn: Double, run: DiarizationRun
+    ) async {
+        guard let service = backends.speakers, let extractor = backends.embeddings else { return }
+        guard let sensors = store.readRawSensors() else { return }
+        let marked = sensors.markingSelf(named: settingsProvider().localUserName)
+        // The extractor reads the submitted audio, whose zero is the track's
+        // own first frame rather than the meeting timeline's.
+        let intervals = SensorAttribution.enrollmentIntervals(
+            sensors: marked, diarized: run.intervals
+        ).map {
+            DiarizationInterval(
+                start: max(0, $0.start - leadIn), end: max(0, $0.end - leadIn),
+                clusterID: $0.clusterID, quality: $0.quality
+            )
+        }
+        guard !intervals.isEmpty else { return }
+        do {
+            let embeddings = try await extractor.embed(audio: audio, intervals: intervals)
+            var vectors: [String: [[Float]]] = [:]
+            for embedding in embeddings {
+                vectors[embedding.clusterID, default: []].append(embedding.vector)
+            }
+            var seconds: [String: Double] = [:]
+            for interval in intervals {
+                seconds[interval.clusterID, default: 0] += interval.duration
+            }
+            let speakerStore = await service.speakerStore
+            for (key, collected) in vectors {
+                try await speakerStore.recordOccurrence(
+                    meetingID: meetingID,
+                    clusterID: key,
+                    track: track,
+                    speechSeconds: seconds[key] ?? 0,
+                    embedding: VoiceVector.centroid(collected),
+                    model: extractor.model,
+                    resolution: nil,
+                    identityID: nil,
+                    source: .sensor,
+                    humanVerified: false,
+                    wasExpectedParticipant: false,
+                    now: clock.now
+                )
+            }
+            Log.processing.info(
+                "sensor voices embedded people=\(vectors.count, privacy: .public)"
+            )
+        } catch {
+            Log.processing.notice(
+                "sensor voice embedding skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
     }
 
     /// Writes one row per cluster into the local identity store, with the vector
@@ -974,6 +1050,95 @@ public actor ProcessingPipeline {
         }
     }
 
+
+    /// The sensor record with the local user marked, where a meeting has one.
+    ///
+    /// Only remote meetings: the record describes the far-end track, and an
+    /// in-person or imported recording has none by construction.
+    private func sensorRecord(store: MeetingStore, metadata: MeetingMetadata) -> RawSensors? {
+        guard metadata.source.micTrackIsLocalUser else { return nil }
+        guard let sensors = store.readRawSensors() else { return nil }
+        return sensors.markingSelf(named: settingsProvider().localUserName)
+    }
+
+    /// Names speakers from what the meeting client said, where it said enough.
+    ///
+    /// Two kinds of key. The sensor keys word attribution wrote get one entry
+    /// per participant who held the floor, carrying the name the client
+    /// rendered. Cluster keys cover the fallback stretches: a cluster one
+    /// person's turns dominate names that person's uncovered words too.
+    ///
+    /// The decisions live in `SensorAttribution`, which is pure and tested on
+    /// its own. Writing through `applySuggestion` is what keeps a person's own
+    /// correction and the microphone track's deterministic name above this, and
+    /// stops a later voice match from overwriting it.
+    private func applySensorNames(
+        store: MeetingStore, metadata: MeetingMetadata,
+        diarization: RawDiarization, into speakers: inout SpeakerMap
+    ) {
+        guard let marked = sensorRecord(store: store, metadata: metadata) else { return }
+        let people = SensorAttribution.speakerEntries(sensors: marked)
+        for entry in people {
+            speakers.applySuggestion(entry.assignment, for: entry.key)
+        }
+        let clusters = SensorAttribution.assignments(
+            diarization: diarization, sensors: marked
+        )
+        for entry in clusters {
+            speakers.applySuggestion(entry.assignment, for: entry.key)
+        }
+        Log.processing.info(
+            """
+            sensor naming source=\(marked.source, privacy: .public) \
+            people=\(people.count, privacy: .public) \
+            clusters=\(clusters.count, privacy: .public)
+            """
+        )
+    }
+
+    /// Names sensor speakers from the handles earlier confirmations bound.
+    ///
+    /// The strongest naming there is: the platform identifier survived from a
+    /// meeting where a person confirmed who it belongs to, so the name and the
+    /// identity arrive before a second of audio is scored. Written at the same
+    /// `.sensor` origin as the roster name and applied after it, so the name
+    /// the person chose beats the platform's rendering of it, and a human
+    /// correction in this meeting still beats both.
+    private func applySensorHandles(
+        store: MeetingStore, metadata: MeetingMetadata, into speakers: inout SpeakerMap
+    ) async {
+        guard let service = backends.speakers else { return }
+        guard let sensors = sensorRecord(store: store, metadata: metadata),
+              let provider = SensorAttribution.handleProvider(source: sensors.source)
+        else { return }
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        let held = Set(sensors.turns.map(\.participantID)).subtracting(selfIDs)
+        guard !held.isEmpty else { return }
+        let speakerStore = await service.speakerStore
+        var named = 0
+        for participantID in held.sorted() {
+            guard let identity = await speakerStore.identity(
+                handle: participantID, provider: provider
+            ), identity.isNamed else { continue }
+            speakers.applySuggestion(
+                SpeakerAssignment(
+                    displayName: identity.resolvedName,
+                    origin: .sensor,
+                    participantID: participantID,
+                    identityID: identity.id,
+                    provenance: SpeakerProvenance(
+                        source: .sensor, identityID: identity.id, humanVerified: true
+                    )
+                ),
+                for: SpeakerLabel.sensor(participantID: participantID)
+            )
+            named += 1
+        }
+        if named > 0 {
+            Log.processing.info("sensor handles named=\(named, privacy: .public)")
+        }
+    }
+
     /// Measures what the recorded audio holds, once, before the first assembly.
     ///
     /// Only here. Every later assembly reads the file, so a rebuild is free and
@@ -988,7 +1153,7 @@ public actor ProcessingPipeline {
     /// Never throws. The words are already safe on disk as raw chunks, and a
     /// meeting that cannot be measured assembles the way it did before this
     /// existed: every segment kept. Failing the stage instead would turn an
-    /// unreadable track into a meeting with no markdown and no mixdown.
+    /// unmeasurable meeting into an unreadable one.
     private func measureSpeech(store: MeetingStore, metadata: MeetingMetadata) async {
         guard metadata.source.micTrackIsLocalUser else { return }
         guard store.readSpeechEvidence() == nil else { return }
@@ -1207,12 +1372,20 @@ public actor ProcessingPipeline {
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
             speech: store.readSpeechEvidence(),
+            sensors: sensorRecord(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
 
         var speakers = try store.readSpeakerMap()
-        if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil {
+        applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &speakers)
+        await applySensorHandles(store: store, metadata: metadata, into: &speakers)
+        // Not where the user cleared it. The microphone track is the local user
+        // by construction, but "Leave unnamed" is offered on that chip like any
+        // other, and writing the name back on the next pass made the control do
+        // nothing there.
+        if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil,
+           !speakers.clearedKeys.contains(SpeakerLabel.localUser) {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,
                 origin: .deterministic,
@@ -1278,6 +1451,37 @@ public actor ProcessingPipeline {
         return nil
     }
 
+    /// The audio behind any speaker key: a cluster's intervals, or for a sensor
+    /// key the participant's turns cut to the solo speech heard inside them.
+    ///
+    /// What a confirmation enrols and a retraction takes back, so both kinds of
+    /// key move through those paths on the same terms.
+    private func audioBehind(
+        _ key: String, store: MeetingStore, metadata: MeetingMetadata
+    ) throws -> (run: DiarizationRun, spans: [AudioSpan])? {
+        let diarization = try store.readRawDiarization()
+        return clusterAudio(key, in: diarization)
+            ?? sensorAudio(key, store: store, metadata: metadata, diarization: diarization)
+    }
+
+    private func sensorAudio(
+        _ key: String, store: MeetingStore, metadata: MeetingMetadata,
+        diarization: RawDiarization
+    ) -> (run: DiarizationRun, spans: [AudioSpan])? {
+        guard SpeakerLabel.sensorParticipantID(from: key) != nil,
+              let sensors = sensorRecord(store: store, metadata: metadata)
+        else { return nil }
+        for run in diarization.activeRuns where run.track == .remote {
+            let spans = SensorAttribution.enrollmentIntervals(
+                sensors: sensors, diarized: run.intervals
+            )
+            .filter { $0.clusterID == key }
+            .map { AudioSpan(start: $0.start, end: $0.end) }
+            if !spans.isEmpty { return (run, AudioSpan.union(spans)) }
+        }
+        return nil
+    }
+
     /// Matches every cluster against the local voice memory.
     ///
     /// A read, in every case. Nothing here writes a vector into a profile at any
@@ -1312,6 +1516,13 @@ public actor ProcessingPipeline {
                 ))
             }
         }
+        // Sensor keys are deliberately not submitted. Their spans are a subset
+        // of some cluster's spans, so resolution would see one voice claiming
+        // the same seconds twice: the concurrency rule then refuses the second
+        // claim its own identity and mints an anonymous twin of a known voice,
+        // and the twin splits every future margin. Sensor keys get their
+        // identities from handles and from a person confirming a name; their
+        // occurrence rows exist so that confirmation has a vector to enrol.
         guard !clusters.isEmpty else { return }
 
         // Expected participants are a soft prior, and only a person or a
@@ -1352,6 +1563,14 @@ public actor ProcessingPipeline {
                     provenance: provenance
                 ),
                 for: result.clusterID
+            )
+            // The name may have been declined because something outranks this,
+            // which the meeting client's own account of the call does. The
+            // identity is not a name and is linked either way, so a cluster
+            // named from the roster still has a person behind it.
+            speakers.linkIdentity(
+                identity.id, to: result.clusterID,
+                named: identity.isNamed ? identity.resolvedName : nil
             )
             if identity.isNamed,
                !metadata.participants.contains(where: { $0.displayName == identity.resolvedName }) {
@@ -1696,6 +1915,7 @@ public actor ProcessingPipeline {
             raw: raw,
             diarization: diarization,
             speech: found.store.readSpeechEvidence(),
+            sensors: sensorRecord(store: found.store, metadata: found.metadata),
             micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
             generatedAt: clock.now
         )
@@ -1758,6 +1978,21 @@ public actor ProcessingPipeline {
             try await confirmCluster(
                 meetingID: meetingID, clusterID: key, identityID: resolved, settings: settings
             )
+            // A person just said who this platform account belongs to. Where
+            // the platform's identifier outlives the meeting, that binding is
+            // the strongest re-identification there is: every later meeting
+            // names this account's speech from it before any audio is scored.
+            // Only a human statement writes one; an automatic voice match at
+            // any confidence never does.
+            if let participantID = SpeakerLabel.sensorParticipantID(from: key),
+               let source = found.store.readRawSensors()?.source,
+               let provider = SensorAttribution.handleProvider(source: source),
+               let service = backends.speakers {
+                try await service.speakerStore.setHandle(
+                    IdentityHandle(provider: provider, handle: participantID),
+                    to: resolved, now: clock.now
+                )
+            }
             try await refreshCachedNames(for: resolved)
         } else {
             // Leave unknown. Clearing the name used to leave the vector behind,
@@ -1766,6 +2001,18 @@ public actor ProcessingPipeline {
             // 1.0, the next resolution pass wrote the cleared name straight back
             // at High confidence.
             try await retractCluster(meetingID: meetingID, clusterID: key)
+            // The handle binding is the same shape of leftover: naming this
+            // speaker bound their platform account, so clearing the name has to
+            // withdraw the binding too, or the next meeting with this account,
+            // and a re-analysis of this one, writes the cleared name back.
+            if let participantID = SpeakerLabel.sensorParticipantID(from: key),
+               let source = found.store.readRawSensors()?.source,
+               let provider = SensorAttribution.handleProvider(source: source),
+               let service = backends.speakers {
+                try await service.speakerStore.removeHandle(
+                    IdentityHandle(provider: provider, handle: participantID)
+                )
+            }
         }
         return resolved
     }
@@ -1786,7 +2033,9 @@ public actor ProcessingPipeline {
         guard let service = backends.speakers else { return }
         let store = await service.speakerStore
         if let found = repository.findMeeting(id: meetingID, includingMerged: true),
-           let audio = clusterAudio(clusterID, in: try found.store.readRawDiarization()) {
+           let audio = try audioBehind(
+               clusterID, store: found.store, metadata: found.metadata
+           ) {
             // Nobody is claiming the audio, so nothing is exempt: every vector
             // that stood on it loses it. Leaving it behind used to mean the
             // person the name was taken away from kept the voice, and because
@@ -2173,6 +2422,16 @@ public actor ProcessingPipeline {
         diarization.setActive(run)
         try store.writeRawDiarization(diarization)
 
+        // Re-clustering renumbers, so every name keyed to the old clusters is
+        // now keyed to nothing. Sensor keys survive by construction, and the
+        // client's account of the call is still on disk and still true, so the
+        // cluster-level fallback names are applied again here. Without this,
+        // re-analysing a meeting silently threw away its names.
+        var reNamed = try store.readSpeakerMap()
+        applySensorNames(store: store, metadata: metadata, diarization: diarization, into: &reNamed)
+        await applySensorHandles(store: store, metadata: metadata, into: &reNamed)
+        try store.writeSpeakerMap(reNamed)
+
         // Deliberately not deleting this meeting's confirmed enrolments here.
         // The clusters they came from no longer exist under these identifiers,
         // so a wrong name confirmed before a re-analysis cannot be retracted
@@ -2198,11 +2457,11 @@ public actor ProcessingPipeline {
         let transcript = TranscriptAssembler().assemble(
             raw: raw, diarization: diarization,
             speech: store.readSpeechEvidence(),
+            sensors: sensorRecord(store: store, metadata: metadata),
             micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)
-        let speakers = try store.readSpeakerMap()
         try await rerenderMarkdown(store: store, metadata: metadataCopy)
     }
 
@@ -2223,7 +2482,6 @@ public actor ProcessingPipeline {
         try await recognizeVoices(
             store: found.store, metadata: &metadata, settings: settingsProvider()
         )
-        let speakers = try found.store.readSpeakerMap()
         try await rerenderMarkdown(store: found.store, metadata: metadata)
     }
 
@@ -2302,8 +2560,8 @@ public actor ProcessingPipeline {
         // nothing to retract later, so the confirmation writes the name and
         // learns no voice from it.
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
-              let audio = clusterAudio(
-                  clusterID, in: try found.store.readRawDiarization()
+              let audio = try audioBehind(
+                  clusterID, store: found.store, metadata: found.metadata
               ), !audio.spans.isEmpty
         else { return }
         // Minus the lines inside it a person has already given to somebody else.

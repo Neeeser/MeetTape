@@ -1206,6 +1206,48 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("clearing a sensor speaker's name withdraws the account binding") { expect in
+                // Naming a sensor speaker binds their platform account, so the
+                // next meeting names them automatically. Clearing the name has
+                // to withdraw that too, or the correction is undone by the very
+                // mechanism the confirmation armed: re-analysis writes the
+                // cleared name back here, and every later huddle writes it on
+                // arrival.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                try meeting.store.writeRawSensors(RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U123", displayName: "Chris")],
+                    turns: [SensorTurn(start: 0, end: 30, participantID: "U123")]
+                ))
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let key = SpeakerLabel.sensor(participantID: "U123")
+
+                let chris = try expect.unwrap(
+                    await pipeline.applySpeakerName("Chris", to: key, meetingID: meeting.metadata.id)
+                )
+                expect.equal(
+                    await store.identity(handle: "U123", provider: "slack")?.id, chris,
+                    "naming a sensor speaker binds the account"
+                )
+
+                _ = try await pipeline.applySpeakerName("", to: key, meetingID: meeting.metadata.id)
+                expect.isNil(
+                    await store.identity(handle: "U123", provider: "slack"),
+                    "and clearing the name withdraws it"
+                )
+            },
+
             test("correcting a second person keeps the first person's voice") { expect in
                 // Two people can each hold a legitimate enrolment from one
                 // meeting. Removing everyone else's on each correction meant a

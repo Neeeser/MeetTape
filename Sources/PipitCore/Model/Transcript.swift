@@ -189,11 +189,33 @@ public enum SpeakerLabel {
     /// run, has no occurrence row and no vector, so it reads as what it is.
     public static let unattributed = "unattributed"
 
+    /// Key prefix for speech the meeting client attributed directly.
+    ///
+    /// The rest of the key is the platform's own identifier for the person, so
+    /// unlike a cluster key it survives a re-analysis: re-clustering renumbers
+    /// clusters and the sensor key keeps naming the same person.
+    public static let sensorPrefix = "sensor_"
+
+    public static func sensor(participantID: String) -> String {
+        "\(sensorPrefix)\(participantID)"
+    }
+
+    /// The platform participant identifier inside a sensor key, or nil for any
+    /// other kind of key.
+    public static func sensorParticipantID(from key: String) -> String? {
+        guard key.hasPrefix(sensorPrefix) else { return nil }
+        let id = String(key.dropFirst(sensorPrefix.count))
+        return id.isEmpty ? nil : id
+    }
+
     public static func namespaced(chunkID: String, rawLabel: String) -> String {
         // A label that already carries a namespace keeps it. Attribution against
         // a diarization run stamps the run into the key so a re-analysis cannot
         // inherit names that belonged to the previous clustering.
         if rawLabel.contains("_speaker_") { return rawLabel }
+        // A sensor key already names a person. Stamping a chunk into it would
+        // split one speaker into one key per chunk.
+        if rawLabel.hasPrefix(sensorPrefix) { return rawLabel }
         return "\(chunkID)_speaker_\(normalise(rawLabel))"
     }
 

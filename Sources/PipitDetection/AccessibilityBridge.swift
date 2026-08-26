@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 import Foundation
 import PipitCore
 
@@ -36,6 +37,8 @@ public enum AccessibilityBridge {
         guard let value = attribute(element, name) else { return nil }
         if CFGetTypeID(value) == CFStringGetTypeID() { return (value as! CFString) as String }
         if let number = value as? NSNumber { return number.stringValue }
+        // AXDOMClassList arrives as an array of class names.
+        if let list = value as? [Any] { return list.map { "\($0)" }.joined(separator: ",") }
         return nil
     }
 
@@ -44,56 +47,128 @@ public enum AccessibilityBridge {
         return (value as? [AXUIElement]) ?? []
     }
 
-    /// One node's identifying text, lowercased for matching.
+    /// One node's identifying text.
+    ///
+    /// Every field here costs a synchronous call into another process, so the
+    /// struct holds what a visitor actually reads and nothing else. Role and
+    /// value used to be collected for nobody, which was two wasted round trips
+    /// per node on a walk that runs twice a second.
     struct Node {
-        let role: String
         let title: String
         let description: String
-        let value: String
+        /// Electron and Chromium apps expose the page's own id and class list
+        /// once `AXManualAccessibility` is set, and Slack's class names say what
+        /// they mean. Without these a huddle tile is anonymous. Both are read
+        /// only where a caller asked for them, because outside a huddle there
+        /// are no tiles to find and the reads are pure cost.
+        let domIdentifier: String
+        let domClassList: String
     }
 
-    static func snapshot(_ element: AXUIElement) -> Node {
+    static func snapshot(_ element: AXUIElement, wantsDOM: Bool = false) -> Node {
         Node(
-            role: string(element, kAXRoleAttribute as String) ?? "",
             title: string(element, kAXTitleAttribute as String) ?? "",
             description: string(element, kAXDescriptionAttribute as String) ?? "",
-            value: string(element, kAXValueAttribute as String) ?? ""
+            domIdentifier: wantsDOM ? (string(element, "AXDOMIdentifier") ?? "") : "",
+            domClassList: wantsDOM ? (string(element, "AXDOMClassList") ?? "") : ""
         )
     }
 
-    /// Depth- and node-bounded walk. Returns false from `visit` to stop early.
-    ///
-    /// Returns false when the budget ran out, which the caller must treat as "no
-    /// information" rather than "not present": Slack's tree is large enough that a
-    /// truncated walk can miss the huddle window entirely.
-    static func walk(
-        _ element: AXUIElement, maxDepth: Int, budget: inout Int, depth: Int = 0,
-        visit: (Node) -> Bool
-    ) -> Bool {
-        guard budget > 0 else { return false }
+    /// Walk that hands the element over as well as its text, so a subtree can be
+    /// re-entered. Returning false from `visit` prunes that node's children
+    /// without stopping the walk.
+    static func walkElements(
+        _ element: AXUIElement, maxDepth: Int, budget: inout Int, wantsDOM: Bool = false,
+        depth: Int = 0, visit: (AXUIElement, Node) -> Bool
+    ) {
+        guard budget > 0 else { return }
         budget -= 1
-        if !visit(snapshot(element)) { return false }
-        guard depth < maxDepth else { return true }
+        guard visit(element, snapshot(element, wantsDOM: wantsDOM)) else { return }
+        guard depth < maxDepth else { return }
         for child in children(element) {
-            if !walk(child, maxDepth: maxDepth, budget: &budget, depth: depth + 1, visit: visit) {
-                return false
-            }
+            walkElements(
+                child, maxDepth: maxDepth, budget: &budget, wantsDOM: wantsDOM,
+                depth: depth + 1, visit: visit
+            )
         }
-        return true
     }
+
 }
 
-/// Reads Slack's huddle controls.
+/// Reads Slack's huddle controls and its roster.
 ///
 /// `AXButton` described as "Leave Huddle" is the only reliable join signal, and
-/// its mute counterpart inverts its label while muted. Nothing else about a huddle
-/// is exposed: participant names and the active speaker are not available from
-/// Slack on macOS, and the app is expected to work without them.
+/// its mute counterpart inverts its label while muted.
+///
+/// The huddle grid is readable too. Setting `AXManualAccessibility` builds
+/// Slack's web accessibility tree, and each tile then carries the Slack user id
+/// in `AXDOMIdentifier`, the display name in its description, the mute state in
+/// its name overlay, and a speaking class that exists only while that person
+/// holds the floor. All four are readable for other people, not only for the
+/// local user, which is the case that matters, because the far end arrives as
+/// one mixed track.
 public struct SlackAccessibilityReader: Sendable {
     public let bundleIdentifier: String
 
     public init(bundleIdentifier: String = "com.tinyspeck.slackmacgap") {
         self.bundleIdentifier = bundleIdentifier
+    }
+
+    /// What is known about each Slack process's web tree. Keyed by pid, so a
+    /// relaunched Slack starts over.
+    private struct WebTreeState {
+        var isBuilt = false
+        /// Sets that did not take. Slack's accessibility server is not up the
+        /// instant the app launches, so a first failure is worth retrying, and
+        /// retrying twice a second forever is not.
+        var failures = 0
+    }
+
+    private static let webTrees =
+        OSAllocatedUnfairLock<[pid_t: WebTreeState]>(initialState: [:])
+    /// After this many failed sets, stop paying for the second walk that only
+    /// exists to populate a tree this process is never going to get.
+    private static let webTreeAttemptLimit = 5
+
+    static func webTreeIsBuilt(pid: pid_t) -> Bool {
+        webTrees.withLock { $0[pid]?.isBuilt ?? false }
+    }
+
+    /// Whether asking again is still worth a walk.
+    static func webTreeIsWorthRetrying(pid: pid_t) -> Bool {
+        webTrees.withLock { ($0[pid]?.failures ?? 0) < webTreeAttemptLimit }
+    }
+
+    /// Drops the record that a process's tree was built, so a Slack with no
+    /// huddle running goes back to the cheap walk. The attribute itself cannot
+    /// be unset from here, but nothing outside a huddle needs what it exposes.
+    ///
+    /// Failures are kept. Slack's subtree reads empty intermittently during a
+    /// live huddle, so clearing the whole entry re-armed every retry on each of
+    /// those reads and the limit bounded nothing.
+    static func forgetWebTree(pid: pid_t) {
+        webTrees.withLock { states in
+            guard var state = states[pid] else { return }
+            state.isBuilt = false
+            states[pid] = state
+        }
+    }
+
+    private static func enableWebTree(_ application: AXUIElement, pid: pid_t) {
+        let alreadyEnabled = webTreeIsBuilt(pid: pid)
+        guard !alreadyEnabled else { return }
+        let result = AXUIElementSetAttributeValue(
+            application, "AXManualAccessibility" as CFString, kCFBooleanTrue
+        )
+        // Only a set that worked counts as built. Recording the attempt
+        // regardless meant one early failure left the web tree unbuilt for the
+        // life of that process: every tile identifier empty, the roster silently
+        // dead, and nothing to see until the user restarted Slack.
+        webTrees.withLock { states in
+            var state = states[pid] ?? WebTreeState()
+            if result == .success { state.isBuilt = true } else { state.failures += 1 }
+            states[pid] = state
+        }
     }
 
     public func read() -> SlackAccessibilityObservation {
@@ -103,44 +178,171 @@ public struct SlackAccessibilityReader: Sendable {
         }
 
         let application = AXUIElement.forApplication(pid: pid)
+        // The web tree is what carries the tile identifiers, and Chromium only
+        // builds it once a client asks. Asking costs Slack a full accessibility
+        // tree for the rest of its life, so it is asked for only once a huddle
+        // is actually running. The leave control that proves one is running is
+        // found without it, which is how this worked before tiles existed.
+        //
+        // The cost of waiting is one poll: the first read inside a huddle sees
+        // no tiles, the next sees them all.
         let windows = AccessibilityBridge.children(application)
         guard !windows.isEmpty else {
             return SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: true)
         }
 
+        // Tiles exist only inside a huddle, and their identifiers only once
+        // Chromium has been asked to build the web tree. Outside a huddle both
+        // are pure cost on a walk that runs twice a second, so the first pass
+        // reads the cheap attributes and stops there.
+        var pass = scan(windows: windows, wantsTiles: Self.webTreeIsBuilt(pid: pid))
+
+        // A huddle was found and this pass was not looking for tiles, which is
+        // the first poll of every huddle and of every launch. Ask for the tree
+        // and look again rather than reporting a huddle with nobody in it,
+        // rather than letting the roster arrive a poll late every time the app
+        // restarts mid-call.
+        //
+        // Normally one extra walk on the first poll of a huddle. Where the set
+        // never takes it would be one extra walk on every poll, which is what
+        // the retry limit bounds.
+        if pass.hasLeave, !pass.wantedTiles, Self.webTreeIsWorthRetrying(pid: pid) {
+            Self.enableWebTree(application, pid: pid)
+            pass = scan(windows: windows, wantsTiles: true)
+        }
+        // No huddle, so nothing needs the deep walk or the identifiers it reads.
+        // Without this the first huddle of a Slack session left every later poll
+        // paying for a tree with nothing in it.
+        if !pass.hasLeave { Self.forgetWebTree(pid: pid) }
+
+        return SlackAccessibilityObservation(
+            hasLeaveHuddleControl: pass.hasLeave,
+            // A truncated walk proves nothing about the control's absence.
+            subtreeWasEmpty: pass.visitedNodes <= windows.count
+                || (pass.truncated && !pass.hasLeave),
+            isMuted: pass.muted,
+            windowTitle: pass.title,
+            tiles: pass.tiles
+        )
+    }
+
+    private struct Pass {
         var hasLeave = false
         var muted: Bool?
         var title: String?
         var visitedNodes = 0
         var truncated = false
+        var tiles: [SlackHuddleTile] = []
+        var wantedTiles = false
+    }
+
+    private func scan(windows: [AXUIElement], wantsTiles: Bool) -> Pass {
+        var pass = Pass()
+        pass.wantedTiles = wantsTiles
+        var byID: [String: SlackHuddleTile] = [:]
+        var order: [String] = []
         // Each window gets its own budget, so a large workspace window cannot
-        // consume the whole allowance before the huddle window is reached.
-        let budgetPerWindow = 4_000
+        // consume the whole allowance before the huddle window is reached. A
+        // whole Slack process measured 708 nodes with the web tree built, so
+        // this is a wide margin rather than a tuned number.
+        let budgetPerWindow = 20_000
 
         for window in windows {
-            guard AccessibilityBridge.string(window, kAXRoleAttribute as String) == (kAXWindowRole as String)
-            else { continue }
-            if title == nil {
-                title = AccessibilityBridge.string(window, kAXTitleAttribute as String)
+            guard AccessibilityBridge.string(window, kAXRoleAttribute as String)
+                == (kAXWindowRole as String) else { continue }
+            if pass.title == nil {
+                pass.title = AccessibilityBridge.string(window, kAXTitleAttribute as String)
             }
             var budget = budgetPerWindow
-            let completed = AccessibilityBridge.walk(window, maxDepth: 16, budget: &budget) { node in
-                visitedNodes += 1
+            // Tiles are collected during the walk and read after it: reading a
+            // subtree from inside the walk would borrow the same budget twice.
+            // Depth follows the same rule as the attributes, because the
+            // controls sit high in the tree and only the tiles are deep.
+            var found: [(element: AXUIElement, userID: String, isSelf: Bool, description: String)] = []
+            AccessibilityBridge.walkElements(
+                window, maxDepth: wantsTiles ? 24 : 16, budget: &budget, wantsDOM: wantsTiles
+            ) { element, node in
+                pass.visitedNodes += 1
                 let haystack = "\(node.description) \(node.title)".lowercased()
-                if haystack.contains("leave huddle") { hasLeave = true }
-                if haystack.contains("unmute microphone") { muted = true }
-                else if haystack.contains("mute microphone") { muted = false }
-                return true
-            }
-            if !completed { truncated = true }
-        }
+                if haystack.contains("leave huddle") { pass.hasLeave = true }
+                if haystack.contains("unmute microphone") { pass.muted = true }
+                else if haystack.contains("mute microphone") { pass.muted = false }
 
-        // A truncated walk proves nothing about the control's absence.
-        return SlackAccessibilityObservation(
-            hasLeaveHuddleControl: hasLeave,
-            subtreeWasEmpty: visitedNodes <= windows.count || (truncated && !hasLeave),
-            isMuted: muted,
-            windowTitle: title
+                guard wantsTiles,
+                      let userID = SlackHuddleTileParser.userID(from: node.domIdentifier)
+                else { return true }
+                found.append((
+                    element: element, userID: userID,
+                    isSelf: SlackHuddleTileParser.isSelf(node.domIdentifier),
+                    description: node.description
+                ))
+                // A tile's state lives in its own subtree, read below, so the
+                // outer walk does not descend into it.
+                return false
+            }
+            for entry in found {
+                let tile = readTile(
+                    entry.element, userID: entry.userID, isSelf: entry.isSelf,
+                    description: entry.description, budget: &budget
+                )
+                if let existing = byID[entry.userID] {
+                    byID[entry.userID] = merge(existing, tile)
+                } else {
+                    byID[entry.userID] = tile
+                    order.append(entry.userID)
+                }
+            }
+            // Exhaustion, not a strict overrun: the walk stops decrementing at
+            // zero, so zero is the only evidence there is. A walk that happens
+            // to finish on its last node is reported truncated too, which reads
+            // as "no information" and is the safe direction.
+            if budget <= 0 { pass.truncated = true }
+        }
+        pass.tiles = order.compactMap { byID[$0] }
+        return pass
+    }
+
+    /// One person joined from two devices is two tiles sharing a user id. They
+    /// are one person: speaking on either device is that person speaking, and
+    /// they count as unmuted if either device is.
+    private func merge(_ lhs: SlackHuddleTile, _ rhs: SlackHuddleTile) -> SlackHuddleTile {
+        SlackHuddleTile(
+            userID: lhs.userID,
+            displayName: lhs.displayName ?? rhs.displayName,
+            isSelf: lhs.isSelf || rhs.isSelf,
+            isMuted: (lhs.isMuted == false || rhs.isMuted == false)
+                ? false : (lhs.isMuted ?? rhs.isMuted),
+            isSpeaking: lhs.isSpeaking || rhs.isSpeaking
+        )
+    }
+
+    /// Reads one tile from its own subtree, spending the caller's budget.
+    ///
+    /// Sharing the budget rather than taking a fresh one per tile is the point:
+    /// a twenty-person huddle would otherwise add thousands of uncounted
+    /// cross-process reads to a walk that runs twice a second.
+    private func readTile(
+        _ element: AXUIElement, userID: String, isSelf: Bool, description: String,
+        budget: inout Int
+    ) -> SlackHuddleTile {
+        var name = SlackHuddleTileParser.displayName(from: description)
+        var muted: Bool?
+        var speaking = false
+        // Bounded hard: a tile subtree is small, and the poll runs twice a
+        // second beside everything else detection does.
+        AccessibilityBridge.walkElements(
+            element, maxDepth: 8, budget: &budget, wantsDOM: true
+        ) { _, node in
+            if name == nil { name = SlackHuddleTileParser.displayName(from: node.description) }
+            if SlackHuddleTileParser.isSpeaking(classList: node.domClassList) { speaking = true }
+            if let state = SlackHuddleTileParser.isMuted(description: node.description) {
+                muted = state
+            }
+            return true
+        }
+        return SlackHuddleTile(
+            userID: userID, displayName: name, isSelf: isSelf,
+            isMuted: muted, isSpeaking: speaking
         )
     }
 }

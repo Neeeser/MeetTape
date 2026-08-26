@@ -98,6 +98,7 @@ meeting/
     ├── metadata.json
     ├── transcript.raw.json
     ├── diarization.raw.json
+    ├── sensors.raw.json
     ├── speakers.map.json
     └── transcript.json
 ```
@@ -148,6 +149,34 @@ the recording and transcript available for retry.
 Diarization writes immutable speaker intervals. `speakers.map.json` adds mutable
 cluster mappings, line corrections, and transcript boundaries above that raw
 output. Re-analysis appends another diarization run and keeps the previous run.
+
+`sensors.raw.json` records what the meeting client itself said: the roster keyed
+by the platform's own identifier, who was seen unmuted, and who held the floor
+when. Mute state is kept as a record of what the client reported and is not
+consulted when deciding who spoke, because holding the floor settles that and a
+tile whose overlay never resolved would otherwise outrank it.
+It is immutable like the diarization beside it, because it is evidence about a
+recording rather than a conclusion about one.
+
+Three things read it. Word attribution assigns each transcribed word on the
+remote track to the sensor turn covering it, keyed on the platform's own
+participant identifier, and the diarizer attributes only the words no turn
+covers: gaps in the readings, overlap, and every meeting recorded without a
+readable client. Voice enrollment embeds each participant's turns cut to the
+solo speech the diarizer heard inside them, so voice memory learns a
+known-identity voice without waiting for a confirmation. Cluster naming matches
+a diarization cluster to whoever's turns dominate it, which carries the name
+onto the stretches the sensor did not see.
+
+Sensor names sit at an origin above a voice match and below the microphone
+track, so a person's own correction always wins. The sensor never sets the
+diarizer's speaker count and never moves a boundary.
+
+A cluster split evenly between two people is named for neither, a timeline
+covering too little of the diarized speech names nobody, which is what
+disagreeing clocks look like, and a floor nobody confirmed ends at the last
+reading that saw it rather than running to the end of the call. A sensor that reports nothing leaves
+naming exactly as it was before, which is by voice alone.
 
 Named people and recurring unnamed voices share one identity store. A confirmed
 speaker name can add meeting audio to a profile. Automatic recognition reads the

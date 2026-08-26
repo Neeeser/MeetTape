@@ -46,7 +46,7 @@ final class SpeakerDatabase {
 
     /// Bumped for every schema change. Migrations are additive; nothing here
     /// ever drops a column or a table that holds user data.
-    static let latestVersion: Int32 = 2
+    static let latestVersion: Int32 = 3
 
     init(url: URL) throws {
         self.url = url
@@ -139,6 +139,7 @@ final class SpeakerDatabase {
         switch version {
         case 1: try execute(Self.schemaV1)
         case 2: try execute(Self.personDetailTables)
+        case 3: try execute(Self.handleTables)
         default:
             // Advancing user_version for a step that did nothing marks the
             // schema as migrated when it is not, and the loop never retries.
@@ -150,6 +151,24 @@ final class SpeakerDatabase {
     }
 
     static var schemaV1: String { schemaCore + evidenceTables }
+
+    /// A platform's own identifier for a person, bound to their identity.
+    ///
+    /// Slack's user id survives across every meeting, which makes it a better
+    /// re-identification key than any voice vector: a person confirmed once is
+    /// named deterministically in every later huddle before a second of audio
+    /// is processed. One identity per handle, so re-confirming a handle to a
+    /// different person moves it rather than leaving two claims.
+    static let handleTables = """
+        CREATE TABLE identity_handle(
+          provider TEXT NOT NULL,
+          handle TEXT NOT NULL,
+          identity_id INTEGER NOT NULL REFERENCES identity(id) ON DELETE CASCADE,
+          created_at REAL NOT NULL,
+          PRIMARY KEY(provider, handle)
+        );
+        CREATE INDEX idx_handle_identity ON identity_handle(identity_id);
+        """
 
     /// What a person keeps about somebody, as opposed to what the matcher keeps.
     ///

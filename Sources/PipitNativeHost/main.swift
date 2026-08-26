@@ -138,12 +138,31 @@ func sensorMessage(from raw: [String: Any], browser: BrowserKind) -> SensorMessa
             muted: raw["muted"] as? Bool,
             tabID: raw["tabId"] as? Int,
             participants: raw["participants"] as? [String],
+            people: people(from: raw["people"]),
             activeSpeaker: raw["activeSpeaker"] as? String,
             otherAudibleTabs: raw["otherAudibleTabs"] as? Int
         ))
     default:
         return nil
     }
+}
+
+/// The roster a page reported. Anything without an identifier is dropped rather
+/// than given a made-up one: an identifier is what ties a person to a voice, and
+/// a placeholder would tie them to the wrong one.
+private func people(from value: Any?) -> [BrowserParticipant]? {
+    guard let rows = value as? [[String: Any]] else { return nil }
+    let parsed = rows.compactMap { row -> BrowserParticipant? in
+        guard let id = row["id"] as? String, !id.isEmpty else { return nil }
+        let name = (row["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return BrowserParticipant(
+            id: String(id.prefix(200)),
+            displayName: name.map { String($0.prefix(80)) },
+            isSelf: (row["isSelf"] as? Bool) ?? false,
+            isMuted: row["muted"] as? Bool
+        )
+    }
+    return parsed.isEmpty ? nil : Array(parsed.prefix(50))
 }
 
 let arguments = CommandLine.arguments

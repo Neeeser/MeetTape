@@ -51,12 +51,6 @@ constructs `PipitRuntime`, `SetupModel`, or `LocalModelManager`.
 - Keep voice profiles under Application Support and out of meeting folders.
 - Speech dependencies are pinned to measured versions. A version change requires
   benchmark evaluation.
-- A cluster identifier only means something inside one recording, and both halves
-  of a rejoined call number their speakers from zero. Name a recording, never a
-  conversation.
-- What the meetings list counts as work, the speaker strip has to offer. A voice
-  the strip will not draw is a voice the list must not count, or the Unnamed
-  filter fills with meetings nothing can clear.
 - An imported recording is dated from what the recorder wrote: the container's
   creation date, then a timestamp in the filename, then the file's date on this
   Mac. The manifest still owns how long the audio runs.

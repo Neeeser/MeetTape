@@ -1487,5 +1487,96 @@ enum SpeakerIdentityTests {
         ])
     }
 
-    static var all: [Suite] { [policySuite, vectorSuite, storeSuite, recognitionSuite] }
+    static var all: [Suite] {
+        [policySuite, vectorSuite, storeSuite, handleSuite, recognitionSuite]
+    }
+
+    static var handleSuite: Suite {
+        Suite("IdentityHandles", [
+            test("a handle names its person and follows a merge") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                try await store.setHandle(
+                    IdentityHandle(provider: "slack", handle: "U0CHRIS"), to: chris.id
+                )
+                expect.equal(
+                    await store.identity(handle: "U0CHRIS", provider: "slack")?.id, chris.id
+                )
+                // The saved Chris and the huddle Chris turn out to be one
+                // person. The handle keeps working, resolved to the survivor.
+                let saved = try await store.createPerson(name: "Chris Whitton")
+                try await store.merge(chris.id, into: saved.id)
+                expect.equal(
+                    await store.identity(handle: "U0CHRIS", provider: "slack")?.id, saved.id
+                )
+            },
+
+            test("re-confirming a handle moves it to the newer person") { expect in
+                // A handle can only be one person, and the newest confirmation
+                // is the correction of whatever the older one claimed.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let wrong = try await store.createPerson(name: "Ada")
+                let right = try await store.createPerson(name: "Grace")
+                try await store.setHandle(
+                    IdentityHandle(provider: "slack", handle: "U1"), to: wrong.id
+                )
+                try await store.setHandle(
+                    IdentityHandle(provider: "slack", handle: "U1"), to: right.id
+                )
+                expect.equal(await store.identity(handle: "U1", provider: "slack")?.id, right.id)
+            },
+
+            test("unlinking removes the claim and nothing else") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let person = try await store.createPerson(name: "Ada")
+                let handle = IdentityHandle(provider: "slack", handle: "U1")
+                try await store.setHandle(handle, to: person.id)
+                try await store.removeHandle(handle)
+                expect.isNil(await store.identity(handle: "U1", provider: "slack"))
+                expect.equal(try await store.current(person.id)?.id, person.id, "the person stays")
+            },
+
+            test("the People pane sees the handles a merge carried in") { expect in
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let source = try await store.createPerson(name: "Chris")
+                let target = try await store.createPerson(name: "Chris Whitton")
+                try await store.setHandle(
+                    IdentityHandle(provider: "slack", handle: "U0CHRIS"), to: source.id
+                )
+                try await store.merge(source.id, into: target.id)
+                let listed = try await store.handles(of: target.id)
+                expect.equal(listed, [IdentityHandle(provider: "slack", handle: "U0CHRIS")])
+
+                // Merges chain, and a handle two hops deep still names this
+                // person, so it has to be visible where it can be withdrawn.
+                let survivor = try await store.createPerson(name: "Christopher")
+                try await store.merge(target.id, into: survivor.id)
+                expect.equal(
+                    try await store.handles(of: survivor.id),
+                    [IdentityHandle(provider: "slack", handle: "U0CHRIS")]
+                )
+            },
+
+            test("a provider and handle are namespaced apart") { expect in
+                // Two platforms can hand out the same string. One binding per
+                // platform, not one per string.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let ada = try await store.createPerson(name: "Ada")
+                let grace = try await store.createPerson(name: "Grace")
+                try await store.setHandle(
+                    IdentityHandle(provider: "slack", handle: "shared"), to: ada.id
+                )
+                try await store.setHandle(
+                    IdentityHandle(provider: "other", handle: "shared"), to: grace.id
+                )
+                expect.equal(await store.identity(handle: "shared", provider: "slack")?.id, ada.id)
+                expect.equal(await store.identity(handle: "shared", provider: "other")?.id, grace.id)
+            },
+        ])
+    }
 }

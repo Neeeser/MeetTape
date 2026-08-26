@@ -12,6 +12,7 @@ struct PersonDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 badges
+                linkedAccounts
                 stats
                 notes
                 actions
@@ -93,6 +94,38 @@ struct PersonDetailView: View {
                     .buttonStyle(.plain)
                     .help(badge.label)
                 }
+            }
+        }
+    }
+
+    /// The platform accounts confirmed as this person.
+    ///
+    /// One row per binding: the platform, the platform's own identifier, and
+    /// the way out. A binding is written when the user says who a meeting's
+    /// speaker is, so this is where a wrong answer gets taken back.
+    @ViewBuilder private var linkedAccounts: some View {
+        if !model.handles.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Linked accounts").font(.caption).foregroundStyle(.secondary)
+                ForEach(model.handles, id: \.self) { handle in
+                    HStack(spacing: 8) {
+                        Text(handle.provider.capitalized)
+                            .font(.caption.weight(.medium))
+                        Text(handle.handle)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Unlink") { Task { await model.unlink(handle) } }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .help("This account stops naming this person. Their voice and name stay.")
+                    }
+                }
+                Text("Meetings name this person from these accounts automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
     }

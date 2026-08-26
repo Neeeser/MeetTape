@@ -23,6 +23,7 @@ suites += SpeechGateTests.all
 suites.append(EchoTests.suite)
 suites.append(TranscriptPanelTests.suite)
 suites.append(ReconnectTests.suite)
+suites += SensorAttributionTests.all
 suites += SpeakerCorrectionTests.all
 suites += PeopleDirectoryTests.all
 suites += MeetingsWindowTests.all
@@ -35,6 +36,7 @@ suites.append(CompactionTests.suite)
 suites.append(LocalPipelineTests.suite)
 suites.append(LocalModelTests.suite)
 suites.append(BenchScorerTests.suite)
+suites.append(LiveSlackHuddleTests.suite)
 suites.append(LiveOpenAITests.suite)
 suites.append(LiveEndToEndTests.suite)
 

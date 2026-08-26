@@ -9,6 +9,9 @@ import {
   isMeaningfulChange,
   shouldSend,
   HEARTBEAT_MS,
+  rosterFromTiles,
+  zoomParticipantFromLabel,
+  createSpeakingTracker,
 } from '../shared/provider.js';
 
 const leaveControl = { ariaLabel: 'Leave call' };
@@ -135,4 +138,155 @@ test('an unchanged call still reports before the app stops trusting it', () => {
   assert.equal(shouldSend(state, { ...state, state: 'ended' }, 1000, 1001), true);
   // The first snapshot of a tab always sends.
   assert.equal(shouldSend(null, state, 0, 500), true);
+});
+
+// --- roster -----------------------------------------------------------------
+
+test('a tile without an identifier is dropped rather than guessed at', () => {
+  // The identifier is what ties a person to a voice. A made-up one ties them
+  // to the wrong voice, which is worse than leaving the cluster unnamed.
+  const people = rosterFromTiles([
+    { id: 'spaces/x/devices/406', name: 'Ada' },
+    { id: '', name: 'Nameless' },
+    { name: 'No id at all' },
+  ]);
+  assert.equal(people.length, 1);
+  assert.equal(people[0].id, 'spaces/x/devices/406');
+});
+
+test('a duplicate tile collapses to one person', () => {
+  // Meet renders a participant in the grid and again in the people panel.
+  const people = rosterFromTiles([
+    { id: 'd406', name: 'Ada' },
+    { id: 'd406', name: 'Ada' },
+    { id: 'd409', name: 'Grace' },
+  ]);
+  assert.equal(people.length, 2);
+});
+
+test('a name arriving later fills in a blank one', () => {
+  const people = rosterFromTiles([{ id: 'd406' }, { id: 'd406', name: 'Ada' }]);
+  assert.equal(people[0].name, 'Ada');
+});
+
+test('a meter that changed recently is speaking, one that settled is not', () => {
+  // Meet animates a per-participant level meter while someone talks and lets it
+  // settle when they stop. Reading the animation rather than a class name means
+  // no selector has to be kept in step with whatever Meet renames next.
+  //
+  // Timed at the real read cadence of 500 ms, because that is what broke: a hold
+  // shorter than the gap between reads expires before the next read can renew
+  // it, so the floor drops on every tick and no turn ever grows.
+  const tracker = createSpeakingTracker();
+  assert.equal(tracker.update([{ id: 'd406', meter: 'a' }], 0), null);
+  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 500), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 1000), 'd406');
+  // Settled: the meter stops changing and the hold runs out.
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 1500), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 3000), null);
+});
+
+test('a turn survives the gap between reads', () => {
+  // Ten seconds of continuous speech has to come out as one turn, not twenty.
+  // Six seconds in a single turn is what makes somebody a speaker downstream.
+  const tracker = createSpeakingTracker();
+  let held = 0;
+  for (let t = 0; t <= 10_000; t += 500) {
+    if (tracker.update([{ id: 'd406', meter: `m${t}` }], t) === 'd406') held += 1;
+  }
+  assert.ok(held >= 19, `floor held on ${held} of 21 reads`);
+});
+
+test('the floor goes to whoever changed most recently', () => {
+  const tracker = createSpeakingTracker();
+  tracker.update([{ id: 'a', meter: '1' }, { id: 'b', meter: '1' }], 0);
+  tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '1' }], 500);
+  assert.equal(tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '2' }], 1000), 'b');
+});
+
+test('a roster of one is still a roster', () => {
+  // A call can legitimately hold one person, and reporting nothing would read
+  // as the sensor being broken.
+  assert.equal(rosterFromTiles([{ id: 'd406', name: 'Ada' }]).length, 1);
+});
+
+test('the roster rides along in the state message', () => {
+  const state = buildState({
+    href: 'https://meet.google.com/abc-defg-hij',
+    title: 'Meet',
+    controls: [leaveControl],
+    pageText: '',
+    tabId: 3,
+    now: 1000,
+    people: [{ id: 'd406', name: 'Ada', isSelf: true, muted: false }],
+    activeSpeaker: 'd406',
+  });
+  assert.equal(state.people.length, 1);
+  assert.equal(state.activeSpeaker, 'd406');
+});
+
+test('no roster leaves the fields off entirely', () => {
+  // Absent means the page did not say. An empty array would claim an empty room.
+  const state = buildState({
+    href: 'https://meet.google.com/abc-defg-hij',
+    title: 'Meet',
+    controls: [leaveControl],
+    pageText: '',
+    tabId: 3,
+    now: 1000,
+  });
+  assert.equal(state.people, undefined);
+  assert.equal(state.activeSpeaker, undefined);
+});
+
+test('the floor moving is a change worth sending', () => {
+  const base = {
+    provider: 'meet', state: 'in_call', meetingId: 'abc', url: 'u', title: 't',
+    muted: false, activeSpeaker: 'a', people: [{ id: 'a' }, { id: 'b' }],
+  };
+  assert.equal(isMeaningfulChange(base, { ...base, activeSpeaker: 'b' }), true);
+  assert.equal(isMeaningfulChange(base, { ...base }), false);
+});
+
+test('someone joining is a change worth sending', () => {
+  const base = { provider: 'meet', state: 'in_call', people: [{ id: 'a' }] };
+  assert.equal(
+    isMeaningfulChange(base, { ...base, people: [{ id: 'a' }, { id: 'b' }] }),
+    true
+  );
+});
+
+test('a zoom row label yields name, self and mute state', () => {
+  // Measured on the web client: the label is the whole surface. The row id is
+  // a list position and no element carries a participant identifier.
+  assert.deepEqual(
+    zoomParticipantFromLabel('Andrew Neeser (Host, me),computer audio muted,video off'),
+    { name: 'Andrew Neeser', isSelf: true, muted: true }
+  );
+  assert.deepEqual(
+    zoomParticipantFromLabel('A 2 (Guest),computer audio unmuted,video off'),
+    { name: 'A 2', isSelf: false, muted: false }
+  );
+});
+
+test('a zoom label without an audio clause still names the person', () => {
+  assert.deepEqual(
+    zoomParticipantFromLabel('Grace Hopper (Co-host)'),
+    { name: 'Grace Hopper', isSelf: false, muted: undefined }
+  );
+});
+
+test('a zoom name containing parentheses keeps them', () => {
+  // Only a trailing role list is stripped, and only a role reading exactly
+  // "me" marks the local user: a person named Me Someone does not.
+  assert.deepEqual(
+    zoomParticipantFromLabel('Ada (she/her) (Guest),computer audio muted,video off'),
+    { name: 'Ada (she/her)', isSelf: false, muted: true }
+  );
+});
+
+test('an empty or roleless-empty zoom label is nobody', () => {
+  assert.equal(zoomParticipantFromLabel(''), null);
+  assert.equal(zoomParticipantFromLabel('   '), null);
+  assert.equal(zoomParticipantFromLabel('(Host, me),computer audio muted,video off'), null);
 });

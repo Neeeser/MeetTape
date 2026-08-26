@@ -1165,10 +1165,15 @@ enum MeetingsWindowTests {
         model.show(meetingID: second.id)
         model.combineWithEarlier()
 
+        // In the same turn, not after the archive read. The combine is already
+        // on disk when the call returns, and a selection left on the folded row
+        // dangles on a row about to disappear for as long as the pane takes to
+        // reload.
+        expect.equal(model.selection, [first.id], "the conversation's own row is selected")
         await waitFor(expect, "the folded recording's row to leave the list") {
             model.rows.map(\.id) == [first.id]
         }
-        expect.equal(model.selection, [first.id], "and the conversation's own row is selected")
+        expect.equal(model.selection, [first.id], "and the selection survives the read")
     }
 
     /// Separating is done from the pane too. The recording that comes back is a

@@ -65,7 +65,9 @@ extension LocalModelManager {
         config.clustering.warmStartFa = LocalDiarizationTuning.warmStartFa
         // Never set from a participant list, a calendar or a guess. Only a
         // person asking for a specific count on the re-analysis control reaches
-        // this, and then it is their number under their review.
+        // this, and then it is their number under their review. A count too low
+        // merges two real voices into one cluster, renaming cannot split them
+        // again, and the merged voice is then enrolled into somebody's profile.
         config.clustering.numSpeakers = speakerCount
         return config
     }

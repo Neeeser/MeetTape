@@ -9,19 +9,24 @@ public struct DetectionSnapshot: Sendable, Equatable {
     public var browserSensor: BrowserSensorTracker.Connection
     public var hasAccessibility: Bool
     public var hasWindowTitles: Bool
+    /// Who the meeting client says is in the call, and who is holding the floor.
+    /// Empty where nothing readable is in a meeting.
+    public var roster: SensorReading?
 
     public init(
         evidence: [ProviderEvidence] = [],
         slackState: SlackHuddleDetector.State = .idle,
         browserSensor: BrowserSensorTracker.Connection = .absent,
         hasAccessibility: Bool = false,
-        hasWindowTitles: Bool = false
+        hasWindowTitles: Bool = false,
+        roster: SensorReading? = nil
     ) {
         self.evidence = evidence
         self.slackState = slackState
         self.browserSensor = browserSensor
         self.hasAccessibility = hasAccessibility
         self.hasWindowTitles = hasWindowTitles
+        self.roster = roster
     }
 }
 
@@ -86,6 +91,60 @@ public final class DetectionEngine: @unchecked Sendable {
         for browser in configuration.browsers {
             browserDetectors[browser] = BrowserMeetingDetector(browser: browser)
         }
+    }
+
+
+    /// Who the meeting client says is in the call.
+    ///
+    /// Slack wins over the browser when both are readable, because the huddle
+    /// reader sees other people's tiles directly while the extension reports
+    /// whatever the page chose to render. Nothing here decides that a meeting is
+    /// happening; that stays with the evidence above.
+    private func reading(
+        slack: SlackAccessibilityObservation,
+        browsers: [BrowserKind: BrowserMeetingDetector],
+        at now: Double
+    ) -> SensorReading? {
+        if !slack.tiles.isEmpty {
+            return SensorReading(
+                source: "slack-huddle-ax",
+                provider: .slack,
+                at: now,
+                participants: slack.tiles.map {
+                    SensorParticipant(id: $0.userID, displayName: $0.displayName, isSelf: $0.isSelf)
+                },
+                // At most one tile carries the flag, and it moves atomically, so
+                // the first one holding it is the floor.
+                speakingID: slack.tiles.first(where: \.isSpeaking)?.userID,
+                unmutedIDs: Set(slack.tiles.filter { $0.isMuted == false }.map(\.userID)),
+                // Slack's tile identifier carries `self_`, which is structural
+                // rather than inferred from anything the interface renders.
+                selfIsAuthoritative: true
+            )
+        }
+        for kind in [BrowserKind.firefox, .chrome] {
+            // currentEvent, not lastEvent. The latter is whatever arrived most
+            // recently from any tab, so a second Meet tab sitting on a landing
+            // page reporting `browsing` would hide the roster of the call being
+            // recorded, and a dead content script would leave a stale event
+            // latched. currentEvent weighs tabs and drops the untrustworthy.
+            guard let event = browsers[kind]?.sensor.currentEvent(at: now),
+                  event.state.isActiveCall,
+                  let people = event.people, !people.isEmpty
+            else { continue }
+            return SensorReading(
+                source: "\(event.provider.rawValue)-dom",
+                provider: event.provider,
+                at: now,
+                participants: people.map {
+                    SensorParticipant(id: $0.id, displayName: $0.displayName, isSelf: $0.isSelf)
+                },
+                meetingID: event.meetingID,
+                speakingID: event.activeSpeaker,
+                unmutedIDs: Set(people.filter { $0.isMuted == false }.map(\.id))
+            )
+        }
+        return nil
     }
 
     public var snapshot: DetectionSnapshot {
@@ -190,6 +249,11 @@ public final class DetectionEngine: @unchecked Sendable {
         // Read accessibility before taking the lock: the walk crosses into
         // another process and can block for seconds when Slack is busy.
         let slackObservation = slackReader.read()
+        // Stamped after the walk, because the tiles describe the call as of
+        // when the read finished. Stamping with the poll's start put every turn
+        // boundary early by however long the walk took, and inflated the
+        // cadence estimate that decides when a silence ends a turn.
+        let observedAt = clock.monotonicSeconds
 
         lock.lock()
 
@@ -267,7 +331,8 @@ public final class DetectionEngine: @unchecked Sendable {
             slackState: slackDetector.state,
             browserSensor: browserDetectors[.firefox]?.sensor.connection ?? .absent,
             hasAccessibility: AccessibilityBridge.isTrusted,
-            hasWindowTitles: !titles.isEmpty || windowReader.hasTitleAccess
+            hasWindowTitles: !titles.isEmpty || windowReader.hasTitleAccess,
+            roster: reading(slack: slackObservation, browsers: browserDetectors, at: observedAt)
         )
         let labels = evidence.map { item in
             "\(item.provider.rawValue):\(item.confidence.rawValue):\(item.source.rawValue)"

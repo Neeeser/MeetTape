@@ -111,15 +111,33 @@ public struct RecordingTimeline: Sendable, Equatable {
         CaptureTrack.allCases.compactMap { firstFrameHostTime(track: $0) }.min()
     }
 
-    /// Whether one track's audio is a single unbroken stretch.
+    /// Whether one track's audio runs without a gap in it.
     ///
     /// The meeting timeline is concatenated-audio time: segments are joined
-    /// with nothing between them, so after a capture restart everything later
-    /// sits earlier on the timeline than in host time by the length of the gap.
-    /// Anything placed by a single host-time shift is only valid while this
-    /// holds.
-    public func isContiguous(track: CaptureTrack) -> Bool {
-        segments(track: track).count <= 1
+    /// with nothing between them, so a stretch of missing audio makes
+    /// everything after it sit earlier on the timeline than in host time by the
+    /// length of the gap. Anything placed by a single host-time shift, which is
+    /// how sensor readings land, is only valid while this holds.
+    ///
+    /// Segment count says nothing about this. The writer rotates every thirty
+    /// seconds, so a five minute call is ten segments recorded back to back.
+    /// What matters is whether each segment begins where the one before it
+    /// ended, measured on the capture clock and allowed a rotation's worth of
+    /// slack, well above the buffer boundary a rotation actually costs.
+    public func isContiguous(track: CaptureTrack, tolerance: Double = 0.5) -> Bool {
+        let ordered = segments(track: track)
+        for (previous, next) in zip(ordered, ordered.dropFirst()) {
+            // A segment whose start was never resolved cannot be compared. It
+            // is also not evidence of a gap, and refusing on it would drop the
+            // record for a recording that is very likely fine.
+            guard let start = previous.resolvedFirstFrameHostTime,
+                  let following = next.resolvedFirstFrameHostTime
+            else { continue }
+            let recorded = previous.seconds
+            guard recorded > 0 else { continue }
+            if following - (start + recorded) > tolerance { return false }
+        }
+        return true
     }
 
     /// How long after the meeting started this track's first frame arrived.

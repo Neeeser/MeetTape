@@ -212,17 +212,28 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
     public var utteranceOverrides: [UtteranceOverride]
     /// Where a person said one line is really two.
     public var lineCuts: [LineCut]
+    /// Speakers a person deliberately left unnamed.
+    ///
+    /// Clearing a name removes its entry, which leaves nothing to outrank the
+    /// automatic stage that wrote it, so the next pass put the same name back.
+    /// That is invisible for a name derived from audio, because re-deriving it
+    /// is the point, and wrong for one the meeting client hands over ready
+    /// made: the client says "Chris" every time, so without this a person can
+    /// never take "Chris" off that speaker.
+    public var clearedKeys: Set<String>
 
     public init(
         version: Int = SpeakerMap.currentVersion,
         entries: [String: SpeakerAssignment] = [:],
         utteranceOverrides: [UtteranceOverride] = [],
-        lineCuts: [LineCut] = []
+        lineCuts: [LineCut] = [],
+        clearedKeys: Set<String> = []
     ) {
         self.version = version
         self.entries = entries
         self.utteranceOverrides = utteranceOverrides
         self.lineCuts = lineCuts
+        self.clearedKeys = clearedKeys
     }
 
     /// A map written before line-level corrections existed decodes with none of
@@ -234,6 +245,7 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         utteranceOverrides =
             try container.decodeIfPresent([UtteranceOverride].self, forKey: .utteranceOverrides) ?? []
         lineCuts = try container.decodeIfPresent([LineCut].self, forKey: .lineCuts) ?? []
+        clearedKeys = try container.decodeIfPresent(Set<String>.self, forKey: .clearedKeys) ?? []
     }
 
     /// Records a boundary, ignoring one that falls where a boundary already is.
@@ -271,6 +283,9 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
             assign(assignment, to: key)
             return
         }
+        // A person took this name off deliberately. Nothing automatic puts one
+        // back until they say otherwise.
+        if clearedKeys.contains(key) { return }
         if let existing = entries[key], existing.origin > assignment.origin { return }
         var incoming = assignment
         // An identity is not part of the suggestion being replaced. Re-running a
@@ -325,8 +340,12 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             entries.removeValue(forKey: key)
+            // Remembered, so an automatic stage cannot write the same name back
+            // on the next pass. A person naming this speaker again clears it.
+            clearedKeys.insert(key)
             return
         }
+        clearedKeys.remove(key)
         entries[key] = SpeakerAssignment(
             displayName: trimmed, origin: .human, participantID: participantID,
             identityID: identityID, provenance: .human()

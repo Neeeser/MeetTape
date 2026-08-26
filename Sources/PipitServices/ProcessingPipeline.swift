@@ -946,11 +946,16 @@ public actor ProcessingPipeline {
     /// under their sensor key.
     ///
     /// The stretches come from `SensorAttribution.enrollmentIntervals`: the
-    /// participant's turns cut to the solo speech the diarizer heard inside
-    /// them. The client attributed that audio to one person while it was
-    /// recorded, so the vector is a known voice rather than a cluster's guess,
-    /// and voice memory can recognise them next time without anyone confirming
-    /// a name first.
+    /// participant's turns cut to the solo speech of the clusters those turns
+    /// dominate. The client attributed that audio to one person while it was
+    /// recorded, so the vector is a known voice rather than a cluster's guess.
+    ///
+    /// Stored, not resolved. Nothing matches this vector against the profiles
+    /// on its own, because a sensor key covers the same seconds as the cluster
+    /// beside it and two claims on one voice is what mints an anonymous twin.
+    /// It waits here so that confirming a name has a vector to enrol, and so
+    /// that a handle bound to this account can carry a person's profile
+    /// forward without re-deriving it from audio.
     ///
     /// Never throws into the caller. A voice that cannot be embedded is a voice
     /// learned later through a confirmation, exactly as before this existed.

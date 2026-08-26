@@ -83,21 +83,33 @@ enum ManifestTests {
                 )
             },
 
-            test("a restarted track is not contiguous") { expect in
-                // The meeting timeline splices segments together without the
-                // gap between them, so anything placed by a single host-time
-                // shift, which is how sensor readings land, is only valid for
-                // a track recorded in one stretch.
-                let single = ManifestReader.timeline(from: timelineLines(segments: [
-                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),
+            test("rotation is not a gap, and a real gap is") { expect in
+                // The writer rotates every thirty seconds, so a long call is
+                // many segments recorded back to back. Counting segments would
+                // call every real meeting discontiguous and silently turn off
+                // everything that places itself by a single host-time shift.
+                let rotating = ManifestReader.timeline(from: timelineLines(segments: [
+                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_000.0),
+                    (track: .remote, index: 2, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_030.0),
+                    (track: .remote, index: 3, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_060.0),
                 ]))
-                expect.isTrue(single.isContiguous(track: .remote))
-                let restarted = ManifestReader.timeline(from: timelineLines(segments: [
-                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30)),
-                    (track: .remote, index: 2, rate: 48_000.0, frames: Int64(48_000 * 30)),
+                expect.isTrue(
+                    rotating.isContiguous(track: .remote),
+                    "thirty-second rotation is how every meeting is recorded"
+                )
+
+                // A sleep/wake or a tap rebind leaves audio missing, and
+                // everything after it sits early on the concatenated timeline.
+                let gapped = ManifestReader.timeline(from: timelineLines(segments: [
+                    (track: .remote, index: 1, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_000.0),
+                    (track: .remote, index: 2, rate: 48_000.0, frames: Int64(48_000 * 30),
+                     host: 1_050.0),
                 ]))
-                expect.isFalse(restarted.isContiguous(track: .remote))
-                expect.isTrue(restarted.isContiguous(track: .mic), "the other track is unaffected")
+                expect.isFalse(gapped.isContiguous(track: .remote))
             },
 
             test("meeting duration is the longer of the two tracks") { expect in
@@ -263,6 +275,44 @@ enum ManifestTests {
                 ))
             ))
             host += 1
+        }
+        return ManifestReadResult(lines: lines, hasTruncatedTail: false, unrecognisedLines: 0)
+    }
+
+    /// Segments placed at chosen host times, for anything that reads where one
+    /// segment ends and the next begins.
+    static func timelineLines(
+        segments: [(track: CaptureTrack, index: Int, rate: Double, frames: Int64, host: Double)]
+    ) -> ManifestReadResult {
+        var lines: [ManifestLine] = [
+            ManifestLine(
+                hostTime: 0, wallClock: Date(timeIntervalSince1970: 0),
+                event: .sessionStart(.init(
+                    meetingID: "meeting", source: .googleMeet, segmentSeconds: 30,
+                    appVersion: "1.0.0", processID: 1
+                ))
+            ),
+        ]
+        for segment in segments {
+            lines.append(ManifestLine(
+                hostTime: segment.host, wallClock: Date(timeIntervalSince1970: segment.host),
+                event: .segmentOpen(.init(
+                    track: segment.track, index: segment.index,
+                    file: String(format: "%@.%04d.caf", segment.track.segmentPrefix, segment.index),
+                    firstFrameHostTime: segment.host, startFrame: 0,
+                    sampleRate: segment.rate, channelCount: 1, reason: "rotate"
+                ))
+            ))
+            let seconds = Double(segment.frames) / segment.rate
+            lines.append(ManifestLine(
+                hostTime: segment.host + seconds,
+                wallClock: Date(timeIntervalSince1970: segment.host + seconds),
+                event: .segmentClose(.init(
+                    track: segment.track, index: segment.index, frameCount: segment.frames,
+                    byteCount: segment.frames * 4, seconds: seconds,
+                    firstFrameHostTime: segment.host, reason: "rotate"
+                ))
+            ))
         }
         return ManifestReadResult(lines: lines, hasTruncatedTail: false, unrecognisedLines: 0)
     }

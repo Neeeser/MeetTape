@@ -531,6 +531,34 @@ enum SensorAttributionTests {
                 )
             },
 
+            test("a voice split across two clusters enrolls from both") { expect in
+                // The clusterer is tuned to split a speaker rather than merge
+                // two people, so one voice in two clusters is expected. Keeping
+                // one of them threw away most of that person's audio.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")],
+                    turns: [("U1", 0, 30), ("U1", 40, 70)]
+                )
+                let enrolled = SensorAttribution.enrollmentIntervals(
+                    sensors: raw,
+                    diarized: [interval("a", 1, 29), interval("b", 41, 69)]
+                )
+                let total = enrolled.reduce(0) { $0 + $1.duration }
+                expect.isTrue(total > 50, "only one cluster was kept: \(total)s")
+            },
+
+            test("a short turn keeps its beginning") { expect in
+                // A fixed one-second concession would gut the short turns of an
+                // ordinary back-and-forth, handing away the head of the turn as
+                // well, which is where the sensor is the thing that is right.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 1.2)]
+                )
+                let intervals = SensorAttribution.wordIntervals(sensors: raw)
+                expect.equal(intervals.count, 1)
+                expect.close(intervals.first?.end ?? 0, 0.6, tolerance: 0.001)
+            },
+
             test("a participant whose turns dominate no cluster enrolls nothing") { expect in
                 // Two people splitting one cluster evenly means the diarizer
                 // merged them, and embedding either half would put a two-voice
@@ -1149,6 +1177,31 @@ extension SensorAttributionTests {
                     reread.entries["remote-001_speaker_01"]?.participantID, "U_ADA",
                     "the platform identity is kept, not just the name"
                 )
+            },
+
+            test("a name a person cleared is not written back by the meeting") { expect in
+                // The client hands the same name over every meeting, so without
+                // a record of the clearing, a person can never take a roster
+                // name off a speaker: the next pass puts it straight back.
+                var speakers = SpeakerMap()
+                let key = SpeakerLabel.sensor(participantID: "U_ADA")
+                speakers.assign("Ada", to: key)
+                speakers.assign("", to: key)
+                expect.isNil(speakers.entries[key])
+
+                let sensors = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [SensorParticipant(id: "U_ADA", displayName: "Ada")],
+                    turns: [SensorTurn(start: 0, end: 30, participantID: "U_ADA")]
+                )
+                for entry in SensorAttribution.speakerEntries(sensors: sensors) {
+                    speakers.applySuggestion(entry.assignment, for: entry.key)
+                }
+                expect.isNil(speakers.entries[key], "the roster wrote the cleared name back")
+
+                // And naming it again lifts the block.
+                speakers.assign("Grace", to: key)
+                expect.equal(speakers.entries[key]?.displayName, "Grace")
             },
 
             test("a name a person set is not overwritten by the meeting") { expect in

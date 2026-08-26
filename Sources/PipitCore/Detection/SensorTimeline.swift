@@ -52,7 +52,8 @@ public struct RawSensors: Codable, Sendable, Equatable {
     public static let currentVersion = 1
 
     public var version: Int
-    /// Which reader produced this, for example `slack-huddle-ax` or `meet-dom`.
+    /// Which reader produced this, for example `slack-huddle-ax` or
+    /// `google_meet-dom`.
     public var source: String
     public var participants: [SensorParticipant]
     public var turns: [SensorTurn]
@@ -96,18 +97,29 @@ public struct RawSensors: Codable, Sendable, Equatable {
         return scoped
     }
 
+    /// Whether the local user could only be found by matching a display name.
+    ///
+    /// The platform's own flag is trustworthy: Slack marks the tile `self_`, and
+    /// Meet marks its own tile. A name match is a guess, and two people called
+    /// Andrew in one call is not a rare event. So a name match is allowed to
+    /// suppress a name, which is safe, and never to drive the speaker count,
+    /// which is not: dropping a real speaker from the count re-clusters the
+    /// recording one short and merges two voices into one, and a merge cannot be
+    /// undone by renaming.
+    public func selfIsOnlyAGuess(localUserName: String) -> Bool {
+        let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty, !participants.contains(where: \.isSelf) else { return false }
+        return participants.contains { person in
+            guard let name = person.displayName else { return false }
+            return name.caseInsensitiveCompare(wanted) == .orderedSame
+        }
+    }
+
     /// The same record with the local user marked by name as well as by flag.
     ///
-    /// The page's own answer is not enough. Meet marks the local tile by writing
-    /// "You" into it, which is a English string, so a client in any other
-    /// language reports nobody as self and the exclusion below quietly stops
-    /// working. Zoom marks nobody at all.
-    ///
-    /// The app does know who its user is, so the name it was configured with is
-    /// the second mechanism. Matching a display name is weaker than matching an
-    /// identifier and it is used only to widen who counts as the local user,
-    /// never to narrow it, so the worst case is losing one person's turns rather
-    /// than putting the wrong name on someone.
+    /// The page's own answer is not enough. Meet marks the local tile with an
+    /// English word, so a client in any other language reports nobody as self,
+    /// and Zoom marks nobody at all. The app does know who its user is.
     public func markingSelf(named localUserName: String) -> RawSensors {
         let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return self }
@@ -247,11 +259,16 @@ public struct SensorTimelineBuilder: Sendable {
 /// Detection has no idea when a recording started, so whoever owns the recording
 /// rebases these onto the meeting timeline.
 public struct SensorReading: Sendable, Equatable {
-    /// Which reader produced it, for example `slack-huddle-ax` or `meet-dom`.
+    /// Which reader produced it, for example `slack-huddle-ax` or
+    /// `google_meet-dom`.
     public var source: String
     /// Which meeting provider it describes. A recording only folds in readings
     /// about the meeting it is recording.
     public var provider: MeetingProvider
+    /// The provider's own identifier for the call, where the reader knows it.
+    /// Two browser tabs in two different calls report the same provider, so the
+    /// provider alone cannot tell one from the other.
+    public var meetingID: String?
     public var at: Double
     public var participants: [SensorParticipant]
     public var speakingID: String?
@@ -259,11 +276,12 @@ public struct SensorReading: Sendable, Equatable {
 
     public init(
         source: String, provider: MeetingProvider, at: Double,
-        participants: [SensorParticipant],
+        participants: [SensorParticipant], meetingID: String? = nil,
         speakingID: String? = nil, unmutedIDs: Set<String> = []
     ) {
         self.source = source
         self.provider = provider
+        self.meetingID = meetingID
         self.at = at
         self.participants = participants
         self.speakingID = speakingID
@@ -302,9 +320,10 @@ public struct SensorRecorder: Sendable {
     }
 
     public mutating func record(_ reading: SensorReading) {
-        // One recording, one reader. A Slack huddle opening beside a Meet call
-        // would otherwise fold Slack user ids into a record labelled `meet-dom`,
-        // and nothing downstream could tell the two apart.
+        // One recording, one reader. The runtime already drops readings from
+        // another provider, so this is the backstop rather than the gate: it
+        // holds even if a future reader emits two source names for one provider,
+        // and it keeps the file's `source` field true to its contents.
         if let source, source != reading.source { return }
         source = reading.source
         lastMonotonic = max(lastMonotonic, reading.at)

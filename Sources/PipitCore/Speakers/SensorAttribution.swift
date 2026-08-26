@@ -54,25 +54,40 @@ public enum SensorAttribution {
     /// Below this share of speech covered, the two clocks do not describe the
     /// same call and nothing is named.
     public static let minimumTimelineCoverage: Double = 0.15
-    /// How long someone has to hold the floor before they count as a speaker.
+    /// How long a single turn has to run before its owner counts as a speaker.
     ///
     /// Slack's flag releases about 1.5 s after the voice stops, so a cough, a
     /// "mhm" or a one-word "yeah" all produce a turn. Counting those would tell
-    /// the diarizer to find a cluster for every person who ever made a noise,
-    /// and re-clustering a two-voice track into five splits the two real
-    /// speakers apart.
+    /// the diarizer to find a cluster for everyone who ever made a noise, and
+    /// re-clustering a two-voice track into five splits the two real speakers
+    /// apart.
+    ///
+    /// The longest turn, not the sum. Four "mhm"s across an hour add up past any
+    /// threshold while still describing somebody who never held the floor.
     public static let minimumSpeakerSeconds: Double = 6
 
     public static func attribute(
-        intervals: [DiarizationInterval],
-        sensors: RawSensors,
-        minimumClusterCoverage: Double = minimumClusterCoverage,
-        minimumMargin: Double = minimumMargin,
-        minimumTimelineCoverage: Double = minimumTimelineCoverage
+        intervals: [DiarizationInterval], sensors: RawSensors
     ) -> Result {
-        var heldFor: [String: Double] = [:]
-        for turn in sensors.turns { heldFor[turn.participantID, default: 0] += turn.duration }
-        let speakers = heldFor.filter { $0.value >= minimumSpeakerSeconds }.count
+        // The local user is not in the far-end mixdown, so they are not one of
+        // the voices to be found there. Their turns stay in the overlap below,
+        // where they can still stop somebody else's name landing on the local
+        // user's speech, but they never become a name and never a count.
+        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        var longestTurn: [String: Double] = [:]
+        for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
+            longestTurn[turn.participantID] = max(
+                longestTurn[turn.participantID] ?? 0, turn.duration
+            )
+        }
+        // Somebody muted for the entire call is in the room and not on the
+        // track, whatever their tile did. Where the reader reported mute state
+        // at all, it decides this; where it reported none, every turn stands.
+        let everUnmuted = Set(sensors.unmutedIDs)
+        let speakers = longestTurn
+            .filter { $0.value >= minimumSpeakerSeconds }
+            .filter { everUnmuted.isEmpty || everUnmuted.contains($0.key) }
+            .count
         // Absent rather than zero: the sensor saw turns and none of them was a
         // real turn, which is not the same as knowing nobody spoke.
         let countHint = speakers > 0 ? speakers : nil
@@ -117,6 +132,11 @@ public enum SensorAttribution {
             let runnerUp = ranked.dropFirst().first?.value ?? 0
             guard winner.value / seconds >= minimumClusterCoverage else { continue }
             guard runnerUp == 0 || winner.value >= runnerUp * minimumMargin else { continue }
+            // A cluster the local user best explains is a cluster this track
+            // cannot contain, so it is left blank rather than handed to whoever
+            // came second. Dropping their turns instead would have made the
+            // runner-up zero and let second place win outright.
+            guard !selfIDs.contains(winner.key) else { continue }
             matches.append(Match(
                 clusterID: clusterID,
                 participantID: winner.key,
@@ -138,14 +158,15 @@ extension SensorAttribution {
     /// models or a meeting folder. The pipeline's remaining job is to apply
     /// these, which `SpeakerMap.applySuggestion` already governs.
     ///
-    /// The local user is dropped before anything else happens. The far-end track
-    /// is a mixdown of everyone else, so a turn saying the local user held the
-    /// floor cannot explain a voice heard there, and letting it try put their
-    /// name on whoever they talked over.
+    /// The local user is marked, not removed. The far-end track is a mixdown of
+    /// everyone else, so a turn saying the local user held the floor cannot
+    /// explain a voice heard there. Removing those turns looked equivalent and
+    /// was not: it left the runner-up at zero, so the margin rule stopped
+    /// guarding and second place won the cluster outright.
     public static func assignments(
         diarization: RawDiarization, sensors: RawSensors, localUserName: String = ""
     ) -> [(key: String, assignment: SpeakerAssignment)] {
-        let scoped = sensors.markingSelf(named: localUserName).excludingSelf()
+        let scoped = sensors.markingSelf(named: localUserName)
         guard !scoped.turns.isEmpty else { return [] }
 
         var out: [(key: String, assignment: SpeakerAssignment)] = []

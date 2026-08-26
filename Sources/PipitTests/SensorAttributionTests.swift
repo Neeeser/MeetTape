@@ -496,6 +496,115 @@ enum SensorAttributionTests {
         ])
     }
 
+    static var selfSuite: Suite {
+        Suite("SensorSelfHandling", [
+            test("a cluster the local user best explains is left blank") { expect in
+                // Their voice is not in the far-end mixdown, so nothing there is
+                // theirs. Naming it after whoever came second would be worse
+                // than leaving it for a person to fill in.
+                let raw = sensors(
+                    participants: [
+                        participant("me", "Andrew", isSelf: true),
+                        participant("U2", "Grace"),
+                    ],
+                    turns: [("me", 0, 10), ("U2", 30, 40)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 1, 9)], sensors: raw
+                )
+                expect.equal(result.matches.count, 0)
+            },
+
+            test("the local user's turns still block a wrong name") { expect in
+                // This is why their turns stay in the overlap. Removing them
+                // left the runner-up at zero, so the margin rule stopped
+                // guarding and second place won the cluster outright.
+                let raw = sensors(
+                    participants: [
+                        participant("me", "Andrew", isSelf: true),
+                        participant("U2", "Grace"),
+                    ],
+                    turns: [("me", 0, 8), ("U2", 8, 10)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 10)], sensors: raw
+                )
+                expect.equal(result.matches.count, 0)
+            },
+
+            test("the local user is not one of the voices to be found") { expect in
+                let raw = sensors(
+                    participants: [
+                        participant("me", "Andrew", isSelf: true),
+                        participant("U2", "Grace"), participant("U3", "Ada"),
+                    ],
+                    turns: [("me", 0, 30), ("U2", 30, 60), ("U3", 60, 90)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 31, 59)], sensors: raw
+                )
+                expect.equal(result.speakerCountHint, 2)
+            },
+
+            test("a namesake of the local user is a guess, not a fact") { expect in
+                // Two people called Andrew in one call is not rare. Acting on
+                // the name would drop a real speaker from the count, merge two
+                // voices into one, and rename one of them, which no later stage
+                // can undo.
+                let raw = sensors(
+                    participants: [participant("U2", "Andrew"), participant("U3", "Grace")],
+                    turns: [("U2", 0, 30), ("U3", 30, 60)]
+                )
+                expect.isTrue(raw.selfIsOnlyAGuess(localUserName: "andrew"))
+                expect.isFalse(raw.selfIsOnlyAGuess(localUserName: "Priya"))
+                // The platform said who it was, so a matching name adds nothing.
+                let flagged = sensors(
+                    participants: [
+                        participant("me", "Andrew", isSelf: true),
+                        participant("U3", "Andrew"),
+                    ],
+                    turns: [("U3", 0, 30)]
+                )
+                expect.isFalse(flagged.selfIsOnlyAGuess(localUserName: "Andrew"))
+            },
+
+            test("four interjections do not add up to a speaker") { expect in
+                // The longest turn decides, not the sum. Slack releases about
+                // 1.5 s after a voice stops, so repeated "mhm"s accumulate past
+                // any threshold while describing somebody who never held the
+                // floor.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Nods")],
+                    turns: [
+                        ("U1", 0, 60),
+                        ("U2", 100, 101.6), ("U2", 200, 201.6),
+                        ("U2", 300, 301.6), ("U2", 400, 401.6),
+                    ]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 1, 59)], sensors: raw
+                )
+                expect.equal(result.speakerCountHint, 1)
+            },
+
+            test("somebody muted all call is in the room, not on the track") { expect in
+                let raw = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [participant("U1", "Ada"), participant("U2", "Listener")],
+                    turns: [
+                        SensorTurn(start: 0, end: 60, participantID: "U1"),
+                        SensorTurn(start: 60, end: 120, participantID: "U2"),
+                    ],
+                    unmutedIDs: ["U1"]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 1, 59)], sensors: raw
+                )
+                expect.equal(result.speakerCountHint, 1)
+            },
+        ])
+    }
+
     static var slackTileSuite: Suite {
         Suite("SlackHuddleTile", [
             test("the user id is what follows the last underscore") { expect in
@@ -564,7 +673,7 @@ enum SensorAttributionTests {
     static var all: [Suite] {
         [
             builderSuite, shiftSuite, attributionSuite, trackSuite,
-            linkSuite, slackTileSuite, roundTripSuite,
+            linkSuite, selfSuite, slackTileSuite, roundTripSuite,
         ]
     }
 }

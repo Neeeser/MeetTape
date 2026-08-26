@@ -777,6 +777,13 @@ public final class PipitRuntime {
         guard let meeting = currentMeeting, meeting.metadata.provider == reading.provider else {
             return
         }
+        // Two browser tabs report the same provider, so the provider alone
+        // cannot tell the call being recorded from one the user forgot to leave.
+        // Where both sides know the call's own identifier, they have to agree.
+        if let reported = reading.meetingID, let recorded = meeting.metadata.providerMeetingID,
+           reported != recorded {
+            return
+        }
         sensorRecorder?.record(reading)
     }
 

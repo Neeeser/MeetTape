@@ -16,9 +16,13 @@ public struct SlackAccessibilityObservation: Sendable, Equatable {
     public let accessibilityUnavailable: Bool
     public let isMuted: Bool?
     public let windowTitle: String?
-    /// One entry per person in the huddle grid. Empty where the walk found no
-    /// grid, which is every read outside a huddle and any truncated read inside
-    /// one, so it carries the same "no information" meaning as `subtreeWasEmpty`.
+    /// One entry per person in the huddle grid, and empty outside a huddle.
+    ///
+    /// Not the same signal as `subtreeWasEmpty`. A truncated read returns the
+    /// tiles it did reach, so this can be a partial roster rather than no
+    /// information. A tile the walk ran out of budget inside carries no speaking
+    /// flag and no mute state, which contributes a name and no turn, so a short
+    /// read costs detail rather than correctness.
     public let tiles: [SlackHuddleTile]
 
     public init(

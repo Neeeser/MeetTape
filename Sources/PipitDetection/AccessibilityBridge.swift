@@ -134,12 +134,14 @@ public struct SlackAccessibilityReader: Sendable {
         }
 
         let application = AXUIElement.forApplication(pid: pid)
-        // Chromium only builds the web tree once a client asks for it, and the
-        // tile identifiers live in that tree. The flag latches, so it is set
-        // once per Slack process rather than on every poll: asking twice a
-        // second makes Slack rebuild and maintain a full accessibility tree
-        // whether or not a huddle is running.
-        Self.enableWebTree(application, pid: pid)
+        // The web tree is what carries the tile identifiers, and Chromium only
+        // builds it once a client asks. Asking costs Slack a full accessibility
+        // tree for the rest of its life, so it is asked for only once a huddle
+        // is actually running. The leave control that proves one is running is
+        // found without it, which is how this worked before tiles existed.
+        //
+        // The cost of waiting is one poll: the first read inside a huddle sees
+        // no tiles, the next sees them all.
         let windows = AccessibilityBridge.children(application)
         guard !windows.isEmpty else {
             return SlackAccessibilityObservation(hasLeaveHuddleControl: false, subtreeWasEmpty: true)
@@ -163,6 +165,7 @@ public struct SlackAccessibilityReader: Sendable {
 
         var tiles: [String: SlackHuddleTile] = [:]
         var tileOrder: [String] = []
+        defer { if hasLeave { Self.enableWebTree(application, pid: pid) } }
 
         for window in windows {
             guard AccessibilityBridge.string(window, kAXRoleAttribute as String) == (kAXWindowRole as String)

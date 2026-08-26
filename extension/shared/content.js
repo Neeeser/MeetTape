@@ -64,10 +64,12 @@ function readMeetTiles() {
     tiles.push({
       id,
       name: text.split('\n')[0] || undefined,
-      // Meet writes "You" into the local user's own tile. English only, so the
-      // app marks the local user by configured name as well; this is a hint,
-      // never the only mechanism.
-      isSelf: /\byou\b/i.test(`${node.getAttribute('aria-label') || ''} ${text}`),
+      // Meet writes "You" as the local user's own tile name. Tested against
+      // that name alone: the tile also carries menu and status text, and any
+      // stray "you" in it would mark a remote person as the local user, which
+      // costs them their turns. English only, so the app marks the local user
+      // by configured name as well; this is a hint, never the only mechanism.
+      isSelf: /^you$/i.test(text.split('\n')[0].trim()),
       // getAttribute, not className: on an SVG element className is an
       // SVGAnimatedString whose toString is a constant, which would make the
       // meter look permanently still and kill speaking detection silently.

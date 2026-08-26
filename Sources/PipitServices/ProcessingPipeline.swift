@@ -969,9 +969,15 @@ public actor ProcessingPipeline {
         let unchanged = (run: run, embeddings: embeddings)
         guard let reanalyze = backends.reanalyzeDiarization else { return unchanged }
         guard let sensors = store.readRawSensors() else { return unchanged }
-        let scoped = sensors
-            .markingSelf(named: settingsProvider().localUserName)
-            .excludingSelf()
+        let localUserName = settingsProvider().localUserName
+        // Re-clustering is the one thing here that cannot be undone by renaming:
+        // too low a count merges two people into one voice for good. So it runs
+        // only when the local user was identified by the platform itself. Where
+        // the only evidence is a matching display name, and two people called
+        // Andrew in one call is not rare, the naming still runs and the count
+        // does not.
+        guard !sensors.selfIsOnlyAGuess(localUserName: localUserName) else { return unchanged }
+        let scoped = sensors.markingSelf(named: localUserName)
         let result = SensorAttribution.attribute(intervals: run.intervals, sensors: scoped)
         guard let hint = result.speakerCountHint, hint > 1, hint != run.speakerCount else {
             return unchanged

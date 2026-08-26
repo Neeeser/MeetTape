@@ -136,6 +136,7 @@ public final class DetectionEngine: @unchecked Sendable {
                 participants: people.map {
                     SensorParticipant(id: $0.id, displayName: $0.displayName, isSelf: $0.isSelf)
                 },
+                meetingID: event.meetingID,
                 speakingID: event.activeSpeaker,
                 unmutedIDs: Set(people.filter { $0.isMuted == false }.map(\.id))
             )

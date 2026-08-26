@@ -133,9 +133,13 @@ export function rosterFromTiles(tiles) {
 /// the class names are obfuscated and rotate, but a meter that keeps changing is
 /// a meter with audio behind it whatever its classes are called.
 ///
-/// The hold covers the gaps between frames, so a natural pause inside a sentence
-/// does not read as the floor being given up.
-export function createSpeakingTracker({ holdMs = 400 } = {}) {
+/// The hold has to outlast the gap between reads, or it does nothing at all.
+/// Reads are 500 ms apart, so a 400 ms hold expired before the next one could
+/// ever renew it: every turn collapsed to a single read, no turn reached the six
+/// seconds that make somebody a speaker, and Meet named nobody. It also has to
+/// outlast a natural pause inside a sentence, which is the same order as Slack's
+/// own release of about 1.5 s.
+export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
   const lastMeter = new Map();
   const lastChange = new Map();
   return {

@@ -210,7 +210,7 @@ public struct SlackAccessibilityReader: Sendable {
                     tileOrder.append(entry.userID)
                 }
             }
-            if budget <= 0 { truncated = true }
+            if budget < 0 { truncated = true }
         }
 
         // A truncated walk proves nothing about the control's absence.

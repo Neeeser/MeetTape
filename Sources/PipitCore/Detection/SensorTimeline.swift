@@ -79,25 +79,11 @@ public struct RawSensors: Codable, Sendable, Equatable {
         participants.first { $0.id == id }
     }
 
-    /// The same record without the local user.
-    ///
-    /// What this protects is the far-end track. That track is the mixdown of
-    /// everyone else, and the local user's voice is not in it, so a turn saying
-    /// they held the floor cannot explain anything heard there. Slack does mark
-    /// the local user's own tile while they talk, and leaving that turn in place
-    /// let it win a remote cluster and put the user's name on whoever they were
-    /// talking over. Their own track needs none of this: it is deterministic.
-    public func excludingSelf() -> RawSensors {
-        let selfIDs = Set(participants.filter(\.isSelf).map(\.id))
-        guard !selfIDs.isEmpty else { return self }
-        var scoped = self
-        scoped.participants = participants.filter { !selfIDs.contains($0.id) }
-        scoped.turns = turns.filter { !selfIDs.contains($0.participantID) }
-        scoped.unmutedIDs = unmutedIDs.filter { !selfIDs.contains($0) }
-        return scoped
-    }
-
     /// Whether the local user could only be found by matching a display name.
+    ///
+    /// Paired with `markingSelf`, which declines to mark anyone once the
+    /// platform has named the local user. The two answer the same question and
+    /// have to agree: this one reports the guess, that one makes it.
     ///
     /// The platform's own flag is trustworthy: Slack marks the tile `self_`, and
     /// Meet marks its own tile. A name match is a guess, and two people called
@@ -121,6 +107,12 @@ public struct RawSensors: Codable, Sendable, Equatable {
     /// English word, so a client in any other language reports nobody as self,
     /// and Zoom marks nobody at all. The app does know who its user is.
     public func markingSelf(named localUserName: String) -> RawSensors {
+        // A fallback, not a supplement. Where the platform already named the
+        // local user, somebody else carrying the same display name is a
+        // different person, and marking them too was the whole bug: they left
+        // the speaker count, the recording re-clustered one voice short, and two
+        // people were merged into one.
+        guard !participants.contains(where: \.isSelf) else { return self }
         let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return self }
         var marked = self

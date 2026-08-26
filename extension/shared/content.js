@@ -93,7 +93,11 @@ function readZoomTiles() {
   // voice, so a synthesised one is worse than none.
   const tiles = [];
   for (const doc of readDocuments()) {
-    for (const node of doc.querySelectorAll('[data-participant-id],[data-user-id]')) {
+    // Scoped to the participants panel. `data-user-id` alone also matches chat
+    // rows and reaction senders, which are not people in the call.
+    const panel = doc.querySelector('[class*="participants-"], [aria-label*="articipants"]');
+    if (!panel) continue;
+    for (const node of panel.querySelectorAll('[data-participant-id],[data-user-id]')) {
       const id = node.getAttribute('data-participant-id') || node.getAttribute('data-user-id');
       if (!id) continue;
       const label = (node.getAttribute('aria-label') || node.textContent || '').trim();

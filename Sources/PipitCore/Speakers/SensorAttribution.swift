@@ -80,14 +80,12 @@ public enum SensorAttribution {
                 longestTurn[turn.participantID] ?? 0, turn.duration
             )
         }
-        // Somebody muted for the entire call is in the room and not on the
-        // track, whatever their tile did. Where the reader reported mute state
-        // at all, it decides this; where it reported none, every turn stands.
-        let everUnmuted = Set(sensors.unmutedIDs)
-        let speakers = longestTurn
-            .filter { $0.value >= minimumSpeakerSeconds }
-            .filter { everUnmuted.isEmpty || everUnmuted.contains($0.key) }
-            .count
+        // Held the floor, therefore unmuted. Mute state is recorded as evidence
+        // and deliberately not consulted here: a tile whose overlay never
+        // resolved reads as never-unmuted, and letting that outrank forty
+        // seconds of holding the floor removed a real speaker from the count and
+        // merged them into somebody else.
+        let speakers = longestTurn.filter { $0.value >= minimumSpeakerSeconds }.count
         // Absent rather than zero: the sensor saw turns and none of them was a
         // real turn, which is not the same as knowing nobody spoke.
         let countHint = speakers > 0 ? speakers : nil

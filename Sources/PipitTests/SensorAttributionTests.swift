@@ -377,46 +377,6 @@ enum SensorAttributionTests {
         ])
     }
 
-    static var trackSuite: Suite {
-        Suite("SensorTrackScope", [
-            test("the local user cannot name a cluster on the far-end track") { expect in
-                // Slack marks the local user's own tile while they talk, and
-                // their voice is on the microphone track, not in the far-end
-                // mix. Letting that turn win a remote cluster would put the
-                // user's name on whoever they talked over.
-                let raw = sensors(
-                    participants: [
-                        participant("me", "Andrew", isSelf: true),
-                        participant("U2", "Grace"),
-                    ],
-                    turns: [("me", 0, 10)]
-                )
-                let scoped = raw.excludingSelf()
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 9)], sensors: scoped
-                )
-                expect.equal(result.matches.count, 0)
-            },
-
-            test("dropping the local user keeps everyone else intact") { expect in
-                let raw = sensors(
-                    participants: [
-                        participant("me", "Andrew", isSelf: true),
-                        participant("U2", "Grace"),
-                    ],
-                    turns: [("me", 0, 5), ("U2", 5, 15)]
-                )
-                let scoped = raw.excludingSelf()
-                expect.equal(scoped.participants.count, 1)
-                expect.equal(scoped.turns.count, 1)
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 6, 14)], sensors: scoped
-                )
-                expect.equal(result.matches.first?.displayName, "Grace")
-            },
-        ])
-    }
-
     static var linkSuite: Suite {
         Suite("SensorIdentityLink", [
             test("a voice identity that agrees with the name is linked") { expect in
@@ -469,10 +429,16 @@ enum SensorAttributionTests {
                     ],
                     turns: [("d406", 0, 10), ("d409", 10, 20)]
                 )
-                let scoped = raw.markingSelf(named: "andrew neeser").excludingSelf()
-                expect.equal(scoped.participants.count, 1)
-                expect.equal(scoped.turns.count, 1)
-                expect.equal(scoped.turns.first?.participantID, "d409")
+                let scoped = raw.markingSelf(named: "andrew neeser")
+                expect.equal(scoped.participants.filter(\.isSelf).count, 1)
+                // Marked, not removed: the turns stay and simply stop being
+                // nameable, which is what keeps the margin rule working.
+                expect.equal(scoped.turns.count, 2)
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 10), interval("b", 10, 20)], sensors: scoped
+                )
+                expect.equal(result.matches.count, 1)
+                expect.equal(result.matches.first?.displayName, "Grace")
             },
 
             test("a reader cannot change mid-recording") { expect in
@@ -557,15 +523,61 @@ enum SensorAttributionTests {
                 )
                 expect.isTrue(raw.selfIsOnlyAGuess(localUserName: "andrew"))
                 expect.isFalse(raw.selfIsOnlyAGuess(localUserName: "Priya"))
-                // The platform said who it was, so a matching name adds nothing.
-                let flagged = sensors(
+            },
+
+            test("a namesake beside a real self flag is still a speaker") { expect in
+                // The case that shipped broken twice. Slack and Meet both name
+                // the local user, so the guess guard cleared, and the name match
+                // then marked the colleague as well. He left the speaker count,
+                // the recording re-clustered one voice short, and two people
+                // were merged into one and enrolled as one voice.
+                let raw = sensors(
                     participants: [
                         participant("me", "Andrew", isSelf: true),
-                        participant("U3", "Andrew"),
+                        participant("U2", "Andrew"),
+                        participant("U3", "Ada"),
+                        participant("U4", "Grace"),
                     ],
-                    turns: [("U3", 0, 30)]
+                    turns: [("me", 0, 30), ("U2", 30, 60), ("U3", 60, 90), ("U4", 90, 120)]
                 )
-                expect.isFalse(flagged.selfIsOnlyAGuess(localUserName: "Andrew"))
+                let marked = raw.markingSelf(named: "Andrew")
+                expect.equal(
+                    marked.participants.filter(\.isSelf).count, 1,
+                    "the platform already said who the local user is"
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [
+                        interval("a", 31, 59), interval("b", 61, 89), interval("c", 91, 119),
+                    ],
+                    sensors: marked
+                )
+                expect.equal(result.speakerCountHint, 3, "three remote voices, three speakers")
+                let named = Dictionary(
+                    uniqueKeysWithValues: result.matches.map { ($0.clusterID, $0.displayName) }
+                )
+                expect.equal(named["a"], "Andrew")
+                expect.equal(named["b"], "Ada")
+                expect.equal(named["c"], "Grace")
+            },
+
+            test("a missing mute reading cannot unmake a speaker") { expect in
+                // A tile whose overlay never resolved reads as never-unmuted.
+                // Letting that outrank forty seconds of holding the floor
+                // removed a real speaker from the count and merged them into
+                // somebody else.
+                let raw = RawSensors(
+                    source: "slack-huddle-ax",
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [
+                        SensorTurn(start: 0, end: 40, participantID: "U1"),
+                        SensorTurn(start: 40, end: 80, participantID: "U2"),
+                    ],
+                    unmutedIDs: ["U1"]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 1, 39), interval("b", 41, 79)], sensors: raw
+                )
+                expect.equal(result.speakerCountHint, 2)
             },
 
             test("four interjections do not add up to a speaker") { expect in
@@ -587,21 +599,6 @@ enum SensorAttributionTests {
                 expect.equal(result.speakerCountHint, 1)
             },
 
-            test("somebody muted all call is in the room, not on the track") { expect in
-                let raw = RawSensors(
-                    source: "slack-huddle-ax",
-                    participants: [participant("U1", "Ada"), participant("U2", "Listener")],
-                    turns: [
-                        SensorTurn(start: 0, end: 60, participantID: "U1"),
-                        SensorTurn(start: 60, end: 120, participantID: "U2"),
-                    ],
-                    unmutedIDs: ["U1"]
-                )
-                let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 1, 59)], sensors: raw
-                )
-                expect.equal(result.speakerCountHint, 1)
-            },
         ])
     }
 
@@ -672,7 +669,7 @@ enum SensorAttributionTests {
 
     static var all: [Suite] {
         [
-            builderSuite, shiftSuite, attributionSuite, trackSuite,
+            builderSuite, shiftSuite, attributionSuite,
             linkSuite, selfSuite, slackTileSuite, roundTripSuite,
         ]
     }

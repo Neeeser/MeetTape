@@ -172,18 +172,35 @@ test('a meter that changed recently is speaking, one that settled is not', () =>
   // Meet animates a per-participant level meter while someone talks and lets it
   // settle when they stop. Reading the animation rather than a class name means
   // no selector has to be kept in step with whatever Meet renames next.
-  const tracker = createSpeakingTracker({ holdMs: 400 });
+  //
+  // Timed at the real read cadence of 500 ms, because that is what broke: a hold
+  // shorter than the gap between reads expires before the next read can renew
+  // it, so the floor drops on every tick and no turn ever grows.
+  const tracker = createSpeakingTracker();
   assert.equal(tracker.update([{ id: 'd406', meter: 'a' }], 0), null);
-  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 100), 'd406');
-  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 300), 'd406');
-  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 800), null);
+  assert.equal(tracker.update([{ id: 'd406', meter: 'b' }], 500), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 1000), 'd406');
+  // Settled: the meter stops changing and the hold runs out.
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 1500), 'd406');
+  assert.equal(tracker.update([{ id: 'd406', meter: 'c' }], 3000), null);
+});
+
+test('a turn survives the gap between reads', () => {
+  // Ten seconds of continuous speech has to come out as one turn, not twenty.
+  // Six seconds in a single turn is what makes somebody a speaker downstream.
+  const tracker = createSpeakingTracker();
+  let held = 0;
+  for (let t = 0; t <= 10_000; t += 500) {
+    if (tracker.update([{ id: 'd406', meter: `m${t}` }], t) === 'd406') held += 1;
+  }
+  assert.ok(held >= 19, `floor held on ${held} of 21 reads`);
 });
 
 test('the floor goes to whoever changed most recently', () => {
-  const tracker = createSpeakingTracker({ holdMs: 400 });
+  const tracker = createSpeakingTracker();
   tracker.update([{ id: 'a', meter: '1' }, { id: 'b', meter: '1' }], 0);
-  tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '1' }], 100);
-  assert.equal(tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '2' }], 200), 'b');
+  tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '1' }], 500);
+  assert.equal(tracker.update([{ id: 'a', meter: '2' }, { id: 'b', meter: '2' }], 1000), 'b');
 });
 
 test('a roster of one is still a roster', () => {

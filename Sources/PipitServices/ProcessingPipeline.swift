@@ -60,12 +60,13 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
-    /// Meetings whose folders left the archive while a job was running.
+    /// Meetings whose folders left the archive while a job was running, and
+    /// when they left.
     ///
     /// Every write here goes through `AtomicFile`, which creates the
     /// directories it needs, so a job that carried on after the move put the
     /// meeting back as a row holding no audio and no transcript.
-    private var goneWhileRunning: Set<String> = []
+    private var goneWhileRunning: [String: Date] = [:]
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -113,31 +114,41 @@ public actor ProcessingPipeline {
     /// A stage already running when the meeting was trashed finishes and writes
     /// its output through `AtomicFile`, which creates the directories it needs.
     /// What it left is removed here rather than guarded at every write. Removed
-    /// outright rather than trashed, because the meeting as the user had it is
-    /// already whole in the Trash and this is the scrap written over the top of
-    /// where it used to be.
+    /// outright rather than trashed, because it is scrap written over the top
+    /// of where the meeting used to be, and the meeting itself is whole in the
+    /// Trash.
+    ///
+    /// A folder older than the move is not that scrap. It is the meeting
+    /// itself, put back from the Trash while this ran, so it is left alone and
+    /// the job carries on with it.
     private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
-        guard goneWhileRunning.remove(meetingID) != nil else { return false }
+        guard let movedAt = goneWhileRunning.removeValue(forKey: meetingID) else { return false }
+        if let created = Self.creationDate(of: store.layout.root), created < movedAt {
+            Log.processing.notice("meeting was put back while it processed, so the job carries on")
+            return false
+        }
         try? FileManager.default.removeItem(at: store.layout.root)
         scratch.discard(meetingID: meetingID)
         Log.processing.notice("meeting left the archive while it processed, so the job stopped")
         return true
     }
 
-    /// Takes back a `forget` for a folder the move could not take. Its job
-    /// carries on, because the meeting is still in the list.
-    public func keep(meetingID: String) {
-        goneWhileRunning.remove(meetingID)
+    private static func creationDate(of url: URL) -> Date? {
+        try? FileManager.default.attributesOfItem(atPath: url.path)[.creationDate] as? Date
     }
 
-    /// Stops the job on a meeting whose folder has just been deleted.
+    /// Stops the job on a meeting whose folder has just left the archive.
     ///
-    /// The window offers Delete as soon as the recording is over, which is
-    /// minutes before transcription finishes. The job notices at its next stage
-    /// boundary, removes whatever it wrote in the meantime, and stops.
-    public func forget(meetingID: String) {
+    /// The window offers Move to Trash as soon as the recording is over, which
+    /// is minutes before transcription finishes. The job notices at its next
+    /// stage boundary, removes what it wrote in the meantime, and stops.
+    ///
+    /// Called once the folder has actually moved, and only for folders that
+    /// did. Arming this before the move meant a stage boundary in between
+    /// deleted the meeting the user still had.
+    public func forget(meetingID: String, movedAt: Date) {
         guard running.contains(meetingID) else { return }
-        goneWhileRunning.insert(meetingID)
+        goneWhileRunning[meetingID] = movedAt
     }
 
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
@@ -156,9 +167,9 @@ public actor ProcessingPipeline {
         var holdsSlot = true
         defer {
             running.remove(meetingID)
-            // Nothing writes after this, and a flag left set would take the
+            // Nothing writes after this, and a mark left behind would take the
             // folder out from under a later job on the same meeting.
-            goneWhileRunning.remove(meetingID)
+            goneWhileRunning.removeValue(forKey: meetingID)
             if holdsSlot { jobLock.release() }
         }
 

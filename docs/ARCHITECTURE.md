@@ -209,10 +209,14 @@ Moving to the Trash asks first, then hands every folder the conversation was
 recorded in to the Finder's Trash, both halves of a rejoined call included, and
 drops that meeting's rows from `speaker_occurrence` so it stops counting towards
 how many meetings a voice has been heard in. The confirmed voice material stays.
-Putting the folders back from the Trash puts the meeting back in the list. The
-meeting being recorded is refused, and a folder that will not move leaves the
+Putting a folder back from the Trash puts the meeting back in the list, and a
+job still running for it carries on with the restored folder. The occurrences do
+not come back, because only a processing stage writes them.
+
+The meeting being recorded is refused. A folder that will not move leaves the
 recording the conversation started with in place, so its row still reaches what
-is left.
+is left, and an archive on a volume with no Trash is reported as the volume
+rather than as a fault on one meeting.
 
 An imported recording is filed under the date the recorder wrote rather than the
 date the file was copied. Pipit reads the container's creation date, then a

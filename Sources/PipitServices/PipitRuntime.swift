@@ -726,6 +726,9 @@ public final class PipitRuntime {
         /// A folder would not move, and what is left of the meeting is still in
         /// the archive.
         case folderNotMoved
+        /// The archive is on a volume with no Trash, so nothing moved. A
+        /// network share and an exFAT disk are both ordinary places to keep it.
+        case volumeHasNoTrash
     }
 
     /// Moves every folder the conversation was recorded in to the Trash,
@@ -761,16 +764,11 @@ public final class PipitRuntime {
             Log.app.notice("refused to trash the meeting being recorded")
             return .refusedWhileRecording
         }
-        // Before the folders go. A job that was mid-stage when this ran writes
-        // its output through AtomicFile, which creates the directories it
-        // needs, so a transcription finishing a moment later would put the
-        // meeting back in the archive as a row holding nothing.
-        for recording in ordered { await pipeline.forget(meetingID: recording.metadata.id) }
         // Off the main actor. A long meeting is a few hundred megabytes across
         // several hundred files, and this actor is also the one arming the next
         // recording.
         let trash = self.trash
-        let removed = await Task.detached(priority: .userInitiated) {
+        let (removed, unsupported) = await Task.detached(priority: .userInitiated) {
             var removed = 0
             for directory in directories {
                 do {
@@ -787,20 +785,27 @@ public final class PipitRuntime {
                     }
                     // Stop before the recording the conversation started with.
                     // Its row is the only way back to the folders still here.
-                    return removed
+                    let error = error as NSError
+                    return (removed, error.domain == NSCocoaErrorDomain
+                        && error.code == NSFeatureUnsupportedError)
                 }
                 removed += 1
             }
-            return removed
+            return (removed, false)
         }.value
+        let movedAt = clock.now
         for (index, recording) in ordered.enumerated() {
             let meetingID = recording.metadata.id
-            guard index < removed else {
-                // Still in the archive. Its speakers keep counting it, and a
-                // job that has not yet reached a stage boundary carries on.
-                await pipeline.keep(meetingID: meetingID)
-                continue
-            }
+            // Still in the archive, so nothing about it is forgotten and its
+            // job carries on.
+            guard index < removed else { continue }
+            // A job that was mid-stage writes its output through AtomicFile,
+            // which creates the directories it needs, so a transcription
+            // finishing a moment later would put the meeting back in the
+            // archive as a row holding nothing. Told after the move rather than
+            // before it, because a stage boundary in between then deleted the
+            // meeting the user still had.
+            await pipeline.forget(meetingID: meetingID, movedAt: movedAt)
             trashedMeetingIDs.insert(meetingID)
             // The voice memory counts meetings by the occurrences it holds, so
             // without this a trashed meeting kept counting towards "heard in 3

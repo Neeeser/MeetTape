@@ -665,6 +665,15 @@ enum MeetingsWindowTests {
                     )
                 )
                 expect.isTrue(both.contains("Standup") && both.contains("Design review"))
+                let volume = try expect.unwrap(
+                    MeetingsWindowModel.problemText(
+                        recording: nil, failed: [], noTrash: ["Design review"]
+                    )
+                )
+                expect.isTrue(
+                    volume.contains("volume with no Trash"),
+                    "a share with no Trash is not a fault on one meeting. got \(volume)"
+                )
             },
 
             test("a row names the day when its heading does not") { expect in
@@ -1602,7 +1611,7 @@ enum MeetingsWindowTests {
         let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
         await model.reload()
         expect.equal(model.rows.map(\.id), [meetingID])
-        guard let target = model.rows.first else { return expect.fail("no row to delete") }
+        guard let target = model.rows.first else { return expect.fail("no row to move") }
 
         model.confirmTrash([target])
         guard let pending = model.pendingTrash else {
@@ -1610,7 +1619,7 @@ enum MeetingsWindowTests {
         }
         expect.isTrue(pending.title.contains("Weekly sync"), "got \(pending.title)")
         expect.isTrue(
-            pending.message.contains("moved to the Trash"),
+            pending.message.contains("moved to the Trash rather than deleted"),
             "the warning says where the files go. got \(pending.message)"
         )
         expect.equal(pending.folderCount, 2)
@@ -1865,6 +1874,5 @@ enum MeetingsWindowTests {
             try await store.meetingCount(for: chris.id), 1,
             "and a meeting still in the archive still counts for the people who spoke in it"
         )
-        unlock()
     }
 }

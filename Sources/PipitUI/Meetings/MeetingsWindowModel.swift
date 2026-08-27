@@ -470,19 +470,17 @@ public final class MeetingsWindowModel {
         }
 
         public var message: String {
-            let back = "Putting it back from the Trash puts the meeting back in the list."
             if folderCount == 1 {
                 return "The folder \(folders.first ?? "") and everything in it, the audio "
-                    + "included, is moved to the Trash. \(back)"
+                    + "included, is moved to the Trash rather than deleted."
             }
             if targets.count == 1 {
                 return "This call was recorded in \(folderCount) folders. All of them and "
-                    + "everything in them, the audio included, are moved to the Trash. "
-                    + "Putting them back from the Trash puts the meeting back in the list."
+                    + "everything in them, the audio included, are moved to the Trash rather "
+                    + "than deleted."
             }
             return "\(folderCount) meeting folders and everything in them, the audio included, "
-                + "are moved to the Trash. Putting them back from the Trash puts the meetings "
-                + "back in the list."
+                + "are moved to the Trash rather than deleted."
         }
     }
 
@@ -535,6 +533,7 @@ public final class MeetingsWindowModel {
         var recording: String?
         var failed: [String] = []
         var gone: Set<String> = []
+        var noTrash: [String] = []
         for (index, id) in trash.targets.enumerated() {
             let name = trash.names.indices.contains(index) ? trash.names[index] : id
             switch outcomes[id] ?? .notFound {
@@ -543,13 +542,14 @@ public final class MeetingsWindowModel {
             case .trashed, .notFound: gone.insert(id)
             case .refusedWhileRecording: recording = name
             case .folderNotMoved: failed.append(name)
+            case .volumeHasNoTrash: noTrash.append(name)
             }
         }
         // Only what actually went. A meeting that was refused keeps its row and
         // its place in the selection, and reload opens the pane on it again.
         rows.removeAll { gone.contains($0.id) }
         selection.subtract(gone)
-        trashProblem = Self.problemText(recording: recording, failed: failed)
+        trashProblem = Self.problemText(recording: recording, failed: failed, noTrash: noTrash)
         await reload()
     }
 
@@ -560,7 +560,7 @@ public final class MeetingsWindowModel {
     /// that had already ended. `recording` is one meeting at most, because one
     /// is all this Mac records at a time.
     public nonisolated static func problemText(
-        recording: String?, failed: [String]
+        recording: String?, failed: [String], noTrash: [String] = []
     ) -> String? {
         var sentences: [String] = []
         if let recording {
@@ -573,6 +573,16 @@ public final class MeetingsWindowModel {
         } else if failed.count > 1 {
             sentences.append(
                 "\(failed.count) meetings have folders this Mac would not move to the Trash."
+            )
+        }
+        if !noTrash.isEmpty {
+            // The meetings folder can be anywhere the user pointed it, and a
+            // network share and an exFAT disk have no Trash at all. Without
+            // this the alert read as a fault on one meeting and the same thing
+            // happened to every one of them.
+            sentences.append(
+                "The meetings folder is on a volume with no Trash, so nothing was moved. "
+                    + "The Finder can delete these folders."
             )
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")

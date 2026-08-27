@@ -124,10 +124,13 @@ enum PipelineTests {
                     scratchRoot: root.appendingPathComponent("scratch")
                 )
                 let meetingID = meeting.metadata.id
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
                 transcriber.interference.withLock {
                     $0 = { [pipeline] in
-                        await pipeline.forget(meetingID: meetingID)
-                        try? FileManager.default.removeItem(at: folder)
+                        // What the window does: the folder moves, and the job
+                        // is told once it has.
+                        try? FileManager.default.moveItem(at: folder, to: trashed)
+                        await pipeline.forget(meetingID: meetingID, movedAt: Date())
                     }
                 }
 
@@ -137,9 +140,66 @@ enum PipelineTests {
                     FileManager.default.fileExists(atPath: folder.path),
                     "the folder the user trashed has not come back"
                 )
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: trashed.path),
+                    "and what was moved is untouched"
+                )
                 expect.isNil(
                     meeting.repository.findMeeting(id: meetingID, includingMerged: true)?.metadata,
                     "and no row comes back for it"
+                )
+            },
+
+            test("a meeting put back from the Trash while it processed is left alone") { expect in
+                // The confirmation says the folder is recoverable. A job that
+                // removed the restored folder at its next stage boundary would
+                // take the meeting with it, permanently and without a word.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                let folder = meeting.store.layout.root
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let transcriber = InterferingTranscriber()
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: transcriber,
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: resolved,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                transcriber.interference.withLock {
+                    $0 = { [pipeline] in
+                        try? FileManager.default.moveItem(at: folder, to: trashed)
+                        await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                        // Put Back, from the Finder, before the stage that was
+                        // running reaches its next boundary.
+                        try? FileManager.default.moveItem(at: trashed, to: folder)
+                    }
+                }
+
+                await pipeline.process(meetingID: meetingID)
+
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the meeting the user put back is still there"
+                )
+                let metadata = try expect.unwrap(
+                    meeting.repository.findMeeting(id: meetingID)?.metadata
+                )
+                expect.equal(
+                    metadata.processing.state, .complete,
+                    "and the job it interrupted carried on to the end"
                 )
             },
 

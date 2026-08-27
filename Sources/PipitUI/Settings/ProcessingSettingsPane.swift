@@ -7,7 +7,7 @@ import SwiftUI
 ///
 /// One page: picking a model that is not installed starts its download here,
 /// inline on the row, instead of sending the user to a second page.
-struct ProcessingSettingsTab: View {
+struct ProcessingSettingsPane: View {
     let model: SettingsModel
     private var runtime: PipitRuntime { model.runtime }
 
@@ -312,81 +312,5 @@ struct LocalModelChoicePicker: View {
             // exhaustive.
             "Not offered."
         }
-    }
-}
-
-/// Where the voice database is and what is in it.
-///
-/// The directory itself moved to its own window: a list that grows to hundreds
-/// of people needs search, grouping and multiple selection, and none of that
-/// fits a settings pane sized by seven other tabs.
-struct PeopleSettingsTab: View {
-    let model: SettingsModel
-
-    var body: some View {
-        Form {
-            Section("You") {
-                if !model.people.isEmpty {
-                    Picker(
-                        "You are",
-                        selection: Binding(
-                            get: { model.localUserIdentityID },
-                            set: { chosen in
-                                guard let chosen else { return }
-                                Task { await model.chooseLocalUser(chosen) }
-                            }
-                        )
-                    ) {
-                        if model.localUserIdentityID == nil {
-                            Text("Nobody yet").tag(IdentityID?.none)
-                        }
-                        ForEach(model.people) { entry in
-                            Text(entry.identity.resolvedName).tag(IdentityID?.some(entry.id))
-                        }
-                    }
-                }
-                TextField("Name", text: model.localUserNameField)
-                    .onSubmit { Task { await model.commitLocalUserName() } }
-                Text(
-                    "Your own speech is labelled with this person, and the microphone track "
-                        + "of every call teaches their voice profile. Naming yourself on an "
-                        + "imported recording puts it on the same profile."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                Button("Manage people…") { model.openPeople() }
-                if let statistics = model.voiceStatistics {
-                    Text(
-                        "\(statistics.namedPeople) named, \(statistics.recurringVoices) unnamed "
-                            + "recurring voices."
-                    )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            if let statistics = model.voiceStatistics {
-                Section("Storage") {
-                    LabeledContent("Voice profiles") {
-                        Text("\(statistics.namedPeople) named, \(statistics.recurringVoices) unnamed")
-                    }
-                    LabeledContent("Embeddings") { Text("\(statistics.embeddings)") }
-                    LabeledContent("Database") {
-                        Text("\(max(1, statistics.storageBytes / 1_024)) KB")
-                    }
-                    Text(
-                        "Voice profiles are stored on this Mac only. They are never uploaded "
-                            + "and never written into a meeting folder or an export."
-                    )
-                    .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .task { await model.refreshPeople() }
-        // A name typed and not submitted is still a name the person meant. The
-        // field used to be in General, which wrote it on the way out for the
-        // same reason.
-        .onDisappear { Task { await model.commitLocalUserName() } }
     }
 }

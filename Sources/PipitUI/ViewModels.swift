@@ -20,7 +20,6 @@ import SwiftUI
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
-    public var inputDescription = "Unknown"
     public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String
     public var apiKey = ""
@@ -31,12 +30,16 @@ public final class SettingsModel {
     public var people: [SpeakerDirectoryEntry] = []
     /// Whether the name field holds something a person typed.
     ///
-    /// Leaving the tab writes the field, because a name typed and not submitted
-    /// is still a name they meant. Writing it unconditionally re-rendered the
-    /// markdown of every meeting the local user appears in, every time the tab
-    /// was left, and could rename the person just chosen in the picker to the
-    /// name of the one before them.
+    /// Leaving the pane writes the field, because a name typed and not
+    /// submitted is still a name they meant. Writing it unconditionally
+    /// re-rendered the markdown of every meeting the local user appears in,
+    /// every time the pane was left, and could rename the person just chosen in
+    /// the picker to the name of the one before them.
     @ObservationIgnored private var nameEdited = false
+    /// What the archive costs on disk. Nil until the first walk finishes, which
+    /// is what the Storage page draws "Calculating…" for.
+    public var archiveUsage: ArchiveUsage?
+    public var isMeasuringArchive = false
     /// Opens the people directory. Set by the window manager, which owns both
     /// this model and that window.
     @ObservationIgnored public var onOpenPeople: (() -> Void)?
@@ -62,7 +65,6 @@ public final class SettingsModel {
     public func refresh() async {
         statuses = await runtime.permissions.allStatuses()
         hostStatus = NativeMessagingInstaller().status()
-        inputDescription = CoreAudioSystem.describeDefaultInput()
         sensorStatus = runtime.sensorStatus
         // Off the main actor: this call blocks until the person answers the
         // login-keychain prompt macOS raises when the item's ACL does not
@@ -133,6 +135,10 @@ public final class SettingsModel {
         var settings = runtime.settings
         settings.storageRootPath = url.path
         runtime.update(settings: settings)
+        // The measurement belongs to the folder it was taken in, and the
+        // Storage page draws it under whatever path is current.
+        archiveUsage = nil
+        Task { await refreshArchiveUsage() }
     }
 
     public func refreshPeople() async {
@@ -199,6 +205,28 @@ public final class SettingsModel {
     }
 
     public func openPeople() { onOpenPeople?() }
+
+    /// Measures the archive off the main actor.
+    ///
+    /// A walk of every file of every meeting ever recorded, so it is kept for
+    /// the life of the window and only redone when asked. Opening Storage a
+    /// second time shows the number it already has.
+    public func refreshArchiveUsage(force: Bool = false) async {
+        guard !isMeasuringArchive else { return }
+        guard force || archiveUsage == nil else { return }
+        isMeasuringArchive = true
+        defer { isMeasuringArchive = false }
+        let repository = runtime.repository
+        archiveUsage = await Task.detached(priority: .utility) { repository.usage() }.value
+    }
+
+    /// What the installed speech models take, as the local model state reports
+    /// it. Zero before that state has been read.
+    public var installedModelBytes: Int64 {
+        LocalModelUnit.allCases.reduce(Int64(0)) { total, unit in
+            total + (runtime.localModelState.present.bytes(for: unit) ?? 0)
+        }
+    }
 
     public func installLocalModels() async {
         await runtime.installLocalModels()

@@ -56,6 +56,13 @@ struct PersonDetailView: View {
                 HStack(spacing: 8) {
                     Button("Save") { Task { await model.commitName() } }
                         .disabled(model.nameDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    // Beside the name, because it is the one action here that
+                    // is about this person rather than about the row: nobody
+                    // else's voice can be read into the microphone.
+                    if entry.identity.isLocalUser {
+                        Button("Learn my voice…") { model.startVoiceEnrollment() }
+                            .help("Read a few sentences so Pipit knows your voice")
+                    }
                     if entry.identity.hasAvatar {
                         Button("Remove picture") { Task { await model.removeAvatar() } }
                     }
@@ -251,13 +258,6 @@ struct PersonDetailView: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
-            if entry.identity.isLocalUser {
-                // Only for the person at this Mac. Everybody else's voice is
-                // learned from a recording they are already in, and there is
-                // nobody at this keyboard who can read a script as them.
-                Button("Learn my voice…") { model.startVoiceEnrollment() }
-                    .help("Read a few sentences so Pipit knows your voice")
-            }
             Button("Forget learned voice") { model.confirmForgetVoice() }
                 .disabled(entry.profile == .none)
             Button("Delete", role: .destructive) { model.confirmDeleteSelection() }

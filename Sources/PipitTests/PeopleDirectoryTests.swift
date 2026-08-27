@@ -30,7 +30,8 @@ enum PeopleDirectoryTests {
         aliases: [String] = [],
         anonymousNumber: Int? = nil,
         profile: VoiceProfileStatus = .none,
-        meetings: Int = 0
+        meetings: Int = 0,
+        isLocalUser: Bool = false
     ) -> SpeakerDirectoryEntry {
         SpeakerDirectoryEntry(
             identity: Identity(
@@ -41,6 +42,7 @@ enum PeopleDirectoryTests {
                 aliases: aliases,
                 organization: organization,
                 notes: notes,
+                isLocalUser: isLocalUser,
                 createdAt: Date(timeIntervalSince1970: 0),
                 updatedAt: Date(timeIntervalSince1970: 0)
             ),
@@ -178,6 +180,42 @@ enum PeopleDirectoryTests {
 
     static var filterSuite: Suite {
         Suite("PeopleDirectoryFilter", [
+            test("you are the first section, whatever your organization is") {
+                expect in
+                // The row wanted most often and hardest to find: filed under an
+                // organization it sits among colleagues, in alphabetical order,
+                // named like anybody else.
+                let entries = [
+                    entry(1, name: "Andrew", organization: "Acme", isLocalUser: true),
+                    entry(2, name: "Aaron", organization: "Acme"),
+                    entry(3, name: "Priya"),
+                    entry(4, anonymousNumber: 2),
+                ]
+                let sections = PeopleDirectoryFilter.sections(entries)
+                expect.equal(sections.first?.title, PeopleDirectoryFilter.youTitle)
+                expect.equal(sections.first?.entries.map(\.identity.resolvedName), ["Andrew"])
+                expect.isFalse(
+                    sections.dropFirst().contains { $0.entries.contains { $0.identity.isLocalUser } },
+                    "one row, in one place"
+                )
+                expect.equal(
+                    sections.dropFirst().first?.entries.map(\.identity.resolvedName), ["Aaron"],
+                    "the organization keeps everybody else"
+                )
+            },
+
+            test("a search that does not match you leaves the section out") {
+                expect in
+                let entries = [
+                    entry(1, name: "Andrew", isLocalUser: true),
+                    entry(2, name: "Priya"),
+                ]
+                expect.equal(
+                    PeopleDirectoryFilter.sections(entries, query: "priya").map(\.title),
+                    [PeopleDirectoryFilter.noOrganizationTitle]
+                )
+            },
+
             test("search reaches the organization, the aliases and the notes") { expect in
                 let entries = [
                     entry(1, name: "Chris Fowler", organization: "Acme"),

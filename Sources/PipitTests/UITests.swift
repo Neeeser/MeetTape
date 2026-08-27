@@ -52,6 +52,35 @@ enum UITests {
                 try? FileManager.default.removeItem(at: root)
             },
 
+            test("the reading script covers the sounds it claims to") {
+                expect in await MainActor.run {
+                // The Harvard sentences, IEEE 297-1969: phonetically balanced,
+                // ten to a list. A duplicate or a truncated line means somebody
+                // edited the standard set by hand, which is the one thing that
+                // makes it stop being the standard set.
+                let sentences = VoiceEnrollmentScript.allSentences
+                expect.equal(sentences.count, 30, "three lists of ten")
+                expect.equal(Set(sentences).count, 30, "no sentence twice")
+                expect.isTrue(
+                    sentences.allSatisfy { $0.hasSuffix(".") && $0.count > 20 },
+                    "every line is a whole sentence"
+                )
+                expect.isTrue(
+                    VoiceEnrollmentScript.lists.allSatisfy { $0.sentences.count == 10 }
+                )
+                // Enough words that somebody reading quickly still reaches the
+                // bar: the reading is refused below 45 seconds of speech, and
+                // 200 words a minute is a fast reader.
+                let words = sentences.joined(separator: " ").split(separator: " ").count
+                expect.isTrue(
+                    Double(words) / 200 * 60 >= VoiceEnrollmentModel.targetSeconds,
+                    "\(words) words is \(Int(Double(words) / 200 * 60))s at a fast pace, "
+                        + "under the \(Int(VoiceEnrollmentModel.targetSeconds))s target"
+                )
+                expect.isFalse(VoiceEnrollmentScript.prompts.isEmpty)
+                }
+            },
+
             test("the people window builds with somebody on screen") {
                 expect in try await peopleWindowBuilds(expect)
             },

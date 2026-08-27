@@ -149,6 +149,24 @@ public struct MeetingStore: Sendable {
         try AtomicFile.write(try ArchiveCoding.encode(map), to: layout.speakerMap)
     }
 
+    /// An empty set where nothing has been suggested, which is every meeting
+    /// recorded before this existed and every one processed with no API key.
+    /// The speaker strip then draws no suggestion row, which is what those
+    /// meetings already show.
+    public func readSpeakerSuggestions() -> SpeakerSuggestionSet {
+        guard FileManager.default.fileExists(atPath: layout.speakerSuggestions.path),
+              let data = try? read(layout.speakerSuggestions),
+              let set = try? ArchiveCoding.decode(
+                  SpeakerSuggestionSet.self, from: data, path: layout.speakerSuggestions.path
+              )
+        else { return SpeakerSuggestionSet() }
+        return set
+    }
+
+    public func writeSpeakerSuggestions(_ set: SpeakerSuggestionSet) throws {
+        try AtomicFile.write(try ArchiveCoding.encode(set), to: layout.speakerSuggestions)
+    }
+
     /// The transcript as it reads, which is the assembled transcript divided
     /// wherever a person put a boundary.
     ///

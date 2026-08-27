@@ -48,6 +48,21 @@ enum LiveOpenAITests {
         return (OpenAIClient(keyProvider: store), fixtures)
     }
 
+    /// The key alone, for the checks that need no audio.
+    ///
+    /// Speaker resolution reads a transcript, so pinning its contract costs one
+    /// text request and does not need the fixture to have been built.
+    static func requireClient() throws -> OpenAIClient {
+        guard isEnabled else {
+            throw TestSkip("set PIPIT_LIVE_OPENAI=1 to run live API tests")
+        }
+        let store = EnvironmentAPIKeyStore()
+        guard (try? store.apiKey()) != nil else {
+            throw TestSkip("OPENAI_API_KEY is not set")
+        }
+        return OpenAIClient(keyProvider: store)
+    }
+
     static var suite: Suite {
         Suite("LiveOpenAI", [
             test("the key and the diarization model are both reachable") { expect in
@@ -167,8 +182,7 @@ enum LiveOpenAITests {
                         transcript: anonymous,
                         labels: transcript.speakerKeys,
                         humanContext: "Call with me (Andrew), my boss Chris, and Tim from the platform team.",
-                        calendarAttendees: [],
-                        browserParticipants: [],
+                        nameHints: [],
                         localUserName: "Andrew"
                     ),
                     model: AIModelSettings().metadata
@@ -180,6 +194,61 @@ enum LiveOpenAITests {
                     expect.isTrue(
                         transcript.speakerKeys.contains(suggestion.label),
                         "suggested a label that is not in the transcript: \(suggestion.label)"
+                    )
+                }
+            },
+
+            test("a suggestion names only who was addressed, and quotes the line") { expect in
+                let client = try requireClient()
+                // Two unnamed speakers. One is called by name and answers; the
+                // other says a good deal and is never named by anybody. The
+                // second is the case that used to produce a confident guess out
+                // of nothing.
+                let transcript = """
+                [00:12] Chris L: The retain numbers landed overnight and they look clean.
+                [00:19] Chris L: Ben, do you want to take the ingestion question?
+                [00:24] remote-001_speaker_03: Yeah. The chunker is still the slow part, but I \
+                pulled the embedding call out of the loop and it dropped to about four seconds a document.
+                [00:41] remote-001_speaker_07: I looked at the same path last week. The batching \
+                helps but the tokenizer is doing twice the work it needs to on short documents.
+                [00:58] Chris L: Good. Let us pick it up tomorrow.
+                """
+
+                let suggestions = try await client.resolveSpeakers(
+                    SpeakerResolutionRequest(
+                        transcript: transcript,
+                        labels: ["remote-001_speaker_03", "remote-001_speaker_07"],
+                        humanContext: nil,
+                        nameHints: ["Ben Bartholomew", "Chris Latimer", "Nicolo Boschi"],
+                        localUserName: "Andrew"
+                    ),
+                    model: AIModelSettings().metadata
+                )
+
+                let named = Dictionary(
+                    uniqueKeysWithValues: suggestions.map { ($0.label, $0) }
+                )
+                let ben = try expect.unwrap(named["remote-001_speaker_03"])
+                expect.isTrue(
+                    ben.name.localizedCaseInsensitiveContains("Ben"),
+                    "expected Ben for the addressed speaker, got \(ben.name)"
+                )
+                // The quote is the whole point: it has to be a line that is
+                // actually in the transcript.
+                expect.isTrue(
+                    transcript.localizedCaseInsensitiveContains(
+                        ben.quote.trimmingCharacters(in: CharacterSet(charactersIn: "\"“” "))
+                    ),
+                    "quote is not in the transcript: \(ben.quote)"
+                )
+                expect.isTrue(ben.confidence > 0.5, "confidence was \(ben.confidence)")
+
+                // Nobody said this speaker's name, so nothing may be proposed
+                // for them above the floor the strip draws at.
+                if let unnamed = named["remote-001_speaker_07"] {
+                    expect.isTrue(
+                        unnamed.confidence < SpeakerNameSuggestion.minimumConfidence,
+                        "named a speaker nobody addressed: \(unnamed.name) at \(unnamed.confidence)"
                     )
                 }
             },

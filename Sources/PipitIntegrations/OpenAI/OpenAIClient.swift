@@ -151,9 +151,17 @@ public struct OpenAIClient: AIBackend {
                             "label": ["type": "string"],
                             "name": ["type": "string"],
                             "confidence": ["type": "number"],
-                            "evidence": ["type": "string"],
+                            "quote": ["type": "string"],
+                            "at_seconds": ["type": "number"],
+                            "expanded_from_known_names": ["type": "boolean"],
                         ],
-                        "required": ["label", "name", "confidence", "evidence"],
+                        // Every field is required. A model allowed to omit the
+                        // quote omits it exactly when it has none, which is the
+                        // case the quote exists to catch.
+                        "required": [
+                            "label", "name", "confidence", "quote", "at_seconds",
+                            "expanded_from_known_names",
+                        ],
                     ],
                 ],
                 "unresolved": ["type": "array", "items": ["type": "string"]],
@@ -164,28 +172,38 @@ public struct OpenAIClient: AIBackend {
         var context: [String] = []
         if let name = request.localUserName {
             context.append(
-                "The local microphone track belongs to \(name), so their speech is already "
-                    + "labelled and is not in this transcript."
+                "The local microphone track belongs to \(name), and their lines are already "
+                    + "labelled with that name."
             )
         }
         if let humanContext = request.humanContext, !humanContext.isEmpty {
             context.append("Notes from the user: \(humanContext)")
         }
-        if !request.calendarAttendees.isEmpty {
-            context.append("Calendar attendees: \(request.calendarAttendees.joined(separator: ", "))")
-        }
-        if !request.browserParticipants.isEmpty {
-            context.append("Participants reported by the browser: \(request.browserParticipants.joined(separator: ", "))")
+        if !request.nameHints.isEmpty {
+            context.append(
+                "Names known for this meeting, for completing a first name only: "
+                    + request.nameHints.joined(separator: ", ")
+            )
         }
         context.append("Labels to identify: \(request.labels.joined(separator: ", "))")
 
         let instructions = """
-        You map anonymous diarization labels to real names using only evidence in \
-        the transcript and the context given. Self-introductions and people \
-        addressing each other by name are the strongest evidence. Use a confidence \
-        in [0,1]. If a label cannot be identified, give your best guess with low \
-        confidence and list it in unresolved. Labels from different chunks may \
-        belong to the same person; map them to the same name when the evidence says so.
+        You identify speakers in a meeting transcript. Most lines already carry \
+        the speaker's real name. Only the labels listed below are unidentified, \
+        and only those may be named.
+
+        Name a label only when someone says that name out loud in the transcript. \
+        The evidence is almost always one person addressing another, and that \
+        person speaking next or just before. Quote the line that shows it, \
+        verbatim, with the timestamp it carries. A guess with no line behind it \
+        is worthless here, so return the label in `unresolved` instead of \
+        inventing one.
+
+        You may complete a first name into a full name using the known names \
+        given as context, and must set `expanded_from_known_names` to true when \
+        you do. Never take a name from that list that nobody said. Set \
+        `confidence` in [0,1]: above 0.8 when the name is said clearly and the \
+        turn-taking is unambiguous, lower when either is in doubt.
         """
 
         var body: [String: Any] = [
@@ -220,15 +238,25 @@ public struct OpenAIClient: AIBackend {
         else {
             throw ProcessingError.malformedResponse(reason: "speaker mapping")
         }
+        let allowed = Set(request.labels)
         return mapping.compactMap { entry in
-            guard let label = entry["label"] as? String, let name = entry["name"] as? String else {
+            guard let label = entry["label"] as? String, let name = entry["name"] as? String,
+                  let quote = entry["quote"] as? String
+            else { return nil }
+            // A label outside the set asked about is a rename of a speaker the
+            // meeting already resolved, which this stage does not get to do.
+            guard allowed.contains(label) else { return nil }
+            let trimmed = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
                 return nil
             }
             return SpeakerSuggestion(
                 label: label,
                 name: name,
                 confidence: (entry["confidence"] as? Double) ?? 0,
-                evidence: (entry["evidence"] as? String) ?? ""
+                quote: trimmed,
+                atSeconds: (entry["at_seconds"] as? Double) ?? 0,
+                expandedFromCalendar: (entry["expanded_from_known_names"] as? Bool) ?? false
             )
         }
     }

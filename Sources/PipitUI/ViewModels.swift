@@ -683,6 +683,38 @@ public final class MeetingReviewModel {
         lastLoadedNotes = notes
     }
 
+    /// The generated title to offer, or nil when there is nothing to ask about.
+    public var titleSuggestion: String? { metadata?.titleSuggestion }
+
+    /// Takes the suggestion. The field follows, so the pane does not keep
+    /// showing the old title over a folder that has already been renamed.
+    public func acceptTitleSuggestion() {
+        guard let suggestion = titleSuggestion, let target = shownMeetingID else { return }
+        // A debounced write of whatever was in the field is on its way, and it
+        // would land after this one with the older text.
+        pendingEditSave?.cancel()
+        runtime.acceptTitleSuggestion(meetingID: target)
+        title = suggestion
+        lastLoadedTitle = suggestion
+        reload()
+        onEditsSaved?()
+    }
+
+    public func declineTitleSuggestion() {
+        guard let target = shownMeetingID else { return }
+        runtime.declineTitleSuggestion(meetingID: target)
+        reload()
+    }
+
+    /// The meeting the pane is showing, which is not always the one it was
+    /// opened with.
+    ///
+    /// `reload` resolves through the whole conversation, so folding this
+    /// recording into an earlier one leaves `meetingID` on the recording and
+    /// everything drawn here on the meeting that now owns it. Writing to
+    /// `meetingID` then marked a folder nothing reads.
+    private var shownMeetingID: String? { metadata?.id }
+
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
 
     /// How far the current stage has got, when the backend reports it. A local

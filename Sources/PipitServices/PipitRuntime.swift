@@ -711,6 +711,34 @@ public final class PipitRuntime {
         refreshRecentMeetings()
     }
 
+    /// Takes the generated title as the user's own.
+    ///
+    /// Written to `titles.human` rather than left where it is, because that is
+    /// what accepting means: it now outranks the huddle or calendar name it was
+    /// offered against, and it survives a later re-run of enrichment. The folder
+    /// follows, through the same path as any rename.
+    public func acceptTitleSuggestion(meetingID: String) {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true),
+              let suggestion = found.metadata.titleSuggestion
+        else { return }
+        saveTitle(suggestion, meetingID: meetingID)
+    }
+
+    /// Turns the offer down for good, leaving the generated title on disk.
+    public func declineTitleSuggestion(meetingID: String) {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            return
+        }
+        do {
+            _ = try found.store.updateMetadata { $0.generatedTitleDeclined = true }
+        } catch {
+            Log.app.error(
+                "title suggestion not declined: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
+        refreshRecentMeetings()
+    }
+
     public func saveNotes(_ notes: String, meetingID: String) {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         try? found.store.writeNotes(notes)

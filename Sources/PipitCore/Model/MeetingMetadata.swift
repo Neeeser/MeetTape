@@ -88,6 +88,27 @@ public struct TitleCandidates: Codable, Sendable, Equatable {
         return timestampFallback
     }
 
+    /// The generated title, when it is worth offering and is not already the
+    /// name.
+    ///
+    /// Nil where there is nothing to decide: no generated title, one the user
+    /// typed themselves (they have answered this question), or a generated
+    /// title that already won because nothing outranks it. What is left is a
+    /// meeting named by a huddle, a calendar event or a file, where the
+    /// generated title is the alternative nobody has been shown.
+    public var unusedGeneratedTitle: String? {
+        guard let ai = ai?.trimmingCharacters(in: .whitespacesAndNewlines), !ai.isEmpty else {
+            return nil
+        }
+        guard human?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            return nil
+        }
+        guard resolvedOrigin != "ai" else { return nil }
+        let shown = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ai.caseInsensitiveCompare(shown) != .orderedSame else { return nil }
+        return ai
+    }
+
     public var resolvedOrigin: String {
         if human?.isEmpty == false { return "human" }
         if provider?.isEmpty == false { return "provider" }
@@ -162,6 +183,12 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// before that change, and on a folder a person renamed in Finder, and in
     /// both cases Pipit leaves the folder alone.
     public var directoryName: String?
+    /// Set when the user turned down the generated title for this meeting, so
+    /// the offer is never made again.
+    ///
+    /// A flag rather than clearing `titles.ai`, because the generated title is
+    /// still the fallback if the user later clears a title of their own.
+    public var generatedTitleDeclined: Bool?
     public var source: MeetingSource
     public var provider: MeetingProvider
     public var createdAt: Date
@@ -225,6 +252,7 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.schemaVersion = schemaVersion
         self.id = id
         self.directoryName = nil
+        self.generatedTitleDeclined = nil
         self.source = source
         self.provider = provider
         self.createdAt = createdAt
@@ -258,6 +286,12 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     public var displayTitle: String { titles.resolved }
 
     public var isArchived: Bool { archivedAt != nil }
+
+    /// The generated title to offer the user, or nil when there is nothing to
+    /// ask about. Declining once settles it for good.
+    public var titleSuggestion: String? {
+        generatedTitleDeclined == true ? nil : titles.unusedGeneratedTitle
+    }
 
     public var isProcessingComplete: Bool { processing.state == .complete }
 }

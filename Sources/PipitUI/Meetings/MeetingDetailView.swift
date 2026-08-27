@@ -37,6 +37,13 @@ public struct MeetingDetailView: View {
                 missingKeyBar
                 Divider()
             }
+            // Under the notices rather than over them: a meeting that did not
+            // finish is the more urgent thing to read, and this asks a question
+            // that can wait.
+            if let suggestion = detail.titleSuggestion {
+                suggestionBar(suggestion)
+                Divider()
+            }
             speakerStrip
             if let receipt = model.receipt, receipt.meetingID == detail.meetingID {
                 receiptBar(receipt.text)
@@ -153,6 +160,35 @@ public struct MeetingDetailView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.08))
+    }
+
+    /// The generated title, offered against the name the meeting already has.
+    ///
+    /// Shaped like the notice and receipt bars beside it rather than as a card
+    /// or a popover, so it reads as one more thing the pane is telling you.
+    /// Below the title rather than beside it, because a row that appears next
+    /// to the title moves the title while it is being read.
+    private func suggestionBar(_ suggestion: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+            Text("Suggested title").foregroundStyle(.secondary).layoutPriority(1)
+            // A generated title can outrun a narrow pane, and the whole point
+            // is reading it before deciding.
+            Text(suggestion).lineLimit(1).truncationMode(.tail).help(suggestion)
+            Spacer(minLength: 8)
+            Button("Use it") { detail.acceptTitleSuggestion() }
+                .buttonStyle(.link)
+                .help("Renames this meeting, and its folder, to the suggested title.")
+            Button("Dismiss") { detail.declineTitleSuggestion() }
+                .buttonStyle(.link)
+                .help("Keeps the current title and stops offering this one.")
+        }
+        .font(.caption)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     private func noticeBar(_ text: String) -> some View {

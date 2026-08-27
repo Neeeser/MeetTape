@@ -294,6 +294,12 @@ public final class MeetingReviewModel {
     public var notes = ""
     public var title = ""
     public var summary: String?
+    /// What enrichment wrote as notes, kept apart from the user's own. Shown on
+    /// the Notes tab beside them rather than on the Summary tab under a second
+    /// heading.
+    public var generatedNotes: String?
+    public var isEnriching = false
+    public var isSuggestingNames = false
     public var errorMessage: String?
     /// Detected speakers with how each was decided, refreshed alongside the
     /// transcript.
@@ -400,7 +406,9 @@ public final class MeetingReviewModel {
         let storedNotes = found.store.readNotes()
         if notes == lastLoadedNotes { notes = storedNotes }
         lastLoadedNotes = storedNotes
-        summary = found.store.readSummary()
+        let document = found.store.readSummaryDocument()
+        summary = document.summary
+        generatedNotes = document.generatedNotes
         transcript = try? found.store.readCanonicalTranscript()
         expectedParticipants = found.metadata.participants
             .filter { $0.origin == .human }
@@ -623,6 +631,41 @@ public final class MeetingReviewModel {
             speakerCount: reanalyzeSpeakerCount
         ) { [weak self] in
             self?.isReanalyzing = false
+        }
+    }
+
+    /// How many speakers this meeting could not name.
+    ///
+    /// Drives whether the control is drawn at all: it exists to fill a gap, so
+    /// with nobody unnamed there is nothing for it to do and it is not shown.
+    public var unnamedSpeakerCount: Int {
+        speakerRows.count { $0.isUnnamed }
+    }
+
+    /// Whether a summary is missing, which is the only reason to offer to write
+    /// one. Enrichment never replaces what is already there.
+    public var canGenerateEnrichment: Bool {
+        (summary?.isEmpty ?? true) && metadata?.processing.state == .complete
+    }
+
+    /// Writes the summary, notes, description and title this meeting never got.
+    public func generateEnrichment() {
+        guard !isEnriching else { return }
+        isEnriching = true
+        runtime.generateEnrichment(meetingID: meetingID) { [weak self] in
+            self?.isEnriching = false
+            self?.reload()
+        }
+    }
+
+    /// Asks the model to name the speakers nothing else could name.
+    public func suggestSpeakerNames() {
+        guard !isSuggestingNames else { return }
+        isSuggestingNames = true
+        runtime.suggestSpeakers(meetingID: meetingID) { [weak self] in
+            self?.isSuggestingNames = false
+            guard let self else { return }
+            Task { await self.reloadSpeakers() }
         }
     }
 

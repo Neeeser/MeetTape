@@ -2781,6 +2781,65 @@ public actor ProcessingPipeline {
         try await refreshCachedNames(for: claimant)
     }
 
+    /// Writes the title, description, summary and notes a finished meeting
+    /// never got.
+    ///
+    /// For a meeting processed before a key was stored, where the enriching
+    /// stage skipped every part of itself and completed. One request fills all
+    /// four fields, so this is the same call the pipeline makes rather than a
+    /// second kind of enrichment, and the folder is held for it exactly as the
+    /// stage would.
+    public func generateEnrichment(meetingID: String) async throws {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
+        await waitForSlot()
+        defer { jobLock.release() }
+
+        // Re-read after the wait, as every re-run does: the pre-wait snapshot
+        // predates whatever job held the slot.
+        let store = found.store
+        var metadata = (try? store.readMetadata()) ?? found.metadata
+        let settings = settingsProvider()
+        try await runEnrichment(store: store, metadata: &metadata, settings: settings)
+        // The notice is why the user pressed the button. Leaving it up after
+        // the button worked says the key is still missing on a meeting that
+        // just used it.
+        await recordMissingKey(&metadata, settings: settings)
+        // The markdown carries the participant block and the title, so it is
+        // rewritten from what enrichment just wrote rather than left stale.
+        try await finish(store: store, metadata: &metadata, settings: settings)
+        try persist(metadata, to: store)
+        report(metadata, chunks: nil)
+    }
+
+    /// Asks the model to name the speakers this meeting never named.
+    ///
+    /// The same stage the pipeline runs last, on its own. It reads the speaker
+    /// map as it stands now, so anyone named by hand since is left out of the
+    /// question and a name already accepted is never asked about again.
+    public func suggestSpeakers(meetingID: String) async throws {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
+        await waitForSlot()
+        defer { jobLock.release() }
+
+        let store = found.store
+        var metadata = (try? store.readMetadata()) ?? found.metadata
+        let settings = settingsProvider()
+        try await suggestSpeakerNames(store: store, metadata: metadata, settings: settings)
+        // Nothing here writes metadata, but the key may have appeared since the
+        // meeting was processed and the notice has to stop saying it has not.
+        await recordMissingKey(&metadata, settings: settings)
+        try persist(metadata, to: store)
+        report(metadata, chunks: nil)
+    }
+
     /// Re-clusters a meeting, optionally at a speaker count the user chose.
     ///
     /// Words are not touched: this re-runs clustering only. Where the prepared

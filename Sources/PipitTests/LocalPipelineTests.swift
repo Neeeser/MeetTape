@@ -824,6 +824,103 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("a summary can be written after a key arrives") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let settings = AppSettings()
+                let backend = FakeAIBackend()
+                // Processed before a key was stored, which is the whole reason
+                // this entry point exists.
+                backend.configured = false
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 61, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(try meeting.store.readMetadata().processing.state, .complete)
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: meeting.store.layout.summary.path),
+                    "there should be no summary yet"
+                )
+
+                // The user stores a key and asks for the summary by hand.
+                backend.configured = true
+                try await pipeline.generateEnrichment(meetingID: meeting.metadata.id)
+
+                let document = meeting.store.readSummaryDocument()
+                expect.equal(document.summary, "Discussed retrieval.")
+                let after = try meeting.store.readMetadata()
+                expect.equal(after.titles.ai, "Retrieval logic")
+                // The notice was the reason the user pressed the button, so it
+                // has to stop being true once the button worked.
+                expect.isFalse(after.processing.skippedForMissingKey)
+                // The meeting was already complete and must stay that way.
+                expect.equal(after.processing.state, .complete)
+            },
+
+            test("speaker names can be asked for after a key arrives") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let settings = AppSettings()
+                let backend = FakeAIBackend()
+                backend.configured = false
+                backend.suggestions = [
+                    SpeakerSuggestion(
+                        label: "remote-001_speaker_00", name: "Priya Raman",
+                        confidence: 0.93, quote: "Priya, what did it come back at?", atSeconds: 3
+                    ),
+                ]
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 62, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+                expect.isTrue(
+                    meeting.store.readSpeakerSuggestions().suggestions.isEmpty,
+                    "no key means nothing was proposed on the first pass"
+                )
+
+                backend.configured = true
+                try await pipeline.suggestSpeakers(meetingID: meeting.metadata.id)
+
+                let written = meeting.store.readSpeakerSuggestions().suggestions
+                expect.equal(written.count, 1)
+                expect.equal(written.first?.name, "Priya Raman")
+                // A proposal, exactly as on the first pass. Asking by hand does
+                // not make it an assignment.
+                expect.isNil(try meeting.store.readSpeakerMap().entries["remote-001_speaker_00"])
+                expect.isFalse(try meeting.store.readMetadata().processing.skippedForMissingKey)
+            },
+
             test("the missing-key notice is recorded when only suggestions want the cloud") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

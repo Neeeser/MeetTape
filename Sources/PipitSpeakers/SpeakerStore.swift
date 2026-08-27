@@ -1496,6 +1496,46 @@ public actor SpeakerStore {
         }
     }
 
+    /// Every meeting an identity's merged family holds a vector from.
+    ///
+    /// Read when scoring unnamed voices against each other long after the
+    /// meetings are over. Two unnamed voices whose vectors both came from one
+    /// and the same meeting are that meeting's own clusters: the pass that
+    /// created them had the timing to say whether they talked over each other,
+    /// and a later pass working from centroids alone does not.
+    public func embeddingMeetings(of id: IdentityID) throws -> Set<String> {
+        let family = try identityFamily(id)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        var meetings: Set<String> = []
+        try database.query(
+            """
+            SELECT DISTINCT source_meeting FROM voice_embedding
+            WHERE identity_id IN (\(placeholders)) AND source_meeting IS NOT NULL
+            """,
+            family.map { SQLValue.int64($0) }
+        ) { meetings.insert($0.text(0)) }
+        return meetings
+    }
+
+    /// When the earliest vector in an identity's merged family was stored.
+    ///
+    /// The date a profile began. A meeting processed before it could not have
+    /// matched against it, which is the reason a re-score finds something the
+    /// original pass could not.
+    public func firstEnrolment(of id: IdentityID) throws -> Date? {
+        let family = try identityFamily(id)
+        let placeholders = family.map { _ in "?" }.joined(separator: ",")
+        var earliest: Date?
+        try database.query(
+            """
+            SELECT created_at FROM voice_embedding WHERE identity_id IN (\(placeholders))
+            ORDER BY created_at LIMIT 1
+            """,
+            family.map { SQLValue.int64($0) }
+        ) { earliest = $0.date(0) }
+        return earliest
+    }
+
     /// Whether an identity's merged family holds a vector from any meeting but
     /// this one.
     ///

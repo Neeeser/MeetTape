@@ -72,6 +72,26 @@ public struct ResolvedCluster: Sendable, Equatable {
     public var displayName: String? { identity?.resolvedName }
 }
 
+/// One unnamed voice, and the identity it scores against today.
+public struct UnnamedVoiceMatch: Sendable, Equatable {
+    /// The voice nobody has named.
+    public var voice: Identity
+    /// Who it matches now.
+    public var match: Identity
+    public var resolution: SpeakerResolution
+    /// Clean speech behind the unnamed voice's own profile.
+    public var speechSeconds: Double
+
+    public init(
+        voice: Identity, match: Identity, resolution: SpeakerResolution, speechSeconds: Double
+    ) {
+        self.voice = voice
+        self.match = match
+        self.resolution = resolution
+        self.speechSeconds = speechSeconds
+    }
+}
+
 /// Matches clusters to identities and owns everything that writes to a profile.
 ///
 /// The division that matters: recognition reads, human confirmation writes.
@@ -350,6 +370,88 @@ public actor SpeakerRecognitionService {
               identity.kind == .anonymous
         else { return nil }
         return identity
+    }
+
+    // MARK: - re-scoring
+
+    /// Scores every unnamed voice against the gallery as it stands today.
+    ///
+    /// Recognition runs once, when a meeting is processed. Profiles keep
+    /// growing afterwards and nothing ever asks the old question again, so a
+    /// voice heard before its person had a profile stays a number for good, and
+    /// an unnamed voice heard once is deleted after `ephemeralExpiryDays`.
+    ///
+    /// A read, like `resolve`. Nothing here writes an identity, an occurrence
+    /// or a vector: these are the decisions the first pass declined to make on
+    /// its own, so the answer is returned and a person applies it.
+    public func rematchUnnamedVoices(
+        model: EmbeddingModelIdentifier = .fluidAudioOffline
+    ) async throws -> [UnnamedVoiceMatch] {
+        let profiles = try await store.searchableProfiles(model: model)
+        let unnamed = profiles.filter { $0.identity.kind == .anonymous }
+        guard !unnamed.isEmpty else { return [] }
+
+        // Which meetings each unnamed voice's material came from, read once.
+        // The alternative is this query per pair.
+        var meetings: [IdentityID: Set<String>] = [:]
+        for profile in unnamed {
+            meetings[profile.identity.id] = try await store.embeddingMeetings(
+                of: profile.identity.id
+            )
+        }
+
+        var results: [UnnamedVoiceMatch] = []
+        for profile in unnamed {
+            let probe = VoiceVector.l2Normalized(profile.centroid)
+            guard !probe.isEmpty else { continue }
+            let own = meetings[profile.identity.id] ?? []
+
+            var candidates: [SpeakerCandidate] = []
+            for other in profiles {
+                // Itself. A centroid scores 1.0 against its own profile, and
+                // excluding the row is enough: a merged identity is not in this
+                // list at all, so no two entries share a family.
+                if other.identity.id == profile.identity.id { continue }
+                if other.identity.kind == .anonymous,
+                   sameMeetingSiblings(own, meetings[other.identity.id] ?? []) { continue }
+                candidates.append(SpeakerCandidate(
+                    identityID: other.identity.id,
+                    kind: other.identity.kind,
+                    displayName: other.identity.resolvedName,
+                    score: VoiceVector.cosine(probe, other.centroid)
+                ))
+            }
+
+            let resolution = policy.resolve(
+                candidates: candidates, speechSeconds: profile.speechSeconds
+            )
+            // The naming bar, not the suggestion bar. Every match offered here
+            // is one the first pass would have applied by itself had the
+            // profile existed then, which is what makes a list short enough to
+            // read and near enough to certain to confirm without listening.
+            // Widening to the suggestion band means accepting `.suggest` too,
+            // and showing `resolution.band` beside each row.
+            guard resolution.outcome.isAutomatic,
+                  let matchID = resolution.outcome.identityID,
+                  let match = try await store.current(matchID)
+            else { continue }
+            results.append(UnnamedVoiceMatch(
+                voice: profile.identity, match: match, resolution: resolution,
+                speechSeconds: profile.speechSeconds
+            ))
+        }
+        return results
+    }
+
+    /// Whether two unnamed voices hold material from one and the same meeting,
+    /// and nothing else.
+    ///
+    /// Then they are that meeting's own clusters. The pass that created them
+    /// knew whether they talked over each other and decided they were two
+    /// people; this one works from centroids alone and has no way to know, so
+    /// it leaves that decision where it was made.
+    private func sameMeetingSiblings(_ own: Set<String>, _ other: Set<String>) -> Bool {
+        own.count == 1 && own == other
     }
 
     // MARK: - human confirmation

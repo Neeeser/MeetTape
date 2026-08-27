@@ -72,6 +72,8 @@ public final class PeopleDirectoryModel {
 
     public var pendingAction: PeopleAction?
     public var organizationPrompt: OrganizationPrompt?
+    /// The second look at unnamed voices, while its sheet is open.
+    public var lookAgain: LookAgainState?
     /// The reading sheet, while it is open. Built when it opens so that a
     /// second reading starts from a clean state rather than a finished one.
     public var enrollment: VoiceEnrollmentModel?
@@ -426,6 +428,64 @@ public final class PeopleDirectoryModel {
             selection.subtract(action.targets)
         }
         await reload()
+    }
+
+    // MARK: - looking again at unnamed voices
+
+    /// What the second look found, and what the user has done about it.
+    public struct LookAgainState: Equatable {
+        /// True until the sweep answers. It is a cosine pass over profiles
+        /// already in memory, so this is usually one frame, but an empty list
+        /// and a list not read yet mean opposite things to a reader.
+        public var scanning = true
+        public var matches: [VoiceRematch] = []
+        /// Voices confirmed in this sitting, and the name each took. The row
+        /// stays where it was and says what happened rather than vanishing
+        /// under the pointer that pressed it.
+        public var confirmed: [IdentityID: String] = [:]
+        /// How many unnamed voices were compared.
+        public var scored = 0
+
+        /// Rows still waiting for an answer.
+        public var outstanding: [VoiceRematch] {
+            matches.filter { confirmed[$0.voice.id] == nil }
+        }
+    }
+
+    /// Scores every unnamed voice against the profiles as they stand today.
+    ///
+    /// Recognition runs once, when a meeting is processed, and a profile that
+    /// grew afterwards never gets to answer the old question. This asks it
+    /// again, and offers what it finds.
+    public func lookAgainForMatches() async {
+        let statistics = await runtime.voiceMemoryStatistics()
+        lookAgain = LookAgainState(
+            scanning: true,
+            scored: (statistics?.candidateVoices ?? 0) + (statistics?.recurringVoices ?? 0)
+        )
+        let matches = await runtime.rematchUnnamedVoices()
+        // The sheet may have been closed while the sweep ran.
+        guard lookAgain != nil else { return }
+        lookAgain?.scanning = false
+        lookAgain?.matches = matches
+    }
+
+    public func confirmMatch(_ row: VoiceRematch) async {
+        await runtime.confirmRematch(row)
+        lookAgain?.confirmed[row.voice.id] = row.match.resolvedName
+        // Two unnamed voices that are each other produce a row each. Confirming
+        // one merges the pair, so the other names an identity that is now a
+        // tombstone and cannot be confirmed again.
+        lookAgain?.matches.removeAll {
+            $0.match.id == row.voice.id && $0.voice.id != row.voice.id
+        }
+        await reload()
+    }
+
+    /// Turns one match down. Nothing is written: the sweep is re-run from the
+    /// store each time it is opened, so this row is gone for this sitting only.
+    public func dismissMatch(_ row: VoiceRematch) {
+        lookAgain?.matches.removeAll { $0.voice.id == row.voice.id }
     }
 
     /// Enabled at exactly two, because "these are the same person" is a

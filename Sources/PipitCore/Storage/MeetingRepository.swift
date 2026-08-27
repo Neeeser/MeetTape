@@ -425,7 +425,7 @@ public struct MeetingRepository: Sendable {
         if candidates.timestampFallback.isEmpty { candidates.timestampFallback = fallback }
         let slugHint = candidates.resolvedOrigin == "timestamp" ? nil : candidates.resolved
         let base = MeetingArchiveLayout.meetingID(startedAt: startedAt, source: source, title: slugHint)
-        let id = uniqueMeetingID(base: base)
+        let id = uniqueMeetingID(base: base, startedAt: startedAt)
         var metadata = MeetingMetadata(
             id: id,
             source: source,
@@ -463,14 +463,36 @@ public struct MeetingRepository: Sendable {
     /// It used to be enough to check whether a directory of that name existed,
     /// because the directory was named for the identifier. It no longer is, so
     /// this asks the resolver. Runs once per meeting created.
-    private func uniqueMeetingID(base: String) -> String {
+    private func uniqueMeetingID(base: String, startedAt: Date) -> String {
+        // The month the identifier names, not the resolver. A new meeting's
+        // identifier is free almost always, and asking the resolver made every
+        // recording start by decoding every metadata.json in the archive: the
+        // identifier is absent, so every cheap step misses and the scan runs to
+        // the end. A meeting starting now is in this month by construction.
+        let month = archive.monthDirectory(startedAt: startedAt)
+        let taken = identifiers(in: month)
         var candidate = base
         var suffix = 2
-        while findMeeting(id: candidate, includingMerged: true) != nil {
+        while taken.contains(candidate) {
             candidate = "\(base)-\(suffix)"
             suffix += 1
         }
         return candidate
+    }
+
+    private func identifiers(in month: URL) -> Set<String> {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: month, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var out: Set<String> = []
+        for entry in entries where entry.hasDirectoryPath {
+            guard let metadata = try? MeetingStore(layout: MeetingLayout(root: entry))
+                .readMetadata()
+            else { continue }
+            Self.remember(id: metadata.id, directory: entry, archiveRoot: archive.root)
+            out.insert(metadata.id)
+        }
+        return out
     }
 
     // MARK: folder names
@@ -522,25 +544,36 @@ public struct MeetingRepository: Sendable {
                 $0.directoryName = desired
             }
         } catch {
+            // The name on disk and the name in the metadata have to agree, or
+            // the next settle reads the difference as a rename made in Finder
+            // and never touches the folder again. Put it back.
             Log.storage.error(
                 "folder name not recorded: \(logSafeDescription(error), privacy: .public)"
             )
+            try? FileManager.default.moveItem(at: target, to: current)
+            Self.remember(id: found.metadata.id, directory: current, archiveRoot: archive.root)
+            return current
         }
         return target
     }
 
-    /// Settles every meeting whose folder is out of date with its title.
+    /// Settles every finished meeting whose folder is out of date with its title.
     ///
     /// The startup sweep calls this. A meeting that reached `complete` and was
     /// still compacting when the app quit never re-enters `process`, so without
     /// a pass here its folder would keep its recording-time name for good.
-    public func settleFolderNames() {
+    ///
+    /// `isBusy` names the meetings a job is writing into. Renaming one of those
+    /// moves the folder out from under an absolute path the job is still using,
+    /// and only the pipeline knows which they are.
+    public func settleFolderNames(skipping isBusy: (String) -> Bool = { _ in false }) {
         for directory in meetingDirectories() {
             guard let metadata = try? MeetingStore(layout: MeetingLayout(root: directory))
                 .readMetadata()
             else { continue }
             guard metadata.processing.state == .complete || metadata.processing.state == .failed
             else { continue }
+            guard !isBusy(metadata.id) else { continue }
             settleFolderName(for: metadata)
         }
     }
@@ -707,9 +740,9 @@ public struct MeetingRepository: Sendable {
     /// applying one name to thirty corrected lines did it thirty-one times, so
     /// the cheap answers come first:
     ///
-    /// 1. A directory named for the identifier. Every meeting recorded before
+    /// 1. The cache, checked against the metadata it points at.
+    /// 2. A directory named for the identifier. Every meeting recorded before
     ///    folder names and identifiers parted answers here.
-    /// 2. The cache, checked against the metadata it points at.
     /// 3. A scan. The identifier opens with `YYYY-MM-DD`, so it reads that one
     ///    month before falling back to the whole archive.
     public func findMeeting(
@@ -789,14 +822,22 @@ public struct MeetingRepository: Sendable {
         return nil
     }
 
+    /// Every metadata this reads on the way past is cached, not just the match.
+    /// The first `listMeetings` of a launch resolves one identifier per meeting,
+    /// and without this each of those re-read the whole month.
     private func scanMonth(_ month: URL, for id: String) -> URL? {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: month, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return nil }
+        var match: URL?
         for entry in entries where entry.hasDirectoryPath {
-            if holdsMeeting(id: id, at: entry) { return entry }
+            guard let metadata = try? MeetingStore(layout: MeetingLayout(root: entry))
+                .readMetadata()
+            else { continue }
+            Self.remember(id: metadata.id, directory: entry, archiveRoot: archive.root)
+            if metadata.id == id { match = entry }
         }
-        return nil
+        return match
     }
 
     /// `2026-08-18-1418-slack-huddle` sits under `2026/08`.

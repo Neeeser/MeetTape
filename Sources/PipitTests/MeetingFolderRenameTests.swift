@@ -115,6 +115,28 @@ enum MeetingFolderRenameTests {
                 expect.equal(entries.count, 1, "got \(entries.map(\.lastPathComponent))")
             },
 
+            test("changing only the case of a title does not add a suffix") { expect in
+                // `fileExists` on a case-insensitive volume matches the folder's
+                // own name, so the folder collided with itself and every settle
+                // appended another number.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let repository = MeetingRepository(root: root)
+                let started = MeetingFolderNameTests.date(
+                    year: 2026, month: 8, day: 18, hour: 9, minute: 0
+                )
+                let created = try repository.createMeeting(
+                    source: .slackHuddle, provider: .slack, startedAt: started,
+                    titles: TitleCandidates(provider: "standup", timestampFallback: "f"),
+                    now: started
+                )
+                _ = try created.store.updateMetadata { $0.titles.human = "Standup" }
+                let ready = try complete(created.store)
+
+                let settled = repository.settleFolderName(for: ready)
+                expect.equal(settled?.lastPathComponent, "Standup (Aug 18, 9:00 AM)")
+            },
+
             test("a folder renamed by hand is left alone") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

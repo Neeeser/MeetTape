@@ -126,10 +126,6 @@ public struct MeetingArchiveLayout: Sendable {
             .appendingPathComponent(name, isDirectory: true)
     }
 
-    public func layout(named name: String, startedAt: Date) -> MeetingLayout {
-        MeetingLayout(root: directory(named: name, startedAt: startedAt))
-    }
-
     /// `2026-08-18-1418-slack-engineering-huddle`
     public static func meetingID(startedAt: Date, source: MeetingSource, title: String?) -> String {
         let stamp = timestampSlug(startedAt)
@@ -182,13 +178,25 @@ public struct MeetingArchiveLayout: Sendable {
         while true {
             let target = directory(named: candidate, startedAt: startedAt)
             // A folder being renamed collides with itself, and reporting that
-            // as taken would append a suffix on every settle.
-            if let existing, target.standardizedFileURL == existing.standardizedFileURL {
-                return candidate
-            }
+            // as taken would append a suffix on every settle. Compared the way
+            // the volume compares: `fileExists` on a case-insensitive volume
+            // matches the folder's own name whatever its case, so an exact
+            // string comparison here turned renaming "standup" to "Standup"
+            // into "Standup (Aug 18, 9:00 AM) 2".
+            if let existing, Self.samePath(target, existing) { return candidate }
             guard FileManager.default.fileExists(atPath: target.path) else { return candidate }
             candidate = "\(base) \(suffix)"
             suffix += 1
         }
+    }
+
+    /// Case-folded and normalised, matching how APFS is mounted by default.
+    private static func samePath(_ one: URL, _ other: URL) -> Bool {
+        one.standardizedFileURL.path.compare(
+            other.standardizedFileURL.path,
+            options: [.caseInsensitive, .diacriticInsensitive],
+            range: nil,
+            locale: nil
+        ) == .orderedSame
     }
 }

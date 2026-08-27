@@ -20,7 +20,6 @@ import SwiftUI
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
-    public var inputDescription = "Unknown"
     public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String
     public var apiKey = ""
@@ -56,7 +55,6 @@ public final class SettingsModel {
     public func refresh() async {
         statuses = await runtime.permissions.allStatuses()
         hostStatus = NativeMessagingInstaller().status()
-        inputDescription = CoreAudioSystem.describeDefaultInput()
         sensorStatus = runtime.sensorStatus
         // Off the main actor: this call blocks until the person answers the
         // login-keychain prompt macOS raises when the item's ACL does not
@@ -127,6 +125,10 @@ public final class SettingsModel {
         var settings = runtime.settings
         settings.storageRootPath = url.path
         runtime.update(settings: settings)
+        // The measurement belongs to the folder it was taken in, and the
+        // Storage page draws it under whatever path is current.
+        archiveUsage = nil
+        Task { await refreshArchiveUsage() }
     }
 
     public func refreshPeople() async {

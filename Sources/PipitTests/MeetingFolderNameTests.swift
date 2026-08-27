@@ -87,6 +87,26 @@ enum MeetingFolderNameTests {
                 )
             },
 
+            test("a name of multi-byte characters still fits a path component") { expect in
+                // 60 characters of emoji is 240 bytes before the date is added,
+                // and NAME_MAX is 255, so capping on characters alone made
+                // createMeeting throw and the recording never start.
+                let name = MeetingFolderName.base(
+                    title: String(repeating: "\u{1F389}", count: 200),
+                    source: .zoom,
+                    startedAt: date(year: 2026, month: 8, day: 18, hour: 14, minute: 18)
+                )
+                expect.isTrue(name.utf8.count <= 255, "got \(name.utf8.count) bytes")
+                expect.isTrue(name.hasSuffix("(Aug 18, 2:18 PM)"), "got \(name)")
+
+                let cjk = MeetingFolderName.base(
+                    title: String(repeating: "\u{4F1A}\u{8B70}", count: 60),
+                    source: .zoom,
+                    startedAt: date(year: 2026, month: 8, day: 18, hour: 14, minute: 18)
+                )
+                expect.isTrue(cjk.utf8.count <= 255, "got \(cjk.utf8.count) bytes")
+            },
+
             test("a title that sanitizes away falls back to the source") { expect in
                 let name = MeetingFolderName.base(
                     title: "  ...  ",

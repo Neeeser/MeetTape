@@ -317,7 +317,7 @@ public final class PipitRuntime {
             // A meeting that reached complete and was still compacting when the
             // app quit never re-enters `process`, so this is the only pass that
             // gives its folder the title enrichment produced.
-            repository.settleFolderNames()
+            await pipeline.settleFolderNames()
             refreshRecentMeetings()
         }
     }
@@ -676,11 +676,17 @@ public final class PipitRuntime {
                 $0.titles.human = title.isEmpty ? nil : title
             }
             // The folder is named for the meeting, so renaming the meeting
-            // renames it. Not while it records or processes: those paths are
-            // holding this folder's absolute URL.
+            // renames it. Never while a job holds this folder's absolute paths,
+            // which the pipeline is the one that knows: re-analysis runs for
+            // minutes on a meeting that is already complete, and the panel that
+            // starts it holds the title field too.
             if updated.processing.state == .complete || updated.processing.state == .failed,
                currentMeeting?.metadata.id != meetingID {
-                repository.settleFolderName(for: updated)
+                let processing = pipeline!
+                Task {
+                    await processing.settleFolderName(meetingID: meetingID)
+                    await MainActor.run { self.refreshRecentMeetings() }
+                }
             }
         } catch {
             Log.app.error("title not saved: \(logSafeDescription(error), privacy: .public)")

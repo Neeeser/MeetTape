@@ -60,6 +60,17 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
+    /// Meetings whose folder a job is writing into right now.
+    ///
+    /// Renaming a folder moves it out from under the absolute paths a job
+    /// holds, and `AtomicFile` recreates a missing directory rather than
+    /// failing, so a write through the old path resurrects the folder and
+    /// leaves two directories carrying one identifier. Both long jobs are
+    /// exposed: `process` sleeps out a retry backoff with the state already
+    /// persisted as failed, and re-analysis diarizes for minutes on a meeting
+    /// that is already complete. Separate from `running` so that gating a
+    /// rename does not change which jobs may start.
+    private var foldersHeld: Set<String> = []
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -113,10 +124,12 @@ public actor ProcessingPipeline {
             return
         }
         running.insert(meetingID)
+        foldersHeld.insert(meetingID)
         await jobLock.acquire()
         var holdsSlot = true
         defer {
             running.remove(meetingID)
+            foldersHeld.remove(meetingID)
             if holdsSlot { jobLock.release() }
         }
 
@@ -267,6 +280,24 @@ public actor ProcessingPipeline {
         // The title is final by now: enrichment has run, and the folder still
         // carries whatever was known when recording started.
         repository.settleFolderName(for: metadata)
+    }
+
+    /// Renames one meeting's folder to match its title, unless a job is in it.
+    ///
+    /// The entry every caller outside this actor uses. `process` settles its own
+    /// meeting from its tail, where it still owns the folder.
+    public func settleFolderName(meetingID: String) {
+        guard !foldersHeld.contains(meetingID) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            return
+        }
+        repository.settleFolderName(for: found.metadata)
+    }
+
+    /// Renames every finished meeting whose folder is out of date with its
+    /// title, skipping any a job is writing into.
+    public func settleFolderNames() {
+        repository.settleFolderNames { self.foldersHeld.contains($0) }
     }
 
     /// Replaces a finished meeting's PCM segments with verified archives.
@@ -2377,6 +2408,8 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
+        foldersHeld.insert(meetingID)
+        defer { foldersHeld.remove(meetingID) }
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }

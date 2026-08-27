@@ -40,7 +40,28 @@ public enum MeetingFolderName {
         var name = sanitize(title)
         if name.isEmpty { name = sanitize(source.displayName) }
         if name.isEmpty { name = "Recording" }
-        return "\(name) (\(stamp(startedAt)))"
+        let suffix = " (\(stamp(startedAt)))"
+        return fitToFilesystem(name, suffix: suffix) + suffix
+    }
+
+    /// The most bytes a single path component may take on macOS.
+    private static let nameLimit = 255
+
+    /// Trims the title until the whole name fits `NAME_MAX`.
+    ///
+    /// The character cap above is about readability. This is about the folder
+    /// being creatable at all: a title of sixty emoji is sixty characters and
+    /// two hundred and forty bytes, and with the date after it `createMeeting`
+    /// threw and the recording never started.
+    private static func fitToFilesystem(_ name: String, suffix: String) -> String {
+        let budget = nameLimit - suffix.utf8.count
+        guard budget > 0 else { return "Recording" }
+        var fitted = name
+        while fitted.utf8.count > budget, !fitted.isEmpty {
+            fitted.removeLast()
+        }
+        let trimmed = trim(fitted)
+        return trimmed.isEmpty ? "Recording" : trimmed
     }
 
     /// `Aug 03, 9:02 AM`

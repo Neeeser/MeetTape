@@ -299,7 +299,7 @@ public final class PeopleDirectoryModel {
         )
     }
 
-    /// What a right-click acts on: the whole selection when the row is part of
+    /// What a right-click acts on. The whole selection when the row is part of
     /// it, and that row alone otherwise. Right-clicking a row outside the
     /// selection acting on somebody else is the way this goes wrong.
     public func contextTargets(for entry: SpeakerDirectoryEntry) -> [SpeakerDirectoryEntry] {

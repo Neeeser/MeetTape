@@ -177,8 +177,8 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// and deleted. Nil while the segments are still the source representation.
     public var audioArchive: AudioArchive?
     /// When the user took this meeting out of the list. Every file it holds
-    /// stays where it is: archiving is a statement about the list, not about
-    /// the recording.
+    /// stays where it is. Archiving changes which list a meeting is in and
+    /// nothing else.
     public var archivedAt: Date?
 
     public enum ProvisionalDecision: String, Codable, Sendable {

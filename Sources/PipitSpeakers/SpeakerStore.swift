@@ -1045,7 +1045,7 @@ public actor SpeakerStore {
 
     /// Forgets that a meeting was ever heard.
     ///
-    /// Called when its folder is deleted. Only the occurrence rows go: the
+    /// Called when its folder is deleted. Only the occurrence rows go. The
     /// voice material a person confirmed lives in `voice_embedding` and stays,
     /// so deleting one accidental recording does not cost the profile every
     /// other meeting built. Left behind, these rows kept counting a meeting

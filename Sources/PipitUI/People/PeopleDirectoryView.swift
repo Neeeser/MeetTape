@@ -125,8 +125,8 @@ public struct PeopleDirectoryView: View {
     }
 
     /// What a right-click offers. The same actions the footer menu holds, on
-    /// the row under the pointer: the whole selection when that row is part of
-    /// it, and that row alone otherwise.
+    /// the row under the pointer. It acts on the whole selection when that row
+    /// is part of it, and on that row alone otherwise.
     @ViewBuilder private func menu(_ entry: SpeakerDirectoryEntry) -> some View {
         let targets = model.contextTargets(for: entry)
         Button("Set organization…") { model.beginSetOrganization(targets) }

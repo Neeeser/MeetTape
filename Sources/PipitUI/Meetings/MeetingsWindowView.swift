@@ -180,7 +180,7 @@ public struct MeetingsWindowView: View {
     }
 
     private func footerText(visible: Int) -> String {
-        // Against what the filter holds rather than the whole archive: with
+        // Against what the filter holds rather than the whole archive. With
         // anything archived, All never shows every row and the footer read
         // "14 of 15" with nothing typed in the search field.
         let held = model.filteredRows.count

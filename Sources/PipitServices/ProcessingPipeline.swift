@@ -117,8 +117,14 @@ public actor ProcessingPipeline {
         guard deletedWhileRunning.remove(meetingID) != nil else { return false }
         try? FileManager.default.removeItem(at: store.layout.root)
         scratch.discard(meetingID: meetingID)
-        Log.processing.notice("meeting deleted while it was processing: job stopped")
+        Log.processing.notice("meeting was deleted while it processed, so the job stopped")
         return true
+    }
+
+    /// Takes back a `forget` for a folder the delete could not remove. Its job
+    /// carries on, because the meeting is still in the list.
+    public func keep(meetingID: String) {
+        deletedWhileRunning.remove(meetingID)
     }
 
     /// Stops the job on a meeting whose folder has just been deleted.
@@ -187,6 +193,11 @@ public actor ProcessingPipeline {
                     }
                     if !gate.isBlocked { break }
                 }
+                // The wait above runs for the length of somebody else's call,
+                // which is long enough for the user to delete this meeting.
+                // Without this the job ran a whole transcription pass on it and
+                // reported progress for a folder that was already gone.
+                if discardIfDeleted(metadata.id, store: store) { return }
                 metadata.processing.recordAttempt(for: stage)
                 try persist(metadata, to: store)
                 report(metadata, chunks: nil)
@@ -298,6 +309,9 @@ public actor ProcessingPipeline {
                     holdsSlot = true
                 }
             }
+            // The gate wait above is as long as another call, so the delete
+            // can land before the transcode even starts.
+            if discardIfDeleted(metadata.id, store: store) { return }
             await compactQuietly(store: store)
             // Compaction is minutes of transcoding on a long meeting, and it
             // writes the archives through AtomicFile like everything else, so

@@ -684,17 +684,26 @@ public final class PipitRuntime {
     /// Written on the recording the conversation started with, because the list
     /// draws one row for a call that dropped and was rejoined. A flag on the
     /// folded half would hide nothing.
-    public func setArchived(_ archived: Bool, meetingID: String) {
-        guard let logical = repository.logicalMeeting(id: meetingID) else { return }
+    public func setArchived(_ archived: Bool, meetingIDs: [String]) {
         let at: Date? = archived ? clock.now : nil
-        do {
-            _ = try logical.primary.store.updateMetadata { $0.archivedAt = at }
-        } catch {
-            Log.app.error(
-                "archive state not saved: \(logSafeDescription(error), privacy: .public)"
-            )
+        for meetingID in meetingIDs {
+            guard let logical = repository.logicalMeeting(id: meetingID) else { continue }
+            do {
+                _ = try logical.primary.store.updateMetadata { $0.archivedAt = at }
+            } catch {
+                Log.app.error(
+                    "archive state not saved: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
         }
+        // Once, after all of them. The refresh reads a summary for every meeting
+        // on disk, and archiving forty selected rows did forty of those reads on
+        // the actor that also arms the next recording.
         refreshRecentMeetings()
+    }
+
+    public func setArchived(_ archived: Bool, meetingID: String) {
+        setArchived(archived, meetingIDs: [meetingID])
     }
 
     /// What became of a deletion, in the words the window needs to say it.
@@ -713,22 +722,37 @@ public final class PipitRuntime {
     /// Deletes every folder the conversation was recorded in.
     ///
     /// Permanent, and it takes the audio with it. Both halves of a rejoined
-    /// call go: the row stands for the conversation, and leaving the second
+    /// call go. The row stands for the conversation, and leaving the second
     /// half behind would put a recording in the archive that no row can reach.
     ///
     /// The meeting being recorded right now is refused. Its folder is open for
     /// writing, and deleting it under the capture engine loses the audio
     /// already on disk without stopping the recording.
+    /// Deletes several, reading the archive back once at the end.
+    public func deleteMeetings(_ ids: [String]) async -> [String: MeetingDeletionOutcome] {
+        var outcomes: [String: MeetingDeletionOutcome] = [:]
+        for id in ids { outcomes[id] = await delete(id: id) }
+        refreshRecentMeetings()
+        return outcomes
+    }
+
     @discardableResult
     public func deleteMeeting(id: String) async -> MeetingDeletionOutcome {
+        let outcome = await delete(id: id)
+        refreshRecentMeetings()
+        return outcome
+    }
+
+    private func delete(id: String) async -> MeetingDeletionOutcome {
         guard let logical = repository.logicalMeeting(id: id) else { return .notFound }
         let recordings = logical.recordings
         // Continuations first, the recording the conversation started with
-        // last. A folder that will not delete leaves a row that can still reach
-        // it: taking the first half out first would have left the second half
-        // on disk with nothing in the list pointing at it, which is the outcome
+        // last. A folder that will not delete then leaves a row that can still
+        // reach it. Taking the first half out first left the second half on
+        // disk with nothing in the list pointing at it, which is the outcome
         // this whole path exists to prevent.
-        let directories = (logical.continuations + [logical.primary]).map(\.store.layout.root)
+        let ordered = logical.continuations + [logical.primary]
+        let directories = ordered.map(\.store.layout.root)
         if let recording = currentMeeting, directories.contains(
             where: { $0.standardizedFileURL == recording.store.layout.root.standardizedFileURL }
         ) {
@@ -739,11 +763,12 @@ public final class PipitRuntime {
         // its output through AtomicFile, which creates the directories it
         // needs, so a transcription finishing a moment later would put the
         // meeting back as a row holding nothing.
-        for recording in recordings { await pipeline.forget(meetingID: recording.metadata.id) }
-        // Off the main actor: a long meeting is a few hundred megabytes across
+        for recording in ordered { await pipeline.forget(meetingID: recording.metadata.id) }
+        // Off the main actor. A long meeting is a few hundred megabytes across
         // several hundred files, and this actor is also the one arming the next
         // recording.
-        let deleted = await Task.detached(priority: .userInitiated) {
+        let removed = await Task.detached(priority: .userInitiated) {
+            var removed = 0
             for directory in directories {
                 do {
                     try FileManager.default.removeItem(at: directory)
@@ -753,23 +778,38 @@ public final class PipitRuntime {
                     )
                     // Something already removed it, which is the result asked
                     // for.
-                    guard FileManager.default.fileExists(atPath: directory.path) else { continue }
+                    guard FileManager.default.fileExists(atPath: directory.path) else {
+                        removed += 1
+                        continue
+                    }
                     // Stop before the recording the conversation started with.
                     // Its row is the only way back to the folders still here.
-                    return false
+                    return removed
                 }
+                removed += 1
             }
-            return true
+            return removed
         }.value
-        // The voice memory counts meetings by the occurrences it holds, so
-        // without this a deleted meeting kept counting towards "heard in 3
-        // meetings" for everyone who spoke in it.
-        for recording in recordings { await forgetOccurrences(ofMeeting: recording.metadata.id) }
+        for (index, recording) in ordered.enumerated() {
+            let meetingID = recording.metadata.id
+            guard index < removed else {
+                // Still on disk, so its job carries on and its speakers keep
+                // counting it.
+                await pipeline.keep(meetingID: meetingID)
+                continue
+            }
+            // The voice memory counts meetings by the occurrences it holds, so
+            // without this a deleted meeting kept counting towards "heard in 3
+            // meetings" for everyone who spoke in it.
+            await forgetOccurrences(ofMeeting: meetingID)
+            // Nothing draws a progress row for a folder that is gone, and the
+            // menu bar drew one until the app was relaunched.
+            processing.removeValue(forKey: meetingID)
+        }
         Log.app.notice(
-            "deleted a meeting: \(recordings.count, privacy: .public) recordings, complete=\(deleted, privacy: .public)"
+            "deleted a meeting: \(removed, privacy: .public) of \(ordered.count, privacy: .public) recordings"
         )
-        refreshRecentMeetings()
-        return deleted ? .deleted : .folderNotDeleted
+        return removed == ordered.count ? .deleted : .folderNotDeleted
     }
 
     public func revealInFinder(meetingID: String) {

@@ -74,10 +74,10 @@ public final class MeetingsWindowModel {
     /// it must not put them back.
     @ObservationIgnored private var droppedWhileReading: Set<String> = []
     @ObservationIgnored private var loadTask: Task<[MeetingRow], Never>?
-    /// Counts the changes this window has made to the archive itself: combining,
-    /// separating, archiving and deleting. A read that started before one of
-    /// them holds the archive as it was, and assigning it put the rows back
-    /// that the user had just taken out.
+    /// Counts the changes this window has made to the archive itself, which are
+    /// combining, separating, archiving and deleting. A read that started before
+    /// one of them holds the archive as it was, and assigning it put the rows
+    /// back that the user had just taken out.
     @ObservationIgnored private var archiveChanges = 0
     @ObservationIgnored let runtime: PipitRuntime
 
@@ -449,7 +449,7 @@ public final class MeetingsWindowModel {
     /// A deletion, held until the person who asked for it confirms.
     ///
     /// Carries the meetings it will delete rather than reading the selection
-    /// back when the button is pressed: the alert clears its own state as it
+    /// back when the button is pressed. The alert clears its own state as it
     /// dismisses, and a handler that reads it there finds nothing to do.
     public struct MeetingsDeletion: Identifiable, Equatable {
         public let id = UUID()
@@ -458,6 +458,10 @@ public final class MeetingsWindowModel {
         /// The folder of each meeting, from the meetings root down, so the
         /// confirmation names what leaves the disk.
         public var folders: [String]
+        /// How many folders go. A call that dropped and was rejoined is one row
+        /// over two of them, and naming one while deleting both understated
+        /// what the button does.
+        public var folderCount: Int
 
         public var title: String {
             targets.count == 1
@@ -466,17 +470,22 @@ public final class MeetingsWindowModel {
         }
 
         public var message: String {
-            let what = targets.count == 1
-                ? "The folder \(folders.first ?? "")"
-                : "\(folders.count) meeting folders"
-            return "\(what) and everything in it, the audio included, is deleted from this Mac. "
-                + "This cannot be undone."
+            let what: String
+            if folderCount == 1 {
+                what = "The folder \(folders.first ?? "") and everything in it"
+            } else if targets.count == 1 {
+                what = "This call was recorded in \(folderCount) folders, "
+                    + "\(folders.first ?? "") among them, and everything in them"
+            } else {
+                what = "\(folderCount) meeting folders and everything in them"
+            }
+            return "\(what), the audio included, is deleted from this Mac. This cannot be undone."
         }
     }
 
     public var pendingDeletion: MeetingsDeletion?
 
-    /// What a right-click acts on: the whole selection when the row is part of
+    /// What a right-click acts on. The whole selection when the row is part of
     /// it, and that row alone otherwise. Right-clicking a row outside the
     /// selection acting on some other row is the way this goes wrong.
     public func contextTargets(for row: MeetingRow) -> [MeetingRow] {
@@ -488,7 +497,8 @@ public final class MeetingsWindowModel {
         pendingDeletion = MeetingsDeletion(
             targets: rows.map(\.id),
             names: rows.map(\.title),
-            folders: rows.map { Self.archivePath(of: $0.summary.directory) }
+            folders: rows.map { Self.archivePath(of: $0.summary.directory) },
+            folderCount: rows.reduce(0) { $0 + $1.summary.recordingCount }
         )
     }
 
@@ -506,6 +516,10 @@ public final class MeetingsWindowModel {
     /// `pendingDeletion`, which the alert's dismissal has already cleared.
     public func performDeletion(_ deletion: MeetingsDeletion) async {
         pendingDeletion = nil
+        // Counted before the first await. A read of the archive that finishes
+        // inside the loop below holds meetings this is deleting, and assigning
+        // it put them back and opened the pane on one of them.
+        archiveChanges += 1
         // The pane is holding a read of files that are about to go. What was
         // typed into it is written first anyway, because a deletion can be
         // refused and the meeting is then still there to hold it.
@@ -513,17 +527,18 @@ public final class MeetingsWindowModel {
             detail?.saveEdits()
             detail = nil
         }
-        var recording: [String] = []
+        for id in deletion.targets { dropFromIndex(id) }
+        let outcomes = await runtime.deleteMeetings(deletion.targets)
+        var recording: String?
         var failed: [String] = []
         var gone: Set<String> = []
         for (index, id) in deletion.targets.enumerated() {
-            dropFromIndex(id)
             let name = deletion.names.indices.contains(index) ? deletion.names[index] : id
-            switch await runtime.deleteMeeting(id: id) {
+            switch outcomes[id] ?? .notFound {
             // Nothing of it is left either way. A meeting nothing can find was
             // already gone before this row was drawn.
             case .deleted, .notFound: gone.insert(id)
-            case .refusedWhileRecording: recording.append(name)
+            case .refusedWhileRecording: recording = name
             case .folderNotDeleted: failed.append(name)
             }
         }
@@ -531,7 +546,6 @@ public final class MeetingsWindowModel {
         // its place in the selection, and reload opens the pane on it again.
         rows.removeAll { gone.contains($0.id) }
         selection.subtract(gone)
-        archiveChanges += 1
         deletionProblem = Self.problemText(recording: recording, failed: failed)
         await reload()
     }
@@ -540,18 +554,15 @@ public final class MeetingsWindowModel {
     ///
     /// Each cause gets its own sentence. A folder that would not delete,
     /// reported as a recording in progress, sent the reader looking for a call
-    /// that had already ended.
+    /// that had already ended. `recording` is one meeting at most, because one
+    /// is all this Mac records at a time.
     public nonisolated static func problemText(
-        recording: [String], failed: [String]
+        recording: String?, failed: [String]
     ) -> String? {
         var sentences: [String] = []
-        if recording.count == 1 {
+        if let recording {
             sentences.append(
-                "\(recording[0]) is being recorded, and is kept until the recording stops."
-            )
-        } else if recording.count > 1 {
-            sentences.append(
-                "\(recording.count) meetings are being recorded, and are kept until they stop."
+                "\(recording) is being recorded, and is kept until the recording stops."
             )
         }
         if failed.count == 1 {
@@ -567,10 +578,10 @@ public final class MeetingsWindowModel {
     public func setArchived(_ archived: Bool, _ rows: [MeetingRow]) {
         guard !rows.isEmpty else { return }
         let ids = rows.map(\.id)
-        for id in ids { runtime.setArchived(archived, meetingID: id) }
+        runtime.setArchived(archived, meetingIDs: ids)
         archiveChanges += 1
         // The rows leave whichever list is on screen, so the pane must not stay
-        // open on one of them. What was typed into it is written first: the
+        // open on one of them. What was typed into it is written first. The
         // files stay where they are, so a title half-typed when the row was
         // archived still belongs to a meeting.
         if let focused = detail?.meetingID, ids.contains(focused) {

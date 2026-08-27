@@ -626,13 +626,13 @@ enum MeetingsWindowTests {
             test("what a deletion could not do is said one cause at a time") { expect in
                 // Every refusal used to read as a recording in progress, which
                 // sent the reader looking for a call that had already ended.
-                expect.isNil(MeetingsWindowModel.problemText(recording: [], failed: []))
+                expect.isNil(MeetingsWindowModel.problemText(recording: nil, failed: []))
                 let one = try expect.unwrap(
-                    MeetingsWindowModel.problemText(recording: ["Standup"], failed: [])
+                    MeetingsWindowModel.problemText(recording: "Standup", failed: [])
                 )
                 expect.isTrue(one.contains("Standup is being recorded"), "got \(one)")
                 let other = try expect.unwrap(
-                    MeetingsWindowModel.problemText(recording: [], failed: ["Design review"])
+                    MeetingsWindowModel.problemText(recording: nil, failed: ["Design review"])
                 )
                 expect.isTrue(
                     other.contains("would not delete") && !other.contains("being recorded"),
@@ -640,7 +640,7 @@ enum MeetingsWindowTests {
                 )
                 let both = try expect.unwrap(
                     MeetingsWindowModel.problemText(
-                        recording: ["Standup"], failed: ["Design review"]
+                        recording: "Standup", failed: ["Design review"]
                     )
                 )
                 expect.isTrue(both.contains("Standup") && both.contains("Design review"))
@@ -1590,7 +1590,12 @@ enum MeetingsWindowTests {
         expect.isTrue(deletion.title.contains("Weekly sync"), "got \(deletion.title)")
         expect.isTrue(
             deletion.message.contains("deleted from this Mac"),
-            "the warning says the files go: got \(deletion.message)"
+            "the warning says the files go. got \(deletion.message)"
+        )
+        expect.equal(deletion.folderCount, 2)
+        expect.isTrue(
+            deletion.message.contains("2 folders"),
+            "and it counts both halves of the call. got \(deletion.message)"
         )
         await model.performDeletion(deletion)
 

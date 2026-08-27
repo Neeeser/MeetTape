@@ -1,4 +1,5 @@
 import PipitCore
+import PipitServices
 import SwiftUI
 
 /// One person: who they are, what Pipit has learned of their voice, and what
@@ -14,6 +15,7 @@ struct PersonDetailView: View {
                 badges
                 linkedAccounts
                 stats
+                meetings
                 notes
                 actions
             }
@@ -134,13 +136,79 @@ struct PersonDetailView: View {
         HStack(spacing: 10) {
             statBox("Voice profile", entry.profile.summary, detail: speechDetail)
             statBox(
-                "Heard in",
-                entry.meetingCount == 1 ? "1 meeting" : "\(entry.meetingCount) meetings",
-                detail: entry.identity.lastSeenAt.map {
-                    "Last \($0.formatted(date: .abbreviated, time: .shortened))"
-                }
+                "Last heard",
+                entry.identity.lastSeenAt.map { Format.day($0) } ?? "Not yet",
+                detail: entry.meetingCount == 1
+                    ? "1 meeting" : "\(entry.meetingCount) meetings"
             )
         }
+    }
+
+    /// The meetings this person was heard in, each a way into its transcript.
+    ///
+    /// A count answered "how often", which is the question nobody had. The one
+    /// people ask of a name in this list is which conversations it was in, and
+    /// the play button answers the one after that by ear.
+    @ViewBuilder private var meetings: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Meetings").font(.caption).foregroundStyle(.secondary)
+            if model.loadingAppearances {
+                Text("Reading the archive…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else if model.appearances.isEmpty {
+                Text(
+                    entry.meetingCount == 0
+                        ? "Not heard in a meeting yet."
+                        : "The recordings this voice was heard in are no longer on disk."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.appearances) { appearance in meetingRow(appearance) }
+            }
+        }
+    }
+
+    private func meetingRow(_ appearance: PersonAppearance) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(appearance.title).font(.callout).lineLimit(1)
+                Text(
+                    "\(Format.day(appearance.startedAt)) · "
+                        + "\(Format.shortDuration(appearance.speechSeconds)) of speech"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if appearance.hasAudio {
+                Button {
+                    model.playSample(appearance)
+                } label: {
+                    Image(
+                        systemName: model.player.playing == appearance.meetingID
+                            ? "stop.fill" : "play.fill"
+                    )
+                    .font(.system(size: 11))
+                    .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(
+                    model.player.playing == appearance.meetingID ? Color.accentColor : .secondary
+                )
+                .help("Hear this person in this meeting")
+            }
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.35)))
+        .onTapGesture { model.openMeeting(appearance) }
+        .help("Open this meeting")
     }
 
     private var speechDetail: String? {
@@ -183,6 +251,13 @@ struct PersonDetailView: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
+            if entry.identity.isLocalUser {
+                // Only for the person at this Mac. Everybody else's voice is
+                // learned from a recording they are already in, and there is
+                // nobody at this keyboard who can read a script as them.
+                Button("Learn my voice…") { model.startVoiceEnrollment() }
+                    .help("Read a few sentences so Pipit knows your voice")
+            }
             Button("Forget learned voice") { model.confirmForgetVoice() }
                 .disabled(entry.profile == .none)
             Button("Delete", role: .destructive) { model.confirmDeleteSelection() }

@@ -325,6 +325,35 @@ struct PeopleSettingsTab: View {
 
     var body: some View {
         Form {
+            Section("You") {
+                if !model.people.isEmpty {
+                    Picker(
+                        "You are",
+                        selection: Binding(
+                            get: { model.localUserIdentityID },
+                            set: { chosen in
+                                guard let chosen else { return }
+                                Task { await model.chooseLocalUser(chosen) }
+                            }
+                        )
+                    ) {
+                        if model.localUserIdentityID == nil {
+                            Text("Nobody yet").tag(IdentityID?.none)
+                        }
+                        ForEach(model.people) { entry in
+                            Text(entry.identity.resolvedName).tag(IdentityID?.some(entry.id))
+                        }
+                    }
+                }
+                TextField("Name", text: model.localUserNameField)
+                    .onSubmit { Task { await model.commitLocalUserName() } }
+                Text(
+                    "Your own speech is labelled with this person, and the microphone track "
+                        + "of every call teaches their voice profile. Naming yourself on an "
+                        + "imported recording puts it on the same profile."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             Section {
                 Button("Manage people…") { model.openPeople() }
                 if let statistics = model.voiceStatistics {
@@ -355,5 +384,9 @@ struct PeopleSettingsTab: View {
         }
         .formStyle(.grouped)
         .task { await model.refreshPeople() }
+        // A name typed and not submitted is still a name the person meant. The
+        // field used to be in General, which wrote it on the way out for the
+        // same reason.
+        .onDisappear { Task { await model.commitLocalUserName() } }
     }
 }

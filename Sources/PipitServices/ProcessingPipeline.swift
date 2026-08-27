@@ -1051,6 +1051,86 @@ public actor ProcessingPipeline {
     }
 
 
+    /// Records the microphone track as an appearance by whoever it belongs to.
+    ///
+    /// Every other speaker reaches `speaker_occurrence` through a diarization
+    /// cluster. The microphone track has none, because its speaker is true by
+    /// construction, so nothing wrote a row for it and every count over that
+    /// table read the local user as having been in no meeting at all. The
+    /// People list showed zero beside a voice profile built from those very
+    /// recordings, and `refreshCachedNames` walks the same query, so renaming
+    /// yourself re-rendered none of your own transcripts.
+    ///
+    /// No vector goes with it. The row exists to say the track was heard and
+    /// who it was, and the profile this track feeds is written by
+    /// `learnLocalUserVoice`, which has its own bleed check to pass first.
+    @discardableResult
+    private func recordLocalUserOccurrence(
+        meetingID: String, transcript: CanonicalTranscript, speakers: SpeakerMap
+    ) async -> Bool {
+        guard let service = backends.speakers else { return false }
+        let assignment = speakers.entries[SpeakerLabel.localUser]
+        // "Leave unnamed" on this track is a person saying the meeting is not
+        // theirs. The row is still written, with nobody behind it, because the
+        // one it replaces says it was: skipping here left the meeting counting
+        // towards a person who had just taken their name off it.
+        let cleared = speakers.clearedKeys.contains(SpeakerLabel.localUser)
+        guard assignment != nil || cleared else { return false }
+        let seconds = transcript.speakers
+            .first { $0.key == SpeakerLabel.localUser }?.speechSeconds ?? 0
+        guard seconds > 0 else { return false }
+        do {
+            _ = try await service.speakerStore.recordOccurrence(
+                meetingID: meetingID,
+                clusterID: SpeakerLabel.localUser,
+                track: .mic,
+                speechSeconds: seconds,
+                embedding: nil,
+                model: nil,
+                resolution: nil,
+                identityID: assignment?.identityID,
+                source: assignment?.origin ?? .human,
+                humanVerified: cleared || (assignment?.provenance?.humanVerified ?? false),
+                wasExpectedParticipant: false,
+                now: clock.now
+            )
+            return true
+        } catch {
+            Log.processing.notice(
+                "microphone occurrence skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    /// Writes the microphone track's row for meetings recorded before it had
+    /// one, and reports how many it wrote.
+    ///
+    /// Runs once. Everything that counts a person's meetings reads
+    /// `speaker_occurrence`, and until this existed the local user had no rows
+    /// there at all, so their own history was invisible to the People list and
+    /// to every rename that walks it. New meetings write the row as they are
+    /// processed; this is the archive that was already on disk.
+    public func backfillLocalUserOccurrences() async -> Int {
+        guard backends.speakers != nil else { return 0 }
+        var written = 0
+        for summary in repository.listMeetings() {
+            for store in repository.stores(ofConversation: summary) {
+                guard let metadata = try? store.readMetadata(),
+                      let speakers = try? store.readSpeakerMap(),
+                      let transcript = try? store.readCanonicalTranscript()
+                else { continue }
+                guard speakers.entries[SpeakerLabel.localUser]?.identityID != nil else { continue }
+                if await recordLocalUserOccurrence(
+                    meetingID: metadata.id, transcript: transcript, speakers: speakers
+                ) {
+                    written += 1
+                }
+            }
+        }
+        return written
+    }
+
     /// The sensor record with the local user marked, where a meeting has one.
     ///
     /// Only remote meetings: the record describes the far-end track, and an
@@ -1398,6 +1478,9 @@ public actor ProcessingPipeline {
             )
         }
         try store.writeSpeakerMap(speakers)
+        await recordLocalUserOccurrence(
+            meetingID: metadata.id, transcript: transcript, speakers: speakers
+        )
 
         // Voice memory is a side effect of the meeting, not part of it. A
         // deleted model folder or an unreadable track must not take the whole
@@ -1708,6 +1791,76 @@ public actor ProcessingPipeline {
         )
     }
 
+    /// Adds a recording of somebody reading aloud to their voice profile.
+    ///
+    /// The one enrolment with no meeting behind it, and the only one a person
+    /// starts on purpose. Everything else waits for a recording to exist: the
+    /// microphone track of a remote call, or a name typed onto a cluster. A
+    /// fresh install has neither, and a Mac used only for in-person or imported
+    /// recordings never gets the first, so this is what makes the person at the
+    /// keyboard recognisable before their first call.
+    ///
+    /// The audio has to hold one voice. `singleSpeakerEmbedding` refuses a
+    /// recording where the dominant speaker holds less than three quarters of
+    /// the speech, which is what stops somebody's kitchen radio, or a colleague
+    /// answering a question mid-take, from joining their profile.
+    public func enrolSpokenSample(
+        audio: URL, identityID: IdentityID
+    ) async throws(SpokenEnrollmentError) -> VoiceProfileStatus {
+        guard let service = backends.speakers, let embed = backends.singleSpeakerEmbedding else {
+            throw .modelsUnavailable
+        }
+        let sample: SingleSpeakerSample?
+        do {
+            sample = try await embed(audio)
+        } catch {
+            Log.processing.notice(
+                "spoken enrolment could not be embedded: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        guard let sample, !sample.spans.isEmpty else { throw .noSingleVoice }
+
+        // The spans are inside this recording, which is the whole of it, so
+        // there is no timeline to move them onto. The identifier names the file
+        // rather than a meeting, and no meeting can be named that, so a
+        // retraction that walks meetings never reaches these rows by accident.
+        let recordingID = "enrollment-\(audio.deletingPathExtension().lastPathComponent)"
+        let store = await service.speakerStore
+        let result: Result<VoiceProfileStatus, VoiceEnrollmentRejection>
+        do {
+            result = try await store.enrol(
+                VoiceEnrollmentCandidate(
+                    identityID: identityID,
+                    vector: sample.vector,
+                    model: .fluidAudioOffline,
+                    speechSeconds: sample.speechSeconds,
+                    qualityScore: sample.quality,
+                    source: .spokenEnrollment,
+                    evidence: [VoiceEvidence(
+                        meetingID: recordingID, track: .mic, spans: sample.spans,
+                        confirmation: .spokenEnrollment
+                    )]
+                ),
+                now: clock.now
+            )
+        } catch {
+            Log.processing.error(
+                "spoken enrolment not stored: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        switch result {
+        case .success(let status):
+            Log.processing.info(
+                "spoken enrolment: \(status.sampleCount, privacy: .public) samples, \(Int(status.speechSeconds), privacy: .public)s"
+            )
+            return status
+        case .failure(let rejection):
+            throw .rejected(rejection)
+        }
+    }
+
     /// Asks the cloud model to put names to the speakers it can from the words
     /// alone. Lowest-ranked evidence there is, so it never overwrites a voice
     /// match, a deterministic identity or anything a person set.
@@ -1973,6 +2126,17 @@ public actor ProcessingPipeline {
         // the local user's own voice: the one profile no person ever reviews.
         if key == SpeakerLabel.localUser, resolved != settings.processing.localUserIdentityID {
             try await retractMicrophoneTrack(meetingID: meetingID)
+        }
+        // The row that says the microphone track was heard names whoever the
+        // map now names, or the meeting still counts towards the person the
+        // user has just said was not speaking.
+        // Read without throwing: a transcript that cannot be decoded is a row
+        // this cannot update, not a rename to undo. The name has already been
+        // written to the speaker map by this point.
+        if key == SpeakerLabel.localUser, let transcript = try? found.store.readCanonicalTranscript() {
+            await recordLocalUserOccurrence(
+                meetingID: meetingID, transcript: transcript, speakers: speakers
+            )
         }
         if let resolved {
             try await confirmCluster(

@@ -11,6 +11,10 @@ import TestKit
 /// exercised end to end without 650 MB of CoreML.
 final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     var segments: [RawTranscriptSegment]
+    /// What the microphone track says, where a test needs the two tracks to say
+    /// different things. Identical words on both tracks are read as the far end
+    /// reaching the microphone, and the local lines are dropped.
+    var micSegments: [RawTranscriptSegment]?
     var identifier = "stub-whisper"
     var isLocal = true
     var limits = BackendAudioLimits.none
@@ -26,8 +30,10 @@ final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     ) async throws -> TranscriptionOutput {
         state.withLock { $0.append(audio.lastPathComponent) }
         progress(1)
+        let spoken = audio.lastPathComponent.hasPrefix(CaptureTrack.mic.rawValue)
+            ? (micSegments ?? segments) : segments
         return TranscriptionOutput(
-            segments: segments, text: segments.map(\.text).joined(separator: " "),
+            segments: spoken, text: spoken.map(\.text).joined(separator: " "),
             language: "en", durationSeconds: 6
         )
     }
@@ -126,6 +132,7 @@ enum LocalPipelineTests {
         speakers: SpeakerRecognitionService?,
         aligner: (any TranscriptAligner)? = nil,
         prepareAligner: (@Sendable () async throws -> Void)? = nil,
+        singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         settings: AppSettings,
         scratchRoot: URL
     ) -> ProcessingPipeline {
@@ -137,7 +144,8 @@ enum LocalPipelineTests {
                 diarization: { _, _ in diarizer },
                 speakers: speakers,
                 aligner: aligner,
-                prepareAligner: prepareAligner
+                prepareAligner: prepareAligner,
+                singleSpeakerEmbedding: singleSpeakerEmbedding
             ),
             scratch: ProcessingScratch(root: scratchRoot),
             clock: ManualClock(),
@@ -1353,6 +1361,278 @@ enum LocalPipelineTests {
                     ).sampleCount,
                     1,
                     "a click that moves no line must not cost a voice profile"
+                )
+            },
+
+            test("meetings recorded before the microphone had a row get one") { expect in
+                // The fix writes the row as a meeting is processed, which
+                // leaves every meeting already in the archive counting for
+                // nobody. A person who has been using Pipit for months would
+                // have read their own profile as "heard in 0 meetings" forever.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                // What an already-processed meeting holds: a named microphone
+                // track in the map, lines in the transcript, no occurrence row.
+                var map = SpeakerMap()
+                map.entries[SpeakerLabel.localUser] = SpeakerAssignment(
+                    displayName: "Andrew", origin: .deterministic, identityID: me.id
+                )
+                try meeting.store.writeSpeakerMap(map)
+                try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+                    generatedAt: Date(timeIntervalSince1970: 1_787_070_000),
+                    utterances: [Utterance(
+                        id: "u0", start: 0, end: 30, track: .mic, rawSpeakerLabel: nil,
+                        speakerKey: SpeakerLabel.localUser, text: "sounds right to me",
+                        chunkID: "c1", model: "m"
+                    )]
+                ))
+                expect.equal(try await store.meetingCount(for: me.id), 0)
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                expect.equal(await pipeline.backfillLocalUserOccurrences(), 1)
+                expect.equal(try await store.meetingCount(for: me.id), 1)
+
+                // Idempotent: the row is keyed on the meeting and the cluster,
+                // so a second pass rewrites it rather than counting twice.
+                _ = await pipeline.backfillLocalUserOccurrences()
+                expect.equal(try await store.meetingCount(for: me.id), 1)
+            },
+
+            test("taking your name off the microphone track drops the meeting") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                var map = SpeakerMap()
+                map.entries[SpeakerLabel.localUser] = SpeakerAssignment(
+                    displayName: "Andrew", origin: .deterministic, identityID: me.id
+                )
+                try meeting.store.writeSpeakerMap(map)
+                try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+                    generatedAt: Date(timeIntervalSince1970: 1_787_070_000),
+                    utterances: [Utterance(
+                        id: "u0", start: 0, end: 30, track: .mic, rawSpeakerLabel: nil,
+                        speakerKey: SpeakerLabel.localUser, text: "sounds right to me",
+                        chunkID: "c1", model: "m"
+                    )]
+                ))
+
+                var settings = AppSettings()
+                settings.processing.localUserIdentityID = me.id
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                _ = await pipeline.backfillLocalUserOccurrences()
+                expect.equal(try await store.meetingCount(for: me.id), 1)
+
+                // The chip offers "Leave unnamed" on this track like any other.
+                _ = try await pipeline.applySpeakerName(
+                    "", to: SpeakerLabel.localUser, meetingID: meeting.metadata.id
+                )
+                expect.equal(
+                    try await store.meetingCount(for: me.id), 0,
+                    "a meeting somebody says was not them is not one they were in"
+                )
+            },
+
+            test("reading a few sentences aloud builds a voice profile") { expect in
+                // The one enrolment a person starts. Without it a Mac that has
+                // only ever recorded in-person meetings has nothing to
+                // recognise its own user by: no microphone track of a remote
+                // call, and no cluster anybody has named.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    singleSpeakerEmbedding: { _ in
+                        SingleSpeakerSample(
+                            vector: SpeakerIdentityTests.vector(seed: 7), speechSeconds: 60,
+                            quality: 0.9, spans: [AudioSpan(start: 0, end: 62)]
+                        )
+                    },
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+
+                let status = try await pipeline.enrolSpokenSample(
+                    audio: root.appendingPathComponent("read-aloud.wav"), identityID: me.id
+                )
+                expect.equal(status.sampleCount, 1)
+                expect.equal(
+                    try await store.profileStatus(of: me.id, model: .fluidAudioOffline).sampleCount,
+                    1,
+                    "the profile a later meeting is scored against holds it"
+                )
+            },
+
+            test("a reading with two voices in it enrols nobody") { expect in
+                // The embedder refuses audio whose dominant speaker holds less
+                // than three quarters of the speech. A colleague answering a
+                // question mid-take must not join the profile of the person who
+                // pressed record.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    singleSpeakerEmbedding: { _ in nil },
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+
+                do {
+                    _ = try await pipeline.enrolSpokenSample(
+                        audio: root.appendingPathComponent("read-aloud.wav"), identityID: me.id
+                    )
+                    expect.fail("a recording with no single voice must not enrol")
+                } catch let error as SpokenEnrollmentError {
+                    expect.equal(error, .noSingleVoice)
+                }
+                expect.equal(
+                    try await store.profileStatus(of: me.id, model: .fluidAudioOffline).sampleCount,
+                    0
+                )
+            },
+
+            test("a reading too short to stand behind says how short it was") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    singleSpeakerEmbedding: { _ in
+                        SingleSpeakerSample(
+                            vector: SpeakerIdentityTests.vector(seed: 7), speechSeconds: 12,
+                            quality: 0.9, spans: [AudioSpan(start: 0, end: 12)]
+                        )
+                    },
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+
+                do {
+                    _ = try await pipeline.enrolSpokenSample(
+                        audio: root.appendingPathComponent("read-aloud.wav"), identityID: me.id
+                    )
+                    expect.fail("twelve seconds is below the enrolment bar")
+                } catch let error as SpokenEnrollmentError {
+                    // The numbers reach the screen: "keep reading" is only
+                    // useful next to how much further there is to go.
+                    expect.equal(
+                        error, .rejected(.tooLittleSpeech(seconds: 12, required: 45))
+                    )
+                }
+            },
+
+            test("the microphone track counts as a meeting the local user was in") { expect in
+                // The microphone track has no diarization cluster, so nothing
+                // wrote an occurrence row for it. Every count over that table
+                // then read the local user as having been in no meeting at all:
+                // the People list said zero beside a profile built from those
+                // very recordings, and the rename that walks the same query
+                // visited none of their transcripts.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+                var settings = AppSettings()
+                settings.processing.localUserIdentityID = me.id
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: {
+                        let stub = StubLocalTranscriber(segments: [
+                            RawTranscriptSegment(
+                                start: 0, end: 5, text: "we ship friday", speaker: nil
+                            ),
+                        ])
+                        stub.micSegments = [
+                            RawTranscriptSegment(
+                                start: 0, end: 4, text: "sounds right to me", speaker: nil
+                            ),
+                        ]
+                        return stub
+                    }(),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 5)])
+                    ),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(
+                    try await store.meetingCount(for: me.id), 1,
+                    "the microphone track is the local user, so this is a meeting they were in"
+                )
+                let occurrences = try await store.occurrences(meetingID: meeting.metadata.id)
+                let mine = try expect.unwrap(
+                    occurrences.first { $0.clusterID == SpeakerLabel.localUser }
+                )
+                expect.equal(mine.track, .mic)
+                expect.equal(mine.resolvedIdentityID, me.id)
+                expect.isTrue(mine.speechSeconds > 0, "the row carries the speech behind it")
+
+                // The same query drives the rename refresh, so without the row
+                // above, renaming yourself left every past transcript of your
+                // own showing the name you had left behind.
+                _ = try await store.rename(me.id, to: "Andrew Neeser")
+                try await pipeline.refreshCachedNames(for: me.id)
+                expect.equal(
+                    try meeting.store.readSpeakerMap().displayName(for: SpeakerLabel.localUser),
+                    "Andrew Neeser",
+                    "renaming yourself reaches the meetings you were in"
                 )
             },
 

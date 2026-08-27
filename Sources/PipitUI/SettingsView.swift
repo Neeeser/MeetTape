@@ -68,18 +68,8 @@ struct GeneralSettingsTab: View {
                     .font(.callout)
                 }
             }
-            Section("Your name") {
-                TextField("Name", text: model.text(\.localUserName))
-                    .onSubmit { model.saveLocalUserName() }
-                Text(
-                    "Used to label your own speech. On a remote call it comes from the "
-                        + "microphone track, so it is attributed without diarization."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
-        .onDisappear { model.saveLocalUserName() }
     }
 }
 

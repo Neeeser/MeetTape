@@ -90,6 +90,48 @@ public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     }
 }
 
+/// One meeting a person was heard in, for the list on their profile.
+public struct PersonAppearance: Identifiable, Sendable, Equatable {
+    public let meetingID: String
+    public let title: String
+    public let startedAt: Date
+    /// How long this person spoke in it, over every track and every recording
+    /// of the conversation.
+    public let speechSeconds: Double
+    /// Whether a mixdown is on disk, which is what a sample plays from.
+    public let hasAudio: Bool
+
+    public var id: String { meetingID }
+
+    public init(
+        meetingID: String, title: String, startedAt: Date, speechSeconds: Double, hasAudio: Bool
+    ) {
+        self.meetingID = meetingID
+        self.title = title
+        self.startedAt = startedAt
+        self.speechSeconds = speechSeconds
+        self.hasAudio = hasAudio
+    }
+}
+
+/// A stretch of one person's speech, and the file it plays from.
+///
+/// The file names the recording. Either half of a dropped call keeps its own
+/// timeline, and the span is on the timeline of the mixdown beside it.
+public struct VoiceSample: Sendable, Equatable {
+    public let audio: URL
+    public let start: Double
+    public let end: Double
+
+    public var duration: Double { max(0, end - start) }
+
+    public init(audio: URL, start: Double, end: Double) {
+        self.audio = audio
+        self.start = start
+        self.end = end
+    }
+}
+
 extension PipitRuntime {
     // MARK: - model management
 
@@ -214,6 +256,72 @@ extension PipitRuntime {
         }
     }
 
+    /// Says which person in the directory is the one using this Mac.
+    ///
+    /// The identity owns the answer and Settings caches their name from it. The
+    /// two used to be set separately: a free-text field held a name, the store
+    /// held a flag, and `ensureLocalUserIdentity` pushed the name onto the
+    /// flagged row at every launch, so picking the wrong one left the
+    /// microphone track labelled from a field that named nobody.
+    public func setLocalUser(_ identityID: IdentityID) async {
+        guard let store = speakerStore else { return }
+        do {
+            guard let identity = try await store.current(identityID) else { return }
+            try await store.setLocalUser(identity.id)
+            var updated = settings
+            updated.processing.localUserIdentityID = identity.id
+            updated.localUserName = identity.resolvedName
+            update(settings: updated)
+            Log.app.info("local user set to identity \(identity.id.rawValue, privacy: .public)")
+        } catch {
+            Log.app.error("local user not set: \(logSafeDescription(error), privacy: .public)")
+        }
+    }
+
+    /// Repairs the archive once, for meetings recorded before the microphone
+    /// track was written into voice memory.
+    func backfillLocalUserOccurrences() async {
+        guard !settings.processing.localUserOccurrencesBackfilled else { return }
+        // A voice database that failed to open is a launch that can write
+        // nothing. Marking the pass done here would spend the one shot on it
+        // and leave the archive unrepaired on every later launch.
+        guard speakerStore != nil else { return }
+        let written = await pipeline.backfillLocalUserOccurrences()
+        var updated = settings
+        updated.processing.localUserOccurrencesBackfilled = true
+        update(settings: updated)
+        Log.app.info("microphone tracks recorded for \(written, privacy: .public) recordings")
+    }
+
+    // MARK: - reading a few sentences aloud
+
+    /// Where the audio of a spoken enrolment is kept.
+    public var voiceEnrollmentArchive: VoiceEnrollmentArchive {
+        VoiceEnrollmentArchive(applicationSupport: applicationSupport)
+    }
+
+    /// A path for the next enrolment recording, under the person it is of.
+    public func newEnrollmentRecording() async -> URL? {
+        await ensureLocalUserIdentity()
+        guard let identityID = settings.processing.localUserIdentityID else { return nil }
+        return try? voiceEnrollmentArchive.newRecording(
+            for: identityID, id: UUID().uuidString.lowercased()
+        )
+    }
+
+    /// Adds a recording of the person at this Mac reading aloud to their voice
+    /// profile, and reports what the profile holds afterwards.
+    public func enrolSpokenSample(
+        audio: URL
+    ) async throws(SpokenEnrollmentError) -> VoiceProfileStatus {
+        guard let identityID = settings.processing.localUserIdentityID else {
+            throw .noLocalUser
+        }
+        let status = try await pipeline.enrolSpokenSample(audio: audio, identityID: identityID)
+        refreshRecentMeetings()
+        return status
+    }
+
     /// Forgets unnamed voices heard once and never matched again.
     public func pruneVoiceMemory() async {
         guard let store = speakerStore else { return }
@@ -255,6 +363,94 @@ extension PipitRuntime {
         guard let store = speakerStore else { return nil }
         return try? await store.statistics()
     }
+
+    /// Every meeting a person was heard in, newest first.
+    ///
+    /// The list on their profile, rather than a count: what a reader wants from
+    /// "heard in nine meetings" is which nine, and a way into each transcript.
+    ///
+    /// Occurrences are per recording and a dropped call is two recordings of one
+    /// conversation, so each is resolved to the conversation it belongs to and
+    /// the seconds of both halves are added together.
+    public func appearances(of identityID: IdentityID, limit: Int = 60) async -> [PersonAppearance] {
+        guard let store = speakerStore else { return [] }
+        guard let occurrences = try? await store.occurrences(identityID: identityID) else {
+            return []
+        }
+        guard !occurrences.isEmpty else { return [] }
+        // The rows the list can already answer for, read once. Resolving every
+        // occurrence through `logicalMeeting` instead walked the archive
+        // directory per row, and after the microphone track started writing one
+        // row per meeting that is one walk per meeting in the archive.
+        let listed = repository.listMeetings()
+        let conversations = Set(listed.map(\.id))
+        var seconds: [String: Double] = [:]
+        for occurrence in occurrences {
+            // Only a folded half needs resolving: its own identifier is not in
+            // the list, because the conversation is listed under the recording
+            // it started with.
+            let conversation = conversations.contains(occurrence.meetingID)
+                ? occurrence.meetingID
+                : repository.logicalMeeting(id: occurrence.meetingID)?
+                    .primary.metadata.id ?? occurrence.meetingID
+            seconds[conversation, default: 0] += occurrence.speechSeconds
+        }
+        return listed
+            .filter { seconds[$0.id] != nil }
+            .prefix(limit)
+            .map { summary in
+                PersonAppearance(
+                    meetingID: summary.id,
+                    title: summary.title,
+                    startedAt: summary.startedAt,
+                    speechSeconds: seconds[summary.id] ?? 0,
+                    hasAudio: repository.stores(ofConversation: summary).contains {
+                        FileManager.default.fileExists(atPath: $0.layout.recordingAudio.path)
+                    }
+                )
+            }
+    }
+
+    /// A stretch of one person's speech from one meeting, to play back.
+    ///
+    /// Their longest turn, because the longest is the one least likely to be a
+    /// word said over somebody else, and the mixdown it points at is aligned to
+    /// the same timeline the transcript is on.
+    public func voiceSample(
+        of identityID: IdentityID, inMeeting meetingID: String
+    ) async -> VoiceSample? {
+        guard let store = speakerStore else { return nil }
+        guard let logical = repository.logicalMeeting(id: meetingID) else { return nil }
+        let family = Set((try? await store.family(of: identityID)) ?? [identityID])
+        for recording in logical.recordings {
+            let audio = recording.store.layout.recordingAudio
+            guard FileManager.default.fileExists(atPath: audio.path),
+                  let map = try? recording.store.readSpeakerMap(),
+                  let transcript = try? recording.store.readCanonicalTranscript()
+            else { continue }
+            let keys = Set(
+                map.entries
+                    .filter { $0.value.identityID.map(family.contains) ?? false }
+                    .map(\.key)
+            )
+            guard !keys.isEmpty else { continue }
+            guard let longest = transcript.utterances
+                .filter({ keys.contains($0.speakerKey) })
+                .max(by: { $0.end - $0.start < $1.end - $1.start })
+            else { continue }
+            let start = max(0, longest.start)
+            return VoiceSample(
+                audio: audio,
+                start: start,
+                end: min(longest.end, start + Self.voiceSampleSeconds)
+            )
+        }
+        return nil
+    }
+
+    /// Long enough to recognise a voice, short enough that a person listens to
+    /// the whole of it before deciding.
+    private static let voiceSampleSeconds: Double = 8
 
     /// Which meetings a voice has been heard in, for the "seen before" panel.
     public func meetingsHeard(identityID: IdentityID, limit: Int = 6) async -> [MeetingSummary] {
@@ -343,7 +539,13 @@ extension PipitRuntime {
     public func forgetVoice(of identityID: IdentityID) async {
         guard let store = speakerStore else { return }
         do {
+            // Every identifier that reads as this person, because the vectors
+            // go for the whole family and a reading filed under a row that has
+            // since been merged away would otherwise stay on disk. Forgetting a
+            // voice that leaves its audio behind is a promise half kept.
+            let family = (try? await store.family(of: identityID)) ?? [identityID]
             try await store.forgetVoice(of: identityID)
+            for member in family { voiceEnrollmentArchive.remove(for: member) }
         } catch {
             Log.app.error("forget voice failed: \(logSafeDescription(error), privacy: .public)")
         }
@@ -412,6 +614,7 @@ extension PipitRuntime {
             // is in still holds the notes the confirmation just said were
             // removed.
             let affected = (try? await store.meetingsReferencing(identityID)) ?? []
+            for member in family { voiceEnrollmentArchive.remove(for: member) }
             try await store.delete(identityID)
             await pipeline.rerenderMeetings(affected)
             // Otherwise the stored identifier names a row that no longer

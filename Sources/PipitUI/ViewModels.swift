@@ -27,6 +27,16 @@ public final class SettingsModel {
     public var hasStoredKey: Bool
     public var testState = TestState.idle
     public var voiceStatistics: SpeakerStore.Statistics?
+    /// Everyone with a name, for choosing which of them is you.
+    public var people: [SpeakerDirectoryEntry] = []
+    /// Whether the name field holds something a person typed.
+    ///
+    /// Leaving the tab writes the field, because a name typed and not submitted
+    /// is still a name they meant. Writing it unconditionally re-rendered the
+    /// markdown of every meeting the local user appears in, every time the tab
+    /// was left, and could rename the person just chosen in the picker to the
+    /// name of the one before them.
+    @ObservationIgnored private var nameEdited = false
     /// Opens the people directory. Set by the window manager, which owns both
     /// this model and that window.
     @ObservationIgnored public var onOpenPeople: (() -> Void)?
@@ -127,6 +137,65 @@ public final class SettingsModel {
 
     public func refreshPeople() async {
         voiceStatistics = await runtime.voiceMemoryStatistics()
+        people = await runtime.speakerDirectory(kind: .person)
+        localUserName = runtime.settings.localUserName
+        nameEdited = false
+    }
+
+    /// The name field. Writes through the identity, and remembers that somebody
+    /// typed in it.
+    public var localUserNameField: Binding<String> {
+        Binding(
+            get: { self.localUserName },
+            set: { typed in
+                self.localUserName = typed
+                self.nameEdited = true
+            }
+        )
+    }
+
+    /// Which person in the directory is you, or nil before one is picked.
+    public var localUserIdentityID: IdentityID? {
+        runtime.settings.processing.localUserIdentityID
+    }
+
+    /// Points the microphone track at an existing person.
+    ///
+    /// Their profile then carries everything the track teaches, and an imported
+    /// recording naming you lands on the same row rather than a second one.
+    public func chooseLocalUser(_ identityID: IdentityID) async {
+        await runtime.setLocalUser(identityID)
+        // Before the reads below, which await. A name half typed for the person
+        // who was you a moment ago must not survive into the window where
+        // Settings already names somebody else: leaving the tab there would
+        // rename the person just chosen to what was in the field.
+        localUserName = runtime.settings.localUserName
+        nameEdited = false
+        await refreshPeople()
+    }
+
+    /// Renames whoever is you, or names them for the first time.
+    ///
+    /// Through the identity where there is one, so the name in Settings and the
+    /// name in People cannot drift apart.
+    public func commitLocalUserName() async {
+        guard nameEdited else { return }
+        let name = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            localUserName = runtime.settings.localUserName
+            nameEdited = false
+            return
+        }
+        guard name != runtime.settings.localUserName else {
+            nameEdited = false
+            return
+        }
+        if let identityID = localUserIdentityID {
+            await runtime.renamePerson(identityID, to: name)
+        } else {
+            saveLocalUserName()
+        }
+        await refreshPeople()
     }
 
     public func openPeople() { onOpenPeople?() }

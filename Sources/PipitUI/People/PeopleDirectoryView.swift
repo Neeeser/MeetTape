@@ -48,6 +48,23 @@ public struct PeopleDirectoryView: View {
         ) {
             organizationSheet
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.enrollment != nil },
+                set: { showing in
+                    // Escape dismisses the sheet without pressing anything in
+                    // it, and the microphone has to close either way.
+                    if !showing {
+                        model.enrollment?.cancel()
+                        model.enrollment = nil
+                    }
+                }
+            )
+        ) {
+            if let enrollment = model.enrollment {
+                VoiceEnrollmentView(model: enrollment) { model.enrollment = nil }
+            }
+        }
     }
 
     // MARK: - sidebar

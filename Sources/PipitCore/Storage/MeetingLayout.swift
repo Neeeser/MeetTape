@@ -185,18 +185,19 @@ public struct MeetingArchiveLayout: Sendable {
             // into "Standup (Aug 18, 9:00 AM) 2".
             if let existing, Self.samePath(target, existing) { return candidate }
             guard FileManager.default.fileExists(atPath: target.path) else { return candidate }
-            candidate = "\(base) \(suffix)"
+            candidate = MeetingFolderName.fitToFilesystem("\(base) \(suffix)")
             suffix += 1
         }
     }
 
     /// Case-folded and normalised, matching how APFS is mounted by default.
+    ///
+    /// Case only. Folding diacritics too would call two folders the same when
+    /// they are not, and the caller reads "the same" as "this folder is
+    /// itself", which is how a name already taken gets returned as free.
     private static func samePath(_ one: URL, _ other: URL) -> Bool {
-        one.standardizedFileURL.path.compare(
-            other.standardizedFileURL.path,
-            options: [.caseInsensitive, .diacriticInsensitive],
-            range: nil,
-            locale: nil
-        ) == .orderedSame
+        let left = one.standardizedFileURL.path.precomposedStringWithCanonicalMapping
+        let right = other.standardizedFileURL.path.precomposedStringWithCanonicalMapping
+        return left.compare(right, options: [.caseInsensitive]) == .orderedSame
     }
 }

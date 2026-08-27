@@ -60,7 +60,7 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
-    /// Meetings whose folder a job is writing into right now.
+    /// How many jobs are writing into each meeting's folder right now.
     ///
     /// Renaming a folder moves it out from under the absolute paths a job
     /// holds, and `AtomicFile` recreates a missing directory rather than
@@ -70,7 +70,26 @@ public actor ProcessingPipeline {
     /// persisted as failed, and re-analysis diarizes for minutes on a meeting
     /// that is already complete. Separate from `running` so that gating a
     /// rename does not change which jobs may start.
-    private var foldersHeld: Set<String> = []
+    ///
+    /// A count rather than a set, because the two can overlap on one meeting
+    /// and a set let whichever finished first clear the hold for the other.
+    private var foldersHeld: [String: Int] = [:]
+
+    private func holdFolder(_ meetingID: String) {
+        foldersHeld[meetingID, default: 0] += 1
+    }
+
+    private func releaseFolder(_ meetingID: String) {
+        guard let count = foldersHeld[meetingID] else { return }
+        if count <= 1 { foldersHeld.removeValue(forKey: meetingID) } else {
+            foldersHeld[meetingID] = count - 1
+        }
+    }
+
+    /// Whether anything other than the caller is in this meeting's folder.
+    private func heldByOthers(_ meetingID: String, besidesSelf: Bool) -> Bool {
+        (foldersHeld[meetingID] ?? 0) > (besidesSelf ? 1 : 0)
+    }
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -124,12 +143,12 @@ public actor ProcessingPipeline {
             return
         }
         running.insert(meetingID)
-        foldersHeld.insert(meetingID)
+        holdFolder(meetingID)
         await jobLock.acquire()
         var holdsSlot = true
         defer {
             running.remove(meetingID)
-            foldersHeld.remove(meetingID)
+            releaseFolder(meetingID)
             if holdsSlot { jobLock.release() }
         }
 
@@ -278,8 +297,12 @@ public actor ProcessingPipeline {
 
         // Last, because a rename moves the folder every path above writes into.
         // The title is final by now: enrichment has run, and the folder still
-        // carries whatever was known when recording started.
-        repository.settleFolderName(for: metadata)
+        // carries whatever was known when recording started. Skipped when
+        // something else is in the folder too: a re-analysis queued on the job
+        // slot captured this folder's paths before it started waiting.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadata)
+        }
     }
 
     /// Renames one meeting's folder to match its title, unless a job is in it.
@@ -287,7 +310,7 @@ public actor ProcessingPipeline {
     /// The entry every caller outside this actor uses. `process` settles its own
     /// meeting from its tail, where it still owns the folder.
     public func settleFolderName(meetingID: String) {
-        guard !foldersHeld.contains(meetingID) else { return }
+        guard !heldByOthers(meetingID, besidesSelf: false) else { return }
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
             return
         }
@@ -297,7 +320,7 @@ public actor ProcessingPipeline {
     /// Renames every finished meeting whose folder is out of date with its
     /// title, skipping any a job is writing into.
     public func settleFolderNames() {
-        repository.settleFolderNames { self.foldersHeld.contains($0) }
+        repository.settleFolderNames { self.heldByOthers($0, besidesSelf: false) }
     }
 
     /// Replaces a finished meeting's PCM segments with verified archives.
@@ -2408,8 +2431,8 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
-        foldersHeld.insert(meetingID)
-        defer { foldersHeld.remove(meetingID) }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
@@ -2501,6 +2524,12 @@ public actor ProcessingPipeline {
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)
         try await rerenderMarkdown(store: store, metadata: metadataCopy)
+
+        // A rename made while this ran was refused, correctly, because the paths
+        // above were in flight. Without this it would wait for the next launch.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadataCopy)
+        }
     }
 
     /// Re-runs identity resolution alone, after the expected-participant list

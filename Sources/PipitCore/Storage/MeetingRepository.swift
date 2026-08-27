@@ -550,7 +550,13 @@ public struct MeetingRepository: Sendable {
             Log.storage.error(
                 "folder name not recorded: \(logSafeDescription(error), privacy: .public)"
             )
-            try? FileManager.default.moveItem(at: target, to: current)
+            do {
+                try FileManager.default.moveItem(at: target, to: current)
+            } catch {
+                // The folder is at `target` after all. The resolver validates
+                // every cached entry, so leaving the one written above is right.
+                return target
+            }
             Self.remember(id: found.metadata.id, directory: current, archiveRoot: archive.root)
             return current
         }

@@ -198,6 +198,13 @@ public enum VoiceEnrollmentSource: String, Codable, Sendable, CaseIterable {
     /// A person assigned individual transcript lines, accumulated until there
     /// was enough speech to be worth enrolling.
     case humanConfirmedUtterances = "human_confirmed_utterances"
+    /// A person read a few sentences aloud and said the voice was theirs.
+    ///
+    /// The only enrolment with no meeting behind it. A fresh install has no
+    /// recordings to learn from, and an in-person or imported recording has no
+    /// microphone track whose speaker is true by construction, so somebody who
+    /// records only those was never recognisable as themselves.
+    case spokenEnrollment = "spoken_enrollment"
     /// The one vector an unnamed recurring voice is created with.
     ///
     /// A voice nobody has named has no human to confirm it, so the profile has

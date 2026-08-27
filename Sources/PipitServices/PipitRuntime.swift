@@ -133,12 +133,16 @@ public final class PipitRuntime {
     @ObservationIgnored private var sensorRecorder: SensorRecorder?
     @ObservationIgnored private var onStatusChange: (@MainActor @Sendable () -> Void)?
     @ObservationIgnored private let relay = RuntimeRelay()
+    /// Where everything that is not a meeting lives: settings, the voice
+    /// database, the models, and the audio of a spoken enrolment.
+    @ObservationIgnored public let applicationSupport: URL
 
     public init(
         settingsDirectory: URL = SensorTransport.defaultApplicationSupport,
         clock: any Clock = SystemClock()
     ) {
         self.clock = clock
+        self.applicationSupport = settingsDirectory
         self.settingsStore = SettingsStore(directory: settingsDirectory)
         let loaded = settingsStore.load()
         self.settings = loaded
@@ -306,6 +310,7 @@ public final class PipitRuntime {
             await recover()
             detectionEngine.start()
             await ensureLocalUserIdentity()
+            await backfillLocalUserOccurrences()
             await refreshLocalModelState()
             await pruneVoiceMemory()
             await pipeline.resumeInterrupted()

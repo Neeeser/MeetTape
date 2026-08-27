@@ -66,6 +66,88 @@ enum AudioTests {
 
     static var suite: Suite {
         Suite("Audio", [
+            test("takes read minutes apart are judged as one reading") { expect in
+                // Somebody read part of the script, was told they were short,
+                // and read some more. The two files are one reading with a
+                // pause in the middle, and what judges it has to see them that
+                // way or the second take is measured on its own and is short
+                // too.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+
+                func write(_ seconds: Double, to name: String) throws -> URL {
+                    let url = root.appendingPathComponent(name)
+                    let file = try AVAudioFile(
+                        forWriting: url, settings: format.settings,
+                        commonFormat: .pcmFormatFloat32, interleaved: false
+                    )
+                    try file.write(from: makeTone(seconds: seconds, sampleRate: 48_000))
+                    return url
+                }
+
+                let first = try write(2, to: "take-1.wav")
+                let second = try write(3, to: "take-2.wav")
+                let joined = root.appendingPathComponent("reading.wav")
+                try AudioConcatenation.join([first, second], into: joined)
+
+                let read = try AVAudioFile(forReading: joined)
+                expect.equal(read.processingFormat.sampleRate, 48_000)
+                let seconds = Double(read.length) / read.processingFormat.sampleRate
+                expect.isTrue(
+                    abs(seconds - 5) < 0.01,
+                    "five seconds of reading, got \(seconds)"
+                )
+            },
+
+            test("takes recorded at different rates are refused rather than resampled") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+
+                func write(_ rate: Double, to name: String) throws -> URL {
+                    let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+                    let url = root.appendingPathComponent(name)
+                    let file = try AVAudioFile(
+                        forWriting: url, settings: format.settings,
+                        commonFormat: .pcmFormatFloat32, interleaved: false
+                    )
+                    try file.write(from: makeTone(seconds: 1, sampleRate: rate))
+                    return url
+                }
+
+                // The input device changed between takes. Joining them anyway
+                // would play one of them at the wrong speed, which is a voice
+                // that is not this person's.
+                let first = try write(48_000, to: "take-1.wav")
+                let second = try write(16_000, to: "take-2.wav")
+                do {
+                    try AudioConcatenation.join(
+                        [first, second], into: root.appendingPathComponent("reading.wav")
+                    )
+                    expect.fail("two rates cannot be one reading")
+                } catch let error as AudioConcatenationError {
+                    expect.equal(error, .formatMismatch)
+                }
+            },
+
+            test("the reading meter counts speech and ignores a quiet room") { expect in
+                // The bar a reader watches. Elapsed time told a quick reader
+                // they had done enough when they had not, so it counts audio
+                // loud enough to be somebody talking instead.
+                let speech = VoiceEnrollmentRecorder.speechSeconds(
+                    in: makeTone(seconds: 0.5, sampleRate: 48_000, amplitude: 0.4)
+                )
+                expect.isTrue(abs(speech - 0.5) < 0.001, "half a second of speech, got \(speech)")
+
+                expect.equal(
+                    VoiceEnrollmentRecorder.speechSeconds(
+                        in: makeTone(seconds: 0.5, sampleRate: 48_000, amplitude: 0.001)
+                    ),
+                    0,
+                    "a room nobody is talking in fills no bar"
+                )
+            },
+
             test("segments rotate, close cleanly and report per-segment duration") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

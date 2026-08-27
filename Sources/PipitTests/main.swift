@@ -8,6 +8,8 @@ suites += CaptureRecoveryTests.all
 suites.append(CalendarMatchTests.suite)
 suites.append(ManifestTests.suite)
 suites.append(StorageTests.suite)
+suites.append(MeetingFolderNameTests.suite)
+suites.append(MeetingFolderRenameTests.suite)
 suites.append(AudioTests.suite)
 suites += DetectionTests.all
 suites += SessionTests.all

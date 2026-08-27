@@ -1,51 +1,6 @@
 import PipitCore
 import SwiftUI
 
-/// Colour and label for a capture health state.
-///
-/// A recording is never shown as healthy while a required source is failing, and
-/// a normal recovery is never shown as an alarm.
-public struct HealthIndicator: View {
-    public let state: CaptureHealthState
-
-    public init(state: CaptureHealthState) {
-        self.state = state
-    }
-
-    public var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    var color: Color {
-        switch state {
-        case .healthy: .green
-        case .idleButBound: .green
-        case .recovering: .orange
-        case .degraded: .orange
-        case .failed: .red
-        case .idle: .secondary
-        }
-    }
-
-    var label: String {
-        switch state {
-        case .healthy: "Capturing"
-        case .idleButBound: "Capturing, source quiet"
-        case .recovering: "Reconnecting"
-        case .degraded: "Source unavailable"
-        case .failed: "Not capturing"
-        case .idle: "Idle"
-        }
-    }
-}
-
 public enum Format {
     public static func duration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded())

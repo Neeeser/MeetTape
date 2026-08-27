@@ -30,7 +30,7 @@ enum StorageTests {
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let archive = MeetingArchiveLayout(root: root)
-                let directory = archive.directory(forMeetingID: id, startedAt: started)
+                let directory = archive.directory(named: id, startedAt: started)
                 let parts = directory.pathComponents.suffix(3)
                 expect.equal(parts.count, 3)
                 expect.equal(Array(parts)[2], id)

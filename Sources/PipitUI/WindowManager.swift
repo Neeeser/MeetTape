@@ -11,6 +11,7 @@ public final class WindowManager {
     private var settingsWindow: NSWindow?
     private var settingsModel: SettingsModel?
     private var peopleWindow: NSWindow?
+    private var aboutWindow: NSWindow?
     private var peopleModel: PeopleDirectoryModel?
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
@@ -67,6 +68,25 @@ public final class WindowManager {
         )
         window.setFrameAutosaveName("PipitSettings")
         settingsWindow = window
+        present(window)
+    }
+
+    /// What Pipit is and where it puts things.
+    ///
+    /// Pipit has no app menu bar, so this opens from the status menu rather
+    /// than from an About item macOS would provide.
+    public func showAbout() {
+        if let window = aboutWindow {
+            present(window)
+            return
+        }
+        let window = makeWindow(
+            title: "About Pipit",
+            size: NSSize(width: 460, height: 520),
+            content: AboutView(runtime: runtime)
+        )
+        window.setFrameAutosaveName("PipitAbout")
+        aboutWindow = window
         present(window)
     }
 

@@ -419,6 +419,7 @@ public final class MeetingReviewModel {
     public func reloadSpeakers() async {
         speakerRows = await runtime.speakers(inMeeting: meetingID).filter(\.hasSpeechToShow)
         speakerSuggestions = runtime.speakerSuggestions(inMeeting: meetingID)
+        unnamedSpeakerCount = runtime.unnamedSpeakerCount(inMeeting: meetingID)
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 
@@ -634,13 +635,12 @@ public final class MeetingReviewModel {
         }
     }
 
-    /// How many speakers this meeting could not name.
+    /// How many speakers the model would be asked about.
     ///
-    /// Drives whether the control is drawn at all: it exists to fill a gap, so
-    /// with nobody unnamed there is nothing for it to do and it is not shown.
-    public var unnamedSpeakerCount: Int {
-        speakerRows.count { $0.isUnnamed }
-    }
+    /// Read from the runtime rather than counted off `speakerRows`, so it is
+    /// the same question the stage asks. The strip calls the microphone track
+    /// and a name the user cleared unnamed, and neither is ever sent.
+    public var unnamedSpeakerCount = 0
 
     /// Whether a summary is missing, which is the only reason to offer to write
     /// one. Enrichment never replaces what is already there.

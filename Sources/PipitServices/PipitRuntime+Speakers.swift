@@ -772,6 +772,33 @@ extension PipitRuntime {
         return rows
     }
 
+    /// How many speakers the model would actually be asked about.
+    ///
+    /// The same predicate `suggestSpeakerNames` applies, deliberately, because
+    /// this number decides whether the control is drawn at all. Counting rows
+    /// the strip calls unnamed instead gave a button for speakers the stage
+    /// then refused to ask about: the microphone track, and anyone whose name
+    /// the user cleared on purpose. Pressing it made one request less than zero
+    /// and left the button there forever.
+    public func unnamedSpeakerCount(inMeeting meetingID: String) -> Int {
+        guard let recordings = repository.logicalMeeting(id: meetingID)?.recordings else {
+            return 0
+        }
+        var total = 0
+        for recording in recordings {
+            guard let map = try? recording.store.readSpeakerMap(),
+                  let keys = try? recording.store.readTranscriptSpeakers().map(\.key)
+            else { continue }
+            total += keys.count {
+                $0 != SpeakerLabel.localUser
+                    && !$0.hasSuffix(SpeakerLabel.unattributed)
+                    && map.entries[$0] == nil
+                    && !map.clearedKeys.contains($0)
+            }
+        }
+        return total
+    }
+
     /// Records that the user turned a suggestion down, so a re-run does not
     /// offer the same name again.
     public func dismissSpeakerSuggestion(clusterID: String, recordingID: String) {

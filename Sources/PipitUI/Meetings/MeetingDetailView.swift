@@ -294,7 +294,7 @@ public struct MeetingDetailView: View {
             }
             .disabled(!detail.localModelsReady)
             // Below a divider rather than beside the two run commands. Those
-            // re-cluster the audio on this Mac and clear names; this reads the
+            // re-cluster the audio on this Mac and clear names. This reads the
             // words and sends them away. Same menu, different machine.
             if detail.unnamedSpeakerCount > 0 {
                 Divider()

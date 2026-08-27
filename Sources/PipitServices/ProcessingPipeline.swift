@@ -2192,38 +2192,45 @@ public actor ProcessingPipeline {
             metadata.descriptionText = description
         }
 
-        var summaryParts: [String] = []
-        if let summary = enrichment.summary, !summary.isEmpty {
-            summaryParts.append("## Summary\n\n\(summary)")
-        }
-        if let notes = enrichment.notes, !notes.isEmpty {
-            summaryParts.append("## Notes\n\n\(notes)")
-        }
-        if !summaryParts.isEmpty {
+        // Composed by the type that parses it back, so the headings the reader
+        // splits on and the headings the writer emits cannot drift apart.
+        let document = SummaryDocument(
+            summary: enrichment.summary, generatedNotes: enrichment.notes
+        )
+        if !document.isEmpty {
             // Written to summary.md, never to notes.md: the user's notes are theirs.
-            try store.writeSummary(summaryParts.joined(separator: "\n\n"))
+            try store.writeSummary(document.markdown)
         }
     }
 
     /// Renders the derived files and links the calendar event.
+    /// Renders `transcript.md` from what is on disk now.
+    ///
+    /// Split out of `finish` so a caller that only wants the document rewritten
+    /// can have that without the calendar link and the mixdown beside it.
+    private func writeTranscriptMarkdown(
+        store: MeetingStore, metadata: MeetingMetadata
+    ) async throws {
+        guard let transcript = try store.readCanonicalTranscript() else { return }
+        let speakers = try store.readSpeakerMap()
+        let renderer = TranscriptRenderer()
+        try store.writeTranscriptMarkdown(renderer.markdown(
+            transcript: transcript,
+            speakers: speakers,
+            title: metadata.displayTitle,
+            startedAt: metadata.startedAt,
+            durationSeconds: metadata.durationSeconds,
+            participants: await participants(in: speakers)
+        ))
+    }
+
     private func finish(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
         let timeline = try store.readTimeline()
         metadata.durationSeconds = timeline.duration
 
-        if let transcript = try store.readCanonicalTranscript() {
-            let speakers = try store.readSpeakerMap()
-            let renderer = TranscriptRenderer()
-            try store.writeTranscriptMarkdown(renderer.markdown(
-                transcript: transcript,
-                speakers: speakers,
-                title: metadata.displayTitle,
-                startedAt: metadata.startedAt,
-                durationSeconds: metadata.durationSeconds,
-                participants: await participants(in: speakers)
-            ))
-        }
+        try await writeTranscriptMarkdown(store: store, metadata: metadata)
 
         if metadata.calendar == nil, let calendar {
             if let match = await calendar.bestMatch(
@@ -2795,6 +2802,11 @@ public actor ProcessingPipeline {
         }
         holdFolder(meetingID)
         defer { releaseFolder(meetingID) }
+        // Holding the folder tells the runtime a job will notice a move, so the
+        // runtime skips its own cleanup and this has to do it. Without this a
+        // meeting trashed mid-request came back, because every write here
+        // recreates the folder it writes into.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
         await waitForSlot()
         defer { jobLock.release() }
 
@@ -2802,17 +2814,30 @@ public actor ProcessingPipeline {
         // predates whatever job held the slot.
         let store = found.store
         var metadata = (try? store.readMetadata()) ?? found.metadata
+        if discardIfGone(meetingID, store: store) { return }
         let settings = settingsProvider()
+        // The control says nothing already here is replaced, and a generated
+        // title is the one field enrichment overwrites rather than fills.
+        // Where the slot is empty this run fills it, which is the point.
+        let existingTitle = metadata.titles.ai?.trimmingCharacters(in: .whitespacesAndNewlines)
         try await runEnrichment(store: store, metadata: &metadata, settings: settings)
+        if let existingTitle, !existingTitle.isEmpty { metadata.titles.ai = existingTitle }
         // The notice is why the user pressed the button. Leaving it up after
         // the button worked says the key is still missing on a meeting that
         // just used it.
         await recordMissingKey(&metadata, settings: settings)
-        // The markdown carries the participant block and the title, so it is
+        // The document carries the title and the participant block, so it is
         // rewritten from what enrichment just wrote rather than left stale.
-        try await finish(store: store, metadata: &metadata, settings: settings)
+        // Not `finish`: that also hunts for a calendar event and appends its
+        // attendees, which would rename a months-old meeting and add people to
+        // it. Neither is a summary, and neither is what the button offered.
+        try await writeTranscriptMarkdown(store: store, metadata: metadata)
         try persist(metadata, to: store)
         report(metadata, chunks: nil)
+        // A newly filled title can be the one the folder is named for.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadata)
+        }
     }
 
     /// Asks the model to name the speakers this meeting never named.
@@ -2826,11 +2851,15 @@ public actor ProcessingPipeline {
         }
         holdFolder(meetingID)
         defer { releaseFolder(meetingID) }
+        // As above: holding the folder makes this job responsible for noticing
+        // a move that lands while the request is in flight.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
         await waitForSlot()
         defer { jobLock.release() }
 
         let store = found.store
         var metadata = (try? store.readMetadata()) ?? found.metadata
+        if discardIfGone(meetingID, store: store) { return }
         let settings = settingsProvider()
         try await suggestSpeakerNames(store: store, metadata: metadata, settings: settings)
         // Nothing here writes metadata, but the key may have appeared since the

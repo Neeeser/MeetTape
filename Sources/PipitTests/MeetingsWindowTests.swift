@@ -681,8 +681,52 @@ enum MeetingsWindowTests {
         )
     }
 
+    /// The count decides whether the AI control is drawn at all, so it has to
+    /// be the same question the stage asks. Counting rows the strip merely
+    /// calls unnamed drew a button for speakers the stage then refused, which
+    /// made no request and never went away.
+    @MainActor
+    static func theCountMatchesWhatWouldBeAsked(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(
+            root: root,
+            clusters: [
+                SpeakerLabel.localUser, "remote-001_speaker_00", "remote-001_speaker_01",
+            ]
+        )
+        let runtime = makeRuntime(root: root)
+
+        // The microphone track is never sent, and neither is the bucket for
+        // words no interval claimed.
+        expect.equal(
+            runtime.unnamedSpeakerCount(inMeeting: meeting.id), 2,
+            "the microphone track or the unattributed bucket was counted"
+        )
+
+        var map = try meeting.store.readSpeakerMap()
+        map.assign("Priya Raman", to: "remote-001_speaker_00")
+        try meeting.store.writeSpeakerMap(map)
+        expect.equal(runtime.unnamedSpeakerCount(inMeeting: meeting.id), 1)
+
+        // "Leave unnamed" on the last one. The strip still draws it as unnamed,
+        // and the stage will still refuse to ask about it.
+        map = try meeting.store.readSpeakerMap()
+        map.assign("", to: "remote-001_speaker_01")
+        expect.isTrue(map.clearedKeys.contains("remote-001_speaker_01"))
+        try meeting.store.writeSpeakerMap(map)
+
+        expect.equal(
+            runtime.unnamedSpeakerCount(inMeeting: meeting.id), 0,
+            "a name the user cleared on purpose was counted as work to do"
+        )
+    }
+
     static var windowSuite: Suite {
         Suite("MeetingsWindow", [
+            test("the unnamed count is what the model would be asked about") { expect in
+                try await theCountMatchesWhatWouldBeAsked(expect)
+            },
             test("a dismissal on the second half of a call reaches disk") { expect in
                 try await aDismissalOnTheSecondHalfReachesDisk(expect)
             },

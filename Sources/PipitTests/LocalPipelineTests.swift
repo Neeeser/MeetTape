@@ -873,6 +873,144 @@ enum LocalPipelineTests {
                 expect.equal(after.processing.state, .complete)
             },
 
+            test("writing a summary leaves a generated title alone") { expect in
+                // The control says nothing already on the meeting is replaced,
+                // and the title is the one field enrichment overwrites rather
+                // than fills. A meeting with titling on and summaries off is
+                // named by that title, so replacing it renames the meeting.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: true, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let backend = FakeAIBackend()
+                backend.enrichment = MeetingEnrichment(title: "Retrieval sync")
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 63, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+                expect.equal(try meeting.store.readMetadata().titles.ai, "Retrieval sync")
+
+                // The user now wants a summary. The model answers with a
+                // different title in the same response.
+                backend.enrichment = MeetingEnrichment(
+                    title: "Something else entirely", summary: "We agreed on the pilot."
+                )
+                try await pipeline.generateEnrichment(meetingID: meeting.metadata.id)
+
+                let after = try meeting.store.readMetadata()
+                expect.equal(
+                    after.titles.ai, "Retrieval sync",
+                    "asking for a summary renamed the meeting"
+                )
+                expect.equal(
+                    meeting.store.readSummaryDocument().summary, "We agreed on the pilot.",
+                    "and the summary it was asked for was not written"
+                )
+            },
+
+            test("the generated notes survive the round trip through the file") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let backend = FakeAIBackend()
+                backend.enrichment = MeetingEnrichment(
+                    title: "Retrieval logic",
+                    summary: "We agreed on the pilot.",
+                    notes: "- Chris sends the connector list."
+                )
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 64, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                // Written as one file, read back as two, which is what puts the
+                // notes on their own tab instead of under the summary.
+                let document = meeting.store.readSummaryDocument()
+                expect.equal(document.summary, "We agreed on the pilot.")
+                expect.equal(document.generatedNotes, "- Chris sends the connector list.")
+            },
+
+            test("asking by hand still refuses a name the user cleared") { expect in
+                // The stage guard, reached through the on-demand entry point
+                // rather than through the pipeline.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                let backend = FakeAIBackend()
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 65, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                var map = try meeting.store.readSpeakerMap()
+                let unnamed = try meeting.store.readTranscriptSpeakers()
+                    .map(\.key)
+                    .filter {
+                        $0 != SpeakerLabel.localUser && !$0.hasSuffix(SpeakerLabel.unattributed)
+                            && map.entries[$0] == nil
+                    }
+                let target = try expect.unwrap(unnamed.first)
+                // "Leave unnamed" on the chip, which is what clears a key.
+                map.assign("", to: target)
+                expect.isTrue(map.clearedKeys.contains(target))
+                try meeting.store.writeSpeakerMap(map)
+
+                // Nothing was asked, so nothing may be written either.
+                try await pipeline.suggestSpeakers(meetingID: meeting.metadata.id)
+                expect.isTrue(
+                    meeting.store.readSpeakerSuggestions()
+                        .visible(forUnnamed: [target]).isEmpty,
+                    "a name the user cleared was proposed again"
+                )
+            },
+
             test("speaker names can be asked for after a key arrives") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

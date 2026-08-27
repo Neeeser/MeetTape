@@ -23,7 +23,10 @@ public struct SummaryDocument: Sendable, Equatable {
         self.generatedNotes = generatedNotes
     }
 
-    public var isEmpty: Bool { summary == nil && generatedNotes == nil }
+    /// Whether there is anything worth writing. A model asked for a summary can
+    /// answer with an empty string, and a file holding two headings and no
+    /// prose is worse than no file.
+    public var isEmpty: Bool { markdown.isEmpty }
 
     private static let summaryHeading = "## Summary"
     private static let notesHeading = "## Notes"

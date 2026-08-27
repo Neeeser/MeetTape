@@ -121,34 +121,21 @@ public actor ProcessingPipeline {
     /// A folder older than the move is not that scrap. It is the meeting
     /// itself, put back from the Trash while this ran, so it is left alone and
     /// the job carries on with it.
-    ///
-    /// A folder whose date cannot be read stops the job and is kept. Not every
-    /// volume reports a creation date, and removing one that cannot be dated
-    /// would take a meeting the user had just put back, which has no way back.
     private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
         guard let movedAt = goneWhileRunning.removeValue(forKey: meetingID) else { return false }
-        let created = Self.creationDate(of: store.layout.root)
-        if let created, created < movedAt.addingTimeInterval(-Self.creationDateGrain) {
+        switch RecreatedFolder.discard(at: store.layout.root, writtenAfter: movedAt) {
+        case .predatesTheMove:
             Log.processing.notice("meeting was put back while it processed, so the job carries on")
             return false
+        case .undatable:
+            // Kept, because this volume gives no date to tell what a stage
+            // wrote apart from the meeting itself put back.
+            Log.processing.notice("meeting left the archive, job stopped, undatable folder kept")
+        case .absent, .removed:
+            Log.processing.notice("meeting left the archive while it processed, so the job stopped")
         }
-        if created != nil { try? FileManager.default.removeItem(at: store.layout.root) }
         scratch.discard(meetingID: meetingID)
-        Log.processing.notice("meeting left the archive while it processed, so the job stopped")
         return true
-    }
-
-    /// How far a creation date is allowed to sit before the move and still
-    /// count as scrap written after it.
-    ///
-    /// HFS+ stores whole seconds and exFAT stores hundredths, so a folder
-    /// written a moment after the move can report a moment before it. A meeting
-    /// put back from the Trash was created when it was recorded, which is
-    /// minutes to years earlier, so nothing real sits inside this.
-    private static let creationDateGrain: TimeInterval = 2
-
-    private static func creationDate(of url: URL) -> Date? {
-        try? FileManager.default.attributesOfItem(atPath: url.path)[.creationDate] as? Date
     }
 
     /// Stops the job on a meeting whose folder has just left the archive.
@@ -357,12 +344,24 @@ public actor ProcessingPipeline {
 
     /// Replaces a finished meeting's PCM segments with verified archives.
     /// Public entry for the startup sweep; `process` compacts inline.
+    ///
+    /// Counted as a job for as long as it runs, because it is one: minutes of
+    /// transcoding that writes into the meeting's folder. Left out of `running`
+    /// it was a writer nothing could stop, and a meeting trashed in the middle
+    /// of the launch sweep came back holding audio and no metadata.
     public func compactAudio(meetingID: String) async {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
+        guard !running.contains(meetingID) else { return }
+        running.insert(meetingID)
         await waitForSlot()
-        defer { jobLock.release() }
+        defer {
+            running.remove(meetingID)
+            goneWhileRunning.removeValue(forKey: meetingID)
+            jobLock.release()
+        }
         await compactQuietly(store: found.store)
+        _ = discardIfGone(meetingID, store: found.store)
     }
 
     /// Compacts every finished meeting that still has PCM audio, one at a

@@ -18,6 +18,64 @@ struct StubAudioFileInspector: AudioFileInspecting {
 enum StorageTests {
     static var suite: Suite {
         Suite("Storage", [
+            test("a folder written after a meeting was trashed goes, and the meeting stays") {
+                expect in
+                // Every write goes through AtomicFile, which creates the
+                // directories it needs, so a job still running when the user
+                // trashes a meeting puts a folder back at that path. The date
+                // is what tells that scrap apart from the meeting itself, put
+                // back from the Trash.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let movedAt = Date()
+
+                func folder(_ name: String, created: Date) throws -> URL {
+                    let url = root.appendingPathComponent(name, isDirectory: true)
+                    try FileManager.default.createDirectory(
+                        at: url, withIntermediateDirectories: true
+                    )
+                    try FileManager.default.setAttributes(
+                        [.creationDate: created], ofItemAtPath: url.path
+                    )
+                    return url
+                }
+
+                let scrap = try folder("scrap", created: movedAt.addingTimeInterval(30))
+                expect.equal(
+                    RecreatedFolder.discard(at: scrap, writtenAfter: movedAt), .removed
+                )
+                expect.isFalse(FileManager.default.fileExists(atPath: scrap.path))
+
+                let putBack = try folder("put-back", created: movedAt.addingTimeInterval(-3_600))
+                expect.equal(
+                    RecreatedFolder.discard(at: putBack, writtenAfter: movedAt), .predatesTheMove
+                )
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: putBack.path),
+                    "the meeting somebody put back is left where it is"
+                )
+
+                // HFS+ stores whole seconds, so a folder written just after the
+                // move reports a moment before it. Inside the grain it is still
+                // scrap.
+                let truncated = try folder("truncated", created: movedAt.addingTimeInterval(-0.9))
+                expect.equal(
+                    RecreatedFolder.discard(at: truncated, writtenAfter: movedAt), .removed,
+                    "a coarse clock does not turn scrap into a meeting"
+                )
+                expect.isTrue(
+                    RecreatedFolder.grain > 1,
+                    "and the grain covers a whole second of it"
+                )
+
+                expect.equal(
+                    RecreatedFolder.discard(
+                        at: root.appendingPathComponent("nothing"), writtenAfter: movedAt
+                    ),
+                    .absent
+                )
+            },
+
             test("meeting identifiers are readable, unique and date-partitioned") { expect in
                 let started = Date(timeIntervalSince1970: 1_787_070_000)
                 let id = MeetingArchiveLayout.meetingID(

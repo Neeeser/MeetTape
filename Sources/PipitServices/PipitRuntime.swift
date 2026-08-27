@@ -809,13 +809,14 @@ public final class PipitRuntime {
             // before it, because a stage boundary in between then deleted the
             // meeting the user still had.
             let noticed = await pipeline.forget(meetingID: meetingID, movedAt: movedAt)
-            let directory = recording.store.layout.root
-            if !noticed, FileManager.default.fileExists(atPath: directory.path) {
+            if !noticed {
                 // A job that ended in the moment between the move and the line
-                // above wrote this and there is nothing left to notice it. It
-                // is that write and not the meeting: the folder moved a moment
-                // ago, and nothing else puts one back at that path this fast.
-                try? FileManager.default.removeItem(at: directory)
+                // above left whatever it wrote, and there is nothing running to
+                // notice it. Dated the same way the pipeline dates it, so a
+                // folder somebody put back is left where it is.
+                RecreatedFolder.discard(
+                    at: recording.store.layout.root, writtenAfter: movedAt
+                )
             }
             trashedMeetingIDs.insert(meetingID)
             // The voice memory counts meetings by the occurrences it holds, so

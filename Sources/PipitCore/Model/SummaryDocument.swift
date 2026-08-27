@@ -40,8 +40,12 @@ public struct SummaryDocument: Sendable, Equatable {
         // the file: a legacy summary whose prose happens to contain the words
         // belongs to the summary in full, and guessing otherwise would move
         // half of it to a tab the reader has no reason to open.
-        if text.hasPrefix(Self.notesHeading) {
-            generatedNotes = Self.clean(text.dropFirst(Self.notesHeading.count))
+        // The heading has to end there. A legacy summary opening with the words
+        // in a sentence, "## Notes were taken by Chris", is a summary.
+        let afterNotesHeading = text.dropFirst(Self.notesHeading.count)
+        if text.hasPrefix(Self.notesHeading),
+           afterNotesHeading.isEmpty || afterNotesHeading.first?.isNewline == true {
+            generatedNotes = Self.clean(afterNotesHeading)
             if generatedNotes?.isEmpty == true { generatedNotes = nil }
             return
         }

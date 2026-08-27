@@ -722,8 +722,39 @@ enum MeetingsWindowTests {
         )
     }
 
+    /// The summary and the generated notes share one file, and writing it
+    /// replaces the whole document. A meeting that got notes and no summary is
+    /// exactly what notes on with summaries off produces, and offering to write
+    /// a summary there would throw the notes away with nothing asked.
+    @MainActor
+    static func theSummaryButtonIsHiddenWhereItWouldEatNotes(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        try meeting.store.writeSummary(
+            SummaryDocument(generatedNotes: "- Chris sends the connector list.").markdown
+        )
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the pane to read the notes") {
+            model.detail?.generatedNotes?.isEmpty == false
+        }
+        let detail = try expect.unwrap(model.detail)
+        expect.isNil(detail.summary, "the file holds notes, not a summary")
+        expect.isFalse(
+            detail.canGenerateEnrichment,
+            "the button was offered on a meeting whose notes it would replace"
+        )
+    }
+
     static var windowSuite: Suite {
         Suite("MeetingsWindow", [
+            test("writing a summary is not offered where it would replace notes") { expect in
+                try await theSummaryButtonIsHiddenWhereItWouldEatNotes(expect)
+            },
             test("the unnamed count is what the model would be asked about") { expect in
                 try await theCountMatchesWhatWouldBeAsked(expect)
             },

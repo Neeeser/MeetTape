@@ -40,6 +40,16 @@ enum SummaryDocumentTests {
                 expect.equal(SummaryDocument(markdown: text).summary, text)
             },
 
+            test("a heading is only a heading when the line ends there") { expect in
+                // A legacy summary can open with those words in a sentence. It
+                // is a summary, and reading it as notes would put the whole
+                // meeting on a tab the user has no reason to open.
+                let text = "## Notes were taken by Chris and sent round afterwards."
+                let document = SummaryDocument(markdown: text)
+                expect.equal(document.summary, text)
+                expect.isNil(document.generatedNotes)
+            },
+
             test("a notes-only document round-trips") { expect in
                 let original = SummaryDocument(generatedNotes: "- Chris sends the list.")
                 expect.equal(SummaryDocument(markdown: original.markdown), original)

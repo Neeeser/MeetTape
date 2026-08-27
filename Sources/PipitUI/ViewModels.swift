@@ -650,6 +650,11 @@ public final class MeetingReviewModel {
     public var canGenerateEnrichment: Bool {
         runtime.settings.enrichment.generateSummary
             && (summary?.isEmpty ?? true)
+            // The notes share the file the summary is written to, and the write
+            // replaces the whole document. A meeting that got notes and no
+            // summary, which is what notes on with summaries off produces,
+            // would otherwise offer a button that throws its notes away.
+            && (generatedNotes?.isEmpty ?? true)
             && metadata?.processing.state == .complete
     }
 

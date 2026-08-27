@@ -2192,17 +2192,35 @@ public actor ProcessingPipeline {
             metadata.descriptionText = description
         }
 
-        var summaryParts: [String] = []
-        if let summary = enrichment.summary, !summary.isEmpty {
-            summaryParts.append("## Summary\n\n\(summary)")
-        }
-        if let notes = enrichment.notes, !notes.isEmpty {
-            summaryParts.append("## Notes\n\n\(notes)")
-        }
-        if !summaryParts.isEmpty {
+        // Composed by the type that parses it back, so the headings the reader
+        // splits on and the headings the writer emits cannot drift apart.
+        let document = SummaryDocument(
+            summary: enrichment.summary, generatedNotes: enrichment.notes
+        )
+        if !document.isEmpty {
             // Written to summary.md, never to notes.md: the user's notes are theirs.
-            try store.writeSummary(summaryParts.joined(separator: "\n\n"))
+            try store.writeSummary(document.markdown)
         }
+    }
+
+    /// Renders `transcript.md` from what is on disk now.
+    ///
+    /// Split out of `finish` so a caller that only wants the document rewritten
+    /// can have that without the calendar link and the mixdown beside it.
+    private func writeTranscriptMarkdown(
+        store: MeetingStore, metadata: MeetingMetadata
+    ) async throws {
+        guard let transcript = try store.readCanonicalTranscript() else { return }
+        let speakers = try store.readSpeakerMap()
+        let renderer = TranscriptRenderer()
+        try store.writeTranscriptMarkdown(renderer.markdown(
+            transcript: transcript,
+            speakers: speakers,
+            title: metadata.displayTitle,
+            startedAt: metadata.startedAt,
+            durationSeconds: metadata.durationSeconds,
+            participants: await participants(in: speakers)
+        ))
     }
 
     /// Renders the derived files and links the calendar event.
@@ -2212,18 +2230,7 @@ public actor ProcessingPipeline {
         let timeline = try store.readTimeline()
         metadata.durationSeconds = timeline.duration
 
-        if let transcript = try store.readCanonicalTranscript() {
-            let speakers = try store.readSpeakerMap()
-            let renderer = TranscriptRenderer()
-            try store.writeTranscriptMarkdown(renderer.markdown(
-                transcript: transcript,
-                speakers: speakers,
-                title: metadata.displayTitle,
-                startedAt: metadata.startedAt,
-                durationSeconds: metadata.durationSeconds,
-                participants: await participants(in: speakers)
-            ))
-        }
+        try await writeTranscriptMarkdown(store: store, metadata: metadata)
 
         if metadata.calendar == nil, let calendar {
             if let match = await calendar.bestMatch(
@@ -2779,6 +2786,93 @@ public actor ProcessingPipeline {
             identityID: claimant, settings: settings
         )
         try await refreshCachedNames(for: claimant)
+    }
+
+    /// Writes the title, description, summary and notes a finished meeting
+    /// never got.
+    ///
+    /// For a meeting processed before a key was stored, where the enriching
+    /// stage skipped every part of itself and completed. One request fills all
+    /// four fields, so this is the same call the pipeline makes rather than a
+    /// second kind of enrichment, and the folder is held for it exactly as the
+    /// stage would.
+    public func generateEnrichment(meetingID: String) async throws {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
+        // Holding the folder tells the runtime a job will notice a move, so the
+        // runtime skips its own cleanup and this has to do it. Without this a
+        // meeting trashed mid-request came back, because every write here
+        // recreates the folder it writes into.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
+        await waitForSlot()
+        defer { jobLock.release() }
+
+        // Re-read after the wait, as every re-run does: the pre-wait snapshot
+        // predates whatever job held the slot.
+        let store = found.store
+        var metadata = (try? store.readMetadata()) ?? found.metadata
+        if discardIfGone(meetingID, store: store) { return }
+        let settings = settingsProvider()
+        // The control says nothing already here is replaced, and a generated
+        // title is the one field enrichment overwrites rather than fills.
+        // Where the slot is empty this run fills it, which is the point.
+        let existingTitle = metadata.titles.ai?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await runEnrichment(store: store, metadata: &metadata, settings: settings)
+        if let existingTitle, !existingTitle.isEmpty { metadata.titles.ai = existingTitle }
+        // The notice is why the user pressed the button. Leaving it up after
+        // the button worked says the key is still missing on a meeting that
+        // just used it.
+        await recordMissingKey(&metadata, settings: settings)
+        // The document carries the title and the participant block, so it is
+        // rewritten from what enrichment just wrote rather than left stale.
+        // Not `finish`: that also hunts for a calendar event and appends its
+        // attendees, which would rename a months-old meeting and add people to
+        // it. Neither is a summary, and neither is what the button offered.
+        try await writeTranscriptMarkdown(store: store, metadata: metadata)
+        try persist(metadata, to: store)
+        report(metadata, chunks: nil)
+        // Before the rename, not only in the defer below. The writes above
+        // recreate the folder, so a meeting trashed during the request has a
+        // metadata.json again by now and settles happily under a new name,
+        // which moves it out from under the deferred check and leaves a ghost
+        // nothing will ever clean up.
+        if discardIfGone(meetingID, store: store) { return }
+        // A newly filled title can be the one the folder is named for.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadata)
+        }
+    }
+
+    /// Asks the model to name the speakers this meeting never named.
+    ///
+    /// The same stage the pipeline runs last, on its own. It reads the speaker
+    /// map as it stands now, so anyone named by hand since is left out of the
+    /// question and a name already accepted is never asked about again.
+    public func suggestSpeakers(meetingID: String) async throws {
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            throw StorageError.meetingNotFound(id: meetingID)
+        }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
+        // As above: holding the folder makes this job responsible for noticing
+        // a move that lands while the request is in flight.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
+        await waitForSlot()
+        defer { jobLock.release() }
+
+        let store = found.store
+        var metadata = (try? store.readMetadata()) ?? found.metadata
+        if discardIfGone(meetingID, store: store) { return }
+        let settings = settingsProvider()
+        try await suggestSpeakerNames(store: store, metadata: metadata, settings: settings)
+        // Nothing here writes metadata, but the key may have appeared since the
+        // meeting was processed and the notice has to stop saying it has not.
+        await recordMissingKey(&metadata, settings: settings)
+        try persist(metadata, to: store)
+        report(metadata, chunks: nil)
     }
 
     /// Re-clusters a meeting, optionally at a speaker count the user chose.

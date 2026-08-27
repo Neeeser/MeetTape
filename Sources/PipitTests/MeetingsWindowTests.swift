@@ -681,8 +681,83 @@ enum MeetingsWindowTests {
         )
     }
 
+    /// The count decides whether the AI control is drawn at all, so it has to
+    /// be the same question the stage asks. Counting rows the strip merely
+    /// calls unnamed drew a button for speakers the stage then refused, which
+    /// made no request and never went away.
+    @MainActor
+    static func theCountMatchesWhatWouldBeAsked(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(
+            root: root,
+            clusters: [
+                SpeakerLabel.localUser, "remote-001_speaker_00", "remote-001_speaker_01",
+            ]
+        )
+        let runtime = makeRuntime(root: root)
+
+        // The microphone track is never sent, and neither is the bucket for
+        // words no interval claimed.
+        expect.equal(
+            runtime.unnamedSpeakerCount(inMeeting: meeting.id), 2,
+            "the microphone track or the unattributed bucket was counted"
+        )
+
+        var map = try meeting.store.readSpeakerMap()
+        map.assign("Priya Raman", to: "remote-001_speaker_00")
+        try meeting.store.writeSpeakerMap(map)
+        expect.equal(runtime.unnamedSpeakerCount(inMeeting: meeting.id), 1)
+
+        // "Leave unnamed" on the last one. The strip still draws it as unnamed,
+        // and the stage will still refuse to ask about it.
+        map = try meeting.store.readSpeakerMap()
+        map.assign("", to: "remote-001_speaker_01")
+        expect.isTrue(map.clearedKeys.contains("remote-001_speaker_01"))
+        try meeting.store.writeSpeakerMap(map)
+
+        expect.equal(
+            runtime.unnamedSpeakerCount(inMeeting: meeting.id), 0,
+            "a name the user cleared on purpose was counted as work to do"
+        )
+    }
+
+    /// The summary and the generated notes share one file, and writing it
+    /// replaces the whole document. A meeting that got notes and no summary is
+    /// exactly what notes on with summaries off produces, and offering to write
+    /// a summary there would throw the notes away with nothing asked.
+    @MainActor
+    static func theSummaryButtonIsHiddenWhereItWouldEatNotes(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        try meeting.store.writeSummary(
+            SummaryDocument(generatedNotes: "- Chris sends the connector list.").markdown
+        )
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the pane to read the notes") {
+            model.detail?.generatedNotes?.isEmpty == false
+        }
+        let detail = try expect.unwrap(model.detail)
+        expect.isNil(detail.summary, "the file holds notes, not a summary")
+        expect.isFalse(
+            detail.canGenerateEnrichment,
+            "the button was offered on a meeting whose notes it would replace"
+        )
+    }
+
     static var windowSuite: Suite {
         Suite("MeetingsWindow", [
+            test("writing a summary is not offered where it would replace notes") { expect in
+                try await theSummaryButtonIsHiddenWhereItWouldEatNotes(expect)
+            },
+            test("the unnamed count is what the model would be asked about") { expect in
+                try await theCountMatchesWhatWouldBeAsked(expect)
+            },
             test("a dismissal on the second half of a call reaches disk") { expect in
                 try await aDismissalOnTheSecondHalfReachesDisk(expect)
             },

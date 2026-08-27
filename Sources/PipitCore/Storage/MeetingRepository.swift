@@ -76,6 +76,13 @@ public struct MeetingStore: Sendable {
         try? String(contentsOf: layout.summary, encoding: .utf8)
     }
 
+    /// `summary.md` split into the summary and the generated notes, which the
+    /// app shows on different tabs.
+    public func readSummaryDocument() -> SummaryDocument {
+        guard let text = readSummary() else { return SummaryDocument() }
+        return SummaryDocument(markdown: text)
+    }
+
     public func writeSummary(_ text: String) throws {
         try AtomicFile.writeText(text, to: layout.summary)
     }

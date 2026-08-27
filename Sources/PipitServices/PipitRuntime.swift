@@ -651,6 +651,42 @@ public final class PipitRuntime {
         }
     }
 
+    /// Writes the summary, notes, description and title a finished meeting
+    /// never got, for one recorded before a key was stored.
+    public func generateEnrichment(
+        meetingID: String, completion: @escaping @Sendable @MainActor () -> Void = {}
+    ) {
+        runProcessing { [weak self] in
+            guard let self else { return completion() }
+            do {
+                try await pipeline.generateEnrichment(meetingID: meetingID)
+            } catch {
+                Log.app.error("enrichment failed: \(logSafeDescription(error), privacy: .public)")
+            }
+            refreshRecentMeetings()
+            onProcessingUpdate?(meetingID)
+            completion()
+        }
+    }
+
+    /// Asks the model to name the speakers this meeting never named.
+    public func suggestSpeakers(
+        meetingID: String, completion: @escaping @Sendable @MainActor () -> Void = {}
+    ) {
+        runProcessing { [weak self] in
+            guard let self else { return completion() }
+            do {
+                try await pipeline.suggestSpeakers(meetingID: meetingID)
+            } catch {
+                Log.app.error(
+                    "speaker suggestion failed: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
+            onProcessingUpdate?(meetingID)
+            completion()
+        }
+    }
+
     /// Re-assembles the transcript from the raw chunks already on disk.
     public func rebuildTranscript(meetingID: String, completion: @escaping @Sendable @MainActor () -> Void = {}) {
         runProcessing { [weak self] in

@@ -222,6 +222,9 @@ public struct MeetingDetailView: View {
             HStack(spacing: 8) {
                 Text("Speakers").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                // Only where somebody is still unnamed. The control fills a
+                // gap, so with no gap it is not drawn rather than drawn dim.
+                if detail.unnamedSpeakerCount > 0 { suggestNames }
                 reanalyze
             }
             if detail.speakerRows.isEmpty {
@@ -249,6 +252,31 @@ public struct MeetingDetailView: View {
         }
     }
 
+    /// Asks the model to name the speakers nothing else could.
+    ///
+    /// An icon with no label, because the row it sits on is already a label and
+    /// a caption plus a menu title. The same command is spelled out in the menu
+    /// beside it, which is what makes the icon learnable rather than guessed at.
+    private var suggestNames: some View {
+        Button {
+            detail.suggestSpeakerNames()
+        } label: {
+            if detail.isSuggestingNames {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "sparkles").font(.caption)
+            }
+        }
+        .buttonStyle(.borderless)
+        .disabled(detail.isSuggestingNames)
+        .help(suggestNamesTitle)
+    }
+
+    private var suggestNamesTitle: String {
+        let count = detail.unnamedSpeakerCount
+        return "Suggest names for \(count) \(count == 1 ? "speaker" : "speakers")"
+    }
+
     private var reanalyze: some View {
         Menu {
             Button("Run with the count Pipit picks") {
@@ -265,6 +293,14 @@ public struct MeetingDetailView: View {
                 }
             }
             .disabled(!detail.localModelsReady)
+            // Below a divider rather than beside the two run commands. Those
+            // re-cluster the audio on this Mac and clear names. This reads the
+            // words and sends them away. Same menu, different machine.
+            if detail.unnamedSpeakerCount > 0 {
+                Divider()
+                Button(suggestNamesTitle) { detail.suggestSpeakerNames() }
+                    .disabled(detail.isSuggestingNames)
+            }
             Divider()
             Text(
                 detail.localModelsReady
@@ -343,6 +379,8 @@ public struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 if let summary = detail.summary, !summary.isEmpty {
                     Text(summary).font(.body).textSelection(.enabled)
+                } else if detail.canGenerateEnrichment {
+                    writeSummary
                 } else {
                     Text("No summary. Enrichment writes one when it runs.")
                         .foregroundStyle(.secondary)
@@ -353,6 +391,37 @@ public struct MeetingDetailView: View {
             .padding(.bottom, 20)
             .frame(maxWidth: 680, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Offered where a finished meeting has no summary, which is what a meeting
+    /// processed before a key was stored looks like.
+    ///
+    /// Inside the section rather than in a bar at the top of the pane: the tab
+    /// the text belongs to is where a reader goes looking for it. Nothing is
+    /// replaced, so there is nothing to confirm and no bar to dismiss.
+    private var writeSummary: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("No summary was written for this meeting.")
+                .foregroundStyle(.secondary)
+            Button {
+                detail.generateEnrichment()
+            } label: {
+                if detail.isEnriching {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading the transcript…")
+                    }
+                } else {
+                    Label("Write a summary", systemImage: "sparkles")
+                }
+            }
+            .disabled(detail.isEnriching)
+            Text(
+                "One request writes the summary, the notes and a suggested title. "
+                    + "Nothing already on this meeting is replaced."
+            )
+            .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -375,6 +444,15 @@ public struct MeetingDetailView: View {
                                 + "used as input when speaker names are suggested."
                         )
                         .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let generated = detail.generatedNotes, !generated.isEmpty {
+                    SectionCard(
+                        title: "Meeting notes",
+                        subtitle: "Written from the transcript. Kept apart from your notes above."
+                    ) {
+                        Text(generated).font(.body).textSelection(.enabled)
                     }
                 }
 

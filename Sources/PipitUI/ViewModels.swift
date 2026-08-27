@@ -294,6 +294,12 @@ public final class MeetingReviewModel {
     public var notes = ""
     public var title = ""
     public var summary: String?
+    /// What enrichment wrote as notes, kept apart from the user's own. Shown on
+    /// the Notes tab beside them rather than on the Summary tab under a second
+    /// heading.
+    public var generatedNotes: String?
+    public var isEnriching = false
+    public var isSuggestingNames = false
     public var errorMessage: String?
     /// Detected speakers with how each was decided, refreshed alongside the
     /// transcript.
@@ -400,7 +406,9 @@ public final class MeetingReviewModel {
         let storedNotes = found.store.readNotes()
         if notes == lastLoadedNotes { notes = storedNotes }
         lastLoadedNotes = storedNotes
-        summary = found.store.readSummary()
+        let document = found.store.readSummaryDocument()
+        summary = document.summary
+        generatedNotes = document.generatedNotes
         transcript = try? found.store.readCanonicalTranscript()
         expectedParticipants = found.metadata.participants
             .filter { $0.origin == .human }
@@ -411,6 +419,7 @@ public final class MeetingReviewModel {
     public func reloadSpeakers() async {
         speakerRows = await runtime.speakers(inMeeting: meetingID).filter(\.hasSpeechToShow)
         speakerSuggestions = runtime.speakerSuggestions(inMeeting: meetingID)
+        unnamedSpeakerCount = runtime.unnamedSpeakerCount(inMeeting: meetingID)
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 
@@ -623,6 +632,50 @@ public final class MeetingReviewModel {
             speakerCount: reanalyzeSpeakerCount
         ) { [weak self] in
             self?.isReanalyzing = false
+        }
+    }
+
+    /// How many speakers the model would be asked about.
+    ///
+    /// Read from the runtime rather than counted off `speakerRows`, so it is
+    /// the same question the stage asks. The strip calls the microphone track
+    /// and a name the user cleared unnamed, and neither is ever sent.
+    public var unnamedSpeakerCount = 0
+
+    /// Whether a summary is missing and could actually be written.
+    ///
+    /// The setting is part of the question. With summaries switched off the
+    /// request carries no summary field at all, so the button would spend a
+    /// call, write nothing and still be there afterwards.
+    public var canGenerateEnrichment: Bool {
+        runtime.settings.enrichment.generateSummary
+            && (summary?.isEmpty ?? true)
+            // The notes share the file the summary is written to, and the write
+            // replaces the whole document. A meeting that got notes and no
+            // summary, which is what notes on with summaries off produces,
+            // would otherwise offer a button that throws its notes away.
+            && (generatedNotes?.isEmpty ?? true)
+            && metadata?.processing.state == .complete
+    }
+
+    /// Writes the summary, notes, description and title this meeting never got.
+    public func generateEnrichment() {
+        guard !isEnriching else { return }
+        isEnriching = true
+        runtime.generateEnrichment(meetingID: meetingID) { [weak self] in
+            self?.isEnriching = false
+            self?.reload()
+        }
+    }
+
+    /// Asks the model to name the speakers nothing else could name.
+    public func suggestSpeakerNames() {
+        guard !isSuggestingNames else { return }
+        isSuggestingNames = true
+        runtime.suggestSpeakers(meetingID: meetingID) { [weak self] in
+            self?.isSuggestingNames = false
+            guard let self else { return }
+            Task { await self.reloadSpeakers() }
         }
     }
 

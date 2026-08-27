@@ -824,6 +824,134 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("the missing-key notice is recorded when only suggestions want the cloud") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // Every title and summary switch off, speaker suggestions on.
+                // The flag used to be written only inside enrichment, which
+                // returns before it can say anything under exactly these
+                // settings, so this user got no suggestions and no reason.
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: true
+                )
+                expect.isFalse(settings.enrichment.wantsAnything)
+
+                let backend = FakeAIBackend()
+                backend.configured = false
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 53, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let processing = try meeting.store.readMetadata().processing
+                expect.equal(processing.state, .complete)
+                expect.isTrue(
+                    processing.skippedForMissingKey,
+                    "suggestions were wanted, the key was missing, and nothing said so"
+                )
+            },
+
+            test("turning the cloud toggles off clears the missing-key notice") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                // The state a meeting processed without a key is left in.
+                _ = try meeting.store.updateMetadata {
+                    $0.processing.skippedForMissingKey = true
+                }
+
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                // Nothing wants the cloud any more, so whether a key is stored
+                // does not come into it.
+                let backend = FakeAIBackend()
+                backend.configured = false
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 54, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.isFalse(
+                    try meeting.store.readMetadata().processing.skippedForMissingKey,
+                    "the notice outlived the reason for it"
+                )
+            },
+
+            test("storing a key clears the missing-key notice on the next run") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                // The state a meeting processed without a key is left in.
+                _ = try meeting.store.updateMetadata {
+                    $0.processing.skippedForMissingKey = true
+                }
+
+                // The cloud is still wanted, so clearing the notice has to come
+                // from reading the key rather than from nothing being asked for.
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: true
+                )
+                let backend = FakeAIBackend()
+                backend.configured = true
+
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 55, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.isFalse(
+                    try meeting.store.readMetadata().processing.skippedForMissingKey,
+                    "the notice outlived the key that was stored to answer it"
+                )
+            },
+
             test("the default configuration finishes a meeting with no API key") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -870,6 +998,17 @@ enum LocalPipelineTests {
                 expect.isFalse(
                     backend.calls.contains { $0.kind == "resolve" || $0.kind == "enrich" },
                     "and no cloud request was attempted"
+                )
+                // Skipping is silent to the pipeline and must not be silent to
+                // the reader: a stored key that goes missing otherwise looks
+                // exactly like a key that was never set.
+                expect.isTrue(
+                    try meeting.store.readMetadata().processing.skippedForMissingKey,
+                    "the meeting completed with no summary and did not record why"
+                )
+                expect.isTrue(
+                    meeting.store.readSpeakerSuggestions().suggestions.isEmpty,
+                    "no key means nothing was proposed"
                 )
             },
 

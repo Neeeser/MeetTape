@@ -22,6 +22,28 @@ public struct SpeakerRangePart: Sendable, Equatable {
 }
 
 /// One speaker in one meeting, as the meetings window shows them.
+/// One proposed name, and the speaker it is proposed for.
+public struct MeetingSuggestionRow: Sendable, Equatable, Identifiable {
+    public var clusterID: String
+    public var recordingID: String
+    /// What the speaker strip calls this speaker today, so the pill and the
+    /// chip it points at read the same.
+    public var speakerLabel: String
+    public var suggestion: SpeakerNameSuggestion
+
+    public var id: String { "\(recordingID)/\(clusterID)" }
+
+    public init(
+        clusterID: String, recordingID: String, speakerLabel: String,
+        suggestion: SpeakerNameSuggestion
+    ) {
+        self.clusterID = clusterID
+        self.recordingID = recordingID
+        self.speakerLabel = speakerLabel
+        self.suggestion = suggestion
+    }
+}
+
 public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     public var clusterID: String
     /// The recording this cluster was diarized in.
@@ -692,6 +714,84 @@ extension PipitRuntime {
             }
         }
         return rows
+    }
+
+    /// Names the model proposed for speakers this meeting could not name.
+    ///
+    /// Read against the speaker map as it stands now, so a label named by hand
+    /// since the suggestion was written drops out of the answer. That is what
+    /// makes accepting one pill remove exactly that pill and leave the rest.
+    public func speakerSuggestions(inMeeting meetingID: String) -> [MeetingSuggestionRow] {
+        guard let recordings = repository.logicalMeeting(id: meetingID)?.recordings else {
+            return []
+        }
+        var rows: [MeetingSuggestionRow] = []
+        for (index, recording) in recordings.enumerated() {
+            guard let map = try? recording.store.readSpeakerMap() else { continue }
+            let set = recording.store.readSpeakerSuggestions()
+            guard !set.suggestions.isEmpty else { continue }
+            guard let keys = try? recording.store.readTranscriptSpeakers().map(\.key) else {
+                continue
+            }
+            // A person who clears a name has said no to it. Offering the same
+            // name straight back is the automatic naming this whole change
+            // exists to stop, one step further along.
+            let unnamed = Set(
+                keys.filter { map.entries[$0] == nil && !map.clearedKeys.contains($0) }
+            )
+            for suggestion in set.visible(forUnnamed: unnamed) {
+                // The same fallback the speaker chips draw, so a pill and the
+                // chip it points at agree on what that speaker is called.
+                let label = recordings.count > 1
+                    ? "\(SpeakerMap.fallbackName(for: suggestion.label)), part \(index + 1)"
+                    : SpeakerMap.fallbackName(for: suggestion.label)
+                rows.append(MeetingSuggestionRow(
+                    clusterID: suggestion.label,
+                    recordingID: recording.metadata.id,
+                    speakerLabel: label,
+                    suggestion: suggestion
+                ))
+            }
+        }
+        return rows
+    }
+
+    /// Records that the user turned a suggestion down, so a re-run does not
+    /// offer the same name again.
+    public func dismissSpeakerSuggestion(clusterID: String, recordingID: String) {
+        writeSuggestions(recordingID: recordingID) { $0.dismiss(clusterID) }
+    }
+
+    /// Turns down every suggestion still showing for one meeting.
+    public func dismissAllSpeakerSuggestions(inMeeting meetingID: String) {
+        let rows = speakerSuggestions(inMeeting: meetingID)
+        for recordingID in Set(rows.map(\.recordingID)) {
+            let labels = rows.filter { $0.recordingID == recordingID }.map(\.clusterID)
+            writeSuggestions(recordingID: recordingID) { set in
+                for label in labels { set.dismiss(label) }
+            }
+        }
+    }
+
+    /// Named for a recording rather than a meeting on purpose. A suggestion
+    /// belongs to the half of a rejoined call it was made in, and the ordinary
+    /// lookup hides a half that has been folded into another, so a dismissal on
+    /// part two used to find no folder, write nothing, and let the same pill
+    /// come back on the next read.
+    private func writeSuggestions(
+        recordingID: String, _ body: (inout SpeakerSuggestionSet) -> Void
+    ) {
+        guard let recording = repository.findMeeting(id: recordingID, includingMerged: true)
+        else { return }
+        var set = recording.store.readSpeakerSuggestions()
+        body(&set)
+        do {
+            try recording.store.writeSpeakerSuggestions(set)
+        } catch {
+            Log.app.error(
+                "suggestion update failed: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
     }
 
     /// Changes the speaker on several selected lines at once.

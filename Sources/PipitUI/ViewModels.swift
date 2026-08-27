@@ -281,6 +281,9 @@ public final class MeetingReviewModel {
     /// Detected speakers with how each was decided, refreshed alongside the
     /// transcript.
     public var speakerRows: [MeetingSpeakerRow] = []
+    /// Names the model heard for speakers nothing else could name. Never
+    /// applied on its own: the strip draws them and the user decides.
+    public var speakerSuggestions: [MeetingSuggestionRow] = []
     /// Everyone Pipit could put on a line, for the pickers.
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
@@ -390,6 +393,7 @@ public final class MeetingReviewModel {
     /// The parts that need the identity store, which the file read does not.
     public func reloadSpeakers() async {
         speakerRows = await runtime.speakers(inMeeting: meetingID).filter(\.hasSpeechToShow)
+        speakerSuggestions = runtime.speakerSuggestions(inMeeting: meetingID)
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 

@@ -597,6 +597,25 @@ public final class MeetingReviewModel {
         lastLoadedNotes = notes
     }
 
+    /// The generated title to offer, or nil when there is nothing to ask about.
+    public var titleSuggestion: String? { metadata?.titleSuggestion }
+
+    /// Takes the suggestion. The field follows, so the pane does not keep
+    /// showing the old title over a folder that has already been renamed.
+    public func acceptTitleSuggestion() {
+        guard let suggestion = titleSuggestion else { return }
+        runtime.acceptTitleSuggestion(meetingID: meetingID)
+        title = suggestion
+        lastLoadedTitle = suggestion
+        reload()
+        onEditsSaved?()
+    }
+
+    public func declineTitleSuggestion() {
+        runtime.declineTitleSuggestion(meetingID: meetingID)
+        reload()
+    }
+
     public func retry() { runtime.retryProcessing(meetingID: meetingID) }
 
     /// How far the current stage has got, when the backend reports it. A local

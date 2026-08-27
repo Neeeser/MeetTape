@@ -20,8 +20,9 @@ public enum RecreatedFolder {
         case removed
         /// Older than the move. The meeting itself, put back from the Trash.
         case predatesTheMove
-        /// There, but the volume reports no creation date, so it is kept.
-        case undatable
+        /// There, and still there. Either the volume reports no creation date,
+        /// or the removal itself would not go through.
+        case kept
     }
 
     /// How far a creation date may sit before the move and still count as
@@ -41,9 +42,16 @@ public enum RecreatedFolder {
     @discardableResult
     public static func discard(at url: URL, writtenAfter movedAt: Date) -> Verdict {
         guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
-        guard let created = creationDate(of: url) else { return .undatable }
+        guard let created = creationDate(of: url) else { return .kept }
         guard created >= movedAt.addingTimeInterval(-grain) else { return .predatesTheMove }
-        try? FileManager.default.removeItem(at: url)
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            // Said rather than assumed. A removal a locked file blocks leaves
+            // the folder where it is, and a caller told it was removed goes on
+            // believing the path is clear.
+            return FileManager.default.fileExists(atPath: url.path) ? .kept : .removed
+        }
         return .removed
     }
 

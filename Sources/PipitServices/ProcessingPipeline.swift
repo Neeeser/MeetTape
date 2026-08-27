@@ -127,10 +127,11 @@ public actor ProcessingPipeline {
         case .predatesTheMove:
             Log.processing.notice("meeting was put back while it processed, so the job carries on")
             return false
-        case .undatable:
-            // Kept, because this volume gives no date to tell what a stage
-            // wrote apart from the meeting itself put back.
-            Log.processing.notice("meeting left the archive, job stopped, undatable folder kept")
+        case .kept:
+            // Left where it is, because this volume gives no date to tell what
+            // a stage wrote apart from the meeting itself put back, or because
+            // the removal would not go through.
+            Log.processing.notice("meeting left the archive, job stopped, folder kept")
         case .absent, .removed:
             Log.processing.notice("meeting left the archive while it processed, so the job stopped")
         }
@@ -360,6 +361,11 @@ public actor ProcessingPipeline {
             goneWhileRunning.removeValue(forKey: meetingID)
             jobLock.release()
         }
+        // The wait for the slot is as long as a live recording, so the move can
+        // land before the transcode starts. Checked the way every stage checks
+        // it, rather than handing a folder that has gone to the compactor and
+        // reading its failure out of the log.
+        if discardIfGone(meetingID, store: found.store) { return }
         await compactQuietly(store: found.store)
         _ = discardIfGone(meetingID, store: found.store)
     }

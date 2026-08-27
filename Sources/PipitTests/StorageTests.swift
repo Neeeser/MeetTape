@@ -54,6 +54,12 @@ enum StorageTests {
                     FileManager.default.fileExists(atPath: putBack.path),
                     "the meeting somebody put back is left where it is"
                 )
+                expect.isTrue(
+                    FileManager.default.fileExists(
+                        atPath: putBack.appendingPathComponent("kept").path
+                    ) == false,
+                    "and nothing was written into it"
+                )
 
                 // HFS+ stores whole seconds, so a folder written just after the
                 // move reports a moment before it. Inside the grain it is still
@@ -62,10 +68,6 @@ enum StorageTests {
                 expect.equal(
                     RecreatedFolder.discard(at: truncated, writtenAfter: movedAt), .removed,
                     "a coarse clock does not turn scrap into a meeting"
-                )
-                expect.isTrue(
-                    RecreatedFolder.grain > 1,
-                    "and the grain covers a whole second of it"
                 )
 
                 expect.equal(

@@ -213,19 +213,25 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
     public var speakers: SpeakerRecognitionSettings
     /// The identity that represents the person using this Mac.
     public var localUserIdentityID: IdentityID?
+    /// Whether the pass that writes the local user into meetings recorded
+    /// before that row existed has run. One shot: it walks every meeting in the
+    /// archive, and every launch after the first has nothing to find.
+    public var localUserOccurrencesBackfilled: Bool
 
     public init(
         transcription: ProcessingBackendChoice = .local,
         diarization: ProcessingBackendChoice = .local,
         localTranscriptionModel: LocalTranscriptionModel = .preferred,
         speakers: SpeakerRecognitionSettings = SpeakerRecognitionSettings(),
-        localUserIdentityID: IdentityID? = nil
+        localUserIdentityID: IdentityID? = nil,
+        localUserOccurrencesBackfilled: Bool = false
     ) {
         self.transcription = transcription
         self.diarization = diarization
         self.localTranscriptionModel = localTranscriptionModel
         self.speakers = speakers
         self.localUserIdentityID = localUserIdentityID
+        self.localUserOccurrencesBackfilled = localUserOccurrencesBackfilled
     }
 
     public var usesLocalTranscription: Bool { transcription == .local }
@@ -262,6 +268,8 @@ public struct ProcessingSettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(SpeakerRecognitionSettings.self, forKey: .speakers)
             ?? defaults.speakers
         localUserIdentityID = try container.decodeIfPresent(IdentityID.self, forKey: .localUserIdentityID)
+        localUserOccurrencesBackfilled =
+            try container.decodeIfPresent(Bool.self, forKey: .localUserOccurrencesBackfilled) ?? false
     }
 }
 

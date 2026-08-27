@@ -104,6 +104,9 @@ public final class WindowManager {
             return
         }
         let model = PeopleDirectoryModel(runtime: runtime)
+        model.onOpenMeeting = { [weak self] meetingID in
+            self?.showMeetings(select: meetingID)
+        }
         peopleModel = model
         let window = makeWindow(
             title: "People",

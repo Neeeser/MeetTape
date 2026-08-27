@@ -156,6 +156,32 @@ public struct VoiceEnrollmentCandidate: Sendable, Equatable {
     public var tracks: Set<CaptureTrack> { Set(evidence.map(\.track)) }
 }
 
+/// Why a recording of somebody reading aloud did not reach their profile.
+///
+/// Separate from `VoiceEnrollmentRejection`, which is about the vector: these
+/// are the things that go wrong before there is one, and each is something the
+/// person at the microphone can act on.
+public enum SpokenEnrollmentError: Error, Sendable, Equatable, CustomStringConvertible {
+    /// The speech models are not installed, so nothing can embed the audio.
+    case modelsUnavailable
+    /// The recording holds no speech, or holds more than one voice. Both mean
+    /// the audio cannot stand for one person.
+    case noSingleVoice
+    /// Read, embedded, and still short of the bar a profile needs.
+    case rejected(VoiceEnrollmentRejection)
+    /// Nobody is set as the person at this Mac, so there is no profile to add to.
+    case noLocalUser
+
+    public var description: String {
+        switch self {
+        case .modelsUnavailable: "the speech models are not installed"
+        case .noSingleVoice: "no single voice was heard in the recording"
+        case .rejected(let rejection): rejection.description
+        case .noLocalUser: "nobody is set as the person at this Mac"
+        }
+    }
+}
+
 /// Why a candidate embedding was refused. Reported rather than swallowed, so a
 /// profile that is not growing has a visible reason.
 public enum VoiceEnrollmentRejection: Error, Sendable, Equatable, CustomStringConvertible {

@@ -63,6 +63,7 @@ public struct PeopleDirectorySection: Sendable, Equatable, Identifiable {
 /// and the grouping are the difference between a usable list and a scroll, and
 /// neither is worth discovering through a window.
 public enum PeopleDirectoryFilter {
+    public static let youTitle = "You"
     public static let noOrganizationTitle = "No organization"
     public static let unnamedTitle = "Unnamed voices"
 
@@ -81,7 +82,13 @@ public enum PeopleDirectoryFilter {
         return haystack.contains { $0.lowercased().contains(needle) }
     }
 
-    /// Grouped by organization, with unnamed voices last.
+    /// Grouped by organization, with the local user first and unnamed voices
+    /// last.
+    ///
+    /// The person at this Mac is in every meeting they record, so they are the
+    /// row most often wanted and the one hardest to find: filed under their own
+    /// organization they sit among colleagues, in alphabetical order, named like
+    /// anybody else. They get a section of one at the top instead.
     ///
     /// A directory fills up with voices nobody has named faster than with people
     /// somebody has, so listing them together buries the three names among forty
@@ -94,8 +101,16 @@ public enum PeopleDirectoryFilter {
         var byOrganization: [String: [SpeakerDirectoryEntry]] = [:]
         var unnamed: [SpeakerDirectoryEntry] = []
         var unaffiliated: [SpeakerDirectoryEntry] = []
+        var you: SpeakerDirectoryEntry?
 
         for entry in visible {
+            // Before the name check, so an install that has not been given a
+            // name yet still finds itself at the top rather than among the
+            // unnamed voices.
+            if entry.identity.isLocalUser {
+                you = entry
+                continue
+            }
             guard entry.identity.isNamed else {
                 unnamed.append(entry)
                 continue
@@ -109,8 +124,15 @@ public enum PeopleDirectoryFilter {
             }
         }
 
-        var sections = byOrganization.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-            .map { PeopleDirectorySection(title: $0, entries: sortedByName(byOrganization[$0] ?? [])) }
+        var sections: [PeopleDirectorySection] = []
+        if let you {
+            sections.append(PeopleDirectorySection(title: youTitle, entries: [you]))
+        }
+        sections.append(
+            contentsOf: byOrganization.keys
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+                .map { PeopleDirectorySection(title: $0, entries: sortedByName(byOrganization[$0] ?? [])) }
+        )
         if !unaffiliated.isEmpty {
             sections.append(
                 PeopleDirectorySection(title: noOrganizationTitle, entries: sortedByName(unaffiliated))

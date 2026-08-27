@@ -1,7 +1,9 @@
+import AppKit
 import Foundation
 import PipitCore
 import PipitServices
 import PipitSpeakers
+import PipitUI
 import SQLite3
 import TestKit
 
@@ -30,7 +32,8 @@ enum PeopleDirectoryTests {
         aliases: [String] = [],
         anonymousNumber: Int? = nil,
         profile: VoiceProfileStatus = .none,
-        meetings: Int = 0
+        meetings: Int = 0,
+        isLocalUser: Bool = false
     ) -> SpeakerDirectoryEntry {
         SpeakerDirectoryEntry(
             identity: Identity(
@@ -41,6 +44,7 @@ enum PeopleDirectoryTests {
                 aliases: aliases,
                 organization: organization,
                 notes: notes,
+                isLocalUser: isLocalUser,
                 createdAt: Date(timeIntervalSince1970: 0),
                 updatedAt: Date(timeIntervalSince1970: 0)
             ),
@@ -59,7 +63,9 @@ enum PeopleDirectoryTests {
 
     // MARK: suites
 
-    static var all: [Suite] { [storeSuite, filterSuite, renderSuite, exportSuite] }
+    static var all: [Suite] {
+        [storeSuite, filterSuite, renderSuite, exportSuite, meetingsSuite, localUserSuite]
+    }
 
     static var storeSuite: Suite {
         Suite("PersonDetail", [
@@ -176,6 +182,42 @@ enum PeopleDirectoryTests {
 
     static var filterSuite: Suite {
         Suite("PeopleDirectoryFilter", [
+            test("you are the first section, whatever your organization is") {
+                expect in
+                // The row wanted most often and hardest to find: filed under an
+                // organization it sits among colleagues, in alphabetical order,
+                // named like anybody else.
+                let entries = [
+                    entry(1, name: "Andrew", organization: "Acme", isLocalUser: true),
+                    entry(2, name: "Aaron", organization: "Acme"),
+                    entry(3, name: "Priya"),
+                    entry(4, anonymousNumber: 2),
+                ]
+                let sections = PeopleDirectoryFilter.sections(entries)
+                expect.equal(sections.first?.title, PeopleDirectoryFilter.youTitle)
+                expect.equal(sections.first?.entries.map(\.identity.resolvedName), ["Andrew"])
+                expect.isFalse(
+                    sections.dropFirst().contains { $0.entries.contains { $0.identity.isLocalUser } },
+                    "one row, in one place"
+                )
+                expect.equal(
+                    sections.dropFirst().first?.entries.map(\.identity.resolvedName), ["Aaron"],
+                    "the organization keeps everybody else"
+                )
+            },
+
+            test("a search that does not match you leaves the section out") {
+                expect in
+                let entries = [
+                    entry(1, name: "Andrew", isLocalUser: true),
+                    entry(2, name: "Priya"),
+                ]
+                expect.equal(
+                    PeopleDirectoryFilter.sections(entries, query: "priya").map(\.title),
+                    [PeopleDirectoryFilter.noOrganizationTitle]
+                )
+            },
+
             test("search reaches the organization, the aliases and the notes") { expect in
                 let entries = [
                     entry(1, name: "Chris Fowler", organization: "Acme"),
@@ -219,6 +261,36 @@ enum PeopleDirectoryTests {
                     PeopleDirectoryFilter.sections(entries).map(\.title),
                     ["Acme", PeopleDirectoryFilter.noOrganizationTitle,
                      PeopleDirectoryFilter.unnamedTitle]
+                )
+            },
+
+            test("a right-click acts on the row under the pointer, not the selection") {
+                expect in try await aRightClickActsOnTheRowUnderIt(expect)
+            },
+
+            test("deleting a meeting stops it counting towards a voice's meetings") { expect in
+                // The occurrence rows outlive the folder, and the People window
+                // counts meetings from them. Left behind, a deleted recording
+                // kept counting towards "heard in 3 meetings" forever.
+                let (store, root) = try makeStore()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let chris = try await store.createPerson(name: "Chris")
+                for meeting in ["m-1", "m-2"] {
+                    try await store.recordOccurrence(
+                        meetingID: meeting, clusterID: "remote-001_speaker_00", track: .remote,
+                        speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+                        identityID: chris.id, source: .human,
+                        humanVerified: true, wasExpectedParticipant: false
+                    )
+                }
+                expect.equal(try await store.meetingCount(for: chris.id), 2)
+
+                expect.equal(try await store.deleteOccurrences(meetingID: "m-1"), 1)
+
+                expect.equal(try await store.meetingCount(for: chris.id), 1)
+                expect.equal(
+                    try await store.meetingsReferencing(chris.id), ["m-2"],
+                    "and the meeting still on disk is the one that is left"
                 )
             },
 
@@ -418,6 +490,209 @@ enum PeopleDirectoryTests {
         return (pipeline, meeting.store, chris)
     }
 
+
+    /// The meetings on a person's profile, and the audio behind them.
+    static var meetingsSuite: Suite {
+        Suite("PersonMeetings", [
+            test("a person's profile lists the meetings they were heard in") {
+                expect in try await appearancesListEveryMeeting(expect)
+            },
+
+            test("a sample plays this person's longest turn") {
+                expect in try await theSampleIsTheLongestTurn(expect)
+            },
+
+            test("a person with no audio on disk offers nothing to play") {
+                expect in try await noAudioMeansNoSample(expect)
+            },
+        ])
+    }
+
+    /// A meeting on disk with one named speaker, and a stand-in for the
+    /// mixdown. Nothing here decodes the audio, so a file that exists is
+    /// everything the sample needs from it.
+    @MainActor
+    static func makeAppearance(
+        store: SpeakerStore, identityID: IdentityID,
+        root: URL, title: String, at started: Date, turns: [(Double, Double)],
+        writingAudio: Bool = true
+    ) async throws -> String {
+        let meeting = try MeetingsWindowTests.makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: title, startedAt: started
+        )
+        var map = SpeakerMap()
+        map.assign("Ben", to: "remote-001_speaker_00", identityID: identityID)
+        try meeting.store.writeSpeakerMap(map)
+        try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+            generatedAt: started,
+            utterances: turns.enumerated().map { index, turn in
+                Utterance(
+                    id: "u\(index)", start: turn.0, end: turn.1, track: .remote,
+                    rawSpeakerLabel: "remote-001_speaker_00",
+                    speakerKey: "remote-001_speaker_00",
+                    text: "the northwind renewal", chunkID: "c1", model: "m"
+                )
+            }
+        ))
+        if writingAudio {
+            try Data([0x00]).write(to: meeting.store.layout.recordingAudio)
+        }
+        try await store.recordOccurrence(
+            meetingID: meeting.id, clusterID: "remote-001_speaker_00", track: .remote,
+            speechSeconds: turns.reduce(0) { $0 + ($1.1 - $1.0) }, embedding: nil, model: nil,
+            resolution: nil, identityID: identityID, source: .human,
+            humanVerified: true, wasExpectedParticipant: false
+        )
+        return meeting.id
+    }
+
+    @MainActor
+    static func appearancesListEveryMeeting(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let ben = try await store.createPerson(name: "Ben")
+
+        let older = try await makeAppearance(
+            store: store, identityID: ben.id, root: root,
+            title: "Design review", at: Date(timeIntervalSince1970: 1_787_000_000),
+            turns: [(0, 12)]
+        )
+        let newer = try await makeAppearance(
+            store: store, identityID: ben.id, root: root,
+            title: "Weekly sync", at: Date(timeIntervalSince1970: 1_787_900_000),
+            turns: [(0, 4), (10, 15)]
+        )
+
+        let appearances = await runtime.appearances(of: ben.id)
+        expect.equal(appearances.map(\.meetingID), [newer, older], "newest first")
+        expect.equal(appearances.first?.title, "Weekly sync")
+        expect.equal(appearances.first?.speechSeconds, 9)
+        expect.isTrue(appearances.allSatisfy(\.hasAudio))
+
+        // Nobody else's meetings, and nobody else's silence.
+        let stranger = try await store.createPerson(name: "Priya")
+        expect.isTrue(
+            await runtime.appearances(of: stranger.id).isEmpty,
+            "a person heard in nothing has nothing to list"
+        )
+    }
+
+    @MainActor
+    static func theSampleIsTheLongestTurn(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let ben = try await store.createPerson(name: "Ben")
+        let meetingID = try await makeAppearance(
+            store: store, identityID: ben.id, root: root,
+            title: "Weekly sync", at: Date(timeIntervalSince1970: 1_787_900_000),
+            turns: [(0, 3), (30, 60)]
+        )
+
+        let sample = try expect.unwrap(await runtime.voiceSample(of: ben.id, inMeeting: meetingID))
+        expect.equal(sample.start, 30, "the longest turn, not the first")
+        expect.equal(sample.end, 38, "capped, because nobody listens to thirty seconds to place a voice")
+        expect.equal(sample.audio.lastPathComponent, "recording.m4a")
+
+        // A merged duplicate reads as the person it was merged into, so the
+        // sample follows the same pointer every other read does.
+        let duplicate = try await store.createPerson(name: "B. Baker")
+        try await store.merge(ben.id, into: duplicate.id)
+        _ = try expect.unwrap(await runtime.voiceSample(of: duplicate.id, inMeeting: meetingID))
+    }
+
+    @MainActor
+    static func noAudioMeansNoSample(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let ben = try await store.createPerson(name: "Ben")
+        let meetingID = try await makeAppearance(
+            store: store, identityID: ben.id, root: root,
+            title: "Weekly sync", at: Date(timeIntervalSince1970: 1_787_900_000),
+            turns: [(0, 20)], writingAudio: false
+        )
+
+        // Compaction removes the mixdown of an old meeting. The row stays, and
+        // the button that would play nothing is not offered.
+        expect.isFalse(await runtime.appearances(of: ben.id).first?.hasAudio ?? true)
+        expect.isNil(await runtime.voiceSample(of: ben.id, inMeeting: meetingID))
+    }
+
+
+    /// Which person in the directory is the one at this Mac.
+    static var localUserSuite: Suite {
+        Suite("LocalUser", [
+            test("choosing who you are moves the flag and the name with it") {
+                expect in try await choosingYouMovesTheFlagAndTheName(expect)
+            },
+
+            test("forgetting a voice takes the readings that built it") {
+                expect in try await forgettingAVoiceTakesTheReadings(expect)
+            },
+        ])
+    }
+
+    @MainActor
+    static func choosingYouMovesTheFlagAndTheName(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+
+        await runtime.ensureLocalUserIdentity()
+        let first = try expect.unwrap(try await store.localUser())
+        let andrew = try await store.createPerson(name: "Andrew Neeser")
+
+        await runtime.setLocalUser(andrew.id)
+
+        expect.equal(runtime.settings.processing.localUserIdentityID, andrew.id)
+        expect.equal(runtime.settings.localUserName, "Andrew Neeser", "Settings caches their name")
+        expect.equal(try await store.localUser()?.id, andrew.id)
+        expect.isFalse(
+            try await store.current(first.id)?.isLocalUser ?? true,
+            "two rows cannot both be the person at the keyboard"
+        )
+
+        // The launch sync writes the name in Settings onto the flagged row. It
+        // ran against the row picked here, so a name set anywhere had to be the
+        // one Settings holds, or the next start would put the old one back.
+        await runtime.ensureLocalUserIdentity()
+        expect.equal(try await store.current(andrew.id)?.resolvedName, "Andrew Neeser")
+    }
+
+
+    /// A reading is kept so the vector it produced can be heard and re-derived,
+    /// which means forgetting the voice has to take it. Across the whole family:
+    /// vectors go for every identifier that reads as this person, and audio filed
+    /// under one that has since been merged away is still audio of them.
+    @MainActor
+    static func forgettingAVoiceTakesTheReadings(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let old = try await store.createPerson(name: "Andrew")
+        let current = try await store.createPerson(name: "Andrew Neeser")
+        try await store.merge(old.id, into: current.id)
+
+        let archive = runtime.voiceEnrollmentArchive
+        let reading = try archive.newRecording(for: old.id, id: "take-one")
+        try Data([0x00]).write(to: reading)
+        expect.equal(archive.recordings(for: old.id).count, 1)
+
+        await runtime.forgetVoice(of: current.id)
+
+        expect.isTrue(
+            archive.recordings(for: old.id).isEmpty,
+            "the audio of a merged-away row is audio of the person it reads as"
+        )
+    }
+
     /// The schema as version 1 shipped it, frozen here on purpose.
     ///
     /// A migration test that builds its fixture from the current source cannot
@@ -548,5 +823,40 @@ enum PeopleDirectoryTests {
     enum MigrationFixtureError: Error {
         case cannotOpen
         case schemaFailed(String)
+    }
+
+    // MARK: - the right-click menu
+
+    /// A right-click on a row that is not selected acts on that row. Acting on
+    /// the selection instead would delete somebody the pointer was never over.
+    @MainActor
+    static func aRightClickActsOnTheRowUnderIt(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = PeopleDirectoryModel(runtime: MeetingsWindowTests.makeRuntime(root: root))
+        model.entries = [
+            entry(1, name: "Chris Fowler"),
+            entry(2, name: "Dana Kwon"),
+            entry(3, name: "Priya Raman"),
+        ]
+        model.select(IdentityID(1), extending: false)
+
+        expect.equal(
+            model.contextTargets(for: model.entries[1]).map(\.id), [IdentityID(2)],
+            "the row under the pointer"
+        )
+
+        model.select(IdentityID(2), extending: true)
+        expect.equal(
+            Set(model.contextTargets(for: model.entries[1]).map(\.id)),
+            [IdentityID(1), IdentityID(2)],
+            "and a row inside the selection acts on all of it"
+        )
+
+        model.confirmDelete(model.contextTargets(for: model.entries[1]))
+        let pending = try expect.unwrap(model.pendingAction)
+        expect.equal(pending.kind, .delete)
+        expect.equal(Set(pending.targets), [IdentityID(1), IdentityID(2)])
+        expect.equal(pending.title, "Delete 2 people?")
     }
 }

@@ -48,6 +48,23 @@ public struct PeopleDirectoryView: View {
         ) {
             organizationSheet
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.enrollment != nil },
+                set: { showing in
+                    // Escape dismisses the sheet without pressing anything in
+                    // it, and the microphone has to close either way.
+                    if !showing {
+                        model.enrollment?.cancel()
+                        model.enrollment = nil
+                    }
+                }
+            )
+        ) {
+            if let enrollment = model.enrollment {
+                VoiceEnrollmentView(model: enrollment) { model.enrollment = nil }
+            }
+        }
     }
 
     // MARK: - sidebar
@@ -103,9 +120,24 @@ public struct PeopleDirectoryView: View {
         return HStack(spacing: 8) {
             PersonAvatar(identity: entry.identity, image: model.avatarImage(for: entry))
             VStack(alignment: .leading, spacing: 1) {
-                Text(entry.identity.resolvedName)
-                    .font(.callout)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(entry.identity.resolvedName)
+                        .font(.callout)
+                        .lineLimit(1)
+                    // The row is the person at this Mac. The section heading
+                    // says so too, but a name is what a reader looks at, and
+                    // scrolled past the heading the row is just another name.
+                    if entry.identity.isLocalUser {
+                        Text("You")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule().fill(Color.accentColor.opacity(0.20))
+                            )
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
                 Text(rowSubtitle(entry))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -120,6 +152,29 @@ public struct PeopleDirectoryView: View {
         .background(selected ? Color.accentColor.opacity(0.18) : .clear)
         .onTapGesture {
             model.select(entry.id, extending: NSEvent.modifierFlags.contains(.command))
+        }
+        .contextMenu { menu(entry) }
+    }
+
+    /// What a right-click offers. The same actions the footer menu holds, on
+    /// the row under the pointer. It acts on the whole selection when that row
+    /// is part of it, and on that row alone otherwise.
+    @ViewBuilder private func menu(_ entry: SpeakerDirectoryEntry) -> some View {
+        let targets = model.contextTargets(for: entry)
+        Button("Set organization…") { model.beginSetOrganization(targets) }
+        if targets.count == 1 {
+            Button("Forget learned voice…") { model.confirmForgetVoice(of: entry) }
+                .disabled(targets[0].profile == .none)
+        }
+        if targets.count == 2 {
+            Button("Merge into one person") { Task { await model.merge(targets) } }
+        }
+        Divider()
+        Button(
+            targets.count == 1 ? "Delete…" : "Delete \(targets.count) people…",
+            role: .destructive
+        ) {
+            model.confirmDelete(targets)
         }
     }
 

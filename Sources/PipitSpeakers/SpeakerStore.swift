@@ -1043,6 +1043,21 @@ public actor SpeakerStore {
         }
     }
 
+    /// Forgets that a meeting was ever heard.
+    ///
+    /// Called when its folder is deleted. Only the occurrence rows go. The
+    /// voice material a person confirmed lives in `voice_embedding` and stays,
+    /// so deleting one accidental recording does not cost the profile every
+    /// other meeting built. Left behind, these rows kept counting a meeting
+    /// that no longer exists towards "heard in 3 meetings".
+    @discardableResult
+    public func deleteOccurrences(meetingID: String) throws -> Int {
+        try database.run(
+            "DELETE FROM speaker_occurrence WHERE meeting_id = ?", [.text(meetingID)]
+        )
+        return database.changes
+    }
+
     /// Forgets who a cluster was said to be.
     ///
     /// The occurrence row stays, because the cluster was still heard; what goes

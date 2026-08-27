@@ -24,12 +24,35 @@ struct GeneralSettingsPane: View {
                     )
                 )
             }
-            Section("Your name") {
-                TextField("Name", text: model.text(\.localUserName))
-                    .onSubmit { model.saveLocalUserName() }
+            Section("You") {
+                // Which person in the directory, rather than a name typed here.
+                // The identity owns the name: Settings held one and the store
+                // held a flag, and the launch sync pushed one onto the other.
+                if !model.people.isEmpty {
+                    Picker(
+                        "You are",
+                        selection: Binding(
+                            get: { model.localUserIdentityID },
+                            set: { chosen in
+                                guard let chosen else { return }
+                                Task { await model.chooseLocalUser(chosen) }
+                            }
+                        )
+                    ) {
+                        if model.localUserIdentityID == nil {
+                            Text("Nobody yet").tag(IdentityID?.none)
+                        }
+                        ForEach(model.people) { entry in
+                            Text(entry.identity.resolvedName).tag(IdentityID?.some(entry.id))
+                        }
+                    }
+                }
+                TextField("Name", text: model.localUserNameField)
+                    .onSubmit { Task { await model.commitLocalUserName() } }
                 Text(
-                    "Used to label your own speech. On a remote call it comes from the "
-                        + "microphone track, so it is attributed without diarization."
+                    "Your own speech is labelled with this person, and the microphone track "
+                        + "of every call teaches their voice profile. Naming yourself on an "
+                        + "imported recording puts it on the same profile."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -38,6 +61,8 @@ struct GeneralSettingsPane: View {
             }
         }
         .formStyle(.grouped)
-        .onDisappear { model.saveLocalUserName() }
+        .task { await model.refreshPeople() }
+        // A name typed and not submitted is still a name the person meant.
+        .onDisappear { Task { await model.commitLocalUserName() } }
     }
 }

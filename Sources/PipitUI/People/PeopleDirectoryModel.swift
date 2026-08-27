@@ -27,6 +27,18 @@ public final class PeopleDirectoryModel {
     /// The focused person's confirmed platform accounts. Loaded with the
     /// detail pane; empty for everyone else and while nobody is focused.
     public private(set) var handles: [IdentityHandle] = []
+    /// The meetings the focused person was heard in, newest first. Loaded with
+    /// the detail pane, like the accounts above.
+    public private(set) var appearances: [PersonAppearance] = []
+    /// Whether that list is still being read. An empty list means two different
+    /// things to a reader, and telling them the recordings are gone while the
+    /// pane is still loading is the wrong one.
+    public private(set) var loadingAppearances = false
+    /// Plays a few seconds of somebody's voice from one of those meetings.
+    public let player = VoiceSamplePlayer()
+    /// Opens a meeting in the meetings window. Set by the window manager, which
+    /// owns both windows.
+    @ObservationIgnored public var onOpenMeeting: ((String) -> Void)?
 
     /// The person whose detail pane is on screen, when exactly one is selected.
     public var focused: SpeakerDirectoryEntry? {
@@ -60,6 +72,9 @@ public final class PeopleDirectoryModel {
 
     public var pendingAction: PeopleAction?
     public var organizationPrompt: OrganizationPrompt?
+    /// The reading sheet, while it is open. Built when it opens so that a
+    /// second reading starts from a clean state rather than a finished one.
+    public var enrollment: VoiceEnrollmentModel?
 
     @ObservationIgnored let runtime: PipitRuntime
 
@@ -128,6 +143,7 @@ public final class PeopleDirectoryModel {
         avatars = avatars.filter { live.contains($0.key) }
         if let focused { loadDrafts(from: focused) }
         refreshHandles()
+        refreshAppearances()
     }
 
     /// Reads the focused person's platform accounts, or clears them when the
@@ -141,6 +157,64 @@ public final class PeopleDirectoryModel {
             let fetched = await runtime.personHandles(of: id)
             if self.focused?.id == id { self.handles = fetched }
         }
+    }
+
+    /// Reads the focused person's meetings, or clears them when the focus is
+    /// gone. A merge carries meetings in, so this runs on reload as well as on
+    /// selection.
+    private func refreshAppearances() {
+        player.stop()
+        // Cleared before the read rather than after it: the rows on screen
+        // belong to whoever was selected a moment ago, and leaving them there
+        // offers a play button that plays somebody else.
+        appearances = []
+        guard let focused else { loadingAppearances = false; return }
+        let id = focused.id
+        loadingAppearances = true
+        Task { [weak self] in
+            guard let self else { return }
+            let fetched = await runtime.appearances(of: id)
+            guard self.focused?.id == id else { return }
+            self.appearances = fetched
+            self.loadingAppearances = false
+        }
+    }
+
+    /// Plays a few seconds of this person from one meeting, or stops what is
+    /// already playing when the same row is pressed again.
+    ///
+    /// The span is read when the button is pressed rather than with the list.
+    /// Finding it reads a transcript, and a person who has been in forty
+    /// meetings listens to one of them.
+    public func playSample(_ appearance: PersonAppearance) {
+        guard let focused else { return }
+        if player.playing == appearance.meetingID { player.stop(); return }
+        let id = focused.id
+        Task { [weak self] in
+            guard let self else { return }
+            guard let sample = await runtime.voiceSample(
+                of: id, inMeeting: appearance.meetingID
+            ) else { return }
+            guard self.focused?.id == id else { return }
+            self.player.play(sample, tagged: appearance.meetingID)
+        }
+    }
+
+    /// Opens the sheet where a person reads a few sentences into their own
+    /// profile. Offered on the local user, whose profile is the one no meeting
+    /// can build without a microphone track of its own.
+    public func startVoiceEnrollment() {
+        player.stop()
+        let model = VoiceEnrollmentModel(runtime: runtime)
+        model.onEnrolled = { [weak self] in
+            Task { await self?.reload() }
+        }
+        enrollment = model
+    }
+
+    public func openMeeting(_ appearance: PersonAppearance) {
+        player.stop()
+        onOpenMeeting?(appearance.meetingID)
     }
 
     /// Withdraws one account link. The person and their voice stay.
@@ -174,6 +248,7 @@ public final class PeopleDirectoryModel {
         }
         if let focused { loadDrafts(from: focused) } else { draftOwner = nil }
         refreshHandles()
+        refreshAppearances()
     }
 
     private func loadDrafts(from entry: SpeakerDirectoryEntry) {
@@ -290,16 +365,28 @@ public final class PeopleDirectoryModel {
 
     // MARK: - actions on a selection
 
-    public func confirmDeleteSelection() {
-        let targets = selectedEntries
+    public func confirmDeleteSelection() { confirmDelete(selectedEntries) }
+
+    public func confirmDelete(_ targets: [SpeakerDirectoryEntry]) {
         guard !targets.isEmpty else { return }
         pendingAction = PeopleAction(
             targets: targets.map(\.id), names: targets.map(\.identity.resolvedName), kind: .delete
         )
     }
 
+    /// What a right-click acts on. The whole selection when the row is part of
+    /// it, and that row alone otherwise. Right-clicking a row outside the
+    /// selection acting on somebody else is the way this goes wrong.
+    public func contextTargets(for entry: SpeakerDirectoryEntry) -> [SpeakerDirectoryEntry] {
+        selection.contains(entry.id) ? selectedEntries : [entry]
+    }
+
     public func confirmForgetVoice() {
         guard let entry = focused else { return }
+        confirmForgetVoice(of: entry)
+    }
+
+    public func confirmForgetVoice(of entry: SpeakerDirectoryEntry) {
         pendingAction = PeopleAction(
             targets: [entry.id], names: [entry.identity.resolvedName], kind: .forgetVoice
         )
@@ -345,8 +432,9 @@ public final class PeopleDirectoryModel {
     /// statement about a pair. Three selected is two decisions.
     public var canMerge: Bool { selection.count == 2 }
 
-    public func mergeSelection() async {
-        let targets = selectedEntries
+    public func mergeSelection() async { await merge(selectedEntries) }
+
+    public func merge(_ targets: [SpeakerDirectoryEntry]) async {
         guard targets.count == 2 else { return }
         // Into the named one where there is exactly one, so the surviving row is
         // the one with a name on it. Otherwise into the one heard more often.
@@ -359,8 +447,9 @@ public final class PeopleDirectoryModel {
         await reload()
     }
 
-    public func beginSetOrganization() {
-        let targets = selectedEntries
+    public func beginSetOrganization() { beginSetOrganization(selectedEntries) }
+
+    public func beginSetOrganization(_ targets: [SpeakerDirectoryEntry]) {
         guard !targets.isEmpty else { return }
         organizationPrompt = OrganizationPrompt(
             targets: targets.map(\.id),

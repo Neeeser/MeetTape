@@ -114,7 +114,10 @@ and metadata are durable. An interrupted compaction resumes during startup.
 
 Voice profiles are stored separately at
 `~/Library/Application Support/Pipit/Speakers/voices.sqlite`. Meeting folders
-and exports contain no voice vectors.
+and exports contain no voice vectors. A recording made by reading the enrolment
+script aloud is kept beside it, under
+`~/Library/Application Support/Pipit/VoiceEnrollment/<identity>/`, and is deleted
+when that person's learned voice is forgotten or they are deleted.
 
 ## Speech processing
 
@@ -178,6 +181,18 @@ disagreeing clocks look like, and a floor nobody confirmed ends at the last
 reading that saw it rather than running to the end of the call. A sensor that reports nothing leaves
 naming exactly as it was before, which is by voice alone.
 
+One identity is the person using this Mac, flagged in the store and named in
+Settings from that row. The microphone track of a remote call is theirs by
+construction, so it is written into `speaker_occurrence` under the `local` key
+with no vector: every count of the meetings a person was in reads that table,
+and the track it covers produces no diarization cluster of its own. Taking a
+name off that track writes the row back with nobody behind it.
+
+Their profile can also be built without a meeting. Reading a short script aloud
+is embedded as one speaker and enrolled directly, which is what makes an
+in-person or imported recording recognisable as them: neither carries a
+microphone track whose speaker is known in advance.
+
 Named people and recurring unnamed voices share one identity store. A confirmed
 speaker name can add meeting audio to a profile. Automatic recognition reads the
 profiles and never trains them. Human corrections take precedence over automatic
@@ -200,6 +215,23 @@ background, so search covers titles immediately and words a moment later.
 Selecting a meeting opens the same controls that used to appear only when a
 meeting finished. Naming a speaker rewrites `speakers.map.json` and re-renders
 `transcript.md` for the recording it belongs to.
+
+Right-clicking a row archives it or moves it to the Trash. Archiving writes
+`archivedAt` into `metadata.json` and moves the row to the Archived filter,
+where it is put back from. Every file stays where it is.
+
+Moving to the Trash asks first, then hands every folder the conversation was
+recorded in to the Finder's Trash, both halves of a rejoined call included, and
+drops that meeting's rows from `speaker_occurrence` so it stops counting towards
+how many meetings a voice has been heard in. The confirmed voice material stays.
+Putting a folder back from the Trash puts the meeting back in the list, and a
+job still running for it carries on with the restored folder. The occurrences do
+not come back, because only a processing stage writes them.
+
+The meeting being recorded is refused. A folder that will not move leaves the
+recording the conversation started with in place, so its row still reaches what
+is left, and an archive on a volume with no Trash is reported as the volume
+rather than as a fault on one meeting.
 
 An imported recording is filed under the date the recorder wrote rather than the
 date the file was copied. Pipit reads the container's creation date, then a

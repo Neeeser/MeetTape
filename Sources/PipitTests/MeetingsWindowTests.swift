@@ -54,11 +54,28 @@ enum MeetingsWindowTests {
         return (created.metadata.id, created.store)
     }
 
-    /// A runtime pointed at one temporary archive.
+    /// Where a runtime built here puts the meetings it trashes.
+    static func trashDirectory(under root: URL) -> URL {
+        root.appendingPathComponent("Trash")
+    }
+
+    /// A runtime pointed at one temporary archive, with a Trash of its own.
+    ///
+    /// The Finder's own Trash would fill with the archives these tests build,
+    /// so a trashed folder is moved here instead. It is also what lets a test
+    /// see that a meeting was moved rather than unlinked.
     @MainActor
     static func makeRuntime(root: URL) -> PipitRuntime {
         NSApplication.shared.setActivationPolicy(.prohibited)
-        let runtime = PipitRuntime(settingsDirectory: root)
+        let trash = trashDirectory(under: root)
+        let runtime = PipitRuntime(settingsDirectory: root, trash: { folder in
+            try FileManager.default.createDirectory(
+                at: trash, withIntermediateDirectories: true
+            )
+            try FileManager.default.moveItem(
+                at: folder, to: trash.appendingPathComponent(folder.lastPathComponent)
+            )
+        })
         var settings = runtime.settings
         settings.storageRootPath = root.appendingPathComponent("Meetings").path
         runtime.update(settings: settings)
@@ -97,7 +114,8 @@ enum MeetingsWindowTests {
         speakers: [(String?, Int64?)] = [],
         notes: String = "",
         source: MeetingSource = .googleMeet,
-        interrupted: Bool = false
+        interrupted: Bool = false,
+        archived: Bool = false
     ) -> MeetingRow {
         MeetingRow(
             summary: MeetingSummary(
@@ -111,7 +129,8 @@ enum MeetingsWindowTests {
                 processingState: state,
                 wasInterrupted: interrupted,
                 hasTranscript: state == .complete,
-                recordingCount: 1
+                recordingCount: 1,
+                isArchived: archived
             ),
             speakers: speakers.enumerated().map { index, speaker in
                 MeetingRowSpeaker(
@@ -334,6 +353,28 @@ enum MeetingsWindowTests {
                     rows, filter: .needsAttention, now: now, calendar: calendar
                 ).flatMap(\.rows)
                 expect.equal(Set(visible.map(\.id)), ["b", "c"])
+            },
+
+            test("an archived meeting is in the archived list and no other") { expect in
+                // Archiving is how a recording is put down. Leaving it under
+                // All would make it a badge, and leaving a failed one under
+                // Attention would keep work in front of the user that they
+                // have already dismissed.
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "Kept", at: now, speakers: [(nil, nil)]),
+                    row("b", title: "Put down", at: now, state: .failed,
+                        speakers: [(nil, nil)], archived: true),
+                ]
+                func visible(_ filter: MeetingsFilter) -> [String] {
+                    MeetingsDirectoryFilter.sections(
+                        rows, filter: filter, now: now, calendar: calendar
+                    ).flatMap(\.rows).map(\.id)
+                }
+                expect.equal(visible(.all), ["a"])
+                expect.equal(visible(.unnamed), ["a"], "and it is not work waiting to be done")
+                expect.equal(visible(.needsAttention), [], "nor a failure still asking for a look")
+                expect.equal(visible(.archived), ["b"])
             },
 
             test("grouping a year of meetings costs about what grouping one month costs") { expect in
@@ -776,6 +817,70 @@ enum MeetingsWindowTests {
                     ),
                     ["a": "words"],
                     "and an ordinary read is kept whole"
+                )
+            },
+
+            test("moving a meeting to the Trash takes every folder it was recorded in") {
+                expect in try await trashingMovesEveryFolder(expect)
+            },
+
+            test("archiving takes the row out of the list and leaves the files alone") {
+                expect in try await archivingKeepsTheFiles(expect)
+            },
+
+            test("a right-click acts on the row under the pointer, not the selection") {
+                expect in try await aRightClickActsOnTheRowUnderIt(expect)
+            },
+
+            test("trashing a meeting stops its voices counting it") {
+                expect in try await trashingDropsTheOccurrences(expect)
+            },
+
+            test("a folder that will not move keeps its row and its occurrences") {
+                expect in try await aFolderThatWillNotMoveKeepsItsRow(expect)
+            },
+
+            test("archiving survives the next write to the meeting's metadata") {
+                expect in try await archivingSurvivesAMetadataWrite(expect)
+            },
+
+            test("archiving writes what was typed into the pane before it closes it") {
+                expect in try await archivingSavesTheEdit(expect)
+            },
+
+            test("the footer counts the meetings the filter holds") {
+                expect in try await theFooterCountsWhatTheFilterHolds(expect)
+            },
+
+            test("what the move could not do is said one cause at a time") { expect in
+                // Every refusal used to read as a recording in progress, which
+                // sent the reader looking for a call that had already ended.
+                expect.isNil(MeetingsWindowModel.problemText(recording: nil, failed: []))
+                let one = try expect.unwrap(
+                    MeetingsWindowModel.problemText(recording: "Standup", failed: [])
+                )
+                expect.isTrue(one.contains("Standup is being recorded"), "got \(one)")
+                let other = try expect.unwrap(
+                    MeetingsWindowModel.problemText(recording: nil, failed: ["Design review"])
+                )
+                expect.isTrue(
+                    other.contains("would not move") && !other.contains("being recorded"),
+                    "a folder that would not move is not a recording. got \(other)"
+                )
+                let both = try expect.unwrap(
+                    MeetingsWindowModel.problemText(
+                        recording: "Standup", failed: ["Design review"]
+                    )
+                )
+                expect.isTrue(both.contains("Standup") && both.contains("Design review"))
+                let volume = try expect.unwrap(
+                    MeetingsWindowModel.problemText(
+                        recording: nil, failed: [], noTrash: ["Design review"]
+                    )
+                )
+                expect.isTrue(
+                    volume.contains("volume with no Trash"),
+                    "a share with no Trash is not a fault on one meeting. got \(volume)"
                 )
             },
 
@@ -1694,6 +1799,288 @@ enum MeetingsWindowTests {
         expect.isTrue(
             strip.contains { $0.isUnnamed && $0.displayName.hasSuffix("part 2") },
             "got \(strip.map(\.displayName))"
+        )
+    }
+
+    // MARK: - archiving and trashing
+
+    /// Both halves of a rejoined call are one row, so trashing that row has to
+    /// take both folders. Leaving the second half behind would put a recording
+    /// in the archive that no row can reach.
+    @MainActor
+    static func trashingMovesEveryFolder(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repository, meetingID) = try makeRejoinedCall(root: root)
+        let folders = (repository.logicalMeeting(id: meetingID)?.recordings ?? [])
+            .map(\.store.layout.root)
+        expect.equal(folders.count, 2, "a call recorded in two halves")
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        expect.equal(model.rows.map(\.id), [meetingID])
+        guard let target = model.rows.first else { return expect.fail("no row to move") }
+
+        model.confirmTrash([target])
+        guard let pending = model.pendingTrash else {
+            return expect.fail("the move asks first")
+        }
+        expect.isTrue(pending.title.contains("Weekly sync"), "got \(pending.title)")
+        expect.isTrue(
+            pending.message.contains("moved to the Trash rather than deleted"),
+            "the warning says where the files go. got \(pending.message)"
+        )
+        expect.equal(pending.folderCount, 2)
+        expect.isTrue(
+            pending.message.contains("2 folders"),
+            "and it counts both halves of the call. got \(pending.message)"
+        )
+        await model.performTrash(pending)
+
+        let trash = trashDirectory(under: root)
+        for folder in folders {
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: folder.path),
+                "\(folder.lastPathComponent) has left the archive"
+            )
+            expect.isTrue(
+                FileManager.default.fileExists(
+                    atPath: trash.appendingPathComponent(folder.lastPathComponent).path
+                ),
+                "and is in the Trash, whole, rather than unlinked"
+            )
+        }
+        let moved = MeetingLayout(root: trash.appendingPathComponent(folders[0].lastPathComponent))
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: moved.metadata.path),
+            "with the files it held still in it"
+        )
+        expect.equal(model.rows.count, 0, "and the list has nothing left")
+        expect.isTrue(model.selection.isEmpty)
+        expect.isNil(model.detail, "the pane is not left reading files that are gone")
+        expect.isFalse(model.indexHolds(meetingID), "search does not answer for it either")
+    }
+
+    /// Archiving is about the list. Every file stays exactly where it was, and
+    /// the Archived filter is where the meeting is put back from.
+    @MainActor
+    static func archivingKeepsTheFiles(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let folder = meeting.store.layout.root
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+
+        model.setArchived(true, [target])
+        await waitFor(expect, "the archived row to leave the list") {
+            model.sections.flatMap(\.rows).isEmpty
+        }
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: folder.path), "the folder is untouched"
+        )
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: meeting.store.layout.canonicalTranscript.path),
+            "and so is the transcript"
+        )
+        expect.isTrue(model.selection.isEmpty, "and nothing is selected under All")
+
+        model.filter = .archived
+        expect.equal(
+            model.sections.flatMap(\.rows).map(\.id), [meeting.id],
+            "the archived list is where it went"
+        )
+
+        guard let archived = model.rows.first else { return expect.fail("the row is gone") }
+        expect.isTrue(archived.isArchived)
+        model.setArchived(false, [archived])
+        await waitFor(expect, "the meeting to come back") {
+            model.rows.first?.isArchived == false
+        }
+        model.filter = .all
+        expect.equal(model.sections.flatMap(\.rows).map(\.id), [meeting.id])
+    }
+
+    /// A right-click on a row that is not selected acts on that row. Acting on
+    /// the selection instead would delete meetings the pointer was never over.
+    @MainActor
+    static func aRightClickActsOnTheRowUnderIt(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let started = Date(timeIntervalSince1970: 1_787_070_000)
+        let first = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: started
+        )
+        let second = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Standup",
+            startedAt: started.addingTimeInterval(3_600)
+        )
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        model.select(first.id, extending: false)
+        guard let other = model.rows.first(where: { $0.id == second.id }) else {
+            return expect.fail("the second meeting is not in the list")
+        }
+        expect.equal(model.contextTargets(for: other).map(\.id), [second.id])
+
+        model.select(second.id, extending: true)
+        expect.equal(
+            Set(model.contextTargets(for: other).map(\.id)), [first.id, second.id],
+            "and a row inside the selection acts on all of it"
+        )
+    }
+
+    /// The wiring from the window's move through to the voice memory. Without
+    /// it a trashed meeting kept counting towards "heard in 3 meetings".
+    @MainActor
+    static func trashingDropsTheOccurrences(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let runtime = makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let chris = try await store.createPerson(name: "Chris")
+        try await store.recordOccurrence(
+            meetingID: meeting.id, clusterID: "remote-001_speaker_00", track: .remote,
+            speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+            identityID: chris.id, source: .human,
+            humanVerified: true, wasExpectedParticipant: false
+        )
+        expect.equal(try await store.meetingCount(for: chris.id), 1)
+
+        expect.equal(
+            await runtime.trashMeetings([meeting.id])[meeting.id], .trashed, "the folder went"
+        )
+
+        expect.equal(try await store.meetingCount(for: chris.id), 0)
+    }
+
+    /// The archived flag lives in `metadata.json`, which the pipeline rewrites
+    /// at every stage boundary. `updateMetadata` reads, changes and writes the
+    /// whole document, so a field it does not know about has to survive that.
+    @MainActor
+    static func archivingSurvivesAMetadataWrite(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        let runtime = makeRuntime(root: root)
+
+        runtime.setArchived(true, meetingIDs: [meeting.id])
+        _ = try meeting.store.updateMetadata { $0.durationSeconds = 900 }
+
+        expect.isTrue(try meeting.store.readMetadata().isArchived)
+        let summary = runtime.repository.summary(forDirectory: meeting.store.layout.root)
+        expect.isTrue(summary?.isArchived == true, "and the list reads it back")
+
+        runtime.setArchived(false, meetingIDs: [meeting.id])
+        expect.isFalse(try meeting.store.readMetadata().isArchived)
+    }
+
+    /// Archiving leaves every file where it is, so a title half-typed when the
+    /// row was archived still belongs to a meeting.
+    @MainActor
+    static func archivingSavesTheEdit(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        await waitFor(expect, "the pane to open") { model.detail?.title.isEmpty == false }
+        model.detail?.title = "Renamed while archiving"
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+
+        model.setArchived(true, [target])
+
+        expect.equal(
+            try meeting.store.readMetadata().displayTitle, "Renamed while archiving",
+            "the title reached disk before the pane was dropped"
+        )
+    }
+
+    /// The footer counts against what the filter holds. Against the archive it
+    /// read "1 of 2" under All with nothing typed in the search field.
+    @MainActor
+    static func theFooterCountsWhatTheFilterHolds(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let started = Date(timeIntervalSince1970: 1_787_070_000)
+        _ = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: started
+        )
+        _ = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Standup",
+            startedAt: started.addingTimeInterval(3_600)
+        )
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        expect.equal(model.filteredRows.count, 2)
+        let both = model.totalDuration
+
+        guard let target = model.rows.first else { return expect.fail("nothing recorded") }
+        model.setArchived(true, [target])
+        await waitFor(expect, "the archived row to leave the list") {
+            model.filteredRows.count == 1
+        }
+        expect.equal(
+            model.sections.flatMap(\.rows).count, model.filteredRows.count,
+            "so the footer says one meeting rather than one of two"
+        )
+        expect.isTrue(
+            model.totalDuration < both, "and the total is the time the list adds up to"
+        )
+
+        model.filter = .archived
+        expect.equal(model.filteredRows.count, 1)
+    }
+
+    /// A move that cannot finish stops before the recording the conversation
+    /// started with, so the row that reaches what is left stays in the list.
+    /// Nothing about the meeting is forgotten either, because the meeting is
+    /// still there.
+    @MainActor
+    static func aFolderThatWillNotMoveKeepsItsRow(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        let (repository, meetingID) = try makeRejoinedCall(root: root)
+        guard let logical = repository.logicalMeeting(id: meetingID),
+              let continuation = logical.continuations.first
+        else { return expect.fail("the call was not recorded in two halves") }
+        let locked = continuation.store.layout.root
+        // Locked the way the Finder locks a file, which is the ordinary reason
+        // a folder will not move.
+        let unlock = { try? FileManager.default.setAttributes(
+            [.immutable: false], ofItemAtPath: locked.path
+        ) }
+        defer { try? FileManager.default.removeItem(at: root) }
+        defer { unlock() }
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: locked.path)
+
+        let runtime = makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let chris = try await store.createPerson(name: "Chris")
+        try await store.recordOccurrence(
+            meetingID: meetingID, clusterID: "remote-001_speaker_00", track: .remote,
+            speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+            identityID: chris.id, source: .human,
+            humanVerified: true, wasExpectedParticipant: false
+        )
+
+        let outcome = await runtime.trashMeetings([meetingID])[meetingID]
+
+        expect.equal(outcome, .folderNotMoved)
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: logical.primary.store.layout.root.path),
+            "the recording the conversation started with is still there, so the row still is"
+        )
+        expect.equal(
+            try await store.meetingCount(for: chris.id), 1,
+            "and a meeting still in the archive still counts for the people who spoke in it"
         )
     }
 }

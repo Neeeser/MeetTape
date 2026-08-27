@@ -60,6 +60,14 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
+    /// Meetings whose folders left the archive while a job was running, and
+    /// when they left.
+    ///
+    /// Every write here goes through `AtomicFile`, which creates the
+    /// directories it needs, so a job that carried on after the move put the
+    /// meeting back as a row holding no audio and no transcript.
+    private var goneWhileRunning: [String: Date] = [:]
+
     /// How many jobs are writing into each meeting's folder right now.
     ///
     /// Renaming a folder moves it out from under the absolute paths a job
@@ -81,7 +89,13 @@ public actor ProcessingPipeline {
 
     private func releaseFolder(_ meetingID: String) {
         guard let count = foldersHeld[meetingID] else { return }
-        if count <= 1 { foldersHeld.removeValue(forKey: meetingID) } else {
+        if count <= 1 {
+            foldersHeld.removeValue(forKey: meetingID)
+            // The last writer is out, so nothing is left to notice a move, and
+            // a mark left behind would take the folder out from under a later
+            // job on the same meeting.
+            goneWhileRunning.removeValue(forKey: meetingID)
+        } else {
             foldersHeld[meetingID] = count - 1
         }
     }
@@ -90,6 +104,7 @@ public actor ProcessingPipeline {
     private func heldByOthers(_ meetingID: String, besidesSelf: Bool) -> Bool {
         (foldersHeld[meetingID] ?? 0) > (besidesSelf ? 1 : 0)
     }
+
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -131,6 +146,67 @@ public actor ProcessingPipeline {
         self.chunking = chunking
     }
 
+    /// Removes what a stage wrote into a folder that is no longer meant to
+    /// exist, and says whether the job should stop.
+    ///
+    /// A stage already running when the meeting was trashed finishes and writes
+    /// its output through `AtomicFile`, which creates the directories it needs.
+    /// What it left is removed here rather than guarded at every write. Removed
+    /// outright rather than trashed, because it is scrap written over the top
+    /// of where the meeting used to be, and the meeting itself is whole in the
+    /// Trash.
+    ///
+    /// A folder older than the move is not that scrap. It is the meeting
+    /// itself, put back from the Trash while this ran, so it is left alone and
+    /// the job carries on with it.
+    /// The mark is read rather than taken. Two jobs can be in one folder at
+    /// once, compaction and re-analysis among them, and whichever checked first
+    /// used to take the mark with it. The other then wrote its output into a
+    /// meeting that was already in the Trash and nothing was left to notice.
+    /// `releaseFolder` drops it when the last of them leaves.
+    private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
+        guard let movedAt = goneWhileRunning[meetingID] else { return false }
+        switch RecreatedFolder.discard(at: store.layout.root, writtenAfter: movedAt) {
+        case .predatesTheMove:
+            Log.processing.notice("meeting was put back while it processed, so the job carries on")
+            return false
+        case .kept:
+            // Left where it is, because this volume gives no date to tell what
+            // a stage wrote apart from the meeting itself put back, or because
+            // the removal would not go through.
+            Log.processing.notice("meeting left the archive, job stopped, folder kept")
+        case .absent, .removed:
+            Log.processing.notice("meeting left the archive while it processed, so the job stopped")
+        }
+        scratch.discard(meetingID: meetingID)
+        return true
+    }
+
+    /// Stops the job on a meeting whose folder has just left the archive.
+    ///
+    /// The window offers Move to Trash as soon as the recording is over, which
+    /// is minutes before transcription finishes. The job notices at its next
+    /// stage boundary, removes what it wrote in the meantime, and stops.
+    ///
+    /// Called once the folder has actually moved, and only for folders that
+    /// did. Arming this before the move meant a stage boundary in between
+    /// deleted the meeting the user still had.
+    ///
+    /// Returns whether anything is writing into the folder to notice. When
+    /// nothing is, nothing here will ever clean up what a job wrote on its way
+    /// out, and the caller does it instead.
+    ///
+    /// Asked of the writers rather than of `running`, because processing is not
+    /// the only one. Compaction transcodes for minutes after a meeting is
+    /// complete, and re-analysis diarizes for minutes on one that has been
+    /// complete for months.
+    @discardableResult
+    public func forget(meetingID: String, movedAt: Date) -> Bool {
+        guard foldersHeld[meetingID] != nil else { return false }
+        goneWhileRunning[meetingID] = movedAt
+        return true
+    }
+
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
     /// flight is left alone.
     public func process(meetingID: String) async {
@@ -157,6 +233,7 @@ public actor ProcessingPipeline {
         let settings = settingsProvider()
 
         while let stage = metadata.processing.resumeStage, stage != .complete {
+            if discardIfGone(metadata.id, store: store) { return }
             do {
                 // Capture always wins. A job started before a meeting parks here
                 // between stages rather than competing for the microphone, the
@@ -185,6 +262,11 @@ public actor ProcessingPipeline {
                     }
                     if !gate.isBlocked { break }
                 }
+                // The wait above runs for the length of somebody else's call,
+                // which is long enough for the user to trash this meeting.
+                // Without this the job ran a whole transcription pass on it and
+                // reported progress for a folder that was already gone.
+                if discardIfGone(metadata.id, store: store) { return }
                 metadata.processing.recordAttempt(for: stage)
                 try persist(metadata, to: store)
                 report(metadata, chunks: nil)
@@ -275,9 +357,13 @@ public actor ProcessingPipeline {
                 onFailure(metadata.id, failure)
                 // Nothing else will read the decoded working copies now.
                 scratch.discard(meetingID: metadata.id)
+                _ = discardIfGone(metadata.id, store: store)
                 return
             }
         }
+        // The last stage advances to complete, which ends the loop without
+        // coming back to the check at the top of it.
+        if discardIfGone(metadata.id, store: store) { return }
 
         // Compaction runs strictly after `complete`: every model has read the
         // PCM at full fidelity by now. A failure leaves the segments as the
@@ -299,7 +385,15 @@ public actor ProcessingPipeline {
                     holdsSlot = true
                 }
             }
+            // The gate wait above is as long as another call, so the move can
+            // land before the transcode even starts.
+            if discardIfGone(metadata.id, store: store) { return }
             await compactQuietly(store: store)
+            // Compaction is minutes of transcoding on a long meeting, and it
+            // writes the archives through AtomicFile like everything else, so
+            // a move landing inside it recreated the folder holding nothing but
+            // audio.
+            _ = discardIfGone(metadata.id, store: store)
         }
 
         // Last, because a rename moves the folder every path above writes into.
@@ -332,12 +426,32 @@ public actor ProcessingPipeline {
 
     /// Replaces a finished meeting's PCM segments with verified archives.
     /// Public entry for the startup sweep; `process` compacts inline.
+    ///
+    /// Counted as a job for as long as it runs, because it is one: minutes of
+    /// transcoding that writes into the meeting's folder. Left out of `running`
+    /// it was a writer nothing could stop, and a meeting trashed in the middle
+    /// of the launch sweep came back holding audio and no metadata.
     public func compactAudio(meetingID: String) async {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
+        guard !running.contains(meetingID) else { return }
+        running.insert(meetingID)
+        // Held as well as counted. It writes the archive files into the folder,
+        // so a rename must not move the folder out from under it.
+        holdFolder(meetingID)
         await waitForSlot()
-        defer { jobLock.release() }
+        defer {
+            running.remove(meetingID)
+            releaseFolder(meetingID)
+            jobLock.release()
+        }
+        // The wait for the slot is as long as a live recording, so the move can
+        // land before the transcode starts. Checked the way every stage checks
+        // it, rather than handing a folder that has gone to the compactor and
+        // reading its failure out of the log.
+        if discardIfGone(meetingID, store: found.store) { return }
         await compactQuietly(store: found.store)
+        _ = discardIfGone(meetingID, store: found.store)
     }
 
     /// Compacts every finished meeting that still has PCM audio, one at a
@@ -413,6 +527,10 @@ public actor ProcessingPipeline {
     /// silently discard that edit.
     private func persist(_ metadata: MeetingMetadata, to store: MeetingStore) throws {
         guard (try? store.readMetadata()) != nil else {
+            // No metadata.json is either a job whose first write this is, or a
+            // meeting somebody trashed underneath it. The folder tells the two
+            // apart, and writing into a trashed meeting recreates it.
+            guard FileManager.default.fileExists(atPath: store.layout.root.path) else { return }
             try store.writeMetadata(metadata)
             return
         }
@@ -1117,6 +1235,98 @@ public actor ProcessingPipeline {
     }
 
 
+    /// Records the microphone track as an appearance by whoever it belongs to.
+    ///
+    /// Every other speaker reaches `speaker_occurrence` through a diarization
+    /// cluster. The microphone track has none, because its speaker is true by
+    /// construction, so nothing wrote a row for it and every count over that
+    /// table read the local user as having been in no meeting at all. The
+    /// People list showed zero beside a voice profile built from those very
+    /// recordings, and `refreshCachedNames` walks the same query, so renaming
+    /// yourself re-rendered none of your own transcripts.
+    ///
+    /// No vector goes with it. The row exists to say the track was heard and
+    /// who it was, and the profile this track feeds is written by
+    /// `learnLocalUserVoice`, which has its own bleed check to pass first.
+    @discardableResult
+    private func recordLocalUserOccurrence(
+        meetingID: String, transcript: CanonicalTranscript, speakers: SpeakerMap
+    ) async -> Bool {
+        guard let service = backends.speakers else { return false }
+        let assignment = speakers.entries[SpeakerLabel.localUser]
+        // "Leave unnamed" on this track is a person saying the meeting is not
+        // theirs. The row is still written, with nobody behind it, because the
+        // one it replaces says it was: skipping here left the meeting counting
+        // towards a person who had just taken their name off it.
+        let cleared = speakers.clearedKeys.contains(SpeakerLabel.localUser)
+        guard assignment != nil || cleared else { return false }
+        let seconds = transcript.speakers
+            .first { $0.key == SpeakerLabel.localUser }?.speechSeconds ?? 0
+        guard seconds > 0 else { return false }
+        do {
+            _ = try await service.speakerStore.recordOccurrence(
+                meetingID: meetingID,
+                clusterID: SpeakerLabel.localUser,
+                track: .mic,
+                speechSeconds: seconds,
+                embedding: nil,
+                model: nil,
+                resolution: nil,
+                identityID: assignment?.identityID,
+                source: assignment?.origin ?? .human,
+                humanVerified: cleared || (assignment?.provenance?.humanVerified ?? false),
+                wasExpectedParticipant: false,
+                now: clock.now
+            )
+            return true
+        } catch {
+            Log.processing.notice(
+                "microphone occurrence skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    /// Writes the microphone track's row for meetings recorded before it had
+    /// one, and reports how many it wrote.
+    ///
+    /// Runs once. Everything that counts a person's meetings reads
+    /// `speaker_occurrence`, and until this existed the local user had no rows
+    /// there at all, so their own history was invisible to the People list and
+    /// to every rename that walks it. New meetings write the row as they are
+    /// processed; this is the archive that was already on disk.
+    public func backfillLocalUserOccurrences() async -> Int {
+        guard backends.speakers != nil else { return 0 }
+        let localUserID = settingsProvider().processing.localUserIdentityID
+        var written = 0
+        for summary in repository.listMeetings() {
+            for store in repository.stores(ofConversation: summary) {
+                guard let metadata = try? store.readMetadata(),
+                      var speakers = try? store.readSpeakerMap(),
+                      let transcript = try? store.readCanonicalTranscript()
+                else { continue }
+                // A meeting processed before Settings held an identity at all
+                // names the microphone track and links it to nobody. The track
+                // is the local user by construction, and the entry still says
+                // the pipeline wrote it rather than a person, so the link is
+                // the one this meeting would be given if it ran again.
+                if let localUserID, metadata.source.micTrackIsLocalUser,
+                   speakers.entries[SpeakerLabel.localUser]?.identityID == nil,
+                   speakers.entries[SpeakerLabel.localUser]?.origin == .deterministic {
+                    speakers.linkIdentity(localUserID, to: SpeakerLabel.localUser, named: nil)
+                    try? store.writeSpeakerMap(speakers)
+                }
+                guard speakers.entries[SpeakerLabel.localUser]?.identityID != nil else { continue }
+                if await recordLocalUserOccurrence(
+                    meetingID: metadata.id, transcript: transcript, speakers: speakers
+                ) {
+                    written += 1
+                }
+            }
+        }
+        return written
+    }
+
     /// The sensor record with the local user marked, where a meeting has one.
     ///
     /// Only remote meetings: the record describes the far-end track, and an
@@ -1464,6 +1674,9 @@ public actor ProcessingPipeline {
             )
         }
         try store.writeSpeakerMap(speakers)
+        await recordLocalUserOccurrence(
+            meetingID: metadata.id, transcript: transcript, speakers: speakers
+        )
 
         // Voice memory is a side effect of the meeting, not part of it. A
         // deleted model folder or an unreadable track must not take the whole
@@ -1774,6 +1987,76 @@ public actor ProcessingPipeline {
         )
     }
 
+    /// Adds a recording of somebody reading aloud to their voice profile.
+    ///
+    /// The one enrolment with no meeting behind it, and the only one a person
+    /// starts on purpose. Everything else waits for a recording to exist: the
+    /// microphone track of a remote call, or a name typed onto a cluster. A
+    /// fresh install has neither, and a Mac used only for in-person or imported
+    /// recordings never gets the first, so this is what makes the person at the
+    /// keyboard recognisable before their first call.
+    ///
+    /// The audio has to hold one voice. `singleSpeakerEmbedding` refuses a
+    /// recording where the dominant speaker holds less than three quarters of
+    /// the speech, which is what stops somebody's kitchen radio, or a colleague
+    /// answering a question mid-take, from joining their profile.
+    public func enrolSpokenSample(
+        audio: URL, identityID: IdentityID
+    ) async throws(SpokenEnrollmentError) -> VoiceProfileStatus {
+        guard let service = backends.speakers, let embed = backends.singleSpeakerEmbedding else {
+            throw .modelsUnavailable
+        }
+        let sample: SingleSpeakerSample?
+        do {
+            sample = try await embed(audio)
+        } catch {
+            Log.processing.notice(
+                "spoken enrolment could not be embedded: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        guard let sample, !sample.spans.isEmpty else { throw .noSingleVoice }
+
+        // The spans are inside this recording, which is the whole of it, so
+        // there is no timeline to move them onto. The identifier names the file
+        // rather than a meeting, and no meeting can be named that, so a
+        // retraction that walks meetings never reaches these rows by accident.
+        let recordingID = "enrollment-\(audio.deletingPathExtension().lastPathComponent)"
+        let store = await service.speakerStore
+        let result: Result<VoiceProfileStatus, VoiceEnrollmentRejection>
+        do {
+            result = try await store.enrol(
+                VoiceEnrollmentCandidate(
+                    identityID: identityID,
+                    vector: sample.vector,
+                    model: .fluidAudioOffline,
+                    speechSeconds: sample.speechSeconds,
+                    qualityScore: sample.quality,
+                    source: .spokenEnrollment,
+                    evidence: [VoiceEvidence(
+                        meetingID: recordingID, track: .mic, spans: sample.spans,
+                        confirmation: .spokenEnrollment
+                    )]
+                ),
+                now: clock.now
+            )
+        } catch {
+            Log.processing.error(
+                "spoken enrolment not stored: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        switch result {
+        case .success(let status):
+            Log.processing.info(
+                "spoken enrolment: \(status.sampleCount, privacy: .public) samples, \(Int(status.speechSeconds), privacy: .public)s"
+            )
+            return status
+        case .failure(let rejection):
+            throw .rejected(rejection)
+        }
+    }
+
     /// Asks the cloud model which of the still-unnamed speakers it heard a name
     /// for, and files the answers as suggestions.
     ///
@@ -2064,6 +2347,17 @@ public actor ProcessingPipeline {
         // the local user's own voice: the one profile no person ever reviews.
         if key == SpeakerLabel.localUser, resolved != settings.processing.localUserIdentityID {
             try await retractMicrophoneTrack(meetingID: meetingID)
+        }
+        // The row that says the microphone track was heard names whoever the
+        // map now names, or the meeting still counts towards the person the
+        // user has just said was not speaking.
+        // Read without throwing: a transcript that cannot be decoded is a row
+        // this cannot update, not a rename to undo. The name has already been
+        // written to the speaker map by this point.
+        if key == SpeakerLabel.localUser, let transcript = try? found.store.readCanonicalTranscript() {
+            await recordLocalUserOccurrence(
+                meetingID: meetingID, transcript: transcript, speakers: speakers
+            )
         }
         if let resolved {
             try await confirmCluster(
@@ -2465,6 +2759,11 @@ public actor ProcessingPipeline {
         guard let reanalyze = backends.reanalyzeDiarization else { return }
         holdFolder(meetingID)
         defer { releaseFolder(meetingID) }
+        // This diarizes for minutes and writes the result into the folder, so a
+        // meeting trashed while it runs would come back holding it. Registered
+        // after the release above, so it runs before the hold goes and takes
+        // the mark with it.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }

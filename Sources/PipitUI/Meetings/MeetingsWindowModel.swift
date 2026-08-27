@@ -74,6 +74,11 @@ public final class MeetingsWindowModel {
     /// it must not put them back.
     @ObservationIgnored private var droppedWhileReading: Set<String> = []
     @ObservationIgnored private var loadTask: Task<[MeetingRow], Never>?
+    /// Counts the changes this window has made to the archive itself, which are
+    /// combining, separating, archiving and deleting. A read that started before
+    /// one of them holds the archive as it was, and assigning it put the rows
+    /// back that the user had just taken out.
+    @ObservationIgnored private var archiveChanges = 0
     @ObservationIgnored let runtime: PipitRuntime
 
     /// Opens Settings, set by whoever owns the windows. The same shape the
@@ -100,10 +105,18 @@ public final class MeetingsWindowModel {
             _ = await inFlight.value
             return
         }
-        let task = Task { [runtime] in await runtime.meetingRows() }
-        loadTask = task
-        let loaded = await task.value
-        loadTask = nil
+        var loaded: [MeetingRow] = []
+        while true {
+            let changes = archiveChanges
+            let task = Task { [runtime] in await runtime.meetingRows() }
+            loadTask = task
+            loaded = await task.value
+            loadTask = nil
+            // Read again rather than drawing an archive that has changed under
+            // the read. One more read per change the user made, and only while
+            // one was already running.
+            if changes == archiveChanges { break }
+        }
         rows = loaded
         isLoading = false
         // The meeting the pane is showing stays selected even when this read
@@ -244,8 +257,13 @@ public final class MeetingsWindowModel {
         rows.filter { selection.contains($0.id) }
     }
 
-    /// Every meeting's total, for the footer.
-    public var totalDuration: Double { PipitRuntime.totalDuration(of: rows) }
+    /// The rows this filter holds, before the search query narrows them. What
+    /// the footer counts against, because with anything archived the archive's
+    /// own total is a number no list on screen adds up to.
+    public var filteredRows: [MeetingRow] { rows.filter { filter.admits($0) } }
+
+    /// The total of the meetings this filter holds, for the footer.
+    public var totalDuration: Double { PipitRuntime.totalDuration(of: filteredRows) }
 
     public func select(_ id: String, extending: Bool) {
         if extending {
@@ -325,6 +343,7 @@ public final class MeetingsWindowModel {
         guard let detail else { return }
         let meetingID = detail.meetingID
         detail.combineWithEarlier()
+        archiveChanges += 1
         show(meetingID: meetingID)
         Task { [weak self] in await self?.reload() }
     }
@@ -333,6 +352,7 @@ public final class MeetingsWindowModel {
     /// back is a row of its own, and nothing short of a read knows it is there.
     public func separate(_ recordingID: String) {
         detail?.detach(recordingID)
+        archiveChanges += 1
         Task { [weak self] in await self?.reload() }
     }
 
@@ -471,16 +491,183 @@ public final class MeetingsWindowModel {
 
     public func dismissReceipt() { receipt = nil }
 
+    // MARK: - archiving and trashing
+
+    /// A move to the Trash, held until the person who asked for it confirms.
+    ///
+    /// Carries the meetings it will move rather than reading the selection back
+    /// when the button is pressed. The alert clears its own state as it
+    /// dismisses, and a handler that reads it there finds nothing to do.
+    public struct MeetingsTrash: Identifiable, Equatable {
+        public let id = UUID()
+        public var targets: [String]
+        public var names: [String]
+        /// The folder of each meeting, from the meetings root down, so the
+        /// confirmation names what leaves the archive.
+        public var folders: [String]
+        /// How many folders go. A call that dropped and was rejoined is one row
+        /// over two of them, and naming one while moving both understated what
+        /// the button does.
+        public var folderCount: Int
+
+        public var title: String {
+            targets.count == 1
+                ? "Move \(names.first ?? "this meeting") to the Trash?"
+                : "Move \(targets.count) meetings to the Trash?"
+        }
+
+        public var message: String {
+            if folderCount == 1 {
+                return "The folder \(folders.first ?? "") and everything in it, the audio "
+                    + "included, is moved to the Trash rather than deleted."
+            }
+            if targets.count == 1 {
+                return "This call was recorded in \(folderCount) folders. All of them and "
+                    + "everything in them, the audio included, are moved to the Trash rather "
+                    + "than deleted."
+            }
+            return "\(folderCount) meeting folders and everything in them, the audio included, "
+                + "are moved to the Trash rather than deleted."
+        }
+    }
+
+    public var pendingTrash: MeetingsTrash?
+
+    /// What a right-click acts on. The whole selection when the row is part of
+    /// it, and that row alone otherwise. Right-clicking a row outside the
+    /// selection acting on some other row is the way this goes wrong.
+    public func contextTargets(for row: MeetingRow) -> [MeetingRow] {
+        selection.contains(row.id) ? selectedRows : [row]
+    }
+
+    public func confirmTrash(_ rows: [MeetingRow]) {
+        guard !rows.isEmpty else { return }
+        pendingTrash = MeetingsTrash(
+            targets: rows.map(\.id),
+            names: rows.map(\.title),
+            folders: rows.map { Self.archivePath(of: $0.summary.directory) },
+            folderCount: rows.reduce(0) { $0 + $1.summary.recordingCount }
+        )
+    }
+
+    /// The folder from the meetings root down. The absolute path is long enough
+    /// to push an alert wide, and the part a person recognises is the end.
+    static func archivePath(of directory: URL) -> String {
+        directory.pathComponents.suffix(3).joined(separator: "/")
+    }
+
+    /// What the move could not do. The window says it in an alert, because the
+    /// row simply coming back says nothing at all.
+    public var trashProblem: String?
+
+    /// Runs a confirmed move. Takes it as an argument rather than reading
+    /// `pendingTrash`, which the alert's dismissal has already cleared.
+    public func performTrash(_ trash: MeetingsTrash) async {
+        pendingTrash = nil
+        // Counted before the first await. A read of the archive that finishes
+        // inside the move below holds meetings this is taking out, and
+        // assigning it put them back and opened the pane on one of them.
+        archiveChanges += 1
+        // The pane is holding a read of files that are about to go. What was
+        // typed into it is written first anyway, because the move can be
+        // refused and the meeting is then still there to hold it.
+        if let focused = detail?.meetingID, trash.targets.contains(focused) {
+            detail?.saveEdits()
+            detail = nil
+        }
+        for id in trash.targets { dropFromIndex(id) }
+        let outcomes = await runtime.trashMeetings(trash.targets)
+        var recording: String?
+        var failed: [String] = []
+        var gone: Set<String> = []
+        var noTrash: [String] = []
+        for (index, id) in trash.targets.enumerated() {
+            let name = trash.names.indices.contains(index) ? trash.names[index] : id
+            switch outcomes[id] ?? .notFound {
+            // Out of the archive either way. A meeting nothing can find was
+            // already gone before this row was drawn.
+            case .trashed, .notFound: gone.insert(id)
+            case .refusedWhileRecording: recording = name
+            case .folderNotMoved: failed.append(name)
+            case .volumeHasNoTrash: noTrash.append(name)
+            }
+        }
+        // Only what actually went. A meeting that was refused keeps its row and
+        // its place in the selection, and reload opens the pane on it again.
+        rows.removeAll { gone.contains($0.id) }
+        selection.subtract(gone)
+        trashProblem = Self.problemText(recording: recording, failed: failed, noTrash: noTrash)
+        await reload()
+    }
+
+    /// What is still in the archive, and why. Nil when everything went.
+    ///
+    /// Each cause gets its own sentence. A folder that would not move,
+    /// reported as a recording in progress, sent the reader looking for a call
+    /// that had already ended. `recording` is one meeting at most, because one
+    /// is all this Mac records at a time.
+    public nonisolated static func problemText(
+        recording: String?, failed: [String], noTrash: [String] = []
+    ) -> String? {
+        var sentences: [String] = []
+        if let recording {
+            sentences.append(
+                "\(recording) is being recorded, and is kept until the recording stops."
+            )
+        }
+        if failed.count == 1 {
+            sentences.append("\(failed[0]) has a folder this Mac would not move to the Trash.")
+        } else if failed.count > 1 {
+            sentences.append(
+                "\(failed.count) meetings have folders this Mac would not move to the Trash."
+            )
+        }
+        if !noTrash.isEmpty {
+            // The meetings folder can be anywhere the user pointed it, and a
+            // network share and an exFAT disk have no Trash at all. Without
+            // this the alert read as a fault on one meeting and the same thing
+            // happened to every one of them.
+            sentences.append(
+                "The meetings folder is on a volume with no Trash, so nothing was moved. "
+                    + "The Finder can delete these folders."
+            )
+        }
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    }
+
+    /// Takes meetings out of the list, or puts them back. Nothing on disk
+    /// moves.
+    public func setArchived(_ archived: Bool, _ rows: [MeetingRow]) {
+        guard !rows.isEmpty else { return }
+        let ids = rows.map(\.id)
+        runtime.setArchived(archived, meetingIDs: ids)
+        archiveChanges += 1
+        // The rows leave whichever list is on screen, so the pane must not stay
+        // open on one of them. What was typed into it is written first. The
+        // files stay where they are, so a title half-typed when the row was
+        // archived still belongs to a meeting.
+        if let focused = detail?.meetingID, ids.contains(focused) {
+            detail?.saveEdits()
+            detail = nil
+        }
+        selection.subtract(ids)
+        Task { [weak self] in await self?.reload() }
+    }
+
     // MARK: - actions on the selection
 
-    public func revealSelection() {
-        for row in selectedRows { runtime.revealInFinder(meetingID: row.id) }
+    public func revealSelection() { revealTargets(selectedRows) }
+
+    public func revealTargets(_ rows: [MeetingRow]) {
+        for row in rows { runtime.revealInFinder(meetingID: row.id) }
     }
 
     public func revealArchive() { runtime.revealArchive() }
 
-    public func rebuildSelection() {
-        for row in selectedRows { rebuild(row.id) }
+    public func rebuildSelection() { rebuildTargets(selectedRows) }
+
+    public func rebuildTargets(_ rows: [MeetingRow]) {
+        for row in rows { rebuild(row.id) }
     }
 
     /// Re-assembles the meeting the pane is showing.

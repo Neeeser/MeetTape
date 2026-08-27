@@ -170,9 +170,13 @@ public struct MeetingDetailView: View {
     /// to the title moves the title while it is being read.
     private func suggestionBar(_ suggestion: String) -> some View {
         HStack(spacing: 7) {
-            Image(systemName: "sparkles").foregroundStyle(Color.accentColor)
+            Image(systemName: "sparkles")
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
             Text("Suggested title").foregroundStyle(.secondary).layoutPriority(1)
-            Text(suggestion).lineLimit(1).truncationMode(.tail)
+            // A generated title can outrun a narrow pane, and the whole point
+            // is reading it before deciding.
+            Text(suggestion).lineLimit(1).truncationMode(.tail).help(suggestion)
             Spacer(minLength: 8)
             Button("Use it") { detail.acceptTitleSuggestion() }
                 .buttonStyle(.link)

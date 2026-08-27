@@ -69,6 +69,13 @@ enum TitleSuggestionTests {
                 expect.isNil(metadata(titles).titleSuggestion)
             },
 
+            test("nothing is offered when only stray whitespace separates them") { expect in
+                var titles = TitleCandidates(timestampFallback: "f")
+                titles.provider = "Pricing model rework  "
+                titles.ai = "Pricing model rework"
+                expect.isNil(metadata(titles).titleSuggestion)
+            },
+
             test("declining settles it, and leaves the generated title on disk") { expect in
                 var titles = TitleCandidates(timestampFallback: "f")
                 titles.provider = "Huddle in #engineering"

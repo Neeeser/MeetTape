@@ -104,7 +104,8 @@ public struct TitleCandidates: Codable, Sendable, Equatable {
             return nil
         }
         guard resolvedOrigin != "ai" else { return nil }
-        guard ai.caseInsensitiveCompare(resolved) != .orderedSame else { return nil }
+        let shown = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ai.caseInsensitiveCompare(shown) != .orderedSame else { return nil }
         return ai
     }
 

@@ -11,6 +11,7 @@ public final class WindowManager {
     private var settingsWindow: NSWindow?
     private var settingsModel: SettingsModel?
     private var peopleWindow: NSWindow?
+    private var aboutWindow: NSWindow?
     private var peopleModel: PeopleDirectoryModel?
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
@@ -70,6 +71,25 @@ public final class WindowManager {
         present(window)
     }
 
+    /// What Pipit is and where it puts things.
+    ///
+    /// Pipit has no app menu bar, so this opens from the status menu rather
+    /// than from an About item macOS would provide.
+    public func showAbout() {
+        if let window = aboutWindow {
+            present(window)
+            return
+        }
+        let window = makeWindow(
+            title: "About Pipit",
+            size: NSSize(width: 460, height: 520),
+            content: AboutView(runtime: runtime)
+        )
+        window.setFrameAutosaveName("PipitAbout")
+        aboutWindow = window
+        present(window)
+    }
+
     /// The people directory.
     ///
     /// Its own window rather than a settings tab: the two-pane layout needs more
@@ -84,6 +104,9 @@ public final class WindowManager {
             return
         }
         let model = PeopleDirectoryModel(runtime: runtime)
+        model.onOpenMeeting = { [weak self] meetingID in
+            self?.showMeetings(select: meetingID)
+        }
         peopleModel = model
         let window = makeWindow(
             title: "People",
@@ -249,6 +272,7 @@ public final class WindowManager {
     /// saving a meeting should not pull the user out of what they are doing.
     public func showMeetings(select meetingID: String? = nil, activating: Bool = true) {
         let model = meetingsModel ?? MeetingsWindowModel(runtime: runtime)
+        model.onOpenSettings = { [weak self] in self?.showSettings() }
         meetingsModel = model
         let window = meetingsWindow ?? {
             let created = makeWindow(

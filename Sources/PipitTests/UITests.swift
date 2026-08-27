@@ -52,6 +52,39 @@ enum UITests {
                 try? FileManager.default.removeItem(at: root)
             },
 
+            test("the reading script covers the sounds it claims to") {
+                expect in await MainActor.run {
+                // The Harvard sentences, IEEE 297-1969: phonetically balanced,
+                // ten to a list. A duplicate or a truncated line means somebody
+                // edited the standard set by hand, which is the one thing that
+                // makes it stop being the standard set.
+                let sentences = VoiceEnrollmentScript.allSentences
+                expect.equal(sentences.count, 30, "three lists of ten")
+                expect.equal(Set(sentences).count, 30, "no sentence twice")
+                expect.isTrue(
+                    sentences.allSatisfy { $0.hasSuffix(".") && $0.count > 20 },
+                    "every line is a whole sentence"
+                )
+                expect.isTrue(
+                    VoiceEnrollmentScript.lists.allSatisfy { $0.sentences.count == 10 }
+                )
+                // Enough words that somebody reading quickly still reaches the
+                // bar: the reading is refused below 45 seconds of speech, and
+                // 200 words a minute is a fast reader.
+                let words = sentences.joined(separator: " ").split(separator: " ").count
+                expect.isTrue(
+                    Double(words) / 200 * 60 >= VoiceEnrollmentModel.targetSeconds,
+                    "\(words) words is \(Int(Double(words) / 200 * 60))s at a fast pace, "
+                        + "under the \(Int(VoiceEnrollmentModel.targetSeconds))s target"
+                )
+                expect.isFalse(VoiceEnrollmentScript.prompts.isEmpty)
+                }
+            },
+
+            test("the people window builds with somebody on screen") {
+                expect in try await peopleWindowBuilds(expect)
+            },
+
             test("the dragged application is offered as a file URL") { expect in
                 // The drag adds Pipit to the Accessibility and Screen Recording
                 // lists, which is the fast route into panes that have no prompt.
@@ -612,6 +645,44 @@ enum UITests {
                 }
             },
         ])
+    }
+
+    /// The people window with a person selected, their meetings loaded, and the
+    /// sheet that records a reading.
+    ///
+    /// The detail pane draws rows built from the archive rather than from the
+    /// identity alone, so an empty archive, a missing mixdown and a person with
+    /// no meetings all reach it.
+    @MainActor
+    static func peopleWindowBuilds(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        await runtime.ensureLocalUserIdentity()
+        let me = try expect.unwrap(try await store.localUser())
+        _ = try await PeopleDirectoryTests.makeAppearance(
+            store: store, identityID: me.id, root: root, title: "Weekly sync",
+            at: Date(timeIntervalSince1970: 1_787_900_000), turns: [(0, 30)]
+        )
+
+        let model = PeopleDirectoryModel(runtime: runtime)
+        await model.reload()
+        model.select(me.id, extending: false)
+        render(PeopleDirectoryView(model: model), size: NSSize(width: 900, height: 600))
+
+        // The list is loaded in the background, so the pane is drawn again once
+        // it is there. Both states have to build.
+        for _ in 0..<100 where model.appearances.isEmpty {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        expect.isFalse(model.appearances.isEmpty, "the person's meetings reached the pane")
+        render(PeopleDirectoryView(model: model), size: NSSize(width: 900, height: 600))
+
+        render(
+            VoiceEnrollmentView(model: VoiceEnrollmentModel(runtime: runtime), onClose: {}),
+            size: NSSize(width: 520, height: 520)
+        )
     }
 }
 

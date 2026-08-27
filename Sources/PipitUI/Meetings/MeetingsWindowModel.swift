@@ -81,9 +81,15 @@ public final class MeetingsWindowModel {
     @ObservationIgnored private var archiveChanges = 0
     @ObservationIgnored let runtime: PipitRuntime
 
+    /// Opens Settings, set by whoever owns the windows. The same shape the
+    /// settings model already uses to reach the people window.
+    @ObservationIgnored public var onOpenSettings: (() -> Void)?
+
     public init(runtime: PipitRuntime) {
         self.runtime = runtime
     }
+
+    public func openSettings() { onOpenSettings?() }
 
     // MARK: - loading
 
@@ -381,7 +387,10 @@ public final class MeetingsWindowModel {
 
     /// Names a whole cluster and says what it changed.
     public func assignCluster(_ row: MeetingSpeakerRow, to entry: SpeakerDirectoryEntry) {
-        applyClusterChange(row, name: entry.identity.resolvedName) {
+        applyClusterChange(
+            clusterID: row.clusterID, recordingID: row.recordingID,
+            name: entry.identity.resolvedName
+        ) {
             self.detail?.assignCluster(row.clusterID, in: row.recordingID, to: entry)
         }
     }
@@ -389,13 +398,13 @@ public final class MeetingsWindowModel {
     public func assignCluster(_ row: MeetingSpeakerRow, toNewPerson name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        applyClusterChange(row, name: trimmed) {
+        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: trimmed) {
             self.detail?.assignCluster(row.clusterID, in: row.recordingID, toNewPerson: trimmed)
         }
     }
 
     public func clearCluster(_ row: MeetingSpeakerRow) {
-        applyClusterChange(row, name: nil) {
+        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: nil) {
             self.detail?.clearCluster(row.clusterID, in: row.recordingID)
         }
     }
@@ -404,7 +413,7 @@ public final class MeetingsWindowModel {
     /// happened. Counted first because the assignment re-resolves the names the
     /// count is taken from.
     private func applyClusterChange(
-        _ row: MeetingSpeakerRow, name: String?, _ apply: () -> Void
+        clusterID: String, recordingID: String, name: String?, _ apply: () -> Void
     ) {
         guard let detail else { return }
         let meetingID = detail.meetingID
@@ -418,7 +427,7 @@ public final class MeetingsWindowModel {
         // this as before it, and counting it made the receipt claim a line
         // nothing had changed.
         let lines = detail.combinedLines.count {
-            $0.recordingID == row.recordingID && $0.utterance.speakerKey == row.clusterID
+            $0.recordingID == recordingID && $0.utterance.speakerKey == clusterID
                 && !$0.isCorrected
         }
         apply()
@@ -429,6 +438,44 @@ public final class MeetingsWindowModel {
             meetingID: meetingID
         )
         dropFromIndex(meetingID)
+    }
+
+    /// Takes a proposed name, exactly as if the name had been chosen from the
+    /// speaker chip's own menu.
+    ///
+    /// Routed through the same path deliberately. The assignment lands with a
+    /// human origin, voice learning treats it as a correction like any other,
+    /// and undoing it is the chip menu the user already knows. Nothing records
+    /// that a model went first, because after this it is the user's answer.
+    public func acceptSuggestion(_ row: MeetingSuggestionRow) {
+        let name = row.suggestion.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let detail else { return }
+        // An existing person where the name is already one, so accepting does
+        // not create a second Chris beside the one in the directory.
+        let known = detail.knownPeople.first { $0.identity.resolvedName == name }
+        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: name) {
+            if let known {
+                detail.assignCluster(row.clusterID, in: row.recordingID, to: known)
+            } else {
+                detail.assignCluster(row.clusterID, in: row.recordingID, toNewPerson: name)
+            }
+        }
+        // The write is asynchronous, and leaving the pill up until it lands
+        // showed a speaker being offered a name they already have.
+        detail.speakerSuggestions.removeAll { $0.id == row.id }
+    }
+
+    public func dismissSuggestion(_ row: MeetingSuggestionRow) {
+        detail?.runtime.dismissSpeakerSuggestion(
+            clusterID: row.clusterID, recordingID: row.recordingID
+        )
+        detail?.speakerSuggestions.removeAll { $0.id == row.id }
+    }
+
+    public func dismissAllSuggestions() {
+        guard let detail else { return }
+        detail.runtime.dismissAllSpeakerSuggestions(inMeeting: detail.meetingID)
+        detail.speakerSuggestions = []
     }
 
     /// Records a correction made on the words themselves.

@@ -8,6 +8,8 @@ suites += CaptureRecoveryTests.all
 suites.append(CalendarMatchTests.suite)
 suites.append(ManifestTests.suite)
 suites.append(StorageTests.suite)
+suites.append(MeetingFolderNameTests.suite)
+suites.append(MeetingFolderRenameTests.suite)
 suites.append(AudioTests.suite)
 suites += DetectionTests.all
 suites += SessionTests.all
@@ -25,6 +27,7 @@ suites.append(TranscriptPanelTests.suite)
 suites.append(ReconnectTests.suite)
 suites += SensorAttributionTests.all
 suites += SpeakerCorrectionTests.all
+suites.append(SpeakerSuggestionTests.suite)
 suites += PeopleDirectoryTests.all
 suites += MeetingsWindowTests.all
 suites += BackendSelectionTests.all

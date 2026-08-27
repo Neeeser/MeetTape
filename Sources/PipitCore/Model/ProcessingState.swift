@@ -98,6 +98,14 @@ public struct ProcessingStatus: Codable, Sendable, Equatable {
     public var completedStages: [ProcessingState]
     /// The stage that failed, kept so `failed` knows where to resume from.
     public var failedStage: ProcessingState?
+    /// Whether the cloud stages were passed over because no API key is stored.
+    ///
+    /// Recorded because skipping them is silent by design: a user who runs
+    /// everything on this Mac never asked for a title or a summary and must not
+    /// get a failure for one. That leaves a key which disappears looking
+    /// exactly like a key which was never set, and the meeting completes with
+    /// no summary and nothing on screen saying why.
+    public var skippedForMissingKey: Bool
 
     public init(
         state: ProcessingState = .recording,
@@ -105,7 +113,8 @@ public struct ProcessingStatus: Codable, Sendable, Equatable {
         attempts: [String: Int] = [:],
         lastFailure: ProcessingFailure? = nil,
         completedStages: [ProcessingState] = [],
-        failedStage: ProcessingState? = nil
+        failedStage: ProcessingState? = nil,
+        skippedForMissingKey: Bool = false
     ) {
         self.state = state
         self.updatedAt = updatedAt
@@ -113,6 +122,29 @@ public struct ProcessingStatus: Codable, Sendable, Equatable {
         self.lastFailure = lastFailure
         self.completedStages = completedStages
         self.failedStage = failedStage
+        self.skippedForMissingKey = skippedForMissingKey
+    }
+
+    /// Decoded by hand for one field only.
+    ///
+    /// Every `metadata.json` written before `skippedForMissingKey` existed has
+    /// no key for it, and the synthesised decoder treats an absent key for a
+    /// non-optional as a failure. That would make every meeting already on disk
+    /// unreadable, so the field defaults to false and the rest decode as they
+    /// always did.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        state = try container.decode(ProcessingState.self, forKey: .state)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        attempts = try container.decodeIfPresent([String: Int].self, forKey: .attempts) ?? [:]
+        lastFailure = try container.decodeIfPresent(ProcessingFailure.self, forKey: .lastFailure)
+        completedStages = try container.decodeIfPresent(
+            [ProcessingState].self, forKey: .completedStages
+        ) ?? []
+        failedStage = try container.decodeIfPresent(ProcessingState.self, forKey: .failedStage)
+        skippedForMissingKey = try container.decodeIfPresent(
+            Bool.self, forKey: .skippedForMissingKey
+        ) ?? false
     }
 
     public func hasCompleted(_ stage: ProcessingState) -> Bool {

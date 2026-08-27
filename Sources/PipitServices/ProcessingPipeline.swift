@@ -67,6 +67,44 @@ public actor ProcessingPipeline {
     /// directories it needs, so a job that carried on after the move put the
     /// meeting back as a row holding no audio and no transcript.
     private var goneWhileRunning: [String: Date] = [:]
+
+    /// How many jobs are writing into each meeting's folder right now.
+    ///
+    /// Renaming a folder moves it out from under the absolute paths a job
+    /// holds, and `AtomicFile` recreates a missing directory rather than
+    /// failing, so a write through the old path resurrects the folder and
+    /// leaves two directories carrying one identifier. Both long jobs are
+    /// exposed: `process` sleeps out a retry backoff with the state already
+    /// persisted as failed, and re-analysis diarizes for minutes on a meeting
+    /// that is already complete. Separate from `running` so that gating a
+    /// rename does not change which jobs may start.
+    ///
+    /// A count rather than a set, because the two can overlap on one meeting
+    /// and a set let whichever finished first clear the hold for the other.
+    private var foldersHeld: [String: Int] = [:]
+
+    private func holdFolder(_ meetingID: String) {
+        foldersHeld[meetingID, default: 0] += 1
+    }
+
+    private func releaseFolder(_ meetingID: String) {
+        guard let count = foldersHeld[meetingID] else { return }
+        if count <= 1 {
+            foldersHeld.removeValue(forKey: meetingID)
+            // The last writer is out, so nothing is left to notice a move, and
+            // a mark left behind would take the folder out from under a later
+            // job on the same meeting.
+            goneWhileRunning.removeValue(forKey: meetingID)
+        } else {
+            foldersHeld[meetingID] = count - 1
+        }
+    }
+
+    /// Whether anything other than the caller is in this meeting's folder.
+    private func heldByOthers(_ meetingID: String, besidesSelf: Bool) -> Bool {
+        (foldersHeld[meetingID] ?? 0) > (besidesSelf ? 1 : 0)
+    }
+
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -149,12 +187,17 @@ public actor ProcessingPipeline {
     /// did. Arming this before the move meant a stage boundary in between
     /// deleted the meeting the user still had.
     ///
-    /// Returns whether a job is running to notice. When none is, nothing here
-    /// will ever clean up what a job wrote on its way out, and the caller does
-    /// it instead.
+    /// Returns whether anything is writing into the folder to notice. When
+    /// nothing is, nothing here will ever clean up what a job wrote on its way
+    /// out, and the caller does it instead.
+    ///
+    /// Asked of the writers rather than of `running`, because processing is not
+    /// the only one. Compaction transcodes for minutes after a meeting is
+    /// complete, and re-analysis diarizes for minutes on one that has been
+    /// complete for months.
     @discardableResult
     public func forget(meetingID: String, movedAt: Date) -> Bool {
-        guard running.contains(meetingID) else { return false }
+        guard foldersHeld[meetingID] != nil else { return false }
         goneWhileRunning[meetingID] = movedAt
         return true
     }
@@ -171,13 +214,12 @@ public actor ProcessingPipeline {
             return
         }
         running.insert(meetingID)
+        holdFolder(meetingID)
         await jobLock.acquire()
         var holdsSlot = true
         defer {
             running.remove(meetingID)
-            // Nothing writes after this, and a mark left behind would take the
-            // folder out from under a later job on the same meeting.
-            goneWhileRunning.removeValue(forKey: meetingID)
+            releaseFolder(meetingID)
             if holdsSlot { jobLock.release() }
         }
 
@@ -241,6 +283,13 @@ public actor ProcessingPipeline {
                     try await runSpeakerResolution(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .enriching, at: clock.now)
                 case .enriching:
+                    // Recorded here rather than inside enrichment, which returns
+                    // before it can say anything when every title and summary
+                    // toggle is off. Whether a key is stored is a fact about the
+                    // app, so the answer must not depend on which stage happened
+                    // to ask, and it is re-read on every run so storing a key
+                    // clears the notice.
+                    await recordMissingKey(&metadata, settings: settings)
                     // Enrichment is the one part that needs the cloud, and it is
                     // not what makes a meeting readable. Failing it used to take
                     // finish() with it, so a lost connection at the end of a call
@@ -341,6 +390,33 @@ public actor ProcessingPipeline {
             // audio.
             _ = discardIfGone(metadata.id, store: store)
         }
+
+        // Last, because a rename moves the folder every path above writes into.
+        // The title is final by now: enrichment has run, and the folder still
+        // carries whatever was known when recording started. Skipped when
+        // something else is in the folder too: a re-analysis queued on the job
+        // slot captured this folder's paths before it started waiting.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadata)
+        }
+    }
+
+    /// Renames one meeting's folder to match its title, unless a job is in it.
+    ///
+    /// The entry every caller outside this actor uses. `process` settles its own
+    /// meeting from its tail, where it still owns the folder.
+    public func settleFolderName(meetingID: String) {
+        guard !heldByOthers(meetingID, besidesSelf: false) else { return }
+        guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else {
+            return
+        }
+        repository.settleFolderName(for: found.metadata)
+    }
+
+    /// Renames every finished meeting whose folder is out of date with its
+    /// title, skipping any a job is writing into.
+    public func settleFolderNames() {
+        repository.settleFolderNames { self.heldByOthers($0, besidesSelf: false) }
     }
 
     /// Replaces a finished meeting's PCM segments with verified archives.
@@ -355,10 +431,13 @@ public actor ProcessingPipeline {
         guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
         guard !running.contains(meetingID) else { return }
         running.insert(meetingID)
+        // Held as well as counted. It writes the archive files into the folder,
+        // so a rename must not move the folder out from under it.
+        holdFolder(meetingID)
         await waitForSlot()
         defer {
             running.remove(meetingID)
-            goneWhileRunning.removeValue(forKey: meetingID)
+            releaseFolder(meetingID)
             jobLock.release()
         }
         // The wait for the slot is as long as a live recording, so the move can
@@ -1151,6 +1230,98 @@ public actor ProcessingPipeline {
     }
 
 
+    /// Records the microphone track as an appearance by whoever it belongs to.
+    ///
+    /// Every other speaker reaches `speaker_occurrence` through a diarization
+    /// cluster. The microphone track has none, because its speaker is true by
+    /// construction, so nothing wrote a row for it and every count over that
+    /// table read the local user as having been in no meeting at all. The
+    /// People list showed zero beside a voice profile built from those very
+    /// recordings, and `refreshCachedNames` walks the same query, so renaming
+    /// yourself re-rendered none of your own transcripts.
+    ///
+    /// No vector goes with it. The row exists to say the track was heard and
+    /// who it was, and the profile this track feeds is written by
+    /// `learnLocalUserVoice`, which has its own bleed check to pass first.
+    @discardableResult
+    private func recordLocalUserOccurrence(
+        meetingID: String, transcript: CanonicalTranscript, speakers: SpeakerMap
+    ) async -> Bool {
+        guard let service = backends.speakers else { return false }
+        let assignment = speakers.entries[SpeakerLabel.localUser]
+        // "Leave unnamed" on this track is a person saying the meeting is not
+        // theirs. The row is still written, with nobody behind it, because the
+        // one it replaces says it was: skipping here left the meeting counting
+        // towards a person who had just taken their name off it.
+        let cleared = speakers.clearedKeys.contains(SpeakerLabel.localUser)
+        guard assignment != nil || cleared else { return false }
+        let seconds = transcript.speakers
+            .first { $0.key == SpeakerLabel.localUser }?.speechSeconds ?? 0
+        guard seconds > 0 else { return false }
+        do {
+            _ = try await service.speakerStore.recordOccurrence(
+                meetingID: meetingID,
+                clusterID: SpeakerLabel.localUser,
+                track: .mic,
+                speechSeconds: seconds,
+                embedding: nil,
+                model: nil,
+                resolution: nil,
+                identityID: assignment?.identityID,
+                source: assignment?.origin ?? .human,
+                humanVerified: cleared || (assignment?.provenance?.humanVerified ?? false),
+                wasExpectedParticipant: false,
+                now: clock.now
+            )
+            return true
+        } catch {
+            Log.processing.notice(
+                "microphone occurrence skipped: \(logSafeDescription(error), privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    /// Writes the microphone track's row for meetings recorded before it had
+    /// one, and reports how many it wrote.
+    ///
+    /// Runs once. Everything that counts a person's meetings reads
+    /// `speaker_occurrence`, and until this existed the local user had no rows
+    /// there at all, so their own history was invisible to the People list and
+    /// to every rename that walks it. New meetings write the row as they are
+    /// processed; this is the archive that was already on disk.
+    public func backfillLocalUserOccurrences() async -> Int {
+        guard backends.speakers != nil else { return 0 }
+        let localUserID = settingsProvider().processing.localUserIdentityID
+        var written = 0
+        for summary in repository.listMeetings() {
+            for store in repository.stores(ofConversation: summary) {
+                guard let metadata = try? store.readMetadata(),
+                      var speakers = try? store.readSpeakerMap(),
+                      let transcript = try? store.readCanonicalTranscript()
+                else { continue }
+                // A meeting processed before Settings held an identity at all
+                // names the microphone track and links it to nobody. The track
+                // is the local user by construction, and the entry still says
+                // the pipeline wrote it rather than a person, so the link is
+                // the one this meeting would be given if it ran again.
+                if let localUserID, metadata.source.micTrackIsLocalUser,
+                   speakers.entries[SpeakerLabel.localUser]?.identityID == nil,
+                   speakers.entries[SpeakerLabel.localUser]?.origin == .deterministic {
+                    speakers.linkIdentity(localUserID, to: SpeakerLabel.localUser, named: nil)
+                    try? store.writeSpeakerMap(speakers)
+                }
+                guard speakers.entries[SpeakerLabel.localUser]?.identityID != nil else { continue }
+                if await recordLocalUserOccurrence(
+                    meetingID: metadata.id, transcript: transcript, speakers: speakers
+                ) {
+                    written += 1
+                }
+            }
+        }
+        return written
+    }
+
     /// The sensor record with the local user marked, where a meeting has one.
     ///
     /// Only remote meetings: the record describes the far-end track, and an
@@ -1498,6 +1669,9 @@ public actor ProcessingPipeline {
             )
         }
         try store.writeSpeakerMap(speakers)
+        await recordLocalUserOccurrence(
+            meetingID: metadata.id, transcript: transcript, speakers: speakers
+        )
 
         // Voice memory is a side effect of the meeting, not part of it. A
         // deleted model folder or an unreadable track must not take the whole
@@ -1517,7 +1691,7 @@ public actor ProcessingPipeline {
                 "local voice profile skipped: \(logSafeDescription(error), privacy: .public)"
             )
         }
-        try await suggestSpeakerNames(store: store, metadata: &metadata, settings: settings)
+        try await suggestSpeakerNames(store: store, metadata: metadata, settings: settings)
     }
 
     /// The audio one cluster covers, on the meeting timeline.
@@ -1808,11 +1982,86 @@ public actor ProcessingPipeline {
         )
     }
 
-    /// Asks the cloud model to put names to the speakers it can from the words
-    /// alone. Lowest-ranked evidence there is, so it never overwrites a voice
-    /// match, a deterministic identity or anything a person set.
+    /// Adds a recording of somebody reading aloud to their voice profile.
+    ///
+    /// The one enrolment with no meeting behind it, and the only one a person
+    /// starts on purpose. Everything else waits for a recording to exist: the
+    /// microphone track of a remote call, or a name typed onto a cluster. A
+    /// fresh install has neither, and a Mac used only for in-person or imported
+    /// recordings never gets the first, so this is what makes the person at the
+    /// keyboard recognisable before their first call.
+    ///
+    /// The audio has to hold one voice. `singleSpeakerEmbedding` refuses a
+    /// recording where the dominant speaker holds less than three quarters of
+    /// the speech, which is what stops somebody's kitchen radio, or a colleague
+    /// answering a question mid-take, from joining their profile.
+    public func enrolSpokenSample(
+        audio: URL, identityID: IdentityID
+    ) async throws(SpokenEnrollmentError) -> VoiceProfileStatus {
+        guard let service = backends.speakers, let embed = backends.singleSpeakerEmbedding else {
+            throw .modelsUnavailable
+        }
+        let sample: SingleSpeakerSample?
+        do {
+            sample = try await embed(audio)
+        } catch {
+            Log.processing.notice(
+                "spoken enrolment could not be embedded: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        guard let sample, !sample.spans.isEmpty else { throw .noSingleVoice }
+
+        // The spans are inside this recording, which is the whole of it, so
+        // there is no timeline to move them onto. The identifier names the file
+        // rather than a meeting, and no meeting can be named that, so a
+        // retraction that walks meetings never reaches these rows by accident.
+        let recordingID = "enrollment-\(audio.deletingPathExtension().lastPathComponent)"
+        let store = await service.speakerStore
+        let result: Result<VoiceProfileStatus, VoiceEnrollmentRejection>
+        do {
+            result = try await store.enrol(
+                VoiceEnrollmentCandidate(
+                    identityID: identityID,
+                    vector: sample.vector,
+                    model: .fluidAudioOffline,
+                    speechSeconds: sample.speechSeconds,
+                    qualityScore: sample.quality,
+                    source: .spokenEnrollment,
+                    evidence: [VoiceEvidence(
+                        meetingID: recordingID, track: .mic, spans: sample.spans,
+                        confirmation: .spokenEnrollment
+                    )]
+                ),
+                now: clock.now
+            )
+        } catch {
+            Log.processing.error(
+                "spoken enrolment not stored: \(logSafeDescription(error), privacy: .public)"
+            )
+            throw .modelsUnavailable
+        }
+        switch result {
+        case .success(let status):
+            Log.processing.info(
+                "spoken enrolment: \(status.sampleCount, privacy: .public) samples, \(Int(status.speechSeconds), privacy: .public)s"
+            )
+            return status
+        case .failure(let rejection):
+            throw .rejected(rejection)
+        }
+    }
+
+    /// Asks the cloud model which of the still-unnamed speakers it heard a name
+    /// for, and files the answers as suggestions.
+    ///
+    /// Runs last, after sensor names, the microphone track and voice matching
+    /// have all had their say, so the model is asked only about what the
+    /// meeting could not work out for itself. Nothing here writes to
+    /// `speakers.map.json`: a suggestion becomes an assignment when a person
+    /// accepts it, through the same path as choosing the name by hand.
     private func suggestSpeakerNames(
-        store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
+        store: MeetingStore, metadata: MeetingMetadata, settings: AppSettings
     ) async throws {
         guard settings.enrichment.suggestSpeakers else { return }
         // An empty identifier means the user is mid-edit in Settings.
@@ -1829,56 +2078,76 @@ public actor ProcessingPipeline {
             $0 != SpeakerLabel.localUser
                 && !$0.hasSuffix(SpeakerLabel.unattributed)
                 && speakers.entries[$0] == nil
+                // A person took this name off deliberately, so the model is not
+                // asked to produce another one for them.
+                && !speakers.clearedKeys.contains($0)
         }
         guard !labels.isEmpty else { return }
 
+        // Everyone the meeting named keeps their name, and only the labels
+        // being asked about stay labels. The pattern that identifies a speaker
+        // is someone addressing them by name, and it cannot be read when the
+        // person doing the addressing is also anonymous.
+        let unnamed = Set(labels)
         let renderer = TranscriptRenderer()
-        let anonymous = transcript.utterances
-            .filter { $0.speakerKey != SpeakerLabel.localUser }
-            .map { "[\(renderer.timecode($0.start))] \($0.speakerKey): \($0.text)" }
-            .joined(separator: "\n")
+        let rendered = transcript.utterances.map { utterance -> String in
+            let key = utterance.speakerKey
+            let who = unnamed.contains(key) ? key : speakers.resolvedName(for: utterance)
+            return "[\(renderer.timecode(utterance.start))] \(who): \(utterance.text)"
+        }.joined(separator: "\n")
+
+        // Both lists name people in this one meeting. Neither is a directory,
+        // and the People directory is deliberately not sent.
+        var hints = metadata.calendar?.attendees ?? []
+        hints.append(contentsOf: metadata.participants.map(\.displayName))
 
         let suggestions = try await backend.resolveSpeakers(
             SpeakerResolutionRequest(
-                transcript: String(anonymous.prefix(60_000)),
+                transcript: String(rendered.prefix(60_000)),
                 labels: labels,
                 humanContext: store.readNotes(),
-                calendarAttendees: metadata.calendar?.attendees ?? [],
-                browserParticipants: metadata.participants.map(\.displayName),
+                nameHints: Array(Set(hints)).sorted(),
                 localUserName: metadata.source.micTrackIsLocalUser ? settings.localUserName : nil
             ),
             model: settings.models.metadata
         )
 
-        // Suggestions never overwrite a name the user set, nor a voice match.
-        var updated = try store.readSpeakerMap()
-        for suggestion in suggestions where labels.contains(suggestion.label) {
-            guard suggestion.confidence >= 0.35, !suggestion.name.isEmpty else { continue }
-            updated.applySuggestion(
-                SpeakerAssignment(
-                    displayName: suggestion.name,
-                    origin: .ai,
-                    confidence: suggestion.confidence,
-                    evidence: suggestion.evidence,
-                    provenance: SpeakerProvenance(
-                        source: .ai, score: suggestion.confidence, band: .medium
-                    )
-                ),
-                for: suggestion.label
+        // Dismissals are the user's, so a re-run keeps them rather than
+        // offering a name they have already turned down.
+        var set = store.readSpeakerSuggestions()
+        set.suggestions = suggestions.map {
+            SpeakerNameSuggestion(
+                label: $0.label,
+                name: $0.name,
+                confidence: $0.confidence,
+                quote: $0.quote,
+                atSeconds: $0.atSeconds,
+                expandedFromCalendar: $0.expandedFromCalendar
             )
         }
-        try store.writeSpeakerMap(updated)
+        set.generatedAt = clock.now
+        try store.writeSpeakerSuggestions(set)
+        Log.processing.info(
+            "speaker suggestions: \(set.visible(forUnnamed: unnamed).count, privacy: .public) of \(labels.count, privacy: .public) unnamed"
+        )
+    }
 
-        // The same gate the speaker map applies. Without it a name the pipeline
-        // had just rejected as too weak was still recorded as a participant, and
-        // then fed back as context on the next suggestion request.
-        var participants = metadata.participants
-        for suggestion in suggestions
-        where suggestion.confidence >= 0.35 && !suggestion.name.isEmpty
-            && !participants.contains(where: { $0.displayName == suggestion.name }) {
-            participants.append(Participant(displayName: suggestion.name, origin: .ai))
+    /// Whether the cloud stages this meeting wanted were passed over for want
+    /// of a key.
+    ///
+    /// Both optional cloud stages skip silently on purpose, so a user who runs
+    /// everything on this Mac is never shown a failure for something they did
+    /// not ask for. That left a stored key which goes missing looking exactly
+    /// like one that was never set.
+    private func recordMissingKey(
+        _ metadata: inout MeetingMetadata, settings: AppSettings
+    ) async {
+        let wantsCloud = settings.enrichment.wantsAnything || settings.enrichment.suggestSpeakers
+        guard wantsCloud, !settings.models.metadata.isEmpty else {
+            metadata.processing.skippedForMissingKey = false
+            return
         }
-        metadata.participants = participants
+        metadata.processing.skippedForMissingKey = await !backend.isConfigured()
     }
 
     private func runEnrichment(
@@ -2073,6 +2342,17 @@ public actor ProcessingPipeline {
         // the local user's own voice: the one profile no person ever reviews.
         if key == SpeakerLabel.localUser, resolved != settings.processing.localUserIdentityID {
             try await retractMicrophoneTrack(meetingID: meetingID)
+        }
+        // The row that says the microphone track was heard names whoever the
+        // map now names, or the meeting still counts towards the person the
+        // user has just said was not speaking.
+        // Read without throwing: a transcript that cannot be decoded is a row
+        // this cannot update, not a rename to undo. The name has already been
+        // written to the speaker map by this point.
+        if key == SpeakerLabel.localUser, let transcript = try? found.store.readCanonicalTranscript() {
+            await recordLocalUserOccurrence(
+                meetingID: meetingID, transcript: transcript, speakers: speakers
+            )
         }
         if let resolved {
             try await confirmCluster(
@@ -2472,6 +2752,13 @@ public actor ProcessingPipeline {
             throw StorageError.meetingNotFound(id: meetingID)
         }
         guard let reanalyze = backends.reanalyzeDiarization else { return }
+        holdFolder(meetingID)
+        defer { releaseFolder(meetingID) }
+        // This diarizes for minutes and writes the result into the folder, so a
+        // meeting trashed while it runs would come back holding it. Registered
+        // after the release above, so it runs before the hold goes and takes
+        // the mark with it.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }
@@ -2563,6 +2850,12 @@ public actor ProcessingPipeline {
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)
         try await rerenderMarkdown(store: store, metadata: metadataCopy)
+
+        // A rename made while this ran was refused, correctly, because the paths
+        // above were in flight. Without this it would wait for the next launch.
+        if !heldByOthers(meetingID, besidesSelf: true) {
+            repository.settleFolderName(for: metadataCopy)
+        }
     }
 
     /// Re-runs identity resolution alone, after the expected-participant list

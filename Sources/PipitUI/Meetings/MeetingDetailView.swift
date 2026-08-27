@@ -33,6 +33,10 @@ public struct MeetingDetailView: View {
                 failureBar(failure)
                 Divider()
             }
+            if detail.metadata?.processing.skippedForMissingKey == true {
+                missingKeyBar
+                Divider()
+            }
             speakerStrip
             if let receipt = model.receipt, receipt.meetingID == detail.meetingID {
                 receiptBar(receipt.text)
@@ -133,6 +137,24 @@ public struct MeetingDetailView: View {
         .background(Color.red.opacity(0.07))
     }
 
+    /// Says why a meeting completed with no summary.
+    ///
+    /// The one stage that needs the cloud is the one stage allowed to be
+    /// skipped without failing the meeting, which left no trace anywhere when a
+    /// stored key went missing.
+    private var missingKeyBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            Text("No API key stored, so summary, notes and speaker suggestions were skipped")
+                .font(.callout)
+            Spacer(minLength: 8)
+            Button("Open Settings") { model.openSettings() }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.08))
+    }
+
     private func noticeBar(_ text: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
@@ -170,6 +192,12 @@ public struct MeetingDetailView: View {
                 Text(waitingText).font(.caption).foregroundStyle(.secondary)
             } else {
                 SpeakerChips(model: model, detail: detail)
+            }
+            // Only where there is something to propose. A meeting whose voices
+            // all matched, and one where nobody was named out loud, both draw
+            // nothing here rather than a line saying so.
+            if !detail.speakerSuggestions.isEmpty {
+                SuggestionPills(model: model, detail: detail)
             }
             if detail.namingCluster != nil { namingField }
         }
@@ -374,6 +402,96 @@ public struct MeetingDetailView: View {
                 }
             }
         }
+    }
+}
+
+/// Names the model heard, under the speakers they belong to.
+///
+/// A recommendation rather than an answer: the pill says who it thinks a
+/// speaker is and what it heard, and nothing reaches the speaker map until
+/// somebody presses the tick. Written this way round because a name filled in
+/// for you is only worth having when it is right, and the one place the model
+/// is asked about is the one place nothing else could work it out.
+struct SuggestionPills: View {
+    let model: MeetingsWindowModel
+    let detail: MeetingReviewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.bubble")
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                Text("Heard in the conversation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button("Dismiss all") { model.dismissAllSuggestions() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+            FlowRow(spacing: 6) {
+                ForEach(detail.speakerSuggestions) { row in pill(row) }
+            }
+        }
+        .padding(.top, 3)
+    }
+
+    private func pill(_ row: MeetingSuggestionRow) -> some View {
+        HStack(spacing: 6) {
+            SpeakerFace(name: "", side: 20)
+            Text(row.speakerLabel)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+            Text(row.suggestion.name).font(.callout.weight(.medium))
+            // The band rather than the number behind it. A model's confidence
+            // reads as a probability when it is shown as a percentage, and it
+            // is not one.
+            Text(row.suggestion.band.displayName)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 2) {
+                Button { model.acceptSuggestion(row) } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 21, height: 21)
+                        .background(Circle().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+                .help("Name \(row.speakerLabel) as \(row.suggestion.name)")
+
+                Button { model.dismissSuggestion(row) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 21, height: 21)
+                        .background(Circle().fill(Color.primary.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+                .help("Not this. The name is not offered again.")
+            }
+            .padding(.leading, 2)
+        }
+        .padding(.leading, 3)
+        .padding(.trailing, 3)
+        .padding(.vertical, 3)
+        .background { Capsule().fill(Color.accentColor.opacity(0.09)) }
+        .overlay { Capsule().stroke(Color.accentColor.opacity(0.30), lineWidth: 1) }
+        .help(why(row.suggestion))
+    }
+
+    /// The line that earned the guess, which is the whole case for it.
+    private func why(_ suggestion: SpeakerNameSuggestion) -> String {
+        let renderer = TranscriptRenderer()
+        var text = "“\(suggestion.quote)” at \(renderer.timecode(suggestion.atSeconds))"
+        if suggestion.expandedFromCalendar {
+            text += "\nFull name from the calendar invite."
+        }
+        return text
     }
 }
 

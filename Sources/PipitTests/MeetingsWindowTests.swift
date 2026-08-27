@@ -485,8 +485,216 @@ enum MeetingsWindowTests {
         return (repository, first.metadata.id)
     }
 
+    /// Accepting a proposed name has to be indistinguishable from choosing it
+    /// from the chip's own menu, or the user ends up with two kinds of name and
+    /// has to know which is which.
+    @MainActor
+    static func acceptingASuggestionNamesLikeAPerson(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        try meeting.store.writeSpeakerSuggestions(SpeakerSuggestionSet(suggestions: [
+            SpeakerNameSuggestion(
+                label: "remote-001_speaker_00", name: "Priya Raman", confidence: 0.91,
+                quote: "Priya, what did the renewal come back at?", atSeconds: 12
+            ),
+        ]))
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the pill to reach the strip") {
+            model.detail?.speakerSuggestions.count == 1
+        }
+        guard let row = model.detail?.speakerSuggestions.first else {
+            expect.fail("no suggestion on the strip")
+            return
+        }
+        expect.equal(row.speakerLabel, "Speaker 1", "the pill names the speaker as the chip does")
+
+        model.acceptSuggestion(row)
+
+        await waitFor(expect, "the name to reach the speaker map") {
+            (try? meeting.store.readSpeakerMap())?.entries["remote-001_speaker_00"] != nil
+        }
+        let entry = try expect.unwrap(
+            try meeting.store.readSpeakerMap().entries["remote-001_speaker_00"]
+        )
+        expect.equal(entry.displayName, "Priya Raman")
+        // Not `.ai`. After a person agrees to it, it is their answer, and voice
+        // learning must weigh it like any other correction.
+        expect.equal(entry.origin, .human)
+
+        // The speaker now has a name, so the pill goes without anything having
+        // to remove it.
+        await model.detail?.reloadSpeakers()
+        expect.isTrue(
+            model.detail?.speakerSuggestions.isEmpty ?? false,
+            "the pill outlived the name it proposed"
+        )
+    }
+
+    /// Turning one down has to stick across a re-run, or the same wrong name
+    /// comes back every time the meeting is reprocessed.
+    @MainActor
+    static func aDismissedSuggestionStaysDismissed(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        try meeting.store.writeSpeakerSuggestions(SpeakerSuggestionSet(suggestions: [
+            SpeakerNameSuggestion(
+                label: "remote-001_speaker_00", name: "Priya Raman", confidence: 0.91,
+                quote: "Priya, what did the renewal come back at?", atSeconds: 12
+            ),
+        ]))
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the pill to reach the strip") {
+            model.detail?.speakerSuggestions.count == 1
+        }
+        guard let row = model.detail?.speakerSuggestions.first else {
+            expect.fail("no suggestion on the strip")
+            return
+        }
+
+        model.dismissSuggestion(row)
+        expect.isTrue(model.detail?.speakerSuggestions.isEmpty ?? false)
+        // On disk, not just on screen: the speaker still has no name, so
+        // nothing else would keep the pill away on the next read.
+        expect.isTrue(
+            meeting.store.readSpeakerSuggestions().dismissedLabels
+                .contains("remote-001_speaker_00")
+        )
+        await model.detail?.reloadSpeakers()
+        expect.isTrue(
+            model.detail?.speakerSuggestions.isEmpty ?? false,
+            "a name turned down came back on the next read"
+        )
+        expect.isNil(try meeting.store.readSpeakerMap().entries["remote-001_speaker_00"])
+    }
+
+    /// A suggestion belongs to the half of a rejoined call it was made in, and
+    /// that half is folded into the first one. The ordinary lookup hides a
+    /// folded recording, so dismissing there wrote nothing and the pill came
+    /// straight back on the next read.
+    @MainActor
+    static func aDismissalOnTheSecondHalfReachesDisk(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: Date(timeIntervalSince1970: 1_787_066_400)
+        )
+        let second = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review, rejoined"
+        )
+        // Only the second half has anything to propose, so the pill under test
+        // can only have come from the folded recording.
+        try second.store.writeSpeakerSuggestions(SpeakerSuggestionSet(suggestions: [
+            SpeakerNameSuggestion(
+                label: "remote-001_speaker_00", name: "Priya Raman", confidence: 0.91,
+                quote: "Priya, what did the renewal come back at?", atSeconds: 12
+            ),
+        ]))
+
+        let runtime = makeRuntime(root: root)
+        runtime.combine(meetingID: second.id, into: first.id, reason: "a test")
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: first.id)
+        await waitFor(expect, "the pill from the second half to reach the strip") {
+            model.detail?.speakerSuggestions.count == 1
+        }
+        guard let row = model.detail?.speakerSuggestions.first else {
+            expect.fail("no suggestion on the strip")
+            return
+        }
+        expect.equal(row.recordingID, second.id, "the pill belongs to the folded half")
+
+        model.dismissSuggestion(row)
+
+        expect.isTrue(
+            second.store.readSpeakerSuggestions().dismissedLabels
+                .contains("remote-001_speaker_00"),
+            "the dismissal never reached the folded recording's own file"
+        )
+        await model.detail?.reloadSpeakers()
+        expect.isTrue(
+            model.detail?.speakerSuggestions.isEmpty ?? false,
+            "the pill came back on the next read"
+        )
+    }
+
+    /// Clearing a name is a person saying no to it. Nothing automatic puts one
+    /// back, and a pill offering the name straight back is that same automatic
+    /// naming one step further along.
+    @MainActor
+    static func aClearedNameIsNotProposedAgain(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
+        try meeting.store.writeSpeakerSuggestions(SpeakerSuggestionSet(suggestions: [
+            SpeakerNameSuggestion(
+                label: "remote-001_speaker_00", name: "Priya Raman", confidence: 0.91,
+                quote: "Priya, what did the renewal come back at?", atSeconds: 12
+            ),
+        ]))
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the pill to reach the strip") {
+            model.detail?.speakerSuggestions.count == 1
+        }
+        guard let pill = model.detail?.speakerSuggestions.first else {
+            expect.fail("no suggestion on the strip")
+            return
+        }
+
+        // Accept it, then think better of it and take the name off.
+        model.acceptSuggestion(pill)
+        await waitFor(expect, "the name to reach the speaker map") {
+            (try? meeting.store.readSpeakerMap())?.entries["remote-001_speaker_00"] != nil
+        }
+        await model.detail?.reloadSpeakers()
+        guard let chip = model.detail?.speakerRows.first(where: {
+            $0.clusterID == "remote-001_speaker_00"
+        }) else {
+            expect.fail("the named cluster is not in the speaker strip")
+            return
+        }
+        model.clearCluster(chip)
+        await waitFor(expect, "the name to come off") {
+            (try? meeting.store.readSpeakerMap())?.clearedKeys
+                .contains("remote-001_speaker_00") == true
+        }
+
+        await model.detail?.reloadSpeakers()
+        expect.isTrue(
+            model.detail?.speakerSuggestions.isEmpty ?? false,
+            "the name the user just took off was offered straight back"
+        )
+    }
+
     static var windowSuite: Suite {
         Suite("MeetingsWindow", [
+            test("a dismissal on the second half of a call reaches disk") { expect in
+                try await aDismissalOnTheSecondHalfReachesDisk(expect)
+            },
+            test("a name the user cleared is not proposed again") { expect in
+                try await aClearedNameIsNotProposedAgain(expect)
+            },
+            test("accepting a suggestion names the speaker as a person would") { expect in
+                try await acceptingASuggestionNamesLikeAPerson(expect)
+            },
+            test("a suggestion turned down is not offered again") { expect in
+                try await aDismissedSuggestionStaysDismissed(expect)
+            },
             test("the window opens a meeting that no filter is showing") { expect in
                 try await aFilteredOutMeetingStillOpens(expect)
             },

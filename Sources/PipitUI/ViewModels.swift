@@ -20,13 +20,26 @@ import SwiftUI
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
-    public var inputDescription = "Unknown"
     public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String
     public var apiKey = ""
     public var hasStoredKey: Bool
     public var testState = TestState.idle
     public var voiceStatistics: SpeakerStore.Statistics?
+    /// Everyone with a name, for choosing which of them is you.
+    public var people: [SpeakerDirectoryEntry] = []
+    /// Whether the name field holds something a person typed.
+    ///
+    /// Leaving the pane writes the field, because a name typed and not
+    /// submitted is still a name they meant. Writing it unconditionally
+    /// re-rendered the markdown of every meeting the local user appears in,
+    /// every time the pane was left, and could rename the person just chosen in
+    /// the picker to the name of the one before them.
+    @ObservationIgnored private var nameEdited = false
+    /// What the archive costs on disk. Nil until the first walk finishes, which
+    /// is what the Storage page draws "Calculating…" for.
+    public var archiveUsage: ArchiveUsage?
+    public var isMeasuringArchive = false
     /// Opens the people directory. Set by the window manager, which owns both
     /// this model and that window.
     @ObservationIgnored public var onOpenPeople: (() -> Void)?
@@ -52,7 +65,6 @@ public final class SettingsModel {
     public func refresh() async {
         statuses = await runtime.permissions.allStatuses()
         hostStatus = NativeMessagingInstaller().status()
-        inputDescription = CoreAudioSystem.describeDefaultInput()
         sensorStatus = runtime.sensorStatus
         // Off the main actor: this call blocks until the person answers the
         // login-keychain prompt macOS raises when the item's ACL does not
@@ -123,13 +135,115 @@ public final class SettingsModel {
         var settings = runtime.settings
         settings.storageRootPath = url.path
         runtime.update(settings: settings)
+        // The measurement belongs to the folder it was taken in, and the
+        // Storage page draws it under whatever path is current.
+        archiveUsage = nil
+        Task { await refreshArchiveUsage() }
     }
 
-    public func refreshPeople() async {
+    /// The counts the Storage page draws. Nothing about who you are, so a pane
+    /// that only wants numbers cannot reach into the name field.
+    public func refreshVoiceStatistics() async {
         voiceStatistics = await runtime.voiceMemoryStatistics()
     }
 
+    /// The directory and the name beside it, for the pane that picks who you
+    /// are.
+    ///
+    /// The field is left alone while it holds something typed. Reading the
+    /// directory suspends for as long as it takes to score every profile, and a
+    /// straggling read landing after somebody started typing would put the
+    /// stored name back under them and drop what they wrote.
+    public func refreshPeople() async {
+        await refreshVoiceStatistics()
+        people = await runtime.speakerDirectory(kind: .person)
+        guard !nameEdited else { return }
+        localUserName = runtime.settings.localUserName
+    }
+
+    /// The name field. Writes through the identity, and remembers that somebody
+    /// typed in it.
+    public var localUserNameField: Binding<String> {
+        Binding(
+            get: { self.localUserName },
+            set: { typed in
+                self.localUserName = typed
+                self.nameEdited = true
+            }
+        )
+    }
+
+    /// Which person in the directory is you, or nil before one is picked.
+    public var localUserIdentityID: IdentityID? {
+        runtime.settings.processing.localUserIdentityID
+    }
+
+    /// Points the microphone track at an existing person.
+    ///
+    /// Their profile then carries everything the track teaches, and an imported
+    /// recording naming you lands on the same row rather than a second one.
+    public func chooseLocalUser(_ identityID: IdentityID) async {
+        await runtime.setLocalUser(identityID)
+        // Before the reads below, which await. A name half typed for the person
+        // who was you a moment ago must not survive into the window where
+        // Settings already names somebody else: leaving the tab there would
+        // rename the person just chosen to what was in the field.
+        localUserName = runtime.settings.localUserName
+        nameEdited = false
+        await refreshPeople()
+    }
+
+    /// Renames whoever is you, or names them for the first time.
+    ///
+    /// Through the identity where there is one, so the name in Settings and the
+    /// name in People cannot drift apart.
+    public func commitLocalUserName() async {
+        guard nameEdited else { return }
+        let name = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            localUserName = runtime.settings.localUserName
+            nameEdited = false
+            return
+        }
+        guard name != runtime.settings.localUserName else {
+            nameEdited = false
+            return
+        }
+        if let identityID = localUserIdentityID {
+            await runtime.renamePerson(identityID, to: name)
+        } else {
+            saveLocalUserName()
+        }
+        // The field is now what the identity says, so it is no longer something
+        // typed. Cleared before the read below, which leaves the field alone
+        // while this is true.
+        nameEdited = false
+        await refreshPeople()
+    }
+
     public func openPeople() { onOpenPeople?() }
+
+    /// Measures the archive off the main actor.
+    ///
+    /// A walk of every file of every meeting ever recorded, so it is kept for
+    /// the life of the window and only redone when asked. Opening Storage a
+    /// second time shows the number it already has.
+    public func refreshArchiveUsage(force: Bool = false) async {
+        guard !isMeasuringArchive else { return }
+        guard force || archiveUsage == nil else { return }
+        isMeasuringArchive = true
+        defer { isMeasuringArchive = false }
+        let repository = runtime.repository
+        archiveUsage = await Task.detached(priority: .utility) { repository.usage() }.value
+    }
+
+    /// What the installed speech models take, as the local model state reports
+    /// it. Zero before that state has been read.
+    public var installedModelBytes: Int64 {
+        LocalModelUnit.allCases.reduce(Int64(0)) { total, unit in
+            total + (runtime.localModelState.present.bytes(for: unit) ?? 0)
+        }
+    }
 
     public func installLocalModels() async {
         await runtime.installLocalModels()
@@ -184,6 +298,9 @@ public final class MeetingReviewModel {
     /// Detected speakers with how each was decided, refreshed alongside the
     /// transcript.
     public var speakerRows: [MeetingSpeakerRow] = []
+    /// Names the model heard for speakers nothing else could name. Never
+    /// applied on its own: the strip draws them and the user decides.
+    public var speakerSuggestions: [MeetingSuggestionRow] = []
     /// Everyone Pipit could put on a line, for the pickers.
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
@@ -293,6 +410,7 @@ public final class MeetingReviewModel {
     /// The parts that need the identity store, which the file read does not.
     public func reloadSpeakers() async {
         speakerRows = await runtime.speakers(inMeeting: meetingID).filter(\.hasSpeechToShow)
+        speakerSuggestions = runtime.speakerSuggestions(inMeeting: meetingID)
         knownPeople = await runtime.speakerDirectory(kind: .person)
     }
 

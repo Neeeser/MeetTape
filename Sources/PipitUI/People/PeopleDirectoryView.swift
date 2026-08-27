@@ -48,6 +48,23 @@ public struct PeopleDirectoryView: View {
         ) {
             organizationSheet
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.enrollment != nil },
+                set: { showing in
+                    // Escape dismisses the sheet without pressing anything in
+                    // it, and the microphone has to close either way.
+                    if !showing {
+                        model.enrollment?.cancel()
+                        model.enrollment = nil
+                    }
+                }
+            )
+        ) {
+            if let enrollment = model.enrollment {
+                VoiceEnrollmentView(model: enrollment) { model.enrollment = nil }
+            }
+        }
     }
 
     // MARK: - sidebar
@@ -103,9 +120,24 @@ public struct PeopleDirectoryView: View {
         return HStack(spacing: 8) {
             PersonAvatar(identity: entry.identity, image: model.avatarImage(for: entry))
             VStack(alignment: .leading, spacing: 1) {
-                Text(entry.identity.resolvedName)
-                    .font(.callout)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(entry.identity.resolvedName)
+                        .font(.callout)
+                        .lineLimit(1)
+                    // The row is the person at this Mac. The section heading
+                    // says so too, but a name is what a reader looks at, and
+                    // scrolled past the heading the row is just another name.
+                    if entry.identity.isLocalUser {
+                        Text("You")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule().fill(Color.accentColor.opacity(0.20))
+                            )
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
                 Text(rowSubtitle(entry))
                     .font(.caption2)
                     .foregroundStyle(.secondary)

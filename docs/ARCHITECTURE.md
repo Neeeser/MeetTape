@@ -114,7 +114,10 @@ and metadata are durable. An interrupted compaction resumes during startup.
 
 Voice profiles are stored separately at
 `~/Library/Application Support/Pipit/Speakers/voices.sqlite`. Meeting folders
-and exports contain no voice vectors.
+and exports contain no voice vectors. A recording made by reading the enrolment
+script aloud is kept beside it, under
+`~/Library/Application Support/Pipit/VoiceEnrollment/<identity>/`, and is deleted
+when that person's learned voice is forgotten or they are deleted.
 
 ## Speech processing
 
@@ -177,6 +180,18 @@ covering too little of the diarized speech names nobody, which is what
 disagreeing clocks look like, and a floor nobody confirmed ends at the last
 reading that saw it rather than running to the end of the call. A sensor that reports nothing leaves
 naming exactly as it was before, which is by voice alone.
+
+One identity is the person using this Mac, flagged in the store and named in
+Settings from that row. The microphone track of a remote call is theirs by
+construction, so it is written into `speaker_occurrence` under the `local` key
+with no vector: every count of the meetings a person was in reads that table,
+and the track it covers produces no diarization cluster of its own. Taking a
+name off that track writes the row back with nobody behind it.
+
+Their profile can also be built without a meeting. Reading a short script aloud
+is embedded as one speaker and enrolled directly, which is what makes an
+in-person or imported recording recognisable as them: neither carries a
+microphone track whose speaker is known in advance.
 
 Named people and recurring unnamed voices share one identity store. A confirmed
 speaker name can add meeting audio to a profile. Automatic recognition reads the

@@ -40,30 +40,47 @@ public struct Participant: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-/// Title candidates in precedence order. A human title always wins; an AI title is
-/// only used when nothing better exists.
+/// Title candidates in precedence order. A human title always wins, and the
+/// generated one is used when nothing a person or a meeting client supplied is
+/// there.
 public struct TitleCandidates: Codable, Sendable, Equatable {
     public var human: String?
     public var provider: String?
     public var calendar: String?
+    /// What an imported recording's file was called, without its extension.
+    ///
+    /// Ranked above the generated title and apart from `window`, because the two
+    /// are not the same kind of evidence. A window title is scraped, and for a
+    /// call it reads "Meet - abc-defg-hij". A filename is something a person
+    /// chose.
+    public var filename: String?
     public var window: String?
     public var ai: String?
     public var timestampFallback: String
 
     public init(
         human: String? = nil, provider: String? = nil, calendar: String? = nil,
-        window: String? = nil, ai: String? = nil, timestampFallback: String
+        filename: String? = nil, window: String? = nil, ai: String? = nil,
+        timestampFallback: String
     ) {
         self.human = human
         self.provider = provider
         self.calendar = calendar
+        self.filename = filename
         self.window = window
         self.ai = ai
         self.timestampFallback = timestampFallback
     }
 
+    /// The order titles are trusted in.
+    ///
+    /// The generated title sits above `window` because a scraped window title is
+    /// usually the meeting client's own noise, and a sentence read off the
+    /// transcript beats it. It stays below `provider` and `calendar`: those are
+    /// what the meeting is called by the people in it, and a recurring meeting
+    /// keeps one name across every instance only if they win.
     public var resolved: String {
-        for candidate in [human, provider, calendar, window, ai] {
+        for candidate in [human, provider, calendar, filename, ai, window] {
             if let candidate, !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return candidate
             }
@@ -75,8 +92,9 @@ public struct TitleCandidates: Codable, Sendable, Equatable {
         if human?.isEmpty == false { return "human" }
         if provider?.isEmpty == false { return "provider" }
         if calendar?.isEmpty == false { return "calendar" }
-        if window?.isEmpty == false { return "window" }
+        if filename?.isEmpty == false { return "filename" }
         if ai?.isEmpty == false { return "ai" }
+        if window?.isEmpty == false { return "window" }
         return "timestamp"
     }
 }

@@ -580,7 +580,7 @@ public final class PipitRuntime {
         var titles = TitleCandidates(
             timestampFallback: MeetingRepository.timestampTitle(startedAt: started, source: .imported)
         )
-        titles.window = url.deletingPathExtension().lastPathComponent
+        titles.filename = url.deletingPathExtension().lastPathComponent
         let created = try repository.createMeeting(
             source: .imported, provider: .unknown, startedAt: started,
             titles: titles, now: clock.now

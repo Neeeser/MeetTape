@@ -107,6 +107,31 @@ enum MeetingFolderNameTests {
                 expect.isTrue(cjk.utf8.count <= 255, "got \(cjk.utf8.count) bytes")
             },
 
+            test("a generated title beats a window title and loses to a meeting's own") { expect in
+                var titles = TitleCandidates(timestampFallback: "fallback")
+                titles.window = "Meet - abc-defg-hij"
+                titles.ai = "Pricing model rework"
+                expect.equal(titles.resolved, "Pricing model rework")
+                expect.equal(titles.resolvedOrigin, "ai")
+
+                // What the people in the meeting call it wins, so a recurring
+                // meeting keeps one name across every instance.
+                titles.calendar = "Hindsight Daily"
+                expect.equal(titles.resolved, "Hindsight Daily")
+                titles.provider = "Huddle in #engineering"
+                expect.equal(titles.resolved, "Huddle in #engineering")
+                titles.human = "What I called it"
+                expect.equal(titles.resolved, "What I called it")
+            },
+
+            test("an imported file keeps the name it was given") { expect in
+                var titles = TitleCandidates(timestampFallback: "fallback")
+                titles.filename = "Board meeting Aug 12"
+                titles.ai = "Quarterly financial review"
+                expect.equal(titles.resolved, "Board meeting Aug 12")
+                expect.equal(titles.resolvedOrigin, "filename")
+            },
+
             test("a title that sanitizes away falls back to the source") { expect in
                 let name = MeetingFolderName.base(
                     title: "  ...  ",

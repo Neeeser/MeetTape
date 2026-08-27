@@ -1503,6 +1503,92 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("a microphone track linked to nobody is linked to you") { expect in
+                // Meetings processed before Settings held an identity name the
+                // track and link it to no row at all. The track is the local
+                // user by construction and the entry says the pipeline wrote
+                // it, so the backfill gives it the link a fresh run would.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                var map = SpeakerMap()
+                map.entries[SpeakerLabel.localUser] = SpeakerAssignment(
+                    displayName: "Andrew", origin: .deterministic
+                )
+                try meeting.store.writeSpeakerMap(map)
+                try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+                    generatedAt: Date(timeIntervalSince1970: 1_787_070_000),
+                    utterances: [Utterance(
+                        id: "u0", start: 0, end: 30, track: .mic, rawSpeakerLabel: nil,
+                        speakerKey: SpeakerLabel.localUser, text: "sounds right to me",
+                        chunkID: "c1", model: "m"
+                    )]
+                ))
+
+                var settings = AppSettings()
+                settings.processing.localUserIdentityID = me.id
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                expect.equal(await pipeline.backfillLocalUserOccurrences(), 1)
+                expect.equal(try await store.meetingCount(for: me.id), 1)
+                expect.equal(
+                    try meeting.store.readSpeakerMap().entries[SpeakerLabel.localUser]?.identityID,
+                    me.id,
+                    "the meeting's own map carries the link too, or the next rename misses it"
+                )
+            },
+
+            test("a microphone track a person gave to somebody else is left alone") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+
+                // What "the microphone was Priya" leaves behind: a human origin
+                // and no link, because that identity was never resolved here.
+                var map = SpeakerMap()
+                map.entries[SpeakerLabel.localUser] = SpeakerAssignment(
+                    displayName: "Priya", origin: .human
+                )
+                try meeting.store.writeSpeakerMap(map)
+                try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+                    generatedAt: Date(timeIntervalSince1970: 1_787_070_000),
+                    utterances: [Utterance(
+                        id: "u0", start: 0, end: 30, track: .mic, rawSpeakerLabel: nil,
+                        speakerKey: SpeakerLabel.localUser, text: "sounds right to me",
+                        chunkID: "c1", model: "m"
+                    )]
+                ))
+
+                var settings = AppSettings()
+                settings.processing.localUserIdentityID = me.id
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: []),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                _ = await pipeline.backfillLocalUserOccurrences()
+                expect.equal(
+                    try await store.meetingCount(for: me.id), 0,
+                    "a name a person typed is not the microphone track's construction"
+                )
+            },
+
             test("meetings recorded before the microphone had a row get one") { expect in
                 // The fix writes the row as a meeting is processed, which
                 // leaves every meeting already in the archive counting for

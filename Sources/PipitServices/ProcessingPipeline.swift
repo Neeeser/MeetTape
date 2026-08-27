@@ -1179,13 +1179,25 @@ public actor ProcessingPipeline {
     /// processed; this is the archive that was already on disk.
     public func backfillLocalUserOccurrences() async -> Int {
         guard backends.speakers != nil else { return 0 }
+        let localUserID = settingsProvider().processing.localUserIdentityID
         var written = 0
         for summary in repository.listMeetings() {
             for store in repository.stores(ofConversation: summary) {
                 guard let metadata = try? store.readMetadata(),
-                      let speakers = try? store.readSpeakerMap(),
+                      var speakers = try? store.readSpeakerMap(),
                       let transcript = try? store.readCanonicalTranscript()
                 else { continue }
+                // A meeting processed before Settings held an identity at all
+                // names the microphone track and links it to nobody. The track
+                // is the local user by construction, and the entry still says
+                // the pipeline wrote it rather than a person, so the link is
+                // the one this meeting would be given if it ran again.
+                if let localUserID, metadata.source.micTrackIsLocalUser,
+                   speakers.entries[SpeakerLabel.localUser]?.identityID == nil,
+                   speakers.entries[SpeakerLabel.localUser]?.origin == .deterministic {
+                    speakers.linkIdentity(localUserID, to: SpeakerLabel.localUser, named: nil)
+                    try? store.writeSpeakerMap(speakers)
+                }
                 guard speakers.entries[SpeakerLabel.localUser]?.identityID != nil else { continue }
                 if await recordLocalUserOccurrence(
                     meetingID: metadata.id, transcript: transcript, speakers: speakers

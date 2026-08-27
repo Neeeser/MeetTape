@@ -32,6 +32,10 @@ public struct MeetingLayout: Sendable, Equatable {
     /// assembly rather than measured again.
     public var speechEvidence: URL { raw.appendingPathComponent("speech.json") }
     public var speakerMap: URL { raw.appendingPathComponent("speakers.map.json") }
+    /// Names the cloud model proposes for speakers the meeting could not name.
+    /// Deliberately not part of `speakers.map.json`: that file is what the
+    /// meeting concluded, and a proposal is not a conclusion.
+    public var speakerSuggestions: URL { raw.appendingPathComponent("speaker.suggestions.json") }
     /// What the meeting client said about the call: the roster, who was seen
     /// unmuted, and who held the floor when. Immutable like the diarization beside it,
     /// because it is evidence about a recording rather than a conclusion about

@@ -76,17 +76,34 @@ public struct TranscriptionResponse: Sendable, Equatable {
 }
 
 /// A speaker identity the model proposes, always a suggestion and never truth.
+///
+/// The quote is what makes it checkable. A model asked only for a name and a
+/// score will produce both for a meeting where nobody was named at all, and
+/// the score alone gives a reader no way to tell that apart from a real match.
+/// Asked for the line instead, it has to point at something.
 public struct SpeakerSuggestion: Sendable, Equatable, Codable {
     public var label: String
     public var name: String
     public var confidence: Double
-    public var evidence: String
+    /// The transcript line where the name was said, verbatim.
+    public var quote: String
+    /// Where that line starts, in seconds from the start of the meeting.
+    public var atSeconds: Double
+    /// Whether the name was completed from the calendar invite. The model is
+    /// told to say so rather than to pass a full name off as something it
+    /// heard.
+    public var expandedFromCalendar: Bool
 
-    public init(label: String, name: String, confidence: Double, evidence: String) {
+    public init(
+        label: String, name: String, confidence: Double, quote: String,
+        atSeconds: Double, expandedFromCalendar: Bool = false
+    ) {
         self.label = label
         self.name = name
         self.confidence = confidence
-        self.evidence = evidence
+        self.quote = quote
+        self.atSeconds = atSeconds
+        self.expandedFromCalendar = expandedFromCalendar
     }
 }
 
@@ -133,23 +150,37 @@ public struct EnrichmentRequest: Sendable {
 }
 
 public struct SpeakerResolutionRequest: Sendable {
-    /// Anonymous transcript with namespaced labels.
+    /// The transcript as the meeting resolved it: everyone the pipeline named
+    /// appears under their name, and only the speakers it could not name keep
+    /// their label.
+    ///
+    /// Anonymising the whole thing threw away the evidence the model needs. The
+    /// pattern that identifies someone is one person addressing another by name
+    /// and that person answering, and it is unreadable when the addresser is
+    /// also a label.
     public var transcript: String
+    /// The labels still waiting for a name. Nothing else may be renamed.
     public var labels: [String]
     public var humanContext: String?
-    public var calendarAttendees: [String]
-    public var browserParticipants: [String]
+    /// Names already known for this meeting, from the calendar invite and from
+    /// whatever the meeting client reported.
+    ///
+    /// Used only to complete a first name heard in the conversation into a full
+    /// one. Never a roster to assign speakers from: the People directory is not
+    /// sent at all, because a model given a list of everyone the user knows
+    /// will match a speaker to the nearest name on it whether or not anybody
+    /// said it.
+    public var nameHints: [String]
     public var localUserName: String?
 
     public init(
         transcript: String, labels: [String], humanContext: String?,
-        calendarAttendees: [String], browserParticipants: [String], localUserName: String?
+        nameHints: [String], localUserName: String?
     ) {
         self.transcript = transcript
         self.labels = labels
         self.humanContext = humanContext
-        self.calendarAttendees = calendarAttendees
-        self.browserParticipants = browserParticipants
+        self.nameHints = nameHints
         self.localUserName = localUserName
     }
 }

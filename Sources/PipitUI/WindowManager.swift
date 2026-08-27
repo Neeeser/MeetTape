@@ -249,6 +249,7 @@ public final class WindowManager {
     /// saving a meeting should not pull the user out of what they are doing.
     public func showMeetings(select meetingID: String? = nil, activating: Bool = true) {
         let model = meetingsModel ?? MeetingsWindowModel(runtime: runtime)
+        model.onOpenSettings = { [weak self] in self?.showSettings() }
         meetingsModel = model
         let window = meetingsWindow ?? {
             let created = makeWindow(

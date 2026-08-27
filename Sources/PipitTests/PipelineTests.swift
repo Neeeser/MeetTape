@@ -320,7 +320,7 @@ enum PipelineTests {
                 backend.suggestions = [
                     SpeakerSuggestion(
                         label: "remote_chunk_001_speaker_00", name: "Chris",
-                        confidence: 0.98, evidence: "self-introduction"
+                        confidence: 0.98, quote: "Chris here, agreed.", atSeconds: 0
                     ),
                 ]
 
@@ -335,12 +335,18 @@ enum PipelineTests {
                 expect.equal(transcript.utterances.count, 2)
                 let speakers = try meeting.store.readSpeakerMap()
                 expect.equal(speakers.resolvedName(for: SpeakerLabel.localUser), "Me")
-                expect.equal(speakers.resolvedName(for: "remote_chunk_001_speaker_00"), "Chris")
+                // The model's answer is a suggestion, so the speaker map is
+                // left exactly as speaker resolution left it.
+                expect.isNil(speakers.entries["remote_chunk_001_speaker_00"])
+                let suggestions = meeting.store.readSpeakerSuggestions()
+                    .visible(forUnnamed: ["remote_chunk_001_speaker_00"])
+                expect.equal(suggestions.count, 1)
+                expect.equal(suggestions.first?.name, "Chris")
+                expect.equal(suggestions.first?.quote, "Chris here, agreed.")
 
                 let markdown = try String(
                     contentsOf: meeting.store.layout.transcriptMarkdown, encoding: .utf8
                 )
-                expect.isTrue(markdown.contains("Chris"))
                 expect.isTrue(
                     FileManager.default.fileExists(atPath: meeting.store.layout.summary.path),
                     "summary.md should exist"

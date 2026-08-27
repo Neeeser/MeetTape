@@ -174,6 +174,13 @@ public actor ProcessingPipeline {
                     try await runSpeakerResolution(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .enriching, at: clock.now)
                 case .enriching:
+                    // Recorded here rather than inside enrichment, which returns
+                    // before it can say anything when every title and summary
+                    // toggle is off. Whether a key is stored is a fact about the
+                    // app, so the answer must not depend on which stage happened
+                    // to ask, and it is re-read on every run so storing a key
+                    // clears the notice.
+                    await recordMissingKey(&metadata, settings: settings)
                     // Enrichment is the one part that needs the cloud, and it is
                     // not what makes a meeting readable. Failing it used to take
                     // finish() with it, so a lost connection at the end of a call
@@ -1417,7 +1424,7 @@ public actor ProcessingPipeline {
                 "local voice profile skipped: \(logSafeDescription(error), privacy: .public)"
             )
         }
-        try await suggestSpeakerNames(store: store, metadata: &metadata, settings: settings)
+        try await suggestSpeakerNames(store: store, metadata: metadata, settings: settings)
     }
 
     /// The audio one cluster covers, on the meeting timeline.
@@ -1708,11 +1715,16 @@ public actor ProcessingPipeline {
         )
     }
 
-    /// Asks the cloud model to put names to the speakers it can from the words
-    /// alone. Lowest-ranked evidence there is, so it never overwrites a voice
-    /// match, a deterministic identity or anything a person set.
+    /// Asks the cloud model which of the still-unnamed speakers it heard a name
+    /// for, and files the answers as suggestions.
+    ///
+    /// Runs last, after sensor names, the microphone track and voice matching
+    /// have all had their say, so the model is asked only about what the
+    /// meeting could not work out for itself. Nothing here writes to
+    /// `speakers.map.json`: a suggestion becomes an assignment when a person
+    /// accepts it, through the same path as choosing the name by hand.
     private func suggestSpeakerNames(
-        store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
+        store: MeetingStore, metadata: MeetingMetadata, settings: AppSettings
     ) async throws {
         guard settings.enrichment.suggestSpeakers else { return }
         // An empty identifier means the user is mid-edit in Settings.
@@ -1729,56 +1741,76 @@ public actor ProcessingPipeline {
             $0 != SpeakerLabel.localUser
                 && !$0.hasSuffix(SpeakerLabel.unattributed)
                 && speakers.entries[$0] == nil
+                // A person took this name off deliberately, so the model is not
+                // asked to produce another one for them.
+                && !speakers.clearedKeys.contains($0)
         }
         guard !labels.isEmpty else { return }
 
+        // Everyone the meeting named keeps their name, and only the labels
+        // being asked about stay labels. The pattern that identifies a speaker
+        // is someone addressing them by name, and it cannot be read when the
+        // person doing the addressing is also anonymous.
+        let unnamed = Set(labels)
         let renderer = TranscriptRenderer()
-        let anonymous = transcript.utterances
-            .filter { $0.speakerKey != SpeakerLabel.localUser }
-            .map { "[\(renderer.timecode($0.start))] \($0.speakerKey): \($0.text)" }
-            .joined(separator: "\n")
+        let rendered = transcript.utterances.map { utterance -> String in
+            let key = utterance.speakerKey
+            let who = unnamed.contains(key) ? key : speakers.resolvedName(for: utterance)
+            return "[\(renderer.timecode(utterance.start))] \(who): \(utterance.text)"
+        }.joined(separator: "\n")
+
+        // Both lists name people in this one meeting. Neither is a directory,
+        // and the People directory is deliberately not sent.
+        var hints = metadata.calendar?.attendees ?? []
+        hints.append(contentsOf: metadata.participants.map(\.displayName))
 
         let suggestions = try await backend.resolveSpeakers(
             SpeakerResolutionRequest(
-                transcript: String(anonymous.prefix(60_000)),
+                transcript: String(rendered.prefix(60_000)),
                 labels: labels,
                 humanContext: store.readNotes(),
-                calendarAttendees: metadata.calendar?.attendees ?? [],
-                browserParticipants: metadata.participants.map(\.displayName),
+                nameHints: Array(Set(hints)).sorted(),
                 localUserName: metadata.source.micTrackIsLocalUser ? settings.localUserName : nil
             ),
             model: settings.models.metadata
         )
 
-        // Suggestions never overwrite a name the user set, nor a voice match.
-        var updated = try store.readSpeakerMap()
-        for suggestion in suggestions where labels.contains(suggestion.label) {
-            guard suggestion.confidence >= 0.35, !suggestion.name.isEmpty else { continue }
-            updated.applySuggestion(
-                SpeakerAssignment(
-                    displayName: suggestion.name,
-                    origin: .ai,
-                    confidence: suggestion.confidence,
-                    evidence: suggestion.evidence,
-                    provenance: SpeakerProvenance(
-                        source: .ai, score: suggestion.confidence, band: .medium
-                    )
-                ),
-                for: suggestion.label
+        // Dismissals are the user's, so a re-run keeps them rather than
+        // offering a name they have already turned down.
+        var set = store.readSpeakerSuggestions()
+        set.suggestions = suggestions.map {
+            SpeakerNameSuggestion(
+                label: $0.label,
+                name: $0.name,
+                confidence: $0.confidence,
+                quote: $0.quote,
+                atSeconds: $0.atSeconds,
+                expandedFromCalendar: $0.expandedFromCalendar
             )
         }
-        try store.writeSpeakerMap(updated)
+        set.generatedAt = clock.now
+        try store.writeSpeakerSuggestions(set)
+        Log.processing.info(
+            "speaker suggestions: \(set.visible(forUnnamed: unnamed).count, privacy: .public) of \(labels.count, privacy: .public) unnamed"
+        )
+    }
 
-        // The same gate the speaker map applies. Without it a name the pipeline
-        // had just rejected as too weak was still recorded as a participant, and
-        // then fed back as context on the next suggestion request.
-        var participants = metadata.participants
-        for suggestion in suggestions
-        where suggestion.confidence >= 0.35 && !suggestion.name.isEmpty
-            && !participants.contains(where: { $0.displayName == suggestion.name }) {
-            participants.append(Participant(displayName: suggestion.name, origin: .ai))
+    /// Whether the cloud stages this meeting wanted were passed over for want
+    /// of a key.
+    ///
+    /// Both optional cloud stages skip silently on purpose, so a user who runs
+    /// everything on this Mac is never shown a failure for something they did
+    /// not ask for. That left a stored key which goes missing looking exactly
+    /// like one that was never set.
+    private func recordMissingKey(
+        _ metadata: inout MeetingMetadata, settings: AppSettings
+    ) async {
+        let wantsCloud = settings.enrichment.wantsAnything || settings.enrichment.suggestSpeakers
+        guard wantsCloud, !settings.models.metadata.isEmpty else {
+            metadata.processing.skippedForMissingKey = false
+            return
         }
-        metadata.participants = participants
+        metadata.processing.skippedForMissingKey = await !backend.isConfigured()
     }
 
     private func runEnrichment(

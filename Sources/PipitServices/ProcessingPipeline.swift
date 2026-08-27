@@ -60,6 +60,14 @@ public actor ProcessingPipeline {
     private let chunking: ChunkPlanner.Configuration
 
     private var running: Set<String> = []
+    /// Meetings whose folders left the archive while a job was running, and
+    /// when they left.
+    ///
+    /// Every write here goes through `AtomicFile`, which creates the
+    /// directories it needs, so a job that carried on after the move put the
+    /// meeting back as a row holding no audio and no transcript.
+    private var goneWhileRunning: [String: Date] = [:]
+
     /// How many jobs are writing into each meeting's folder right now.
     ///
     /// Renaming a folder moves it out from under the absolute paths a job
@@ -81,7 +89,13 @@ public actor ProcessingPipeline {
 
     private func releaseFolder(_ meetingID: String) {
         guard let count = foldersHeld[meetingID] else { return }
-        if count <= 1 { foldersHeld.removeValue(forKey: meetingID) } else {
+        if count <= 1 {
+            foldersHeld.removeValue(forKey: meetingID)
+            // The last writer is out, so nothing is left to notice a move, and
+            // a mark left behind would take the folder out from under a later
+            // job on the same meeting.
+            goneWhileRunning.removeValue(forKey: meetingID)
+        } else {
             foldersHeld[meetingID] = count - 1
         }
     }
@@ -90,6 +104,7 @@ public actor ProcessingPipeline {
     private func heldByOthers(_ meetingID: String, besidesSelf: Bool) -> Bool {
         (foldersHeld[meetingID] ?? 0) > (besidesSelf ? 1 : 0)
     }
+
     /// One heavy job at a time. Transcription is 92% of the work and the local
     /// models share one Neural Engine, so a second concurrent meeting takes
     /// time from the first rather than adding any.
@@ -131,6 +146,67 @@ public actor ProcessingPipeline {
         self.chunking = chunking
     }
 
+    /// Removes what a stage wrote into a folder that is no longer meant to
+    /// exist, and says whether the job should stop.
+    ///
+    /// A stage already running when the meeting was trashed finishes and writes
+    /// its output through `AtomicFile`, which creates the directories it needs.
+    /// What it left is removed here rather than guarded at every write. Removed
+    /// outright rather than trashed, because it is scrap written over the top
+    /// of where the meeting used to be, and the meeting itself is whole in the
+    /// Trash.
+    ///
+    /// A folder older than the move is not that scrap. It is the meeting
+    /// itself, put back from the Trash while this ran, so it is left alone and
+    /// the job carries on with it.
+    /// The mark is read rather than taken. Two jobs can be in one folder at
+    /// once, compaction and re-analysis among them, and whichever checked first
+    /// used to take the mark with it. The other then wrote its output into a
+    /// meeting that was already in the Trash and nothing was left to notice.
+    /// `releaseFolder` drops it when the last of them leaves.
+    private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
+        guard let movedAt = goneWhileRunning[meetingID] else { return false }
+        switch RecreatedFolder.discard(at: store.layout.root, writtenAfter: movedAt) {
+        case .predatesTheMove:
+            Log.processing.notice("meeting was put back while it processed, so the job carries on")
+            return false
+        case .kept:
+            // Left where it is, because this volume gives no date to tell what
+            // a stage wrote apart from the meeting itself put back, or because
+            // the removal would not go through.
+            Log.processing.notice("meeting left the archive, job stopped, folder kept")
+        case .absent, .removed:
+            Log.processing.notice("meeting left the archive while it processed, so the job stopped")
+        }
+        scratch.discard(meetingID: meetingID)
+        return true
+    }
+
+    /// Stops the job on a meeting whose folder has just left the archive.
+    ///
+    /// The window offers Move to Trash as soon as the recording is over, which
+    /// is minutes before transcription finishes. The job notices at its next
+    /// stage boundary, removes what it wrote in the meantime, and stops.
+    ///
+    /// Called once the folder has actually moved, and only for folders that
+    /// did. Arming this before the move meant a stage boundary in between
+    /// deleted the meeting the user still had.
+    ///
+    /// Returns whether anything is writing into the folder to notice. When
+    /// nothing is, nothing here will ever clean up what a job wrote on its way
+    /// out, and the caller does it instead.
+    ///
+    /// Asked of the writers rather than of `running`, because processing is not
+    /// the only one. Compaction transcodes for minutes after a meeting is
+    /// complete, and re-analysis diarizes for minutes on one that has been
+    /// complete for months.
+    @discardableResult
+    public func forget(meetingID: String, movedAt: Date) -> Bool {
+        guard foldersHeld[meetingID] != nil else { return false }
+        goneWhileRunning[meetingID] = movedAt
+        return true
+    }
+
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in
     /// flight is left alone.
     public func process(meetingID: String) async {
@@ -157,6 +233,7 @@ public actor ProcessingPipeline {
         let settings = settingsProvider()
 
         while let stage = metadata.processing.resumeStage, stage != .complete {
+            if discardIfGone(metadata.id, store: store) { return }
             do {
                 // Capture always wins. A job started before a meeting parks here
                 // between stages rather than competing for the microphone, the
@@ -185,6 +262,11 @@ public actor ProcessingPipeline {
                     }
                     if !gate.isBlocked { break }
                 }
+                // The wait above runs for the length of somebody else's call,
+                // which is long enough for the user to trash this meeting.
+                // Without this the job ran a whole transcription pass on it and
+                // reported progress for a folder that was already gone.
+                if discardIfGone(metadata.id, store: store) { return }
                 metadata.processing.recordAttempt(for: stage)
                 try persist(metadata, to: store)
                 report(metadata, chunks: nil)
@@ -275,9 +357,13 @@ public actor ProcessingPipeline {
                 onFailure(metadata.id, failure)
                 // Nothing else will read the decoded working copies now.
                 scratch.discard(meetingID: metadata.id)
+                _ = discardIfGone(metadata.id, store: store)
                 return
             }
         }
+        // The last stage advances to complete, which ends the loop without
+        // coming back to the check at the top of it.
+        if discardIfGone(metadata.id, store: store) { return }
 
         // Compaction runs strictly after `complete`: every model has read the
         // PCM at full fidelity by now. A failure leaves the segments as the
@@ -299,7 +385,15 @@ public actor ProcessingPipeline {
                     holdsSlot = true
                 }
             }
+            // The gate wait above is as long as another call, so the move can
+            // land before the transcode even starts.
+            if discardIfGone(metadata.id, store: store) { return }
             await compactQuietly(store: store)
+            // Compaction is minutes of transcoding on a long meeting, and it
+            // writes the archives through AtomicFile like everything else, so
+            // a move landing inside it recreated the folder holding nothing but
+            // audio.
+            _ = discardIfGone(metadata.id, store: store)
         }
 
         // Last, because a rename moves the folder every path above writes into.
@@ -332,12 +426,32 @@ public actor ProcessingPipeline {
 
     /// Replaces a finished meeting's PCM segments with verified archives.
     /// Public entry for the startup sweep; `process` compacts inline.
+    ///
+    /// Counted as a job for as long as it runs, because it is one: minutes of
+    /// transcoding that writes into the meeting's folder. Left out of `running`
+    /// it was a writer nothing could stop, and a meeting trashed in the middle
+    /// of the launch sweep came back holding audio and no metadata.
     public func compactAudio(meetingID: String) async {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         guard AudioCompactor.hasWork(store: found.store, metadata: found.metadata) else { return }
+        guard !running.contains(meetingID) else { return }
+        running.insert(meetingID)
+        // Held as well as counted. It writes the archive files into the folder,
+        // so a rename must not move the folder out from under it.
+        holdFolder(meetingID)
         await waitForSlot()
-        defer { jobLock.release() }
+        defer {
+            running.remove(meetingID)
+            releaseFolder(meetingID)
+            jobLock.release()
+        }
+        // The wait for the slot is as long as a live recording, so the move can
+        // land before the transcode starts. Checked the way every stage checks
+        // it, rather than handing a folder that has gone to the compactor and
+        // reading its failure out of the log.
+        if discardIfGone(meetingID, store: found.store) { return }
         await compactQuietly(store: found.store)
+        _ = discardIfGone(meetingID, store: found.store)
     }
 
     /// Compacts every finished meeting that still has PCM audio, one at a
@@ -413,6 +527,10 @@ public actor ProcessingPipeline {
     /// silently discard that edit.
     private func persist(_ metadata: MeetingMetadata, to store: MeetingStore) throws {
         guard (try? store.readMetadata()) != nil else {
+            // No metadata.json is either a job whose first write this is, or a
+            // meeting somebody trashed underneath it. The folder tells the two
+            // apart, and writing into a trashed meeting recreates it.
+            guard FileManager.default.fileExists(atPath: store.layout.root.path) else { return }
             try store.writeMetadata(metadata)
             return
         }
@@ -2641,6 +2759,11 @@ public actor ProcessingPipeline {
         guard let reanalyze = backends.reanalyzeDiarization else { return }
         holdFolder(meetingID)
         defer { releaseFolder(meetingID) }
+        // This diarizes for minutes and writes the result into the folder, so a
+        // meeting trashed while it runs would come back holding it. Registered
+        // after the release above, so it runs before the hold goes and takes
+        // the mark with it.
+        defer { _ = discardIfGone(meetingID, store: found.store) }
         await waitForSlot()
         defer { jobLock.release() }
         defer { scratch.discard(meetingID: meetingID) }

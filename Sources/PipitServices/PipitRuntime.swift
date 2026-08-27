@@ -121,12 +121,20 @@ public final class PipitRuntime {
     /// produced; independent tasks give no ordering guarantee.
     @ObservationIgnored private var workChain: Task<Void, Never>?
     @ObservationIgnored private let clock: any Clock
+    /// How a meeting leaves the archive. The Finder's own Trash in the app, so
+    /// a folder deleted by mistake is one drag from being back. Injected
+    /// because the tests must not fill the developer's Trash with the temporary
+    /// archives they build.
+    @ObservationIgnored private let trash: @Sendable (URL) throws -> Void
     @ObservationIgnored private var sessionController: SessionController
     @ObservationIgnored private var captureEngine: CaptureEngine!
     @ObservationIgnored private var detectionEngine: DetectionEngine!
     @ObservationIgnored private(set) var pipeline: ProcessingPipeline!
     @ObservationIgnored private var powerObserver: PowerEventObserver?
     @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
+    /// Meetings trashed in this session. A meeting identifier carries the
+    /// moment it started, so none of these is ever handed out again.
+    @ObservationIgnored private var trashedMeetingIDs: Set<String> = []
     /// What the meeting client said while this recording ran. Started when a
     /// meeting is committed and written once at the end, because the artifact is
     /// immutable and a half-written one would be worse than none.
@@ -139,9 +147,13 @@ public final class PipitRuntime {
 
     public init(
         settingsDirectory: URL = SensorTransport.defaultApplicationSupport,
-        clock: any Clock = SystemClock()
+        clock: any Clock = SystemClock(),
+        trash: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+        }
     ) {
         self.clock = clock
+        self.trash = trash
         self.applicationSupport = settingsDirectory
         self.settingsStore = SettingsStore(directory: settingsDirectory)
         let loaded = settingsStore.load()
@@ -704,6 +716,161 @@ public final class PipitRuntime {
         try? found.store.writeNotes(notes)
     }
 
+    /// Takes a meeting out of the list, or puts it back. Nothing on disk moves.
+    ///
+    /// Written on the recording the conversation started with, because the list
+    /// draws one row for a call that dropped and was rejoined. A flag on the
+    /// folded half would hide nothing.
+    public func setArchived(_ archived: Bool, meetingIDs: [String]) {
+        let at: Date? = archived ? clock.now : nil
+        for meetingID in meetingIDs {
+            guard let logical = repository.logicalMeeting(id: meetingID) else { continue }
+            do {
+                _ = try logical.primary.store.updateMetadata { $0.archivedAt = at }
+            } catch {
+                Log.app.error(
+                    "archive state not saved: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
+        }
+        // Once, after all of them. The refresh reads a summary for every meeting
+        // on disk, and archiving forty selected rows did forty of those reads on
+        // the actor that also arms the next recording.
+        refreshRecentMeetings()
+    }
+
+    /// What became of a meeting the user asked to be rid of, in the words the
+    /// window needs to say it.
+    public enum MeetingTrashOutcome: Sendable, Equatable {
+        case trashed
+        /// No meeting with that identifier. The row asking was already stale.
+        case notFound
+        /// The meeting is being recorded now, so its folder is open for
+        /// writing.
+        case refusedWhileRecording
+        /// A folder would not move, and what is left of the meeting is still in
+        /// the archive.
+        case folderNotMoved
+        /// The archive is on a volume with no Trash, so nothing moved. A
+        /// network share and an exFAT disk are both ordinary places to keep it.
+        case volumeHasNoTrash
+    }
+
+    /// Moves every folder the conversation was recorded in to the Trash,
+    /// reading the archive back once at the end.
+    ///
+    /// The audio goes with them, and so does the way back: a meeting trashed by
+    /// mistake is put back from the Finder. Both halves of a rejoined call go.
+    /// The row stands for the conversation, and leaving the second half behind
+    /// would put a recording in the archive that no row can reach.
+    ///
+    /// The meeting being recorded right now is refused. Its folder is open for
+    /// writing, and moving it under the capture engine loses the audio already
+    /// on disk without stopping the recording.
+    public func trashMeetings(_ ids: [String]) async -> [String: MeetingTrashOutcome] {
+        var outcomes: [String: MeetingTrashOutcome] = [:]
+        for id in ids { outcomes[id] = await moveToTrash(id: id) }
+        refreshRecentMeetings()
+        return outcomes
+    }
+
+    private func moveToTrash(id: String) async -> MeetingTrashOutcome {
+        guard let logical = repository.logicalMeeting(id: id) else { return .notFound }
+        // Continuations first, the recording the conversation started with
+        // last. A folder that will not move then leaves a row that can still
+        // reach it. Taking the first half out first left the second half in the
+        // archive with nothing in the list pointing at it, which is the outcome
+        // this whole path exists to prevent.
+        let ordered = logical.continuations + [logical.primary]
+        let directories = ordered.map(\.store.layout.root)
+        if let recording = currentMeeting, directories.contains(
+            where: { $0.standardizedFileURL == recording.store.layout.root.standardizedFileURL }
+        ) {
+            Log.app.notice("refused to trash the meeting being recorded")
+            return .refusedWhileRecording
+        }
+        // Off the main actor. A long meeting is a few hundred megabytes across
+        // several hundred files, and this actor is also the one arming the next
+        // recording.
+        let trash = self.trash
+        // The wall clock, not this runtime's own, because it is compared
+        // against a creation date the filesystem writes. Taken before the first
+        // move, so anything written at that path afterwards is later than it.
+        let movedAt = Date()
+        let (removed, unsupported) = await Task.detached(priority: .userInitiated) {
+            var removed = 0
+            for directory in directories {
+                do {
+                    try trash(directory)
+                } catch {
+                    Log.storage.error(
+                        "meeting folder not trashed: \(logSafeDescription(error), privacy: .public)"
+                    )
+                    // Something already moved it, which is the result asked
+                    // for.
+                    guard FileManager.default.fileExists(atPath: directory.path) else {
+                        removed += 1
+                        continue
+                    }
+                    // Stop before the recording the conversation started with.
+                    // Its row is the only way back to the folders still here.
+                    let error = error as NSError
+                    return (removed, error.domain == NSCocoaErrorDomain
+                        && error.code == NSFeatureUnsupportedError)
+                }
+                removed += 1
+            }
+            return (removed, false)
+        }.value
+        // A rename can move a folder out from under the path captured above, and
+        // a move that misses it reports the path as already gone. The archive is
+        // asked again rather than believed.
+        var settled = 0
+        for recording in ordered.prefix(removed) {
+            guard repository.findMeeting(
+                id: recording.metadata.id, includingMerged: true
+            ) == nil else { break }
+            settled += 1
+        }
+        for (index, recording) in ordered.enumerated() {
+            let meetingID = recording.metadata.id
+            // Still in the archive, so nothing about it is forgotten and its
+            // job carries on.
+            guard index < settled else { continue }
+            // A job that was mid-stage writes its output through AtomicFile,
+            // which creates the directories it needs, so a transcription
+            // finishing a moment later would put the meeting back in the
+            // archive as a row holding nothing. Told after the move rather than
+            // before it, because a stage boundary in between then deleted the
+            // meeting the user still had.
+            let noticed = await pipeline.forget(meetingID: meetingID, movedAt: movedAt)
+            if !noticed {
+                // A job that ended in the moment between the move and the line
+                // above left whatever it wrote, and there is nothing running to
+                // notice it. Dated the same way the pipeline dates it, so a
+                // folder somebody put back is left where it is.
+                RecreatedFolder.discard(
+                    at: recording.store.layout.root, writtenAfter: movedAt
+                )
+            }
+            trashedMeetingIDs.insert(meetingID)
+            // The voice memory counts meetings by the occurrences it holds, so
+            // without this a trashed meeting kept counting towards "heard in 3
+            // meetings" for everyone who spoke in it.
+            await forgetOccurrences(ofMeeting: meetingID)
+            // Nothing draws a progress row for a folder that has left the
+            // archive, and the menu bar drew one until the app was relaunched.
+            processing.removeValue(forKey: meetingID)
+        }
+        Log.app.notice(
+            "trashed a meeting: \(settled, privacy: .public) of \(ordered.count, privacy: .public) recordings"
+        )
+        if settled == ordered.count { return .trashed }
+        // Only when nothing moved at all. On a rejoined call whose first folder
+        // went and whose second did not, the volume plainly has a Trash.
+        return unsupported && settled == 0 ? .volumeHasNoTrash : .folderNotMoved
+    }
+
     public func revealInFinder(meetingID: String) {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([found.store.layout.root])
@@ -1107,6 +1274,12 @@ public final class PipitRuntime {
     }
 
     func apply(_ progress: ProcessingPipeline.Progress) {
+        // A job reports once more from the stage it was inside when the user
+        // trashed its meeting. That report arrives after the row was cleared
+        // and put it straight back, and the job then stops without ever
+        // reporting again, so the menu bar named a folder that had left the
+        // archive until the app was relaunched.
+        guard !trashedMeetingIDs.contains(progress.meetingID) else { return }
         let previous = processing[progress.meetingID]?.state
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)

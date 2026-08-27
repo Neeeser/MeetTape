@@ -365,16 +365,28 @@ public final class PeopleDirectoryModel {
 
     // MARK: - actions on a selection
 
-    public func confirmDeleteSelection() {
-        let targets = selectedEntries
+    public func confirmDeleteSelection() { confirmDelete(selectedEntries) }
+
+    public func confirmDelete(_ targets: [SpeakerDirectoryEntry]) {
         guard !targets.isEmpty else { return }
         pendingAction = PeopleAction(
             targets: targets.map(\.id), names: targets.map(\.identity.resolvedName), kind: .delete
         )
     }
 
+    /// What a right-click acts on. The whole selection when the row is part of
+    /// it, and that row alone otherwise. Right-clicking a row outside the
+    /// selection acting on somebody else is the way this goes wrong.
+    public func contextTargets(for entry: SpeakerDirectoryEntry) -> [SpeakerDirectoryEntry] {
+        selection.contains(entry.id) ? selectedEntries : [entry]
+    }
+
     public func confirmForgetVoice() {
         guard let entry = focused else { return }
+        confirmForgetVoice(of: entry)
+    }
+
+    public func confirmForgetVoice(of entry: SpeakerDirectoryEntry) {
         pendingAction = PeopleAction(
             targets: [entry.id], names: [entry.identity.resolvedName], kind: .forgetVoice
         )
@@ -420,8 +432,9 @@ public final class PeopleDirectoryModel {
     /// statement about a pair. Three selected is two decisions.
     public var canMerge: Bool { selection.count == 2 }
 
-    public func mergeSelection() async {
-        let targets = selectedEntries
+    public func mergeSelection() async { await merge(selectedEntries) }
+
+    public func merge(_ targets: [SpeakerDirectoryEntry]) async {
         guard targets.count == 2 else { return }
         // Into the named one where there is exactly one, so the surviving row is
         // the one with a name on it. Otherwise into the one heard more often.
@@ -434,8 +447,9 @@ public final class PeopleDirectoryModel {
         await reload()
     }
 
-    public func beginSetOrganization() {
-        let targets = selectedEntries
+    public func beginSetOrganization() { beginSetOrganization(selectedEntries) }
+
+    public func beginSetOrganization(_ targets: [SpeakerDirectoryEntry]) {
         guard !targets.isEmpty else { return }
         organizationPrompt = OrganizationPrompt(
             targets: targets.map(\.id),

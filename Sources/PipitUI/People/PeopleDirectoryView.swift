@@ -153,6 +153,29 @@ public struct PeopleDirectoryView: View {
         .onTapGesture {
             model.select(entry.id, extending: NSEvent.modifierFlags.contains(.command))
         }
+        .contextMenu { menu(entry) }
+    }
+
+    /// What a right-click offers. The same actions the footer menu holds, on
+    /// the row under the pointer. It acts on the whole selection when that row
+    /// is part of it, and on that row alone otherwise.
+    @ViewBuilder private func menu(_ entry: SpeakerDirectoryEntry) -> some View {
+        let targets = model.contextTargets(for: entry)
+        Button("Set organization…") { model.beginSetOrganization(targets) }
+        if targets.count == 1 {
+            Button("Forget learned voice…") { model.confirmForgetVoice(of: entry) }
+                .disabled(targets[0].profile == .none)
+        }
+        if targets.count == 2 {
+            Button("Merge into one person") { Task { await model.merge(targets) } }
+        }
+        Divider()
+        Button(
+            targets.count == 1 ? "Delete…" : "Delete \(targets.count) people…",
+            role: .destructive
+        ) {
+            model.confirmDelete(targets)
+        }
     }
 
     private func rowSubtitle(_ entry: SpeakerDirectoryEntry) -> String {

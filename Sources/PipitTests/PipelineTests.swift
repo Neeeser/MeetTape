@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Synchronization
 import PipitAudio
 import PipitCore
 import PipitIntegrations
@@ -75,8 +76,184 @@ enum PipelineTests {
         )
     }
 
+    /// A transcriber that runs one piece of work before it answers, so a test
+    /// can make something happen while a stage is in flight.
+    final class InterferingTranscriber: TranscriptionBackend, @unchecked Sendable {
+        var identifier = "stub-interfering"
+        var isLocal = true
+        var limits = BackendAudioLimits.none
+        var timing = TranscriptTiming.text
+        let interference = Mutex<(@Sendable () async -> Void)?>(nil)
+
+        func transcribe(
+            audio: URL, progress: @escaping @Sendable (Double) -> Void
+        ) async throws -> TranscriptionOutput {
+            if let work = interference.withLock({ $0 }) { await work() }
+            progress(1)
+            return TranscriptionOutput(segments: [], text: "we ship friday", durationSeconds: 6)
+        }
+    }
+
     static var suite: Suite {
         Suite("ProcessingPipeline", [
+            test("a meeting trashed while it is transcribing does not come back") { expect in
+                // Every write goes through AtomicFile, which creates the
+                // directories it needs. A job that carried on after the folder
+                // left the archive put the meeting back as a row holding no
+                // audio and no transcript, and nothing said where it came from.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                let folder = meeting.store.layout.root
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let transcriber = InterferingTranscriber()
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: transcriber,
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: resolved,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                transcriber.interference.withLock {
+                    $0 = { [pipeline] in
+                        // What the window does: the folder moves, and the job
+                        // is told once it has.
+                        try? FileManager.default.moveItem(at: folder, to: trashed)
+                        await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                    }
+                }
+
+                await pipeline.process(meetingID: meetingID)
+
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the folder the user trashed has not come back"
+                )
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: trashed.path),
+                    "and what was moved is untouched"
+                )
+                expect.isNil(
+                    meeting.repository.findMeeting(id: meetingID, includingMerged: true)?.metadata,
+                    "and no row comes back for it"
+                )
+            },
+
+            test("a meeting put back from the Trash while it processed is left alone") { expect in
+                // The confirmation says the folder is recoverable. A job that
+                // removed the restored folder at its next stage boundary would
+                // take the meeting with it, permanently and without a word.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                let folder = meeting.store.layout.root
+                // A meeting folder is made when the recording starts, so it is
+                // always older than the moment somebody trashes it, and Put
+                // Back restores that date with the folder. What tells the
+                // restored meeting apart from a folder a stage recreated.
+                try FileManager.default.setAttributes(
+                    [.creationDate: Date().addingTimeInterval(-3_600)],
+                    ofItemAtPath: folder.path
+                )
+
+                var settings = AppSettings()
+                settings.processing.transcription = .local
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let resolved = settings
+                let transcriber = InterferingTranscriber()
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: transcriber,
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: resolved,
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                transcriber.interference.withLock {
+                    $0 = { [pipeline] in
+                        try? FileManager.default.moveItem(at: folder, to: trashed)
+                        await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                        // Put Back, from the Finder, before the stage that was
+                        // running reaches its next boundary.
+                        try? FileManager.default.moveItem(at: trashed, to: folder)
+                    }
+                }
+
+                await pipeline.process(meetingID: meetingID)
+
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the meeting the user put back is still there"
+                )
+                let metadata = try expect.unwrap(
+                    meeting.repository.findMeeting(id: meetingID)?.metadata
+                )
+                expect.equal(
+                    metadata.processing.state, .complete,
+                    "and the job it interrupted carried on to the end"
+                )
+            },
+
+            test("a meeting trashed while it compacts does not come back") { expect in
+                // Compaction runs for minutes after a meeting is complete, and
+                // writes its archive files through AtomicFile like everything
+                // else. The launch sweep was left out of the marks entirely, so
+                // a meeting trashed while it transcoded came back holding audio
+                // and no metadata.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                _ = try meeting.store.updateMetadata {
+                    $0.processing = ProcessingStatus(state: .complete, updatedAt: Date())
+                }
+                let folder = meeting.store.layout.root
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: StubTextTranscriber(text: "unused"),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+
+                let compaction = Task { await pipeline.compactAudio(meetingID: meetingID) }
+                // Once the job holds the folder, which is what the window asks
+                // before it moves anything.
+                var held = false
+                for _ in 0..<400 where !held {
+                    held = await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                    if !held { try? await Task.sleep(for: .milliseconds(5)) }
+                }
+                expect.isTrue(held, "the compaction job took the folder")
+                try? FileManager.default.moveItem(at: folder, to: trashed)
+                await compaction.value
+
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the folder the user trashed has not come back"
+                )
+            },
+
             test("a chunk that came back with words is accepted without reading its audio") { expect in
                 // The level only separates silence from a lost transcript, so
                 // decoding on the success path costs a full converter pass per

@@ -22,6 +22,36 @@ public struct MeetingsWindowView: View {
         }
         .frame(minWidth: 900, minHeight: 560)
         .task { await model.reload() }
+        .alert(
+            model.pendingTrash?.title ?? "",
+            isPresented: Binding(
+                get: { model.pendingTrash != nil },
+                set: { if !$0 { model.pendingTrash = nil } }
+            )
+        ) {
+            // Captured here, while the alert still has one. The button's action
+            // runs after the dismissal has cleared `pendingTrash`, so reading
+            // it back there finds nothing to move.
+            let trash = model.pendingTrash
+            Button("Cancel", role: .cancel) { model.pendingTrash = nil }
+            Button("Move to Trash", role: .destructive) {
+                guard let trash else { return }
+                Task { await model.performTrash(trash) }
+            }
+        } message: {
+            Text(model.pendingTrash?.message ?? "")
+        }
+        .alert(
+            "Not everything was moved",
+            isPresented: Binding(
+                get: { model.trashProblem != nil },
+                set: { if !$0 { model.trashProblem = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { model.trashProblem = nil }
+        } message: {
+            Text(model.trashProblem ?? "")
+        }
         // Writes a half-typed title or note before the window goes away. The
         // model saves 1.5 seconds after typing stops, so without this a close
         // inside that window loses what was typed.
@@ -114,6 +144,13 @@ public struct MeetingsWindowView: View {
                             + "still being read."
                 )
                 .foregroundStyle(.secondary)
+            } else if model.filter == .archived {
+                Text("Nothing archived")
+                Text(
+                    "Right-click a meeting to archive it. It leaves this list and its folder "
+                        + "stays where it is."
+                )
+                .foregroundStyle(.secondary)
             } else {
                 Text("Nothing under this filter").foregroundStyle(.secondary)
             }
@@ -143,14 +180,17 @@ public struct MeetingsWindowView: View {
     }
 
     private func footerText(visible: Int) -> String {
+        // Against what the filter holds rather than the whole archive. With
+        // anything archived, All never shows every row and the footer read
+        // "14 of 15" with nothing typed in the search field.
+        let held = model.filteredRows.count
         if model.selection.count > 1 {
-            return "\(visible) of \(model.rows.count) · \(model.selection.count) selected"
+            return "\(visible) of \(held) · \(model.selection.count) selected"
         }
-        if visible != model.rows.count {
-            return "\(visible) of \(model.rows.count)"
+        if visible != held {
+            return "\(visible) of \(held)"
         }
-        let count = model.rows.count
-        return "\(count) \(count == 1 ? "meeting" : "meetings") · "
+        return "\(held) \(held == 1 ? "meeting" : "meetings") · "
             + Format.shortDuration(model.totalDuration)
     }
 
@@ -206,8 +246,43 @@ struct MeetingRowView: View {
         .onTapGesture {
             model.select(row.id, extending: NSEvent.modifierFlags.contains(.command))
         }
+        .contextMenu { menu }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.title), \(subtitle)")
+    }
+
+    /// What a right-click offers. It acts on the whole selection when this row
+    /// is part of it, and on this row alone otherwise, so the items say how
+    /// many meetings they will reach.
+    @ViewBuilder private var menu: some View {
+        let targets = model.contextTargets(for: row)
+        let many = targets.count > 1
+        Button(many ? "Reveal \(targets.count) in Finder" : "Reveal in Finder") {
+            model.revealTargets(targets)
+        }
+        Button(many ? "Rebuild \(targets.count) transcripts" : "Rebuild transcript") {
+            model.rebuildTargets(targets)
+        }
+        Divider()
+        if targets.allSatisfy(\.isArchived) {
+            Button(many ? "Put \(targets.count) back" : "Put back") {
+                model.setArchived(false, targets)
+            }
+        } else {
+            Button(many ? "Archive \(targets.count) meetings" : "Archive") {
+                model.setArchived(true, targets)
+            }
+        }
+        // Offered on every row, including one that says it is recording. That
+        // state also belongs to a meeting a crash left behind, and refusing
+        // those is how a row becomes permanent. A recording in progress is
+        // refused by the runtime, and the alert says which meeting and why.
+        Button(
+            many ? "Move \(targets.count) meetings to Trash…" : "Move to Trash…",
+            role: .destructive
+        ) {
+            model.confirmTrash(targets)
+        }
     }
 
     private var kindIcon: some View {
@@ -311,6 +386,14 @@ struct MeetingsSelectionView: View {
                     HStack(spacing: 8) {
                         Button("Reveal in Finder") { model.revealSelection() }
                         Button("Rebuild transcripts") { model.rebuildSelection() }
+                        if model.selectedRows.allSatisfy(\.isArchived) {
+                            Button("Put back") { model.setArchived(false, model.selectedRows) }
+                        } else {
+                            Button("Archive") { model.setArchived(true, model.selectedRows) }
+                        }
+                        Button("Move to Trash…", role: .destructive) {
+                            model.confirmTrash(model.selectedRows)
+                        }
                         Spacer()
                     }
                 }

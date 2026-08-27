@@ -768,6 +768,10 @@ public final class PipitRuntime {
         // several hundred files, and this actor is also the one arming the next
         // recording.
         let trash = self.trash
+        // The wall clock, not this runtime's own, because it is compared
+        // against a creation date the filesystem writes. Taken before the first
+        // move, so anything written at that path afterwards is later than it.
+        let movedAt = Date()
         let (removed, unsupported) = await Task.detached(priority: .userInitiated) {
             var removed = 0
             for directory in directories {
@@ -793,7 +797,6 @@ public final class PipitRuntime {
             }
             return (removed, false)
         }.value
-        let movedAt = clock.now
         for (index, recording) in ordered.enumerated() {
             let meetingID = recording.metadata.id
             // Still in the archive, so nothing about it is forgotten and its
@@ -805,7 +808,15 @@ public final class PipitRuntime {
             // archive as a row holding nothing. Told after the move rather than
             // before it, because a stage boundary in between then deleted the
             // meeting the user still had.
-            await pipeline.forget(meetingID: meetingID, movedAt: movedAt)
+            let noticed = await pipeline.forget(meetingID: meetingID, movedAt: movedAt)
+            let directory = recording.store.layout.root
+            if !noticed, FileManager.default.fileExists(atPath: directory.path) {
+                // A job that ended in the moment between the move and the line
+                // above wrote this and there is nothing left to notice it. It
+                // is that write and not the meeting: the folder moved a moment
+                // ago, and nothing else puts one back at that path this fast.
+                try? FileManager.default.removeItem(at: directory)
+            }
             trashedMeetingIDs.insert(meetingID)
             // The voice memory counts meetings by the occurrences it holds, so
             // without this a trashed meeting kept counting towards "heard in 3
@@ -818,7 +829,10 @@ public final class PipitRuntime {
         Log.app.notice(
             "trashed a meeting: \(removed, privacy: .public) of \(ordered.count, privacy: .public) recordings"
         )
-        return removed == ordered.count ? .trashed : .folderNotMoved
+        if removed == ordered.count { return .trashed }
+        // Only when nothing moved at all. On a rejoined call whose first folder
+        // went and whose second did not, the volume plainly has a Trash.
+        return unsupported && removed == 0 ? .volumeHasNoTrash : .folderNotMoved
     }
 
     public func revealInFinder(meetingID: String) {

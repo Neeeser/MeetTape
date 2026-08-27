@@ -158,6 +158,14 @@ enum PipelineTests {
                 defer { try? FileManager.default.removeItem(at: root) }
                 let meeting = try makeRecordedMeeting(root: root, seconds: 6)
                 let folder = meeting.store.layout.root
+                // A meeting folder is made when the recording starts, so it is
+                // always older than the moment somebody trashes it, and Put
+                // Back restores that date with the folder. What tells the
+                // restored meeting apart from a folder a stage recreated.
+                try FileManager.default.setAttributes(
+                    [.creationDate: Date().addingTimeInterval(-3_600)],
+                    ofItemAtPath: folder.path
+                )
 
                 var settings = AppSettings()
                 settings.processing.transcription = .local

@@ -121,17 +121,31 @@ public actor ProcessingPipeline {
     /// A folder older than the move is not that scrap. It is the meeting
     /// itself, put back from the Trash while this ran, so it is left alone and
     /// the job carries on with it.
+    ///
+    /// A folder whose date cannot be read stops the job and is kept. Not every
+    /// volume reports a creation date, and removing one that cannot be dated
+    /// would take a meeting the user had just put back, which has no way back.
     private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
         guard let movedAt = goneWhileRunning.removeValue(forKey: meetingID) else { return false }
-        if let created = Self.creationDate(of: store.layout.root), created < movedAt {
+        let created = Self.creationDate(of: store.layout.root)
+        if let created, created < movedAt.addingTimeInterval(-Self.creationDateGrain) {
             Log.processing.notice("meeting was put back while it processed, so the job carries on")
             return false
         }
-        try? FileManager.default.removeItem(at: store.layout.root)
+        if created != nil { try? FileManager.default.removeItem(at: store.layout.root) }
         scratch.discard(meetingID: meetingID)
         Log.processing.notice("meeting left the archive while it processed, so the job stopped")
         return true
     }
+
+    /// How far a creation date is allowed to sit before the move and still
+    /// count as scrap written after it.
+    ///
+    /// HFS+ stores whole seconds and exFAT stores hundredths, so a folder
+    /// written a moment after the move can report a moment before it. A meeting
+    /// put back from the Trash was created when it was recorded, which is
+    /// minutes to years earlier, so nothing real sits inside this.
+    private static let creationDateGrain: TimeInterval = 2
 
     private static func creationDate(of url: URL) -> Date? {
         try? FileManager.default.attributesOfItem(atPath: url.path)[.creationDate] as? Date
@@ -146,9 +160,15 @@ public actor ProcessingPipeline {
     /// Called once the folder has actually moved, and only for folders that
     /// did. Arming this before the move meant a stage boundary in between
     /// deleted the meeting the user still had.
-    public func forget(meetingID: String, movedAt: Date) {
-        guard running.contains(meetingID) else { return }
+    ///
+    /// Returns whether a job is running to notice. When none is, nothing here
+    /// will ever clean up what a job wrote on its way out, and the caller does
+    /// it instead.
+    @discardableResult
+    public func forget(meetingID: String, movedAt: Date) -> Bool {
+        guard running.contains(meetingID) else { return false }
         goneWhileRunning[meetingID] = movedAt
+        return true
     }
 
     /// Runs or resumes a meeting. Safe to call repeatedly; a meeting already in

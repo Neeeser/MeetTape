@@ -96,11 +96,11 @@ enum PipelineTests {
 
     static var suite: Suite {
         Suite("ProcessingPipeline", [
-            test("a meeting deleted while it is transcribing does not come back") { expect in
+            test("a meeting trashed while it is transcribing does not come back") { expect in
                 // Every write goes through AtomicFile, which creates the
                 // directories it needs. A job that carried on after the folder
-                // was deleted put the meeting back as a row holding no audio
-                // and no transcript, and nothing said where it came from.
+                // left the archive put the meeting back as a row holding no
+                // audio and no transcript, and nothing said where it came from.
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let meeting = try makeRecordedMeeting(root: root, seconds: 6)
@@ -135,7 +135,7 @@ enum PipelineTests {
 
                 expect.isFalse(
                     FileManager.default.fileExists(atPath: folder.path),
-                    "the folder the user deleted is still deleted"
+                    "the folder the user trashed has not come back"
                 )
                 expect.isNil(
                     meeting.repository.findMeeting(id: meetingID, includingMerged: true)?.metadata,

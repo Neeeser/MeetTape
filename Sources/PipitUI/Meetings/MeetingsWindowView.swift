@@ -23,34 +23,34 @@ public struct MeetingsWindowView: View {
         .frame(minWidth: 900, minHeight: 560)
         .task { await model.reload() }
         .alert(
-            model.pendingDeletion?.title ?? "",
+            model.pendingTrash?.title ?? "",
             isPresented: Binding(
-                get: { model.pendingDeletion != nil },
-                set: { if !$0 { model.pendingDeletion = nil } }
+                get: { model.pendingTrash != nil },
+                set: { if !$0 { model.pendingTrash = nil } }
             )
         ) {
             // Captured here, while the alert still has one. The button's action
-            // runs after the dismissal has cleared `pendingDeletion`, so
-            // reading it back there finds nothing to delete.
-            let deletion = model.pendingDeletion
-            Button("Cancel", role: .cancel) { model.pendingDeletion = nil }
-            Button("Delete", role: .destructive) {
-                guard let deletion else { return }
-                Task { await model.performDeletion(deletion) }
+            // runs after the dismissal has cleared `pendingTrash`, so reading
+            // it back there finds nothing to move.
+            let trash = model.pendingTrash
+            Button("Cancel", role: .cancel) { model.pendingTrash = nil }
+            Button("Move to Trash", role: .destructive) {
+                guard let trash else { return }
+                Task { await model.performTrash(trash) }
             }
         } message: {
-            Text(model.pendingDeletion?.message ?? "")
+            Text(model.pendingTrash?.message ?? "")
         }
         .alert(
-            "Not everything was deleted",
+            "Not everything was moved",
             isPresented: Binding(
-                get: { model.deletionProblem != nil },
-                set: { if !$0 { model.deletionProblem = nil } }
+                get: { model.trashProblem != nil },
+                set: { if !$0 { model.trashProblem = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { model.deletionProblem = nil }
+            Button("OK", role: .cancel) { model.trashProblem = nil }
         } message: {
-            Text(model.deletionProblem ?? "")
+            Text(model.trashProblem ?? "")
         }
         // Writes a half-typed title or note before the window goes away. The
         // model saves 1.5 seconds after typing stops, so without this a close
@@ -277,8 +277,11 @@ struct MeetingRowView: View {
         // state also belongs to a meeting a crash left behind, and refusing
         // those is how a row becomes permanent. A recording in progress is
         // refused by the runtime, and the alert says which meeting and why.
-        Button(many ? "Delete \(targets.count) meetings…" : "Delete…", role: .destructive) {
-            model.confirmDelete(targets)
+        Button(
+            many ? "Move \(targets.count) meetings to Trash…" : "Move to Trash…",
+            role: .destructive
+        ) {
+            model.confirmTrash(targets)
         }
     }
 
@@ -388,8 +391,8 @@ struct MeetingsSelectionView: View {
                         } else {
                             Button("Archive") { model.setArchived(true, model.selectedRows) }
                         }
-                        Button("Delete…", role: .destructive) {
-                            model.confirmDelete(model.selectedRows)
+                        Button("Move to Trash…", role: .destructive) {
+                            model.confirmTrash(model.selectedRows)
                         }
                         Spacer()
                     }

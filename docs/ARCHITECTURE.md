@@ -201,13 +201,18 @@ Selecting a meeting opens the same controls that used to appear only when a
 meeting finished. Naming a speaker rewrites `speakers.map.json` and re-renders
 `transcript.md` for the recording it belongs to.
 
-Right-clicking a row archives or deletes it. Archiving writes `archivedAt` into
-`metadata.json` and moves the row to the Archived filter, where it is put back
-from. Every file stays where it is. Deleting asks first, then removes every
-folder the conversation was recorded in, both halves of a rejoined call
-included, and drops that meeting's rows from `speaker_occurrence` so it stops
-counting towards how many meetings a voice has been heard in. The confirmed
-voice material stays. The meeting being recorded is refused.
+Right-clicking a row archives it or moves it to the Trash. Archiving writes
+`archivedAt` into `metadata.json` and moves the row to the Archived filter,
+where it is put back from. Every file stays where it is.
+
+Moving to the Trash asks first, then hands every folder the conversation was
+recorded in to the Finder's Trash, both halves of a rejoined call included, and
+drops that meeting's rows from `speaker_occurrence` so it stops counting towards
+how many meetings a voice has been heard in. The confirmed voice material stays.
+Putting the folders back from the Trash puts the meeting back in the list. The
+meeting being recorded is refused, and a folder that will not move leaves the
+recording the conversation started with in place, so its row still reaches what
+is left.
 
 An imported recording is filed under the date the recorder wrote rather than the
 date the file was copied. Pipit reads the container's creation date, then a

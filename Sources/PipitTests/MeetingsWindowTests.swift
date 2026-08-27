@@ -54,11 +54,28 @@ enum MeetingsWindowTests {
         return (created.metadata.id, created.store)
     }
 
-    /// A runtime pointed at one temporary archive.
+    /// Where a runtime built here puts the meetings it trashes.
+    static func trashDirectory(under root: URL) -> URL {
+        root.appendingPathComponent("Trash")
+    }
+
+    /// A runtime pointed at one temporary archive, with a Trash of its own.
+    ///
+    /// The Finder's own Trash would fill with the archives these tests build,
+    /// so a trashed folder is moved here instead. It is also what lets a test
+    /// see that a meeting was moved rather than unlinked.
     @MainActor
     static func makeRuntime(root: URL) -> PipitRuntime {
         NSApplication.shared.setActivationPolicy(.prohibited)
-        let runtime = PipitRuntime(settingsDirectory: root)
+        let trash = trashDirectory(under: root)
+        let runtime = PipitRuntime(settingsDirectory: root, trash: { folder in
+            try FileManager.default.createDirectory(
+                at: trash, withIntermediateDirectories: true
+            )
+            try FileManager.default.moveItem(
+                at: folder, to: trash.appendingPathComponent(folder.lastPathComponent)
+            )
+        })
         var settings = runtime.settings
         settings.storageRootPath = root.appendingPathComponent("Meetings").path
         runtime.update(settings: settings)
@@ -595,8 +612,8 @@ enum MeetingsWindowTests {
                 )
             },
 
-            test("deleting takes every folder the conversation was recorded in") {
-                expect in try await deletingRemovesEveryFolder(expect)
+            test("moving a meeting to the Trash takes every folder it was recorded in") {
+                expect in try await trashingMovesEveryFolder(expect)
             },
 
             test("archiving takes the row out of the list and leaves the files alone") {
@@ -607,12 +624,12 @@ enum MeetingsWindowTests {
                 expect in try await aRightClickActsOnTheRowUnderIt(expect)
             },
 
-            test("deleting a meeting stops its voices counting it") {
-                expect in try await deletingDropsTheOccurrences(expect)
+            test("trashing a meeting stops its voices counting it") {
+                expect in try await trashingDropsTheOccurrences(expect)
             },
 
-            test("a folder that will not delete keeps its row and its occurrences") {
-                expect in try await aFolderThatWillNotDeleteKeepsItsRow(expect)
+            test("a folder that will not move keeps its row and its occurrences") {
+                expect in try await aFolderThatWillNotMoveKeepsItsRow(expect)
             },
 
             test("archiving survives the next write to the meeting's metadata") {
@@ -627,7 +644,7 @@ enum MeetingsWindowTests {
                 expect in try await theFooterCountsWhatTheFilterHolds(expect)
             },
 
-            test("what a deletion could not do is said one cause at a time") { expect in
+            test("what the move could not do is said one cause at a time") { expect in
                 // Every refusal used to read as a recording in progress, which
                 // sent the reader looking for a call that had already ended.
                 expect.isNil(MeetingsWindowModel.problemText(recording: nil, failed: []))
@@ -639,8 +656,8 @@ enum MeetingsWindowTests {
                     MeetingsWindowModel.problemText(recording: nil, failed: ["Design review"])
                 )
                 expect.isTrue(
-                    other.contains("would not delete") && !other.contains("being recorded"),
-                    "a folder that would not delete is not a recording: got \(other)"
+                    other.contains("would not move") && !other.contains("being recorded"),
+                    "a folder that would not move is not a recording. got \(other)"
                 )
                 let both = try expect.unwrap(
                     MeetingsWindowModel.problemText(
@@ -1568,13 +1585,13 @@ enum MeetingsWindowTests {
         )
     }
 
-    // MARK: - archiving and deleting
+    // MARK: - archiving and trashing
 
-    /// Both halves of a rejoined call are one row, so deleting that row has to
+    /// Both halves of a rejoined call are one row, so trashing that row has to
     /// take both folders. Leaving the second half behind would put a recording
     /// in the archive that no row can reach.
     @MainActor
-    static func deletingRemovesEveryFolder(_ expect: Expect) async throws {
+    static func trashingMovesEveryFolder(_ expect: Expect) async throws {
         let root = try ManifestTests.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let (repository, meetingID) = try makeRejoinedCall(root: root)
@@ -1587,28 +1604,40 @@ enum MeetingsWindowTests {
         expect.equal(model.rows.map(\.id), [meetingID])
         guard let target = model.rows.first else { return expect.fail("no row to delete") }
 
-        model.confirmDelete([target])
-        guard let deletion = model.pendingDeletion else {
-            return expect.fail("delete asks first")
+        model.confirmTrash([target])
+        guard let pending = model.pendingTrash else {
+            return expect.fail("the move asks first")
         }
-        expect.isTrue(deletion.title.contains("Weekly sync"), "got \(deletion.title)")
+        expect.isTrue(pending.title.contains("Weekly sync"), "got \(pending.title)")
         expect.isTrue(
-            deletion.message.contains("deleted from this Mac"),
-            "the warning says the files go. got \(deletion.message)"
+            pending.message.contains("moved to the Trash"),
+            "the warning says where the files go. got \(pending.message)"
         )
-        expect.equal(deletion.folderCount, 2)
+        expect.equal(pending.folderCount, 2)
         expect.isTrue(
-            deletion.message.contains("2 folders"),
-            "and it counts both halves of the call. got \(deletion.message)"
+            pending.message.contains("2 folders"),
+            "and it counts both halves of the call. got \(pending.message)"
         )
-        await model.performDeletion(deletion)
+        await model.performTrash(pending)
 
+        let trash = trashDirectory(under: root)
         for folder in folders {
             expect.isFalse(
                 FileManager.default.fileExists(atPath: folder.path),
-                "\(folder.lastPathComponent) is gone"
+                "\(folder.lastPathComponent) has left the archive"
+            )
+            expect.isTrue(
+                FileManager.default.fileExists(
+                    atPath: trash.appendingPathComponent(folder.lastPathComponent).path
+                ),
+                "and is in the Trash, whole, rather than unlinked"
             )
         }
+        let moved = MeetingLayout(root: trash.appendingPathComponent(folders[0].lastPathComponent))
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: moved.metadata.path),
+            "with the files it held still in it"
+        )
         expect.equal(model.rows.count, 0, "and the list has nothing left")
         expect.isTrue(model.selection.isEmpty)
         expect.isNil(model.detail, "the pane is not left reading files that are gone")
@@ -1688,10 +1717,10 @@ enum MeetingsWindowTests {
         )
     }
 
-    /// The wiring from the window's delete through to the voice memory. Without
-    /// it a deleted meeting kept counting towards "heard in 3 meetings".
+    /// The wiring from the window's move through to the voice memory. Without
+    /// it a trashed meeting kept counting towards "heard in 3 meetings".
     @MainActor
-    static func deletingDropsTheOccurrences(_ expect: Expect) async throws {
+    static func trashingDropsTheOccurrences(_ expect: Expect) async throws {
         let root = try ManifestTests.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
@@ -1707,7 +1736,7 @@ enum MeetingsWindowTests {
         expect.equal(try await store.meetingCount(for: chris.id), 1)
 
         expect.equal(
-            await runtime.deleteMeetings([meeting.id])[meeting.id], .deleted, "the folder went"
+            await runtime.trashMeetings([meeting.id])[meeting.id], .trashed, "the folder went"
         )
 
         expect.equal(try await store.meetingCount(for: chris.id), 0)
@@ -1794,12 +1823,12 @@ enum MeetingsWindowTests {
         expect.equal(model.filteredRows.count, 1)
     }
 
-    /// A deletion that cannot finish stops before the recording the
-    /// conversation started with, so the row that reaches what is left stays in
-    /// the list. Nothing about the meeting is forgotten either, because the
-    /// meeting is still there.
+    /// A move that cannot finish stops before the recording the conversation
+    /// started with, so the row that reaches what is left stays in the list.
+    /// Nothing about the meeting is forgotten either, because the meeting is
+    /// still there.
     @MainActor
-    static func aFolderThatWillNotDeleteKeepsItsRow(_ expect: Expect) async throws {
+    static func aFolderThatWillNotMoveKeepsItsRow(_ expect: Expect) async throws {
         let root = try ManifestTests.makeTemporaryDirectory()
         let (repository, meetingID) = try makeRejoinedCall(root: root)
         guard let logical = repository.logicalMeeting(id: meetingID),
@@ -1807,7 +1836,7 @@ enum MeetingsWindowTests {
         else { return expect.fail("the call was not recorded in two halves") }
         let locked = continuation.store.layout.root
         // Locked the way the Finder locks a file, which is the ordinary reason
-        // a folder will not delete.
+        // a folder will not move.
         let unlock = { try? FileManager.default.setAttributes(
             [.immutable: false], ofItemAtPath: locked.path
         ) }
@@ -1825,16 +1854,16 @@ enum MeetingsWindowTests {
             humanVerified: true, wasExpectedParticipant: false
         )
 
-        let outcome = await runtime.deleteMeetings([meetingID])[meetingID]
+        let outcome = await runtime.trashMeetings([meetingID])[meetingID]
 
-        expect.equal(outcome, .folderNotDeleted)
+        expect.equal(outcome, .folderNotMoved)
         expect.isTrue(
             FileManager.default.fileExists(atPath: logical.primary.store.layout.root.path),
             "the recording the conversation started with is still there, so the row still is"
         )
         expect.equal(
             try await store.meetingCount(for: chris.id), 1,
-            "and a meeting still on disk still counts for the people who spoke in it"
+            "and a meeting still in the archive still counts for the people who spoke in it"
         )
         unlock()
     }

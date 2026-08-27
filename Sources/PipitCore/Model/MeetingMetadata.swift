@@ -136,6 +136,14 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
 
     public var schemaVersion: Int
     public var id: String
+    /// The folder name Pipit last wrote for this meeting.
+    ///
+    /// The identifier used to be the folder name. It no longer is, so that a
+    /// folder can be called what the meeting is called while the identifier
+    /// stays fixed for the speakers database. Absent on every meeting recorded
+    /// before that change, and on a folder a person renamed in Finder, and in
+    /// both cases Pipit leaves the folder alone.
+    public var directoryName: String?
     public var source: MeetingSource
     public var provider: MeetingProvider
     public var createdAt: Date
@@ -194,6 +202,7 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
+        self.directoryName = nil
         self.source = source
         self.provider = provider
         self.createdAt = createdAt

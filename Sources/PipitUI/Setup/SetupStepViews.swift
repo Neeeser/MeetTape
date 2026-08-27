@@ -194,7 +194,7 @@ struct ModelsStep: View {
                     HStack {
                         Image(systemName: installed(unit) ? "checkmark.circle.fill" : "arrow.down.circle")
                             .foregroundStyle(installed(unit) ? .green : .secondary)
-                        Text(ProcessingSettingsTab.unitName(unit))
+                        Text(ProcessingSettingsPane.unitName(unit))
                         Spacer()
                         Text(status(unit)).font(.caption).foregroundStyle(.secondary)
                     }
@@ -229,10 +229,10 @@ struct ModelsStep: View {
 
     private func status(_ unit: LocalModelUnit) -> String {
         if let bytes = runtime.localModelState.present.bytes(for: unit) {
-            return "Installed, \(ProcessingSettingsTab.megabytes(bytes))"
+            return "Installed, \(ProcessingSettingsPane.megabytes(bytes))"
         }
         if runtime.localModelState.isBusy { return "Downloading" }
-        return "About \(ProcessingSettingsTab.megabytes(unit.approximateBytes))"
+        return "About \(ProcessingSettingsPane.megabytes(unit.approximateBytes))"
     }
 
     @ViewBuilder
@@ -262,7 +262,7 @@ struct ModelsStep: View {
 
     private var downloadLabel: String {
         let missing = model.snapshot.missingUnits.reduce(Int64(0)) { $0 + $1.approximateBytes }
-        return "Download about \(ProcessingSettingsTab.megabytes(missing))"
+        return "Download about \(ProcessingSettingsPane.megabytes(missing))"
     }
 }
 

@@ -139,14 +139,6 @@ public enum CoreAudioSystem {
         return list.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    /// A one-line description of the current input device, for the manifest and for
-    /// the audio settings pane.
-    public static func describeDefaultInput() -> String {
-        guard let device = defaultInputDevice() else { return "none" }
-        let channels = deviceChannelCount(device, scope: kAudioObjectPropertyScopeInput)
-        return "\(deviceName(device)) \(channels)ch/\(Int(deviceSampleRate(device)))Hz"
-    }
-
     public static func fourCharCode(_ status: OSStatus) -> String {
         let value = UInt32(bitPattern: status)
         let bytes = [

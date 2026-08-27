@@ -400,10 +400,10 @@ extension PipitRuntime {
             return []
         }
         guard !occurrences.isEmpty else { return [] }
-        // The rows the list can already answer for, read once. Resolving every
-        // occurrence through `logicalMeeting` instead walked the archive
-        // directory per row, and after the microphone track started writing one
-        // row per meeting that is one walk per meeting in the archive.
+        // The rows the list can already answer for, read once, so the common
+        // case is a set lookup rather than a resolve. After the microphone
+        // track started writing one row per meeting, resolving every occurrence
+        // through `logicalMeeting` was one lookup per meeting in the archive.
         let listed = repository.listMeetings()
         let conversations = Set(listed.map(\.id))
         var seconds: [String: Double] = [:]

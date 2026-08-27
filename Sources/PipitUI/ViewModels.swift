@@ -141,11 +141,24 @@ public final class SettingsModel {
         Task { await refreshArchiveUsage() }
     }
 
-    public func refreshPeople() async {
+    /// The counts the Storage page draws. Nothing about who you are, so a pane
+    /// that only wants numbers cannot reach into the name field.
+    public func refreshVoiceStatistics() async {
         voiceStatistics = await runtime.voiceMemoryStatistics()
+    }
+
+    /// The directory and the name beside it, for the pane that picks who you
+    /// are.
+    ///
+    /// The field is left alone while it holds something typed. Reading the
+    /// directory suspends for as long as it takes to score every profile, and a
+    /// straggling read landing after somebody started typing would put the
+    /// stored name back under them and drop what they wrote.
+    public func refreshPeople() async {
+        await refreshVoiceStatistics()
         people = await runtime.speakerDirectory(kind: .person)
+        guard !nameEdited else { return }
         localUserName = runtime.settings.localUserName
-        nameEdited = false
     }
 
     /// The name field. Writes through the identity, and remembers that somebody
@@ -201,6 +214,10 @@ public final class SettingsModel {
         } else {
             saveLocalUserName()
         }
+        // The field is now what the identity says, so it is no longer something
+        // typed. Cleared before the read below, which leaves the field alone
+        // while this is true.
+        nameEdited = false
         await refreshPeople()
     }
 

@@ -64,7 +64,7 @@ struct StorageSettingsPane: View {
         }
         .formStyle(.grouped)
         .task {
-            await model.refreshPeople()
+            await model.refreshVoiceStatistics()
             await model.refreshArchiveUsage()
         }
     }

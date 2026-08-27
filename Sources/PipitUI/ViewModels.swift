@@ -642,10 +642,15 @@ public final class MeetingReviewModel {
     /// and a name the user cleared unnamed, and neither is ever sent.
     public var unnamedSpeakerCount = 0
 
-    /// Whether a summary is missing, which is the only reason to offer to write
-    /// one. Enrichment never replaces what is already there.
+    /// Whether a summary is missing and could actually be written.
+    ///
+    /// The setting is part of the question. With summaries switched off the
+    /// request carries no summary field at all, so the button would spend a
+    /// call, write nothing and still be there afterwards.
     public var canGenerateEnrichment: Bool {
-        (summary?.isEmpty ?? true) && metadata?.processing.state == .complete
+        runtime.settings.enrichment.generateSummary
+            && (summary?.isEmpty ?? true)
+            && metadata?.processing.state == .complete
     }
 
     /// Writes the summary, notes, description and title this meeting never got.

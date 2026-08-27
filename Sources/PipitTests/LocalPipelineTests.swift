@@ -873,6 +873,75 @@ enum LocalPipelineTests {
                 expect.equal(after.processing.state, .complete)
             },
 
+            test("a meeting trashed while a summary is written does not come back") { expect in
+                // Holding the folder tells the runtime a job will notice the
+                // move, so the runtime does not clean up and this job has to.
+                // Every write here goes through AtomicFile, which recreates the
+                // folder, and the metadata written back is enough for the
+                // folder rename at the tail to find it and move it somewhere
+                // the deferred check no longer looks.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                let folder = meeting.store.layout.root
+                let meetingID = meeting.metadata.id
+
+                let backend = FakeAIBackend()
+                backend.enrichment = MeetingEnrichment(
+                    title: "Retrieval logic", summary: "We agreed on the pilot."
+                )
+                // Processed before a key existed, so no title was generated.
+                // That is what lets this run fill the slot, change the resolved
+                // title and set the folder rename in motion, which is the part
+                // that carries a recreated folder out of reach.
+                backend.configured = false
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: backend,
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [RawTranscriptWord(start: 0, end: 2, text: " we ship friday")]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 5, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 66, spans: [(0, 5)])
+                    ),
+                    speakers: nil,
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meetingID)
+                expect.isNil(try meeting.store.readMetadata().titles.ai)
+                // Nothing outranking the generated title, so filling that slot
+                // changes the name the folder is derived from. Without this the
+                // folder never renames and the deferred check finds the ghost
+                // where it left it, which hides the bug rather than fixing it.
+                _ = try meeting.store.updateMetadata { $0.titles.provider = nil }
+
+                backend.configured = true
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                backend.enrichInterference = { [pipeline] in
+                    // What the window does: the folder moves, and the job is
+                    // told once it has.
+                    try? FileManager.default.moveItem(at: folder, to: trashed)
+                    _ = await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                }
+                try await pipeline.generateEnrichment(meetingID: meetingID)
+
+                // Checked by identifier rather than by path. A ghost that the
+                // folder rename has already moved is not at `folder` any more,
+                // so the path alone would report success on the bug.
+                expect.isNil(
+                    meeting.repository.findMeeting(id: meetingID, includingMerged: true)?.metadata,
+                    "the meeting the user trashed came back"
+                )
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: trashed.path),
+                    "and what was moved is untouched"
+                )
+            },
+
             test("writing a summary leaves a generated title alone") { expect in
                 // The control says nothing already on the meeting is replaced,
                 // and the title is the one field enrichment overwrites rather
@@ -997,6 +1066,14 @@ enum LocalPipelineTests {
                             && map.entries[$0] == nil
                     }
                 let target = try expect.unwrap(unnamed.first)
+                // A name waiting to be proposed for exactly that speaker, so
+                // the guard is the only thing keeping it off the strip.
+                backend.suggestions = [
+                    SpeakerSuggestion(
+                        label: target, name: "Priya Raman", confidence: 0.93,
+                        quote: "Priya, what did it come back at?", atSeconds: 3
+                    ),
+                ]
                 // "Leave unnamed" on the chip, which is what clears a key.
                 map.assign("", to: target)
                 expect.isTrue(map.clearedKeys.contains(target))

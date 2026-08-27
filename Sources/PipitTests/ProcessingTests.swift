@@ -29,6 +29,9 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     var diarizationByChunk: [[RawTranscriptSegment]] = []
     /// False models a user who never entered a key.
     var configured = true
+    /// Runs inside the enrichment request, for the paths that need something to
+    /// happen to the meeting while a call is in flight.
+    var enrichInterference: (@Sendable () async -> Void)?
 
     func isConfigured() async -> Bool { configured }
 
@@ -89,6 +92,7 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     func enrich(_ request: EnrichmentRequest, model: String) async throws -> MeetingEnrichment {
         record(Call(kind: "enrich", model: model, file: ""))
         if !configured { throw ProcessingError.missingAPIKey }
+        if let enrichInterference { await enrichInterference() }
         if let failEnrichment { throw failEnrichment }
         return enrichment
     }

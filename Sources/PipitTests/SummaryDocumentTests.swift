@@ -21,14 +21,28 @@ enum SummaryDocumentTests {
                 expect.isNil(document.generatedNotes)
             },
 
-            test("notes written without a summary still come back") { expect in
-                // Enrichment writes the parts it was asked for, so notes on
-                // their own is a real file rather than a hypothetical one.
+            test("notes written without a summary read as notes") { expect in
+                // Notes on with summaries off is a real setting, so a file that
+                // opens with the notes heading is a real file. It used to read
+                // as the summary, which put the notes on the Summary tab with
+                // the heading showing in the body.
                 let document = SummaryDocument(markdown: "## Notes\n\n- Chris sends the list.")
-                // No summary heading, so the whole file reads as the summary.
-                // Splitting on a notes heading alone would hide the text on a
-                // tab the user has no reason to open.
-                expect.equal(document.summary, "## Notes\n\n- Chris sends the list.")
+                expect.equal(document.generatedNotes, "- Chris sends the list.")
+                expect.isNil(document.summary)
+            },
+
+            test("a notes heading inside legacy prose is not a boundary") { expect in
+                // Only at the very start of the file. A summary written before
+                // the split whose prose happens to mention the words is still
+                // one summary, and moving half of it to another tab would be
+                // worse than leaving the words where they are.
+                let text = "We agreed on the pilot.\n\n## Notes were taken by Chris."
+                expect.equal(SummaryDocument(markdown: text).summary, text)
+            },
+
+            test("a notes-only document round-trips") { expect in
+                let original = SummaryDocument(generatedNotes: "- Chris sends the list.")
+                expect.equal(SummaryDocument(markdown: original.markdown), original)
             },
 
             test("a file with no heading reads as the summary") { expect in

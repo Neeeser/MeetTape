@@ -35,6 +35,17 @@ public struct SummaryDocument: Sendable, Equatable {
         let text = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
+        // Notes with no summary above them, which is what the settings produce
+        // with notes on and summaries off. Recognised only at the very start of
+        // the file: a legacy summary whose prose happens to contain the words
+        // belongs to the summary in full, and guessing otherwise would move
+        // half of it to a tab the reader has no reason to open.
+        if text.hasPrefix(Self.notesHeading) {
+            generatedNotes = Self.clean(text.dropFirst(Self.notesHeading.count))
+            if generatedNotes?.isEmpty == true { generatedNotes = nil }
+            return
+        }
+
         // A file with no heading at all predates the split, or was edited by
         // hand. It reads as the summary, which is the tab it has always shown
         // on.

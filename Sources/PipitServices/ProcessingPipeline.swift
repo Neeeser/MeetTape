@@ -2203,7 +2203,6 @@ public actor ProcessingPipeline {
         }
     }
 
-    /// Renders the derived files and links the calendar event.
     /// Renders `transcript.md` from what is on disk now.
     ///
     /// Split out of `finish` so a caller that only wants the document rewritten
@@ -2224,6 +2223,7 @@ public actor ProcessingPipeline {
         ))
     }
 
+    /// Renders the derived files and links the calendar event.
     private func finish(
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
@@ -2834,6 +2834,12 @@ public actor ProcessingPipeline {
         try await writeTranscriptMarkdown(store: store, metadata: metadata)
         try persist(metadata, to: store)
         report(metadata, chunks: nil)
+        // Before the rename, not only in the defer below. The writes above
+        // recreate the folder, so a meeting trashed during the request has a
+        // metadata.json again by now and settles happily under a new name,
+        // which moves it out from under the deferred check and leaves a ghost
+        // nothing will ever clean up.
+        if discardIfGone(meetingID, store: store) { return }
         // A newly filled title can be the one the folder is named for.
         if !heldByOthers(meetingID, besidesSelf: true) {
             repository.settleFolderName(for: metadata)

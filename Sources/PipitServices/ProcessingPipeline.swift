@@ -159,8 +159,13 @@ public actor ProcessingPipeline {
     /// A folder older than the move is not that scrap. It is the meeting
     /// itself, put back from the Trash while this ran, so it is left alone and
     /// the job carries on with it.
+    /// The mark is read rather than taken. Two jobs can be in one folder at
+    /// once, compaction and re-analysis among them, and whichever checked first
+    /// used to take the mark with it. The other then wrote its output into a
+    /// meeting that was already in the Trash and nothing was left to notice.
+    /// `releaseFolder` drops it when the last of them leaves.
     private func discardIfGone(_ meetingID: String, store: MeetingStore) -> Bool {
-        guard let movedAt = goneWhileRunning.removeValue(forKey: meetingID) else { return false }
+        guard let movedAt = goneWhileRunning[meetingID] else { return false }
         switch RecreatedFolder.discard(at: store.layout.root, writtenAfter: movedAt) {
         case .predatesTheMove:
             Log.processing.notice("meeting was put back while it processed, so the job carries on")

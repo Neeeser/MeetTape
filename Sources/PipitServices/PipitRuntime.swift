@@ -822,11 +822,21 @@ public final class PipitRuntime {
             }
             return (removed, false)
         }.value
+        // A rename can move a folder out from under the path captured above, and
+        // a move that misses it reports the path as already gone. The archive is
+        // asked again rather than believed.
+        var settled = 0
+        for recording in ordered.prefix(removed) {
+            guard repository.findMeeting(
+                id: recording.metadata.id, includingMerged: true
+            ) == nil else { break }
+            settled += 1
+        }
         for (index, recording) in ordered.enumerated() {
             let meetingID = recording.metadata.id
             // Still in the archive, so nothing about it is forgotten and its
             // job carries on.
-            guard index < removed else { continue }
+            guard index < settled else { continue }
             // A job that was mid-stage writes its output through AtomicFile,
             // which creates the directories it needs, so a transcription
             // finishing a moment later would put the meeting back in the
@@ -853,12 +863,12 @@ public final class PipitRuntime {
             processing.removeValue(forKey: meetingID)
         }
         Log.app.notice(
-            "trashed a meeting: \(removed, privacy: .public) of \(ordered.count, privacy: .public) recordings"
+            "trashed a meeting: \(settled, privacy: .public) of \(ordered.count, privacy: .public) recordings"
         )
-        if removed == ordered.count { return .trashed }
+        if settled == ordered.count { return .trashed }
         // Only when nothing moved at all. On a rejoined call whose first folder
         // went and whose second did not, the volume plainly has a Trash.
-        return unsupported && removed == 0 ? .volumeHasNoTrash : .folderNotMoved
+        return unsupported && settled == 0 ? .volumeHasNoTrash : .folderNotMoved
     }
 
     public func revealInFinder(meetingID: String) {

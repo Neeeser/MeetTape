@@ -211,6 +211,49 @@ enum PipelineTests {
                 )
             },
 
+            test("a meeting trashed while it compacts does not come back") { expect in
+                // Compaction runs for minutes after a meeting is complete, and
+                // writes its archive files through AtomicFile like everything
+                // else. The launch sweep was left out of the marks entirely, so
+                // a meeting trashed while it transcoded came back holding audio
+                // and no metadata.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try makeRecordedMeeting(root: root, seconds: 6)
+                _ = try meeting.store.updateMetadata {
+                    $0.processing = ProcessingStatus(state: .complete, updatedAt: Date())
+                }
+                let folder = meeting.store.layout.root
+                let trashed = root.appendingPathComponent("Trash", isDirectory: true)
+                let pipeline = LocalPipelineTests.makePipeline(
+                    repository: meeting.repository,
+                    backend: FakeAIBackend(),
+                    transcriber: StubTextTranscriber(text: "unused"),
+                    diarizer: StubLocalDiarizer(intervals: [], chunkEmbeddings: []),
+                    speakers: nil,
+                    settings: AppSettings(),
+                    scratchRoot: root.appendingPathComponent("scratch")
+                )
+                let meetingID = meeting.metadata.id
+
+                let compaction = Task { await pipeline.compactAudio(meetingID: meetingID) }
+                // Once the job holds the folder, which is what the window asks
+                // before it moves anything.
+                var held = false
+                for _ in 0..<400 where !held {
+                    held = await pipeline.forget(meetingID: meetingID, movedAt: Date())
+                    if !held { try? await Task.sleep(for: .milliseconds(5)) }
+                }
+                expect.isTrue(held, "the compaction job took the folder")
+                try? FileManager.default.moveItem(at: folder, to: trashed)
+                await compaction.value
+
+                expect.isFalse(
+                    FileManager.default.fileExists(atPath: folder.path),
+                    "the folder the user trashed has not come back"
+                )
+            },
+
             test("a chunk that came back with words is accepted without reading its audio") { expect in
                 // The level only separates silence from a lost transcript, so
                 // decoding on the success path costs a full converter pass per

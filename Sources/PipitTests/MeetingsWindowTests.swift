@@ -611,6 +611,10 @@ enum MeetingsWindowTests {
                 expect in try await deletingDropsTheOccurrences(expect)
             },
 
+            test("a folder that will not delete keeps its row and its occurrences") {
+                expect in try await aFolderThatWillNotDeleteKeepsItsRow(expect)
+            },
+
             test("archiving survives the next write to the meeting's metadata") {
                 expect in try await archivingSurvivesAMetadataWrite(expect)
             },
@@ -1702,7 +1706,9 @@ enum MeetingsWindowTests {
         )
         expect.equal(try await store.meetingCount(for: chris.id), 1)
 
-        expect.equal(await runtime.deleteMeeting(id: meeting.id), .deleted, "the folder went")
+        expect.equal(
+            await runtime.deleteMeetings([meeting.id])[meeting.id], .deleted, "the folder went"
+        )
 
         expect.equal(try await store.meetingCount(for: chris.id), 0)
     }
@@ -1717,14 +1723,14 @@ enum MeetingsWindowTests {
         let meeting = try makeMeeting(root: root, clusters: ["remote-001_speaker_00"])
         let runtime = makeRuntime(root: root)
 
-        runtime.setArchived(true, meetingID: meeting.id)
+        runtime.setArchived(true, meetingIDs: [meeting.id])
         _ = try meeting.store.updateMetadata { $0.durationSeconds = 900 }
 
         expect.isTrue(try meeting.store.readMetadata().isArchived)
         let summary = runtime.repository.summary(forDirectory: meeting.store.layout.root)
         expect.isTrue(summary?.isArchived == true, "and the list reads it back")
 
-        runtime.setArchived(false, meetingID: meeting.id)
+        runtime.setArchived(false, meetingIDs: [meeting.id])
         expect.isFalse(try meeting.store.readMetadata().isArchived)
     }
 
@@ -1786,5 +1792,50 @@ enum MeetingsWindowTests {
 
         model.filter = .archived
         expect.equal(model.filteredRows.count, 1)
+    }
+
+    /// A deletion that cannot finish stops before the recording the
+    /// conversation started with, so the row that reaches what is left stays in
+    /// the list. Nothing about the meeting is forgotten either, because the
+    /// meeting is still there.
+    @MainActor
+    static func aFolderThatWillNotDeleteKeepsItsRow(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        let (repository, meetingID) = try makeRejoinedCall(root: root)
+        guard let logical = repository.logicalMeeting(id: meetingID),
+              let continuation = logical.continuations.first
+        else { return expect.fail("the call was not recorded in two halves") }
+        let locked = continuation.store.layout.root
+        // Locked the way the Finder locks a file, which is the ordinary reason
+        // a folder will not delete.
+        let unlock = { try? FileManager.default.setAttributes(
+            [.immutable: false], ofItemAtPath: locked.path
+        ) }
+        defer { try? FileManager.default.removeItem(at: root) }
+        defer { unlock() }
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: locked.path)
+
+        let runtime = makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+        let chris = try await store.createPerson(name: "Chris")
+        try await store.recordOccurrence(
+            meetingID: meetingID, clusterID: "remote-001_speaker_00", track: .remote,
+            speechSeconds: 120, embedding: nil, model: nil, resolution: nil,
+            identityID: chris.id, source: .human,
+            humanVerified: true, wasExpectedParticipant: false
+        )
+
+        let outcome = await runtime.deleteMeetings([meetingID])[meetingID]
+
+        expect.equal(outcome, .folderNotDeleted)
+        expect.isTrue(
+            FileManager.default.fileExists(atPath: logical.primary.store.layout.root.path),
+            "the recording the conversation started with is still there, so the row still is"
+        )
+        expect.equal(
+            try await store.meetingCount(for: chris.id), 1,
+            "and a meeting still on disk still counts for the people who spoke in it"
+        )
+        unlock()
     }
 }

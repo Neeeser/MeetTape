@@ -127,6 +127,9 @@ public final class PipitRuntime {
     @ObservationIgnored private(set) var pipeline: ProcessingPipeline!
     @ObservationIgnored private var powerObserver: PowerEventObserver?
     @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
+    /// Meetings deleted in this session. A meeting identifier carries the
+    /// moment it started, so none of these is ever handed out again.
+    @ObservationIgnored private var deletedMeetingIDs: Set<String> = []
     /// What the meeting client said while this recording ran. Started when a
     /// meeting is committed and written once at the end, because the artifact is
     /// immutable and a half-written one would be worse than none.
@@ -702,10 +705,6 @@ public final class PipitRuntime {
         refreshRecentMeetings()
     }
 
-    public func setArchived(_ archived: Bool, meetingID: String) {
-        setArchived(archived, meetingIDs: [meetingID])
-    }
-
     /// What became of a deletion, in the words the window needs to say it.
     public enum MeetingDeletionOutcome: Sendable, Equatable {
         case deleted
@@ -736,16 +735,8 @@ public final class PipitRuntime {
         return outcomes
     }
 
-    @discardableResult
-    public func deleteMeeting(id: String) async -> MeetingDeletionOutcome {
-        let outcome = await delete(id: id)
-        refreshRecentMeetings()
-        return outcome
-    }
-
     private func delete(id: String) async -> MeetingDeletionOutcome {
         guard let logical = repository.logicalMeeting(id: id) else { return .notFound }
-        let recordings = logical.recordings
         // Continuations first, the recording the conversation started with
         // last. A folder that will not delete then leaves a row that can still
         // reach it. Taking the first half out first left the second half on
@@ -793,11 +784,12 @@ public final class PipitRuntime {
         for (index, recording) in ordered.enumerated() {
             let meetingID = recording.metadata.id
             guard index < removed else {
-                // Still on disk, so its job carries on and its speakers keep
-                // counting it.
+                // Still on disk. Its speakers keep counting it, and a job that
+                // has not yet reached a stage boundary carries on.
                 await pipeline.keep(meetingID: meetingID)
                 continue
             }
+            deletedMeetingIDs.insert(meetingID)
             // The voice memory counts meetings by the occurrences it holds, so
             // without this a deleted meeting kept counting towards "heard in 3
             // meetings" for everyone who spoke in it.
@@ -1215,6 +1207,12 @@ public final class PipitRuntime {
     }
 
     func apply(_ progress: ProcessingPipeline.Progress) {
+        // A job reports once more from the stage it was inside when the user
+        // deleted its meeting. That report arrives after the row was cleared
+        // and put it straight back, and the job then stops without ever
+        // reporting again, so the menu bar named a folder that was gone until
+        // the app was relaunched.
+        guard !deletedMeetingIDs.contains(progress.meetingID) else { return }
         let previous = processing[progress.meetingID]?.state
         if progress.state == .complete {
             processing.removeValue(forKey: progress.meetingID)

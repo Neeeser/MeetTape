@@ -470,16 +470,18 @@ public final class MeetingsWindowModel {
         }
 
         public var message: String {
-            let what: String
+            let undone = "This cannot be undone."
             if folderCount == 1 {
-                what = "The folder \(folders.first ?? "") and everything in it"
-            } else if targets.count == 1 {
-                what = "This call was recorded in \(folderCount) folders, "
-                    + "\(folders.first ?? "") among them, and everything in them"
-            } else {
-                what = "\(folderCount) meeting folders and everything in them"
+                return "The folder \(folders.first ?? "") and everything in it is deleted from "
+                    + "this Mac. The audio goes with it. \(undone)"
             }
-            return "\(what), the audio included, is deleted from this Mac. This cannot be undone."
+            if targets.count == 1 {
+                return "This call was recorded in \(folderCount) folders. All of them and "
+                    + "everything in them are deleted from this Mac. The audio goes with them. "
+                    + undone
+            }
+            return "\(folderCount) meeting folders and everything in them are deleted from this "
+                + "Mac. The audio goes with them. \(undone)"
         }
     }
 

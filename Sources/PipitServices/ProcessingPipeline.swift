@@ -2319,6 +2319,41 @@ public actor ProcessingPipeline {
         try await store.clearOccurrenceIdentity(meetingID: meetingID, clusterID: clusterID)
     }
 
+    /// Applies a match found by re-scoring an unnamed voice: it becomes that
+    /// identity, everywhere it was heard.
+    ///
+    /// Two steps, in this order. The merge is the identity decision and it is
+    /// made against the identifier the caller names, rather than left to the
+    /// name lookup inside `applySpeakerName`, which goes by display name and can
+    /// only guess between two people called the same thing.
+    ///
+    /// Naming each cluster afterwards is what puts the name in the transcript. A
+    /// voice the first pass only seeded was never written into a speaker map at
+    /// all: it lives in an occurrence row and nowhere else, so a merge on its
+    /// own renames nothing a reader can see. This is the ordinary human
+    /// confirmation path, so the audio also joins the profile the way typing the
+    /// name onto the meeting does.
+    public func applyRematch(
+        voice: IdentityID, into match: IdentityID, named name: String
+    ) async throws {
+        guard let service = backends.speakers else { return }
+        let store = await service.speakerStore
+        // Before the merge, while the occurrences still name this voice rather
+        // than resolving through a tombstone.
+        let occurrences = try await store.occurrences(identityID: voice)
+        try await store.merge(voice, into: match)
+        for occurrence in occurrences {
+            _ = try await applySpeakerName(
+                name, to: occurrence.clusterID, meetingID: occurrence.meetingID,
+                identityID: match
+            )
+        }
+        // Meetings that reference this voice through an occurrence the loop
+        // above could not name, and the participant block of every meeting the
+        // person is in, which carries their organization and notes too.
+        try await refreshCachedNames(for: match)
+    }
+
     /// Changes the speaker on transcript lines, without touching the cluster
     /// they belong to.
     ///

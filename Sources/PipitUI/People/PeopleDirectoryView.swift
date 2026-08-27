@@ -65,6 +65,16 @@ public struct PeopleDirectoryView: View {
                 VoiceEnrollmentView(model: enrollment) { model.enrollment = nil }
             }
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.lookAgain != nil },
+                set: { if !$0 { model.lookAgain = nil } }
+            )
+        ) {
+            if let state = model.lookAgain {
+                LookAgainView(model: model, state: state) { model.lookAgain = nil }
+            }
+        }
     }
 
     // MARK: - sidebar
@@ -182,6 +192,12 @@ public struct PeopleDirectoryView: View {
                     .disabled(model.selection.isEmpty)
                 Button("Merge into one person") { Task { await model.mergeSelection() } }
                     .disabled(!model.canMerge)
+                // Above the deletions on purpose. The voices a purge takes are
+                // the ones this offers to name, so the chance to keep one comes
+                // before the way to throw it away.
+                Button("Look again for matches…") {
+                    Task { await model.lookAgainForMatches() }
+                }
                 Divider()
                 Button("Delete \(model.purgeCandidates.count) unnamed voices heard once…") {
                     model.confirmPurge()

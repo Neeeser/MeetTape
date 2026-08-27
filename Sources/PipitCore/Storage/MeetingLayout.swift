@@ -108,18 +108,26 @@ public struct MeetingArchiveLayout: Sendable {
         return home.appendingPathComponent("Documents/Pipit/Meetings", isDirectory: true)
     }
 
-    public func directory(forMeetingID id: String, startedAt: Date) -> URL {
+    /// The `YYYY/MM` folder a meeting starting then belongs in.
+    public func monthDirectory(startedAt: Date) -> URL {
         let components = Calendar.current.dateComponents([.year, .month], from: startedAt)
         let year = String(format: "%04d", components.year ?? 1970)
         let month = String(format: "%02d", components.month ?? 1)
         return root
             .appendingPathComponent(year, isDirectory: true)
             .appendingPathComponent(month, isDirectory: true)
-            .appendingPathComponent(id, isDirectory: true)
     }
 
-    public func layout(forMeetingID id: String, startedAt: Date) -> MeetingLayout {
-        MeetingLayout(root: directory(forMeetingID: id, startedAt: startedAt))
+    /// Where a folder of this name would sit. The name is
+    /// `MeetingFolderName.base` for a meeting recorded now, and the meeting's
+    /// identifier for one recorded before folder names and identifiers parted.
+    public func directory(named name: String, startedAt: Date) -> URL {
+        monthDirectory(startedAt: startedAt)
+            .appendingPathComponent(name, isDirectory: true)
+    }
+
+    public func layout(named name: String, startedAt: Date) -> MeetingLayout {
+        MeetingLayout(root: directory(named: name, startedAt: startedAt))
     }
 
     /// `2026-08-18-1418-slack-engineering-huddle`
@@ -162,14 +170,25 @@ public struct MeetingArchiveLayout: Sendable {
         return out
     }
 
-    /// A directory name that does not collide with an existing one.
-    public func uniqueMeetingID(base: String, startedAt: Date) -> String {
+    /// A folder name that does not collide with one already in that month.
+    ///
+    /// Reaching the suffix takes two meetings sharing a title and a starting
+    /// minute, because the name already carries the time.
+    public func uniqueDirectoryName(
+        base: String, startedAt: Date, excluding existing: URL? = nil
+    ) -> String {
         var candidate = base
         var suffix = 2
-        while FileManager.default.fileExists(atPath: directory(forMeetingID: candidate, startedAt: startedAt).path) {
-            candidate = "\(base)-\(suffix)"
+        while true {
+            let target = directory(named: candidate, startedAt: startedAt)
+            // A folder being renamed collides with itself, and reporting that
+            // as taken would append a suffix on every settle.
+            if let existing, target.standardizedFileURL == existing.standardizedFileURL {
+                return candidate
+            }
+            guard FileManager.default.fileExists(atPath: target.path) else { return candidate }
+            candidate = "\(base) \(suffix)"
             suffix += 1
         }
-        return candidate
     }
 }

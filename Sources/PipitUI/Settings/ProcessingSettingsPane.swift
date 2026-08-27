@@ -7,7 +7,7 @@ import SwiftUI
 ///
 /// One page: picking a model that is not installed starts its download here,
 /// inline on the row, instead of sending the user to a second page.
-struct ProcessingSettingsTab: View {
+struct ProcessingSettingsPane: View {
     let model: SettingsModel
     private var runtime: PipitRuntime { model.runtime }
 
@@ -312,48 +312,5 @@ struct LocalModelChoicePicker: View {
             // exhaustive.
             "Not offered."
         }
-    }
-}
-
-/// Where the voice database is and what is in it.
-///
-/// The directory itself moved to its own window: a list that grows to hundreds
-/// of people needs search, grouping and multiple selection, and none of that
-/// fits a settings pane sized by seven other tabs.
-struct PeopleSettingsTab: View {
-    let model: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                Button("Manage people…") { model.openPeople() }
-                if let statistics = model.voiceStatistics {
-                    Text(
-                        "\(statistics.namedPeople) named, \(statistics.recurringVoices) unnamed "
-                            + "recurring voices."
-                    )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            if let statistics = model.voiceStatistics {
-                Section("Storage") {
-                    LabeledContent("Voice profiles") {
-                        Text("\(statistics.namedPeople) named, \(statistics.recurringVoices) unnamed")
-                    }
-                    LabeledContent("Embeddings") { Text("\(statistics.embeddings)") }
-                    LabeledContent("Database") {
-                        Text("\(max(1, statistics.storageBytes / 1_024)) KB")
-                    }
-                    Text(
-                        "Voice profiles are stored on this Mac only. They are never uploaded "
-                            + "and never written into a meeting folder or an export."
-                    )
-                    .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .task { await model.refreshPeople() }
     }
 }

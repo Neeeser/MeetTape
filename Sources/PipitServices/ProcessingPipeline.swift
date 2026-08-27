@@ -262,6 +262,11 @@ public actor ProcessingPipeline {
             }
             await compactQuietly(store: store)
         }
+
+        // Last, because a rename moves the folder every path above writes into.
+        // The title is final by now: enrichment has run, and the folder still
+        // carries whatever was known when recording started.
+        repository.settleFolderName(for: metadata)
     }
 
     /// Replaces a finished meeting's PCM segments with verified archives.

@@ -314,6 +314,11 @@ public final class PipitRuntime {
             // before its storage is compacted. Runs through the pipeline's own
             // slot, so it pauses while anything records.
             await pipeline.compactPending()
+            // A meeting that reached complete and was still compacting when the
+            // app quit never re-enters `process`, so this is the only pass that
+            // gives its folder the title enrichment produced.
+            repository.settleFolderNames()
+            refreshRecentMeetings()
         }
     }
 
@@ -667,7 +672,16 @@ public final class PipitRuntime {
     public func saveTitle(_ title: String, meetingID: String) {
         guard let found = repository.findMeeting(id: meetingID, includingMerged: true) else { return }
         do {
-            _ = try found.store.updateMetadata { $0.titles.human = title.isEmpty ? nil : title }
+            let updated = try found.store.updateMetadata {
+                $0.titles.human = title.isEmpty ? nil : title
+            }
+            // The folder is named for the meeting, so renaming the meeting
+            // renames it. Not while it records or processes: those paths are
+            // holding this folder's absolute URL.
+            if updated.processing.state == .complete || updated.processing.state == .failed,
+               currentMeeting?.metadata.id != meetingID {
+                repository.settleFolderName(for: updated)
+            }
         } catch {
             Log.app.error("title not saved: \(logSafeDescription(error), privacy: .public)")
         }

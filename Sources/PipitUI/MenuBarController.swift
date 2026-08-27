@@ -218,6 +218,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         setup.target = self
         menu.addItem(setup)
 
+        let about = NSMenuItem(title: "About Pipit", action: #selector(openAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Pipit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -335,6 +339,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() { windows.showSettings() }
+
+    @objc private func openAbout() { windows.showAbout() }
 
     @objc private func openPeople() { windows.showPeople() }
 

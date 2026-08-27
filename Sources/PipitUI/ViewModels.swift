@@ -27,6 +27,10 @@ public final class SettingsModel {
     public var hasStoredKey: Bool
     public var testState = TestState.idle
     public var voiceStatistics: SpeakerStore.Statistics?
+    /// What the archive costs on disk. Nil until the first walk finishes, which
+    /// is what the Storage page draws "Calculating…" for.
+    public var archiveUsage: ArchiveUsage?
+    public var isMeasuringArchive = false
     /// Opens the people directory. Set by the window manager, which owns both
     /// this model and that window.
     @ObservationIgnored public var onOpenPeople: (() -> Void)?
@@ -130,6 +134,28 @@ public final class SettingsModel {
     }
 
     public func openPeople() { onOpenPeople?() }
+
+    /// Measures the archive off the main actor.
+    ///
+    /// A walk of every file of every meeting ever recorded, so it is kept for
+    /// the life of the window and only redone when asked. Opening Storage a
+    /// second time shows the number it already has.
+    public func refreshArchiveUsage(force: Bool = false) async {
+        guard !isMeasuringArchive else { return }
+        guard force || archiveUsage == nil else { return }
+        isMeasuringArchive = true
+        defer { isMeasuringArchive = false }
+        let repository = runtime.repository
+        archiveUsage = await Task.detached(priority: .utility) { repository.usage() }.value
+    }
+
+    /// What the installed speech models take, as the local model state reports
+    /// it. Zero before that state has been read.
+    public var installedModelBytes: Int64 {
+        LocalModelUnit.allCases.reduce(Int64(0)) { total, unit in
+            total + (runtime.localModelState.present.bytes(for: unit) ?? 0)
+        }
+    }
 
     public func installLocalModels() async {
         await runtime.installLocalModels()

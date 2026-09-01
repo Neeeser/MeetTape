@@ -493,6 +493,31 @@ enum UITests {
                 expect.equal(status.displayHealth, .idle, "an idle session shows no health")
             },
 
+            test("the Firefox card reads the connection and what the build carries") { expect in
+                expect.equal(
+                    FirefoxAddOnState(connection: .fresh, hasBundledAddOn: true), .reporting
+                )
+                expect.equal(
+                    FirefoxAddOnState(connection: .stale, hasBundledAddOn: true), .installed,
+                    "a held connection with no meeting on screen is installed and idle"
+                )
+                expect.equal(
+                    FirefoxAddOnState(connection: .stale, hasBundledAddOn: false), .installed,
+                    "an add-on loaded by hand reads as installed, signed or not"
+                )
+                expect.equal(
+                    FirefoxAddOnState(connection: .absent, hasBundledAddOn: true), .missing,
+                    "not connected, and this build has one to offer"
+                )
+                expect.equal(
+                    FirefoxAddOnState(connection: .disconnected, hasBundledAddOn: false),
+                    .unavailable,
+                    "not connected, and there is nothing to install"
+                )
+                expect.isTrue(FirefoxAddOnState.reporting.isInstalled)
+                expect.isFalse(FirefoxAddOnState.missing.isInstalled)
+            },
+
             test("the add-on warning is for one that was dropped, not one never installed") { expect in
                 var status = RuntimeStatus()
                 status.isFirefoxRunning = true

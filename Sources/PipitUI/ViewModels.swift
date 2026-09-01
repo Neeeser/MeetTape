@@ -65,6 +65,19 @@ public final class SettingsModel {
         hasStoredKey = await Task.detached { KeychainAPIKeyStore().hasKey }.value
     }
 
+    /// Keeps the browser rows current while that page is open.
+    ///
+    /// Separate from `refresh`, which reads the keychain and every permission,
+    /// and is far too heavy to run on a timer.
+    public func pollSensor() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            sensorStatus = runtime.sensorStatus
+            hostStatus = NativeMessagingInstaller().status()
+        }
+    }
+
     public func request(_ kind: PermissionKind) async {
         let status = await runtime.permissions.request(kind)
         statuses = await runtime.permissions.allStatuses()

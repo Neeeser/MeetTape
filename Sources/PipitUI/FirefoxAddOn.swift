@@ -3,19 +3,17 @@ import PipitCore
 import PipitDetection
 import SwiftUI
 
-/// Getting the sensor add-on into Firefox.
+/// Getting the sensor add-on into Firefox, and saying whether it is there.
 ///
-/// Two routes, and which one is available depends on the build. A release build
-/// carries an add-on signed by Mozilla, which Firefox installs permanently from
-/// the file. A local build carries none, so the only way in is the temporary
-/// add-on, loaded by hand from `about:debugging` and dropped when Firefox quits.
+/// A release build carries an add-on signed by Mozilla, which Firefox installs
+/// permanently from the file. A local build carries none: release Firefox
+/// refuses an unsigned add-on, so there is nothing to offer and the page says
+/// so. Loading one temporarily from `about:debugging` is how the extension is
+/// developed, and it lives in the docs rather than in the app.
 ///
-/// Both hand the address or the file to Firefox's executable as an argument.
-/// Firefox does not take `about:` addresses through the system URL handler, and
-/// a running Firefox forwards the argument to itself and exits.
+/// The file goes to Firefox's executable as an argument. A running Firefox
+/// forwards the argument to itself and the launched process exits.
 enum FirefoxAddOn {
-    static let debuggingPageAddress = "about:debugging#/runtime/this-firefox"
-
     /// The first installed Firefox build, release before developer builds.
     static func installedApplication() -> URL? {
         BrowserKind.firefox.bundleIdentifiers.lazy
@@ -25,38 +23,20 @@ enum FirefoxAddOn {
 
     static var isFirefoxInstalled: Bool { installedApplication() != nil }
 
-    static var isFirefoxRunning: Bool {
-        let identifiers = Set(BrowserKind.firefox.bundleIdentifiers)
-        return NSWorkspace.shared.runningApplications.contains { application in
-            guard let identifier = application.bundleIdentifier else { return false }
-            return identifiers.contains(identifier)
-        }
-    }
-
     /// The signed add-on this build ships, if it ships one.
     static var bundledAddOn: URL? { NativeMessagingInstaller.bundledFirefoxAddOnURL() }
 
     /// Hands the signed add-on to Firefox, which raises its own install prompt.
     @discardableResult
     static func install() -> Bool {
-        guard let addOn = bundledAddOn else { return false }
-        return launch(argument: addOn.path)
-    }
-
-    /// Opens the page that loads a temporary add-on.
-    @discardableResult
-    static func openDebuggingPage() -> Bool {
-        launch(argument: debuggingPageAddress)
-    }
-
-    private static func launch(argument: String) -> Bool {
         guard
+            let addOn = bundledAddOn,
             let application = installedApplication(),
             let executable = Bundle(url: application)?.executableURL
         else { return false }
         let process = Process()
         process.executableURL = executable
-        process.arguments = [argument]
+        process.arguments = [addOn.path]
         do {
             try process.run()
         } catch {
@@ -66,36 +46,84 @@ enum FirefoxAddOn {
     }
 }
 
-/// The buttons that get the add-on into Firefox, shown in setup and in settings.
+/// What the Firefox card reports, from the two facts that decide it.
+public enum FirefoxAddOnState: Equatable {
+    /// Installed and holding a connection, with no meeting on screen.
+    case installed
+    /// Installed and reporting a meeting right now.
+    case reporting
+    /// Not connected, and this build has an add-on to install.
+    case missing
+    /// Not connected, and this build carries no signed add-on to offer.
+    case unavailable
+
+    public init(connection: BrowserSensorTracker.Connection, hasBundledAddOn: Bool) {
+        switch (connection, hasBundledAddOn) {
+        case (.fresh, _): self = .reporting
+        case (.stale, _): self = .installed
+        case (_, true): self = .missing
+        case (_, false): self = .unavailable
+        }
+    }
+
+    public var isInstalled: Bool { self == .installed || self == .reporting }
+
+    var title: String {
+        isInstalled ? "Add-on installed" : "Add-on not installed"
+    }
+
+    var symbol: String {
+        switch self {
+        case .installed, .reporting: "checkmark.circle.fill"
+        case .missing: "exclamationmark.circle.fill"
+        case .unavailable: "circle.slash"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .installed, .reporting: .green
+        case .missing: .orange
+        case .unavailable: .secondary
+        }
+    }
+
+    /// The line under the title, which says what follows from the state rather
+    /// than repeating it.
+    var detail: String {
+        switch self {
+        case .reporting: "Reporting a meeting."
+        case .installed: "Watching for Meet and Zoom calls."
+        case .missing:
+            "Meet and Zoom still record, from window titles and microphone state. "
+                + "Recording starts at the prejoin screen rather than when you join."
+        case .unavailable:
+            "This build carries no signed add-on, so there is nothing to install. "
+                + "Developing the extension is covered in docs/RELEASING.md."
+        }
+    }
+}
+
+/// The install button, and what it says after Firefox has been asked.
 ///
-/// A build carrying the signed add-on offers one button. Everything else offers
-/// the manual route, which needs the address and the folder.
-struct FirefoxAddOnControls: View {
-    /// Reveals the unpacked extension folder, which the file picker in
-    /// `about:debugging` needs. Absent where the caller has its own.
-    var revealExtension: (() -> Void)?
+/// Shown by both the settings page and setup, so one wording covers both.
+struct FirefoxAddOnInstallButton: View {
+    /// A second install over one already there, which needs no urgency.
+    var isReinstall = false
     @State private var launchFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                if FirefoxAddOn.bundledAddOn != nil {
-                    Button("Install in Firefox") { launchFailed = !FirefoxAddOn.install() }
+            HStack(spacing: 10) {
+                if isReinstall {
+                    Button("Reinstall add-on") { install() }
                         .disabled(!FirefoxAddOn.isFirefoxInstalled)
                 } else {
-                    Button("Open about:debugging") {
-                        launchFailed = !FirefoxAddOn.openDebuggingPage()
-                    }
-                    .disabled(!FirefoxAddOn.isFirefoxInstalled)
-                    Button("Copy Address") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            FirefoxAddOn.debuggingPageAddress, forType: .string
-                        )
-                    }
-                }
-                if let revealExtension {
-                    Button("Show extension folder") { revealExtension() }
+                    Button("Install in Firefox") { install() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!FirefoxAddOn.isFirefoxInstalled)
+                    Text("Firefox asks you to confirm")
+                        .font(.caption).foregroundStyle(.tertiary)
                 }
             }
             if launchFailed {
@@ -104,5 +132,9 @@ struct FirefoxAddOnControls: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private func install() {
+        launchFailed = !FirefoxAddOn.install()
     }
 }

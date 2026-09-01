@@ -26,9 +26,9 @@ public struct SensorParticipant: Codable, Sendable, Equatable, Identifiable {
 /// One stretch where one person held the floor, on the meeting timeline.
 ///
 /// A turn is not an utterance. Slack marks one speaker at a time and releases
-/// about 1.5 s after the voice stops, so a turn's edges are the client's opinion
-/// about who was talking, drifting later than the audio. Boundaries stay with
-/// the diarizer; this says whose they are.
+/// after the voice stops, measured at a median of 1.2 s, so a turn's edges are
+/// the client's opinion about who was talking, drifting later than the audio.
+/// Boundaries stay with the diarizer; this says whose they are.
 public struct SensorTurn: Codable, Sendable, Equatable {
     public var start: Double
     public var end: Double

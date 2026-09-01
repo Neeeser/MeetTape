@@ -623,6 +623,53 @@ enum SensorAttributionTests {
                 expect.equal(intervals.first?.clusterID, SpeakerLabel.sensor(participantID: "U2"))
             },
 
+            test("an indicator that never moved names no cluster") { expect in
+                // Dropping the turn from word attribution alone made the
+                // recording worse, not better. The words moved onto cluster
+                // keys, and those clusters were still named from the very turn
+                // that had just been refused, so a transcript that read one
+                // wrong name went on reading it. On the recording this is
+                // named after, the name in question is the local user's own,
+                // on a track that by construction cannot hold them.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 400)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 130), interval("b", 140, 260),
+                                interval("c", 270, 390)],
+                    sensors: raw
+                )
+                expect.equal(result.matches.count, 0)
+            },
+
+            test("a turn under the ceiling still names its cluster") { expect in
+                // The other half of the rule, so the ceiling cannot pass by
+                // breaking naming outright.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 120)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 120)], sensors: raw
+                )
+                expect.equal(result.matches.first?.displayName, "Ada")
+            },
+
+            test("a participant whose every turn is refused gets no entry") { expect in
+                // speakerEntries keyed on holding any turn at all, so a
+                // participant the ceiling or the concession leaves with no
+                // interval still got a named key that no utterance uses. It
+                // reaches the folder's people list and the enrichment prompt,
+                // and the confirm-a-voice control offers a name with no audio
+                // behind it.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 400), ("U2", 400, 401), ("U2", 500, 560)]
+                )
+                let keys = Set(SensorAttribution.speakerEntries(sensors: raw).map(\.key))
+                expect.isFalse(keys.contains(SpeakerLabel.sensor(participantID: "U1")))
+                expect.isTrue(keys.contains(SpeakerLabel.sensor(participantID: "U2")))
+            },
+
             test("an indicator that never moved enrols no voice") { expect in
                 // The half that lasts. A wrong word label lives in one
                 // transcript; a centroid built from three people's speech is

@@ -82,13 +82,18 @@ enum MeetingsWindowTests {
         return runtime
     }
 
-    /// Waits for work the window model started in the background, for up to a
-    /// second. A test that fails says more than one that hangs.
+    /// Waits for work the window model started in the background, for up to ten
+    /// seconds. A test that fails says more than one that hangs.
+    ///
+    /// A passing wait ends as soon as the condition holds, so the budget only
+    /// costs time on a real failure. One second was not enough on a loaded CI
+    /// runner, where a save and the list reload behind it took longer than that
+    /// and the title test failed on three runs out of four.
     @MainActor
     static func waitFor(
         _ expect: Expect, _ what: String, until condition: () -> Bool
     ) async {
-        for _ in 0..<200 {
+        for _ in 0..<2_000 {
             if condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }

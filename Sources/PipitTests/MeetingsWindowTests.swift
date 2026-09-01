@@ -755,6 +755,51 @@ enum MeetingsWindowTests {
         )
     }
 
+    /// The copy button hands over the document on disk, both halves of a
+    /// rejoined call in the order they were recorded.
+    ///
+    /// Rendering the panel's own lines instead would drop the header, the
+    /// participants and the timecodes that `transcript.md` carries, and would
+    /// disagree with the file the same meeting's folder holds.
+    @MainActor
+    static func copyingTakesTheTranscriptFromDisk(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review",
+            startedAt: Date(timeIntervalSince1970: 1_787_066_400)
+        )
+        let second = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00"], title: "Design review, rejoined"
+        )
+        let runtime = makeRuntime(root: root)
+        runtime.combine(meetingID: second.id, into: first.id, reason: "a test")
+
+        let detail = MeetingReviewModel(runtime: runtime, meetingID: first.id)
+        expect.isNil(
+            detail.transcriptMarkdown(),
+            "nothing has rendered the document yet, so there is nothing to copy"
+        )
+
+        try first.store.writeTranscriptMarkdown("# Design review\n\nPriya: the renewal.")
+        try second.store.writeTranscriptMarkdown("# Design review\n\nPriya: as I was saying.")
+
+        guard let copied = detail.transcriptMarkdown() else {
+            expect.fail("the document on disk was not read")
+            return
+        }
+        guard let firstHalf = copied.range(of: "the renewal."),
+            let secondHalf = copied.range(of: "as I was saying.")
+        else {
+            expect.fail("both halves of the call belong in one copy: got \(copied)")
+            return
+        }
+        expect.isTrue(
+            firstHalf.lowerBound < secondHalf.lowerBound,
+            "the half recorded first comes first"
+        )
+    }
+
     static var windowSuite: Suite {
         Suite("MeetingsWindow", [
             test("writing a summary is not offered where it would replace notes") { expect in
@@ -762,6 +807,9 @@ enum MeetingsWindowTests {
             },
             test("the unnamed count is what the model would be asked about") { expect in
                 try await theCountMatchesWhatWouldBeAsked(expect)
+            },
+            test("copying the transcript takes the document on disk") { expect in
+                try await copyingTakesTheTranscriptFromDisk(expect)
             },
             test("a dismissal on the second half of a call reaches disk") { expect in
                 try await aDismissalOnTheSecondHalfReachesDisk(expect)

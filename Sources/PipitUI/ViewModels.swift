@@ -19,6 +19,9 @@ import SwiftUI
 @Observable
 public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
+    /// Which page is showing. Held here rather than in the view so opening
+    /// Settings from a menu item can choose the page it is about.
+    var pane: SettingsPane = .general
     public var hostStatus: NativeMessagingInstaller.Status?
     public var sensorStatus: BrowserSensorServer.Status?
     public var localUserName: String

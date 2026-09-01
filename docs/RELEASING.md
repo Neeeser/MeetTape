@@ -15,9 +15,16 @@ The release repository needs these GitHub Actions secrets:
 | `APPLE_ID` | Apple ID used by the notary service |
 | `APPLE_TEAM_ID` | Apple Developer team identifier |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
+| `AMO_JWT_ISSUER` | Mozilla add-on API key, from the AMO credentials page |
+| `AMO_JWT_SECRET` | Mozilla add-on API secret for the same key |
 
 The workflow falls back to ad-hoc signing when the certificate is absent. Do
 not publish an ad-hoc signed build. Gatekeeper will reject it on another Mac.
+
+The AMO credentials come from
+<https://addons.mozilla.org/en-US/developers/addon/api/key/>. A release without
+them ships an app that has no signed add-on, and Firefox users then load a
+temporary add-on that Firefox drops when it quits.
 
 ## Prepare the release
 
@@ -100,3 +107,20 @@ The application bundle includes the browser sensor and native host. Firefox
 distribution through addons.mozilla.org uses the extension identifier
 `sensor@pipit.app`. Keep that identifier aligned with
 `extension/firefox/manifest.json` when publishing an updated XPI.
+
+Release Firefox installs a signed add-on permanently and refuses an unsigned
+one, so the release workflow signs the extension before assembling the app:
+
+```sh
+AMO_JWT_ISSUER=... AMO_JWT_SECRET=... ./scripts/sign-extension.sh 1.2.0
+```
+
+The channel is `unlisted`, so Mozilla signs the file and returns it rather than
+publishing it on addons.mozilla.org. The signed XPI lands at
+`extension/signed/pipit-sensor.xpi`, and `scripts/bundle-app.sh` copies it into
+the app bundle, where Settings offers it as a one-click install.
+
+The version argument stamps the built manifest, because AMO refuses a version
+it has already signed for this add-on. Pass the release version so each tag
+signs a version of its own. Mozilla reviews self-distributed add-ons after the
+fact and can disable one that breaks their policies.

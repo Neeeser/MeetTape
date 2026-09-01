@@ -1,8 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Pipit Sensor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reports Google Meet and Zoom meeting state to Pipit so it records the right calls.",
+  "icons": {
+    "48": "icons/pipit-48.png",
+    "96": "icons/pipit-96.png",
+    "128": "icons/pipit-128.png"
+  },
   "permissions": [
     "nativeMessaging",
     "scripting"

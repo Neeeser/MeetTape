@@ -39,3 +39,6 @@ node_modules/
 # Extension build output
 extension/dist/
 __pycache__/
+
+# Signed Firefox add-on, produced by scripts/sign-extension.sh
+extension/signed/

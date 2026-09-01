@@ -107,6 +107,14 @@ public struct BrowserSensorTracker: Sendable {
         case stale
         /// The transport dropped.
         case disconnected
+
+        /// Whether the add-on is in the browser and talking to Pipit.
+        ///
+        /// A loaded add-on connects when the browser starts and holds the
+        /// connection open, so it reports itself whether or not a meeting is on
+        /// screen. Silence on a held connection means no meeting page, which is
+        /// the ordinary state and not a fault.
+        public var isLoaded: Bool { self == .fresh || self == .stale }
     }
 
     struct Entry: Sendable, Equatable {

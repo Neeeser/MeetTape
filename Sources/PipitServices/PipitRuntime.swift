@@ -19,6 +19,10 @@ public struct RuntimeStatus: Sendable, Equatable {
     public var isProvisional = false
     public var detectionPaused = false
     public var sensorConnection: BrowserSensorTracker.Connection = .absent
+    /// Whether the Firefox add-on has ever connected on this machine, carried
+    /// from settings so the menu bar can tell "dropped" from "never installed".
+    public var firefoxSensorHasConnected = false
+    public var isFirefoxRunning = false
     public var slackState: SlackHuddleDetector.State = .idle
     public var lastWarning: CaptureWarning?
 
@@ -42,6 +46,16 @@ public struct RuntimeStatus: Sendable, Equatable {
     /// the disk during exactly that window.
     public var isCapturing: Bool {
         hasActiveSession || sessionState == .candidate || sessionState == .ending
+    }
+
+    /// The add-on was loaded before and is not now, while Firefox is open to
+    /// load it again.
+    ///
+    /// Firefox drops a temporary add-on every time it quits, which is silent:
+    /// recordings keep happening, they just start at the prejoin screen again.
+    /// Nothing is claimed for a machine where the add-on was never installed.
+    public var sensorNeedsAttention: Bool {
+        firefoxSensorHasConnected && isFirefoxRunning && !sensorConnection.isLoaded
     }
 
     /// Never show a healthy recording while a required source is known to be
@@ -418,6 +432,16 @@ public final class PipitRuntime {
 
     func detectionDidUpdate(_ snapshot: DetectionSnapshot) {
         status.sensorConnection = snapshot.browserSensor
+        status.isFirefoxRunning = BrowserPresence.isRunning(.firefox)
+        // The latch is written once, the first time the add-on ever reports.
+        // From then on a silent sensor is a dropped add-on rather than one that
+        // was never installed.
+        if snapshot.browserSensor.isLoaded, !settings.firefoxSensorHasConnected {
+            var updated = settings
+            updated.firefoxSensorHasConnected = true
+            update(settings: updated)
+        }
+        status.firefoxSensorHasConnected = settings.firefoxSensorHasConnected
         status.slackState = snapshot.slackState
         if let reading = snapshot.roster { recordSensorReading(reading) }
 

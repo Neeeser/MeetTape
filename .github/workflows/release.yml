@@ -80,6 +80,26 @@ jobs:
           echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Sign the Firefox add-on
+        # Absent credentials are not a failure: the app then ships without the
+        # add-on and walks the user through about:debugging instead. Signing
+        # that starts and fails is a failure, because a release that quietly
+        # loses one-click install looks fine and is not.
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$AMO_JWT_ISSUER" ] || [ -z "$AMO_JWT_SECRET" ]; then
+            echo "::warning::No AMO credentials configured; shipping without the signed add-on."
+            exit 0
+          fi
+          ./scripts/sign-extension.sh "$VERSION"
+
       - name: Build the app
         env:
           PIPIT_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}

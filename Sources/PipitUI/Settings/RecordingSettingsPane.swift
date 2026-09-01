@@ -19,6 +19,29 @@ struct RecordingSettingsPane: View {
                 providerRow("FaceTime", keyPath: \.faceTime)
                 providerRow("Unknown calls", keyPath: \.unknownCalls)
             }
+            Section("Ending a meeting") {
+                waitRow(
+                    "Pause recording after the call disappears",
+                    choices: Self.endGraceChoices,
+                    keyPath: \.meetingEndGraceSeconds
+                )
+                Text(
+                    "How long the call has to be gone before recording pauses. A short wait "
+                        + "ends a meeting sooner, and a call that flickers for a moment can cut "
+                        + "the recording."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                waitRow(
+                    "Wait for a rejoin before saving",
+                    choices: Self.reconnectWindowChoices,
+                    keyPath: \.meetingReconnectWindowSeconds
+                )
+                Text(
+                    "Nothing is recorded during this wait. Rejoining within it continues the "
+                        + "same meeting; rejoining after it starts a new one."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Applications") {
                 appList(
                     title: "Always record",
@@ -79,6 +102,38 @@ struct RecordingSettingsPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Fixed steps rather than a free field, so the range the session
+    /// controller enforces is also the range the user can reach.
+    private static let endGraceChoices: [Double] = [2, 4, 6, 10, 20]
+    private static let reconnectWindowChoices: [Double] = [10, 30, 60, 90, 180]
+
+    private func waitRow(
+        _ title: String, choices: [Double], keyPath: WritableKeyPath<AppSettings, Double>
+    ) -> some View {
+        LabeledContent(title) {
+            Picker("", selection: Binding(
+                get: {
+                    let stored = runtime.settings[keyPath: keyPath]
+                    // A value from a hand-edited file has no row of its own. The
+                    // nearest choice is what the picker shows, and choosing
+                    // anything writes a value from the list.
+                    return choices.min { abs($0 - stored) < abs($1 - stored) } ?? stored
+                },
+                set: { newValue in
+                    var settings = runtime.settings
+                    settings[keyPath: keyPath] = newValue
+                    runtime.update(settings: settings)
+                }
+            )) {
+                ForEach(choices, id: \.self) { seconds in
+                    Text("\(Int(seconds)) seconds").tag(seconds)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 160)
+        }
     }
 
     private func providerRow(

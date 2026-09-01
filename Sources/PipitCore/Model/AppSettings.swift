@@ -349,6 +349,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
     /// subtracts what the speakers are playing. Without it, a user on speakers
     /// gets the remote side of the call recorded onto their own track.
     public var echoCancellation: Bool
+    /// How long the call has to be gone before recording pauses. It covers a
+    /// flap in the sensors, so a poll that misses one reading does not cut a
+    /// meeting in two.
+    public var meetingEndGraceSeconds: Double
+    /// How long a paused meeting waits for a rejoin before it is saved. A
+    /// rejoin after this becomes a separate meeting.
+    public var meetingReconnectWindowSeconds: Double
 
     public init(
         version: Int = AppSettings.currentVersion,
@@ -367,7 +374,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
         neverRecordApplications: [String] = [],
         hasCompletedOnboarding: Bool = false,
         preferBuiltInMicrophone: Bool = false,
-        echoCancellation: Bool = true
+        echoCancellation: Bool = true,
+        meetingEndGraceSeconds: Double = SessionController.Configuration().endGraceSeconds,
+        meetingReconnectWindowSeconds: Double = SessionController.Configuration()
+            .reconnectWindowSeconds
     ) {
         self.version = version
         self.storageRootPath = storageRootPath
@@ -386,6 +396,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.preferBuiltInMicrophone = preferBuiltInMicrophone
         self.echoCancellation = echoCancellation
+        self.meetingEndGraceSeconds = meetingEndGraceSeconds
+        self.meetingReconnectWindowSeconds = meetingReconnectWindowSeconds
     }
 
     /// Every field decodes with its default when absent, so a settings file
@@ -468,6 +480,15 @@ public struct AppSettings: Codable, Sendable, Equatable {
         echoCancellation =
             try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
             ?? defaults.echoCancellation
+        // Every file on disk predates these keys, and was written under the
+        // longer waits the new defaults replace. Nothing is migrated. An absent
+        // key takes the new default, which is the point of shortening them.
+        meetingEndGraceSeconds =
+            try container.decodeIfPresent(Double.self, forKey: .meetingEndGraceSeconds)
+            ?? defaults.meetingEndGraceSeconds
+        meetingReconnectWindowSeconds =
+            try container.decodeIfPresent(Double.self, forKey: .meetingReconnectWindowSeconds)
+            ?? defaults.meetingReconnectWindowSeconds
         // The stored number gated the migrations above; the decoded struct is
         // current-schema, and writing it back as such is what stops a
         // migration from re-running against a value the user has since chosen.
@@ -492,6 +513,26 @@ public struct AppSettings: Codable, Sendable, Equatable {
             alwaysRecord: Set(alwaysRecordApplications),
             neverRecord: Set(neverRecordApplications)
         )
+    }
+
+    /// The lifecycle waits, held to the range the pickers offer. A file edited
+    /// by hand can name a zero-second grace, which ends a meeting on one
+    /// dropped poll, or a window long enough to leave a meeting unsaved for an
+    /// afternoon.
+    public var sessionConfiguration: SessionController.Configuration {
+        SessionController.Configuration(
+            reconnectWindowSeconds: Self.held(
+                meetingReconnectWindowSeconds,
+                to: SessionController.Configuration.reconnectWindowRange
+            ),
+            endGraceSeconds: Self.held(
+                meetingEndGraceSeconds, to: SessionController.Configuration.endGraceRange
+            )
+        )
+    }
+
+    private static func held(_ seconds: Double, to range: ClosedRange<Double>) -> Double {
+        min(max(seconds, range.lowerBound), range.upperBound)
     }
 }
 

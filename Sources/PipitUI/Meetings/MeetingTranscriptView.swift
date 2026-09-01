@@ -23,7 +23,6 @@ struct MeetingTranscriptView: View {
                             blockView(block)
                         }
                     }
-                    if detail.isNaming { namingField }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 20)
@@ -122,7 +121,7 @@ struct MeetingTranscriptView: View {
             TranscriptParagraph(
                 text: paragraph.text,
                 spans: paragraph.spans,
-                people: detail.knownPeople,
+                people: detail.peopleHere,
                 onAction: { action, person in
                     guard let person else { return }
                     let target = target(action, in: block)
@@ -131,11 +130,25 @@ struct MeetingTranscriptView: View {
                         person.identity.resolvedName, lines: target.parts.count
                     )
                 },
-                onNewPerson: { action in
-                    detail.beginNamingRange(target(action, in: block))
+                onSomeoneElse: { action in
+                    detail.beginNaming(.range(target(action, in: block), in: block.id))
                 }
             )
+            // Anchored on the block, because the menu that raised it is an
+            // AppKit one and has already closed by the time this opens.
+            .popover(isPresented: pickingRange(in: block), arrowEdge: .bottom) {
+                if let open = detail.namingRange(inBlock: block.id) { picker(open) }
+            }
         }
+    }
+
+    private func pickingRange(in block: CombinedLineBlock) -> Binding<Bool> {
+        Binding(
+            get: { detail.namingRange(inBlock: block.id) != nil },
+            set: { open in
+                if !open, detail.namingRange(inBlock: block.id) != nil { detail.cancelNaming() }
+            }
+        )
     }
 
     /// The colour this speaker has everywhere else.
@@ -195,43 +208,77 @@ struct MeetingTranscriptView: View {
     /// Names the whole turn. Every line under the header moves together,
     /// because the header is the only menu the lines have.
     private func blockMenu(for block: CombinedLineBlock) -> some View {
-        Menu(block.speakerName) {
-            ForEach(detail.knownPeople) { person in
-                Button(person.identity.resolvedName) {
-                    detail.assignBlock(block, to: person)
-                    model.noteLineCorrection(
-                        person.identity.resolvedName, lines: block.lines.count
-                    )
+        let target = SpeakerNamingTarget.block(block)
+        return Button(block.speakerName) { detail.beginNaming(target) }
+            .buttonStyle(.plain)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(tint(for: block.speakerName))
+            .popover(isPresented: picking(target.id), arrowEdge: .bottom) { picker(target) }
+    }
+
+    /// The picker, wherever the transcript raises it. The turn header opens it
+    /// on the whole block. A right-click on a selection opens it on that
+    /// stretch alone.
+    private func picker(_ target: SpeakerNamingTarget) -> some View {
+        PeoplePickerView(
+            // The whole directory, unlike the AppKit submenu behind it: this
+            // one has a search field, so the long tail is reachable.
+            people: detail.knownPeople,
+            context: detail.pickerContext,
+            model: detail.picker,
+            leaveUnnamedTitle: leaveUnnamedTitle(for: target),
+            onPick: { person in
+                detail.cancelNaming()
+                apply(target, name: person.identity.resolvedName) {
+                    switch target.subject {
+                    case let .block(block): detail.assignBlock(block, to: person)
+                    case let .range(range): detail.assignRange(range, to: person)
+                    case .cluster: break
+                    }
                 }
+            },
+            onNewPerson: { name in
+                detail.cancelNaming()
+                apply(target, name: name) {
+                    switch target.subject {
+                    case let .block(block): detail.assignBlock(block, toNewPerson: name)
+                    case let .range(range): detail.assignRange(range, toNewPerson: name)
+                    case .cluster: break
+                    }
+                }
+            },
+            onLeaveUnnamed: {
+                detail.cancelNaming()
+                if case let .block(block) = target.subject { detail.clearBlock(block) }
             }
-            if !detail.knownPeople.isEmpty { Divider() }
-            Button("New person…") { detail.beginNamingBlock(block) }
-            Button("Use this speaker's name") { detail.clearBlock(block) }
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .font(.callout.weight(.semibold))
-        .tint(tint(for: block.speakerName))
+        )
     }
 
-    private var namingField: some View {
-        HStack {
-            TextField("Name", text: detail.text(\.newPersonDraft))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 260)
-                .onSubmit { commit() }
-            Button("Save") { commit() }
-                .disabled(detail.newPersonDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-            Button("Cancel") { detail.cancelNaming() }
-            Spacer()
-        }
+    /// Only a whole turn can be handed back to its cluster. A stretch inside
+    /// one was carved out by hand and has nothing to fall back to.
+    private func leaveUnnamedTitle(for target: SpeakerNamingTarget) -> String? {
+        if case .block = target.subject { return "Use this speaker's name" }
+        return nil
     }
 
-    private func commit() {
-        let name = detail.newPersonDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = detail.namingBlock?.lines.count ?? detail.namingRange?.parts.count ?? 0
-        detail.commitNaming()
+    /// Applies the change and reports how many lines it moved, which is what
+    /// the receipt above the transcript counts.
+    private func apply(_ target: SpeakerNamingTarget, name: String, _ change: () -> Void) {
+        change()
+        let lines: Int
+        switch target.subject {
+        case let .block(block): lines = block.lines.count
+        case let .range(range): lines = range.parts.count
+        case .cluster: lines = 0
+        }
         guard !name.isEmpty, lines > 0 else { return }
         model.noteLineCorrection(name, lines: lines)
+    }
+
+    private func picking(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { detail.isNaming(id) },
+            set: { open in if !open, detail.isNaming(id) { detail.cancelNaming() } }
+        )
     }
 }

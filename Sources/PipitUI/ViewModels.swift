@@ -21,21 +21,10 @@ public final class SettingsModel {
     public var statuses: [PermissionStatus] = []
     public var hostStatus: NativeMessagingInstaller.Status?
     public var sensorStatus: BrowserSensorServer.Status?
-    public var localUserName: String
     public var apiKey = ""
     public var hasStoredKey: Bool
     public var testState = TestState.idle
     public var voiceStatistics: SpeakerStore.Statistics?
-    /// Everyone with a name, for choosing which of them is you.
-    public var people: [SpeakerDirectoryEntry] = []
-    /// Whether the name field holds something a person typed.
-    ///
-    /// Leaving the pane writes the field, because a name typed and not
-    /// submitted is still a name they meant. Writing it unconditionally
-    /// re-rendered the markdown of every meeting the local user appears in,
-    /// every time the pane was left, and could rename the person just chosen in
-    /// the picker to the name of the one before them.
-    @ObservationIgnored private var nameEdited = false
     /// What the archive costs on disk. Nil until the first walk finishes, which
     /// is what the Storage page draws "Calculating…" for.
     public var archiveUsage: ArchiveUsage?
@@ -55,7 +44,6 @@ public final class SettingsModel {
 
     public init(runtime: PipitRuntime) {
         self.runtime = runtime
-        self.localUserName = runtime.settings.localUserName
         // Deliberately not read here. A keychain lookup can block on an
         // authorisation prompt, and building a view is not the place to
         // discover that: the panel would hang with nothing on screen.
@@ -86,12 +74,6 @@ public final class SettingsModel {
         Log.ui.info(
             "requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"
         )
-    }
-
-    public func saveLocalUserName() {
-        var settings = runtime.settings
-        settings.localUserName = localUserName.isEmpty ? "Me" : localUserName
-        runtime.updateSettingsAndIdentity(settings)
     }
 
     public func saveKey() {
@@ -145,80 +127,6 @@ public final class SettingsModel {
     /// that only wants numbers cannot reach into the name field.
     public func refreshVoiceStatistics() async {
         voiceStatistics = await runtime.voiceMemoryStatistics()
-    }
-
-    /// The directory and the name beside it, for the pane that picks who you
-    /// are.
-    ///
-    /// The field is left alone while it holds something typed. Reading the
-    /// directory suspends for as long as it takes to score every profile, and a
-    /// straggling read landing after somebody started typing would put the
-    /// stored name back under them and drop what they wrote.
-    public func refreshPeople() async {
-        await refreshVoiceStatistics()
-        people = await runtime.speakerDirectory(kind: .person)
-        guard !nameEdited else { return }
-        localUserName = runtime.settings.localUserName
-    }
-
-    /// The name field. Writes through the identity, and remembers that somebody
-    /// typed in it.
-    public var localUserNameField: Binding<String> {
-        Binding(
-            get: { self.localUserName },
-            set: { typed in
-                self.localUserName = typed
-                self.nameEdited = true
-            }
-        )
-    }
-
-    /// Which person in the directory is you, or nil before one is picked.
-    public var localUserIdentityID: IdentityID? {
-        runtime.settings.processing.localUserIdentityID
-    }
-
-    /// Points the microphone track at an existing person.
-    ///
-    /// Their profile then carries everything the track teaches, and an imported
-    /// recording naming you lands on the same row rather than a second one.
-    public func chooseLocalUser(_ identityID: IdentityID) async {
-        await runtime.setLocalUser(identityID)
-        // Before the reads below, which await. A name half typed for the person
-        // who was you a moment ago must not survive into the window where
-        // Settings already names somebody else: leaving the tab there would
-        // rename the person just chosen to what was in the field.
-        localUserName = runtime.settings.localUserName
-        nameEdited = false
-        await refreshPeople()
-    }
-
-    /// Renames whoever is you, or names them for the first time.
-    ///
-    /// Through the identity where there is one, so the name in Settings and the
-    /// name in People cannot drift apart.
-    public func commitLocalUserName() async {
-        guard nameEdited else { return }
-        let name = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else {
-            localUserName = runtime.settings.localUserName
-            nameEdited = false
-            return
-        }
-        guard name != runtime.settings.localUserName else {
-            nameEdited = false
-            return
-        }
-        if let identityID = localUserIdentityID {
-            await runtime.renamePerson(identityID, to: name)
-        } else {
-            saveLocalUserName()
-        }
-        // The field is now what the identity says, so it is no longer something
-        // typed. Cleared before the read below, which leaves the field alone
-        // while this is true.
-        nameEdited = false
-        await refreshPeople()
     }
 
     public func openPeople() { onOpenPeople?() }
@@ -285,6 +193,46 @@ public struct SpeakerRangeTarget: Sendable, Equatable {
     }
 }
 
+/// What the people picker is about to name.
+///
+/// Carries an identifier of its own so the popover on one chip can be told from
+/// the popover on the next without comparing the payload behind it.
+public struct SpeakerNamingTarget: Identifiable {
+    public enum Subject {
+        /// Every key the chip stands for. The diarizer splits one voice across
+        /// several clusters and the chip is the person, so naming reaches all
+        /// of them.
+        case cluster(ids: [String], recordingID: String)
+        case block(CombinedLineBlock)
+        case range(SpeakerRangeTarget)
+    }
+
+    public let id: String
+    public let subject: Subject
+
+    public static func cluster(_ ids: [String], in recordingID: String) -> Self {
+        Self(
+            id: "cluster:\(recordingID):\(ids.first ?? "")",
+            subject: .cluster(ids: ids, recordingID: recordingID)
+        )
+    }
+
+    public static func block(_ block: CombinedLineBlock) -> Self {
+        Self(id: "block:\(block.id)", subject: .block(block))
+    }
+
+    /// Anchored on the turn it was raised from. The right-click menu that
+    /// raised it is an AppKit one and has already closed by the time the
+    /// popover opens, so the block on screen is what it hangs off.
+    public static func range(_ target: SpeakerRangeTarget, in blockID: String) -> Self {
+        let part = target.parts.first
+        return Self(
+            id: "range:\(blockID):\(part?.utteranceID ?? ""):\(part?.startSeconds ?? 0)",
+            subject: .range(target)
+        )
+    }
+}
+
 /// Loads and edits one meeting's files.
 @MainActor
 @Observable
@@ -311,14 +259,11 @@ public final class MeetingReviewModel {
     public var knownPeople: [SpeakerDirectoryEntry] = []
     public var expectedParticipants: [String] = []
     public var participantDraft = ""
-    /// The cluster waiting for a typed name, and the recording it belongs to.
-    public var namingCluster: (clusterID: String, recordingID: String)?
-    /// The stretch of one track waiting for a name, after a split or a
-    /// selection whose speaker is not in the list yet.
-    public var namingRange: SpeakerRangeTarget?
-    /// The turn waiting for a name.
-    public var namingBlock: CombinedLineBlock?
-    public var newPersonDraft = ""
+    /// What the people picker is open on, if it is open.
+    public var naming: SpeakerNamingTarget?
+    /// What is typed into the picker and which row the arrow keys are on. Held
+    /// here rather than in the popover, which is rebuilt on every assignment.
+    @ObservationIgnored public let picker = PeoplePickerModel()
     public var reanalyzeCount = ""
     public var isReanalyzing = false
 
@@ -439,6 +384,7 @@ public final class MeetingReviewModel {
     public func assignCluster(
         _ clusterIDs: [String], in recordingID: String, to entry: SpeakerDirectoryEntry
     ) {
+        notePicked(entry)
         runtime.assignSpeaker(
             name: entry.identity.resolvedName, keys: clusterIDs, meetingID: recordingID,
             identityID: entry.id
@@ -464,6 +410,7 @@ public final class MeetingReviewModel {
     /// thirty seconds of a three-minute answer and tear the paragraph in two on
     /// the next reload.
     public func assignBlock(_ block: CombinedLineBlock, to entry: SpeakerDirectoryEntry) {
+        notePicked(entry)
         assignBlock(block, name: entry.identity.resolvedName, identityID: entry.id)
     }
 
@@ -510,6 +457,7 @@ public final class MeetingReviewModel {
     /// rebuilds the blocks. Naming a whole line moves one name and can be shown
     /// straight away; this cannot without rebuilding the same thing twice.
     public func assignRange(_ target: SpeakerRangeTarget, to entry: SpeakerDirectoryEntry) {
+        notePicked(entry)
         runtime.assignSpeakerRange(
             name: entry.identity.resolvedName, meetingID: target.recordingID,
             track: target.track, parts: target.parts, identityID: entry.id
@@ -525,52 +473,68 @@ public final class MeetingReviewModel {
         )
     }
 
-    public func beginNamingRange(_ target: SpeakerRangeTarget) {
-        namingRange = target
-        namingBlock = nil
-        namingCluster = nil
-        newPersonDraft = ""
+    /// The people already in this meeting, in the order the picker offers them.
+    ///
+    /// For the AppKit submenu a right-click raises, which holds no search field
+    /// and so carries only the short list that answers it nearly every time.
+    public var peopleHere: [SpeakerDirectoryEntry] {
+        PeoplePickerRanking.sections(knownPeople, context: pickerContext)
+            .first { $0.title == PeoplePickerRanking.inThisMeetingTitle }?
+            .rows.map(\.entry) ?? []
     }
 
-    /// Whether anything in the transcript is waiting for a name.
-    public var isNaming: Bool { namingRange != nil || namingBlock != nil }
+    /// Marks a person as reached for just now, which is what the picker's
+    /// "Recent" section is ordered by. Recognition already stamps this when it
+    /// matches a voice; a name set by hand is at least as strong a signal.
+    public func notePicked(_ entry: SpeakerDirectoryEntry) {
+        runtime.notePersonUsed(entry.id)
+    }
 
-    public func beginNamingBlock(_ block: CombinedLineBlock) {
-        namingBlock = block
-        namingRange = nil
-        namingCluster = nil
-        newPersonDraft = ""
+    /// Opens the picker on something that needs a speaker.
+    public func beginNaming(_ target: SpeakerNamingTarget) {
+        naming = target
+        picker.reset()
+    }
+
+    /// Whether the picker is open on this particular control. The popover on
+    /// one chip has to be told from the popover on the next.
+    public func isNaming(_ id: String) -> Bool { naming?.id == id }
+
+    /// The stretch the picker is open on inside this turn, if it is open on one.
+    public func namingRange(inBlock blockID: String) -> SpeakerNamingTarget? {
+        guard let naming, case .range = naming.subject,
+              naming.id.hasPrefix("range:\(blockID):") else { return nil }
+        return naming
+    }
+
+    public func cancelNaming() {
+        naming = nil
+        picker.reset()
+    }
+
+    /// Who the picker offers before the rest of the directory.
+    ///
+    /// A voice already named in this meeting outranks a name off the invite,
+    /// so the chips are written second and win the key.
+    public var pickerContext: [IdentityID: PeoplePickerContext] {
+        var map: [IdentityID: PeoplePickerContext] = [:]
+        for name in expectedParticipants {
+            guard let entry = knownPeople.first(where: {
+                $0.identity.resolvedName.localizedCaseInsensitiveCompare(name) == .orderedSame
+            }) else { continue }
+            map[entry.id] = .expected
+        }
+        for row in speakerRows {
+            guard let identity = row.identity else { continue }
+            map[identity.id] = .onAChip
+        }
+        return map
     }
 
     /// Separates a recording from the conversation it was linked to.
     public func detach(_ recordingID: String) {
         runtime.detachContinuation(meetingID: recordingID)
         reload()
-    }
-
-    public func beginNamingCluster(_ clusterID: String, in recordingID: String) {
-        namingCluster = (clusterID, recordingID)
-        namingRange = nil
-        namingBlock = nil
-        newPersonDraft = ""
-    }
-
-    public func cancelNaming() {
-        namingCluster = nil
-        namingRange = nil
-        namingBlock = nil
-        newPersonDraft = ""
-    }
-
-    public func commitNaming() {
-        if let target = namingRange {
-            assignRange(target, toNewPerson: newPersonDraft)
-        } else if let block = namingBlock {
-            assignBlock(block, toNewPerson: newPersonDraft)
-        } else if let cluster = namingCluster {
-            assignCluster([cluster.clusterID], in: cluster.recordingID, toNewPerson: newPersonDraft)
-        }
-        cancelNaming()
     }
 
     public func addParticipant() {

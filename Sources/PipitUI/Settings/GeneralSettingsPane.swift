@@ -1,4 +1,3 @@
-import PipitCore
 import PipitServices
 import SwiftUI
 
@@ -24,45 +23,16 @@ struct GeneralSettingsPane: View {
                     )
                 )
             }
-            Section("You") {
-                // Which person in the directory, rather than a name typed here.
-                // The identity owns the name: Settings held one and the store
-                // held a flag, and the launch sync pushed one onto the other.
-                if !model.people.isEmpty {
-                    Picker(
-                        "You are",
-                        selection: Binding(
-                            get: { model.localUserIdentityID },
-                            set: { chosen in
-                                guard let chosen else { return }
-                                Task { await model.chooseLocalUser(chosen) }
-                            }
-                        )
-                    ) {
-                        if model.localUserIdentityID == nil {
-                            Text("Nobody yet").tag(IdentityID?.none)
-                        }
-                        ForEach(model.people) { entry in
-                            Text(entry.identity.resolvedName).tag(IdentityID?.some(entry.id))
-                        }
-                    }
-                }
-                TextField("Name", text: model.localUserNameField)
-                    .onSubmit { Task { await model.commitLocalUserName() } }
-                Text(
-                    "Your own speech is labelled with this person, and the microphone track "
-                        + "of every call teaches their voice profile. Naming yourself on an "
-                        + "imported recording puts it on the same profile."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
+            // Nothing here says who you are. Naming yourself is a rename and
+            // saying an existing row is you is a merge, and People owns both.
+            // A second door onto them here renamed the person just picked to
+            // the name left in the field. The microphone track never needed
+            // the answer. It is labelled deterministically whatever the row
+            // ends up called.
             Section("People") {
                 Button("Manage people…") { model.openPeople() }
             }
         }
         .formStyle(.grouped)
-        .task { await model.refreshPeople() }
-        // A name typed and not submitted is still a name the person meant.
-        .onDisappear { Task { await model.commitLocalUserName() } }
     }
 }

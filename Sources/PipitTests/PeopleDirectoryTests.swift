@@ -33,7 +33,8 @@ enum PeopleDirectoryTests {
         anonymousNumber: Int? = nil,
         profile: VoiceProfileStatus = .none,
         meetings: Int = 0,
-        isLocalUser: Bool = false
+        isLocalUser: Bool = false,
+        lastSeen: Date? = nil
     ) -> SpeakerDirectoryEntry {
         SpeakerDirectoryEntry(
             identity: Identity(
@@ -46,7 +47,8 @@ enum PeopleDirectoryTests {
                 notes: notes,
                 isLocalUser: isLocalUser,
                 createdAt: Date(timeIntervalSince1970: 0),
-                updatedAt: Date(timeIntervalSince1970: 0)
+                updatedAt: Date(timeIntervalSince1970: 0),
+                lastSeenAt: lastSeen
             ),
             profile: profile,
             meetingCount: meetings
@@ -64,7 +66,148 @@ enum PeopleDirectoryTests {
     // MARK: suites
 
     static var all: [Suite] {
-        [storeSuite, filterSuite, renderSuite, exportSuite, meetingsSuite, localUserSuite]
+        [storeSuite, filterSuite, pickerSuite, renderSuite, exportSuite, meetingsSuite,
+         localUserSuite]
+    }
+
+    /// How the directory is ordered for the question "who is this voice?".
+    ///
+    /// Alphabetical order answers a different question, and at forty voices it
+    /// scattered the three people actually in the room through the list.
+    static var pickerSuite: Suite {
+        Suite("PeoplePicker", [
+            test("the people in this meeting come first, then recent, then the rest") {
+                expect in
+                let day = Date(timeIntervalSince1970: 1_700_000_000)
+                let entries = [
+                    entry(1, name: "Zoe", organization: "Acme"),
+                    entry(2, name: "Brian M", organization: "Acme"),
+                    entry(3, name: "Ali Rodell", lastSeen: day),
+                    entry(4, name: "Alastair"),
+                ]
+                let sections = PeoplePickerRanking.sections(
+                    entries, context: [IdentityID(2): .onAChip]
+                )
+                expect.equal(
+                    sections.map(\.title),
+                    [PeoplePickerRanking.inThisMeetingTitle, PeoplePickerRanking.recentTitle,
+                     PeoplePickerRanking.everyoneTitle]
+                )
+                expect.equal(sections[0].rows.map(\.entry.identity.resolvedName), ["Brian M"])
+                expect.equal(sections[1].rows.map(\.entry.identity.resolvedName), ["Ali Rodell"])
+                expect.equal(
+                    sections[2].rows.map(\.entry.identity.resolvedName), ["Alastair", "Zoe"],
+                    "what is left is alphabetical"
+                )
+            },
+
+            test("nobody appears twice") { expect in
+                let day = Date(timeIntervalSince1970: 1_700_000_000)
+                let entries = [
+                    entry(1, name: "Brian M", lastSeen: day),
+                    entry(2, name: "Ali Rodell", lastSeen: day.addingTimeInterval(-60)),
+                ]
+                let sections = PeoplePickerRanking.sections(
+                    entries, context: [IdentityID(1): .onAChip]
+                )
+                let names = sections.flatMap(\.rows).map(\.entry.identity.resolvedName)
+                expect.equal(names.count, Set(names).count, "a person offered twice is two answers")
+                expect.equal(sections[0].rows.map(\.entry.identity.resolvedName), ["Brian M"])
+                expect.equal(sections[1].rows.map(\.entry.identity.resolvedName), ["Ali Rodell"])
+            },
+
+            test("someone already heard is offered above someone merely expected") {
+                expect in
+                let sections = PeoplePickerRanking.sections(
+                    [entry(1, name: "Ali Rodell"), entry(2, name: "Brian M")],
+                    context: [IdentityID(1): .expected, IdentityID(2): .onAChip]
+                )
+                expect.equal(
+                    sections.first?.rows.map(\.entry.identity.resolvedName),
+                    ["Brian M", "Ali Rodell"],
+                    "a voice already heard is a likelier answer than a name off the invite"
+                )
+            },
+
+            test("only the five most recent are offered before the full list") { expect in
+                let day = Date(timeIntervalSince1970: 1_700_000_000)
+                let entries = (1...7).map { index in
+                    entry(
+                        Int64(index), name: "Person \(index)",
+                        lastSeen: day.addingTimeInterval(Double(index) * 60)
+                    )
+                }
+                let sections = PeoplePickerRanking.sections(entries)
+                expect.equal(
+                    sections[0].rows.map(\.entry.identity.resolvedName),
+                    ["Person 7", "Person 6", "Person 5", "Person 4", "Person 3"],
+                    "most recent first, and only five of them"
+                )
+                expect.equal(sections[1].rows.count, 2, "the rest are still reachable")
+            },
+
+            test("searching collapses recent into one list and keeps the meeting's own") {
+                expect in
+                let day = Date(timeIntervalSince1970: 1_700_000_000)
+                let entries = [
+                    entry(1, name: "Chris B", organization: "Acme"),
+                    entry(2, name: "Chris Latimer", lastSeen: day),
+                    entry(3, name: "Christine Ayers"),
+                    entry(4, name: "Dana Kwon", lastSeen: day),
+                ]
+                let sections = PeoplePickerRanking.sections(
+                    entries, context: [IdentityID(1): .onAChip], query: "chris"
+                )
+                expect.equal(
+                    sections.map(\.title),
+                    [PeoplePickerRanking.inThisMeetingTitle, PeoplePickerRanking.everyoneTitle],
+                    "splitting five recent names off three results hides the split's reason"
+                )
+                expect.equal(sections[0].rows.map(\.entry.identity.resolvedName), ["Chris B"])
+                expect.equal(
+                    sections[1].rows.map(\.entry.identity.resolvedName),
+                    ["Chris Latimer", "Christine Ayers"],
+                    "Dana does not match, and the section is alphabetical"
+                )
+            },
+
+            test("a search matching nobody leaves no sections at all") { expect in
+                expect.isTrue(
+                    PeoplePickerRanking.sections(
+                        [entry(1, name: "Chris B")],
+                        context: [IdentityID(1): .onAChip], query: "dara"
+                    ).isEmpty,
+                    "the empty result is what offers to create the person typed"
+                )
+            },
+
+            test("the line under a name says the organization and why they are offered") {
+                expect in
+                expect.equal(
+                    PeoplePickerRanking.detail(
+                        of: entry(1, name: "Brian M", organization: "Acme"), context: .onAChip
+                    ),
+                    "Acme · already on a chip here"
+                )
+                expect.equal(
+                    PeoplePickerRanking.detail(of: entry(2, name: "Hal"), context: .expected),
+                    "Expected here, not heard yet",
+                    "with no organization the reason leads, and reads as a sentence"
+                )
+                expect.equal(
+                    PeoplePickerRanking.detail(of: entry(3, name: "Hal", meetings: 1)),
+                    "Heard in 1 meeting"
+                )
+                expect.equal(
+                    PeoplePickerRanking.detail(of: entry(4, name: "Hal", meetings: 6)),
+                    "Heard in 6 meetings"
+                )
+                expect.equal(
+                    PeoplePickerRanking.detail(of: entry(5, name: "Hal")), "",
+                    "somebody with nothing to say about them gets no second line"
+                )
+            },
+        ])
     }
 
     static var storeSuite: Suite {
@@ -627,44 +770,71 @@ enum PeopleDirectoryTests {
     /// Which person in the directory is the one at this Mac.
     static var localUserSuite: Suite {
         Suite("LocalUser", [
-            test("choosing who you are moves the flag and the name with it") {
-                expect in try await choosingYouMovesTheFlagAndTheName(expect)
-            },
-
             test("forgetting a voice takes the readings that built it") {
                 expect in try await forgettingAVoiceTakesTheReadings(expect)
+            },
+
+            test("merging your row into another one carries the flag to the survivor") {
+                expect in try await mergingYouCarriesTheFlag(expect)
+            },
+
+            test("telling a row it is also you leaves one person with their real name") {
+                expect in try await tellingARowItIsAlsoYou(expect)
             },
         ])
     }
 
+    /// Slack names a huddle's participants and the microphone track is named
+    /// from nothing, so the same person routinely arrives as two rows. Folding
+    /// them together is what puts the mic-track voice and the platform's name
+    /// on one profile.
     @MainActor
-    static func choosingYouMovesTheFlagAndTheName(_ expect: Expect) async throws {
+    static func tellingARowItIsAlsoYou(_ expect: Expect) async throws {
         let root = try ManifestTests.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let runtime = MeetingsWindowTests.makeRuntime(root: root)
         let store = try expect.unwrap(runtime.speakerStore)
 
         await runtime.ensureLocalUserIdentity()
-        let first = try expect.unwrap(try await store.localUser())
-        let andrew = try await store.createPerson(name: "Andrew Neeser")
+        let fromSlack = try await store.createPerson(name: "Andrew Neeser")
+        let model = PeopleDirectoryModel(runtime: runtime)
+        await model.reload()
 
-        await runtime.setLocalUser(andrew.id)
+        let row = try expect.unwrap(model.entries.first { $0.id == fromSlack.id })
+        expect.isTrue(model.canBeYou(row), "the row is not you yet")
+        await model.makeYou(row)
 
-        expect.equal(runtime.settings.processing.localUserIdentityID, andrew.id)
-        expect.equal(runtime.settings.localUserName, "Andrew Neeser", "Settings caches their name")
-        expect.equal(try await store.localUser()?.id, andrew.id)
-        expect.isFalse(
-            try await store.current(first.id)?.isLocalUser ?? true,
-            "two rows cannot both be the person at the keyboard"
+        expect.equal(try await store.localUser()?.id, fromSlack.id)
+        expect.equal(
+            runtime.settings.localUserName, "Andrew Neeser",
+            "the launch sync writes the cached name onto the flagged row, so it has to move too"
         )
-
-        // The launch sync writes the name in Settings onto the flagged row. It
-        // ran against the row picked here, so a name set anywhere had to be the
-        // one Settings holds, or the next start would put the old one back.
-        await runtime.ensureLocalUserIdentity()
-        expect.equal(try await store.current(andrew.id)?.resolvedName, "Andrew Neeser")
+        expect.equal(runtime.settings.processing.localUserIdentityID, fromSlack.id)
+        expect.isFalse(
+            model.canBeYou(try expect.unwrap(model.localUser)), "you cannot be told you are you"
+        )
     }
 
+    /// A merge leaves the source as a tombstone, and the flag saying which row
+    /// is the person at this Mac has to move to the row that survives. Left
+    /// behind, the survivor is not you: the microphone track stops resolving to
+    /// a named person and the launch sync creates a second "Me".
+    @MainActor
+    static func mergingYouCarriesTheFlag(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = MeetingsWindowTests.makeRuntime(root: root)
+        let store = try expect.unwrap(runtime.speakerStore)
+
+        await runtime.ensureLocalUserIdentity()
+        let me = try expect.unwrap(try await store.localUser())
+        let fromSlack = try await store.createPerson(name: "Andrew Neeser")
+
+        try await store.merge(me.id, into: fromSlack.id)
+
+        expect.equal(try await store.localUser()?.id, fromSlack.id)
+        expect.isTrue(try await store.current(fromSlack.id)?.isLocalUser ?? false)
+    }
 
     /// A reading is kept so the vector it produced can be heard and re-derived,
     /// which means forgetting the voice has to take it. Across the whole family:

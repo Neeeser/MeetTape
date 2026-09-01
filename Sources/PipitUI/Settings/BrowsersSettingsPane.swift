@@ -33,10 +33,7 @@ struct BrowsersSettingsPane: View {
                     statusColor: addOnState.color
                 )
                 if addOnState == .missing {
-                    FirefoxAddOnInstallButton()
-                }
-                if addOnState.isInstalled, let lastMessage = model.sensorStatus?.lastMessageAt {
-                    Text("Last heard from ") + Text(lastMessage, style: .relative) + Text(" ago.")
+                    FirefoxAddOnInstallButton(prepareRelay: { model.installHost() })
                 }
             }
 
@@ -92,7 +89,9 @@ struct BrowsersSettingsPane: View {
         HStack {
             Button("Repair connection") { model.installHost() }
             if addOnState.isInstalled, FirefoxAddOn.bundledAddOn != nil {
-                FirefoxAddOnInstallButton(isReinstall: true)
+                FirefoxAddOnInstallButton(
+                    prepareRelay: { model.installHost() }, isReinstall: true
+                )
             }
         }
         Text(

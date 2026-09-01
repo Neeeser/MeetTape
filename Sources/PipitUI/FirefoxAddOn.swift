@@ -123,6 +123,10 @@ public enum FirefoxAddOnState: Equatable {
 ///
 /// Shown by both the settings page and setup, so one wording covers both.
 struct FirefoxAddOnInstallButton: View {
+    /// Writes the relay and its manifest first. Firefox needs both to reach
+    /// Pipit, and nobody installing an add-on should have to know that, so one
+    /// button does both and neither is a step of its own.
+    let prepareRelay: () -> Void
     /// A second install over one already there, which needs no urgency.
     var isReinstall = false
     @State private var launchFailed = false
@@ -134,7 +138,7 @@ struct FirefoxAddOnInstallButton: View {
                     Button("Reinstall add-on") { install() }
                         .disabled(!FirefoxAddOn.isFirefoxInstalled)
                 } else {
-                    Button("Install in Firefox") { install() }
+                    Button("Install the Firefox add-on") { install() }
                         .buttonStyle(.borderedProminent)
                         .disabled(!FirefoxAddOn.isFirefoxInstalled)
                     Text("Firefox asks you to confirm")
@@ -150,6 +154,7 @@ struct FirefoxAddOnInstallButton: View {
     }
 
     private func install() {
+        prepareRelay()
         launchFailed = !FirefoxAddOn.install()
     }
 }

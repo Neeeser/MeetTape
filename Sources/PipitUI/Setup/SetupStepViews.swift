@@ -404,30 +404,17 @@ struct FirefoxStep: View {
             )
 
             HStack(spacing: 8) {
-                Image(
-                    systemName: model.hostStatus?.isReadyForFirefox == true
-                        ? "checkmark.circle.fill" : "circle"
-                )
-                .foregroundStyle(model.hostStatus?.isReadyForFirefox == true ? .green : .secondary)
-                Text("Step 1, the native messaging host")
+                Image(systemName: addOnState.symbol)
+                    .foregroundStyle(addOnState.color)
+                Text(addOnState.title)
                 Spacer()
-                Button("Install host") { model.installHost() }
-                    .disabled(model.hostStatus?.isReadyForFirefox == true)
             }
+            Text(addOnState.detail)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: addOnState.isInstalled ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(addOnState.isInstalled ? .green : .secondary)
-                    Text("Step 2, the add-on in Firefox")
-                    Spacer()
-                }
-                Text(addOnState.detail)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if addOnState == .missing {
-                    FirefoxAddOnInstallButton()
-                }
+            if !addOnState.isInstalled, addOnState != .unavailable {
+                FirefoxAddOnInstallButton(prepareRelay: { model.installHost() })
             }
         }
     }

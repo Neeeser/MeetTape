@@ -755,6 +755,32 @@ enum HardeningTests {
 extension HardeningTests {
     static var sensorTrustSuite: Suite {
         Suite("SensorTrust", [
+            test("an add-on in a Firefox profile is found without it saying anything") { expect in
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let profile = root.appendingPathComponent("abc123.default-release/extensions")
+                try FileManager.default.createDirectory(
+                    at: profile, withIntermediateDirectories: true
+                )
+
+                expect.isFalse(
+                    FirefoxProfile.hasInstalledAddOn(profilesDirectory: root),
+                    "an empty profile holds no add-on"
+                )
+
+                try Data().write(to: profile.appendingPathComponent("sensor@pipit.app.xpi"))
+                expect.isTrue(
+                    FirefoxProfile.hasInstalledAddOn(profilesDirectory: root),
+                    "the file Firefox writes on install is the whole answer"
+                )
+                expect.isFalse(
+                    FirefoxProfile.hasInstalledAddOn(
+                        profilesDirectory: root.appendingPathComponent("missing")
+                    ),
+                    "no Firefox on this Mac reads as no add-on"
+                )
+            },
+
             test("only Pipit's own relay, launched by a browser, is accepted") { expect in
                 let verifier = SensorPeerVerifier(
                     allowedHostPaths: ["/Users/x/Library/Application Support/Pipit/pipit-nativehost"],

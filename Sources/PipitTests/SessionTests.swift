@@ -15,6 +15,14 @@ enum SessionTests {
         )
     }
 
+    static func slackEvidence(confidence: MeetingConfidence) -> ProviderEvidence {
+        ProviderEvidence(
+            provider: .slack, confidence: confidence, source: .accessibility,
+            title: "Engineering", applicationBundleID: "com.tinyspeck.slackmacgap",
+            audioBundlePrefixes: ["com.tinyspeck.slackmacgap"]
+        )
+    }
+
     static func genericEvidence(
         confidence: MeetingConfidence, bundleIdentifier: String = "com.example.videochat"
     ) -> ProviderEvidence {
@@ -301,7 +309,7 @@ enum SessionTests {
                 }
                 expect.equal(controller.snapshot.state, .recording)
 
-                let stopped = controller.stop(reason: "user_stopped")
+                let stopped = controller.stop(reason: "user_stopped", now: 400)
                 expect.isTrue(stopped.contains { if case .finishRecording = $0 { true } else { false } })
                 expect.equal(controller.snapshot.state, .idle)
             },
@@ -498,6 +506,108 @@ enum SessionTests {
                 expect.isTrue(
                     meet.contains { if case .commitRecording = $0 { true } else { false } },
                     "a Meet call in the same browser still records"
+                )
+            },
+
+            test("stopping by hand does not start the same call again") { expect in
+                // Slack holds the microphone either side of a huddle, and
+                // evidence is reasserted on every poll. Stopping left the session
+                // idle in front of that evidence, so half a second later it
+                // recorded the same call again and the user threw away a
+                // one-second meeting after every huddle.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let huddle = slackEvidence(confidence: .confirmed)
+                let started = controller.update(evidence: [huddle], now: 100, wallClock: wall)
+                expect.isTrue(
+                    started.contains { if case .commitRecording = $0 { true } else { false } },
+                    "the huddle records"
+                )
+
+                let stopped = controller.stop(reason: "user_stopped", now: 200)
+                expect.isTrue(
+                    stopped.contains { if case .finishRecording = $0 { true } else { false } }
+                )
+
+                var now = 200.0
+                for _ in 0..<120 {
+                    now += 0.5
+                    expect.equal(
+                        controller.update(evidence: [huddle], now: now, wallClock: wall), [],
+                        "the call the user stopped stays stopped while it is still there"
+                    )
+                }
+                expect.equal(controller.snapshot.state, .idle)
+            },
+
+            test("a later call records after a hand stop") { expect in
+                // The stop is about the call the user stopped, not about the
+                // application for the rest of the day.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                let huddle = slackEvidence(confidence: .confirmed)
+                _ = controller.update(evidence: [huddle], now: 100, wallClock: wall)
+                _ = controller.stop(reason: "user_stopped", now: 200)
+
+                // The huddle ends: no evidence at all for longer than the grace.
+                _ = controller.update(evidence: [], now: 201, wallClock: wall)
+                _ = controller.update(evidence: [], now: 210, wallClock: wall)
+
+                let second = controller.update(evidence: [huddle], now: 400, wallClock: wall)
+                expect.isTrue(
+                    second.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a later huddle is a new meeting"
+                )
+            },
+
+            test("the huddle after the one the user stopped records") { expect in
+                // Slack idles on the microphone between huddles, so waiting for
+                // the application to go quiet would hold the stop over the next
+                // huddle as well: the user leaves one call, joins another, and
+                // nothing records. The huddle dropping out of confirmed is what
+                // says it is over.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [slackEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+                _ = controller.stop(reason: "user_stopped", now: 200)
+
+                let idling = slackEvidence(confidence: .candidate)
+                var now = 200.0
+                for _ in 0..<20 {
+                    now += 0.5
+                    _ = controller.update(evidence: [idling], now: now, wallClock: wall)
+                }
+                expect.equal(controller.snapshot.state, .candidate, "the idle microphone only arms")
+
+                let next = controller.update(
+                    evidence: [slackEvidence(confidence: .confirmed)], now: now + 0.5,
+                    wallClock: wall
+                )
+                expect.isTrue(
+                    next.contains { if case .commitRecording = $0 { true } else { false } },
+                    "the next huddle is a new meeting"
+                )
+            },
+
+            test("stopping one meeting does not stop the next one recording") { expect in
+                // Both meetings run in the same browser, so an identity built
+                // from the application alone would swallow the second one.
+                var controller = SessionController()
+                let wall = Date(timeIntervalSince1970: 1_787_070_000)
+                _ = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                )
+                _ = controller.stop(reason: "user_stopped", now: 200)
+
+                let next = controller.update(
+                    evidence: [meetEvidence(confidence: .confirmed, meetingID: "zzz-yyyy-xxx")],
+                    now: 201, wallClock: wall
+                )
+                expect.isTrue(
+                    next.contains { if case .commitRecording = $0 { true } else { false } },
+                    "a different meeting in the same browser records"
                 )
             },
 

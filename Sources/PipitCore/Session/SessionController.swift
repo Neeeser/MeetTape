@@ -181,26 +181,31 @@ public struct SessionController: Sendable {
     private var pendingEnd: Double?
     private var reconnectingSince: Double?
     private var announcedOtherTabs = false
-    /// The call whose provisional recording the user declined.
+    /// A call the user has answered for: the provisional prompt was declined, or
+    /// the recording was stopped by hand.
     ///
-    /// The prompt is raised from evidence, and evidence is reasserted on every
-    /// poll, so an answer the session did not remember was undone half a second
-    /// later: it went idle, read the same evidence again and asked again. The
-    /// answer is released once that call stops producing evidence, which is what
-    /// makes a later call in the same application ask afresh.
+    /// Evidence is reasserted on every poll, so an answer the session did not
+    /// remember was undone half a second later. A declined prompt went idle,
+    /// read the same evidence again and asked again. A stopped huddle went idle
+    /// and recorded itself again, which is where the one-second meetings after
+    /// every Slack huddle came from. The answer is released once that call stops
+    /// producing evidence, which is what makes the next call start afresh.
     ///
     /// The provider is part of the identity because the application alone is a
-    /// browser for anything running in a tab. Declining one call must not stop a
+    /// browser for anything running in a tab. Stopping one call must not stop a
     /// Meet in the same browser from recording.
-    private struct DeclinedCall {
+    private struct SuppressedCall {
         let provider: MeetingProvider
         /// Normalised to the application, so a helper rotating under the call
         /// does not read as a different one.
         let application: String
+        /// Set when the call had one. A different identifier on the same provider
+        /// is a different meeting, and it records normally.
+        let meetingID: String?
         var lastSeen: Double
     }
 
-    private var declined: DeclinedCall?
+    private var suppressed: [SuppressedCall] = []
     /// What the open prompt asked about. The evidence moves on while the prompt
     /// waits for an answer, so reading the answer's subject from it recorded
     /// whichever call happened to be strongest when the user clicked.
@@ -224,7 +229,7 @@ public struct SessionController: Sendable {
     public mutating func update(
         evidence allEvidence: [ProviderEvidence], now: Double, wallClock: Date
     ) -> [SessionAction] {
-        ageDeclinedCall(in: allEvidence, now: now)
+        ageSuppressedCalls(in: allEvidence, now: now)
 
         guard !snapshot.isManual else {
             // A manually started recording is the user's, and provider state never
@@ -419,15 +424,37 @@ public struct SessionController: Sendable {
         return actions
     }
 
-    public mutating func stop(reason: String) -> [SessionAction] {
+    /// Ends the session on the user's word.
+    public mutating func stop(reason: String, now: Double) -> [SessionAction] {
         switch snapshot.state {
         case .recording, .reconnecting, .ending:
+            suppressCurrentCall(now: now)
             return finishRecording(reason: reason)
         case .candidate:
+            suppressCurrentCall(now: now)
             return finishCandidate(reason: reason)
         case .idle, .ended:
             return []
         }
+    }
+
+    /// Remembers the call the session was on, so the evidence that is still
+    /// there does not start it again on the next poll. Read before the reset,
+    /// which is where the evidence lives.
+    private mutating func suppressCurrentCall(now: Double) {
+        guard let evidence, let bundle = evidence.applicationBundleID else { return }
+        let call = SuppressedCall(
+            provider: evidence.provider,
+            application: MicrophoneIgnoreList.applicationIdentifier(for: bundle),
+            meetingID: evidence.meetingID ?? snapshot.providerMeetingID,
+            lastSeen: now
+        )
+        suppressed.removeAll { existing in
+            existing.provider == call.provider
+                && existing.application == call.application
+                && existing.meetingID == call.meetingID
+        }
+        suppressed.append(call)
     }
 
     /// Answer to "This looks like a meeting. Keep recording?".
@@ -438,34 +465,48 @@ public struct SessionController: Sendable {
         snapshot.isProvisional = false
         if keep { return [] }
         if let asked = askedAbout {
-            declined = DeclinedCall(
+            // The prompt is raised per call, not per meeting, so the question the
+            // user answered covers every meeting that application reports.
+            suppressed.append(SuppressedCall(
                 provider: asked.provider,
                 application: MicrophoneIgnoreList.applicationIdentifier(for: asked.application),
+                meetingID: nil,
                 lastSeen: now
-            )
+            ))
         }
         return finishRecording(reason: reason, discard: true)
     }
 
-    /// Releases a declined call once it is over.
-    private mutating func ageDeclinedCall(in allEvidence: [ProviderEvidence], now: Double) {
-        guard var current = declined else { return }
-        let stillThere = allEvidence.contains { candidate in
-            candidate.confidence > .none && Self.matches(current, candidate)
-        }
-        if stillThere {
-            current.lastSeen = now
-            declined = current
-        } else if now - current.lastSeen >= configuration.endGraceSeconds {
-            declined = nil
+    /// Releases each suppressed call once it is over.
+    ///
+    /// A call is over when it stops being confirmed, on the same grace the
+    /// recording path uses, rather than when its application goes quiet. Slack
+    /// idles on the microphone between huddles, so waiting for silence held the
+    /// answer over the next huddle too and recorded nothing when the user left
+    /// one call and joined another.
+    private mutating func ageSuppressedCalls(in allEvidence: [ProviderEvidence], now: Double) {
+        suppressed = suppressed.compactMap { call in
+            let stillThere = allEvidence.contains { candidate in
+                candidate.confidence == .confirmed && Self.matches(call, candidate)
+            }
+            if stillThere {
+                var seen = call
+                seen.lastSeen = now
+                return seen
+            }
+            return now - call.lastSeen >= configuration.endGraceSeconds ? nil : call
         }
     }
 
-    private static func matches(_ declined: DeclinedCall, _ candidate: ProviderEvidence) -> Bool {
-        guard candidate.provider == declined.provider,
-              let application = candidate.applicationBundleID
+    private static func matches(_ call: SuppressedCall, _ candidate: ProviderEvidence) -> Bool {
+        guard candidate.provider == call.provider,
+              let application = candidate.applicationBundleID,
+              MicrophoneIgnoreList.applicationIdentifier(for: application) == call.application
         else { return false }
-        return MicrophoneIgnoreList.applicationIdentifier(for: application) == declined.application
+        guard let suppressedID = call.meetingID, let candidateID = candidate.meetingID else {
+            return true
+        }
+        return suppressedID == candidateID
     }
 
     // MARK: - internals
@@ -480,8 +521,7 @@ public struct SessionController: Sendable {
             .filter { $0.confidence > .none }
             .filter { policies.policy(for: $0.provider).autoStart != .never }
             .filter { candidate in
-                guard let declined else { return true }
-                return !Self.matches(declined, candidate)
+                !suppressed.contains { Self.matches($0, candidate) }
             }
             .max { lhs, rhs in
                 if lhs.confidence != rhs.confidence { return lhs.confidence < rhs.confidence }

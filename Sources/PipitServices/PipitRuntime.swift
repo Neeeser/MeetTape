@@ -471,7 +471,7 @@ public final class PipitRuntime {
     }
 
     public func stopRecording(reason: String = "user_stopped") {
-        let actions = sessionController.stop(reason: reason)
+        let actions = sessionController.stop(reason: reason, now: clock.monotonicSeconds)
         syncStatusFromSession()
         enqueue { [weak self] in await self?.perform(actions) }
     }
@@ -1030,7 +1030,7 @@ public final class PipitRuntime {
             if let createdDirectory { try? FileManager.default.removeItem(at: createdDirectory) }
             currentMeeting = nil
             sensorRecorder = nil
-            _ = sessionController.stop(reason: "commit_failed")
+            _ = sessionController.stop(reason: "commit_failed", now: clock.monotonicSeconds)
             syncStatusFromSession()
             refreshRecentMeetings()
             return false

@@ -64,11 +64,21 @@ public enum SlackHuddleTileParser {
     /// Tested by shape rather than against a list, because an id this app has
     /// never seen still has to read as a person. Accounts are `U`, bots are
     /// `B`, and org-wide accounts on Enterprise Grid are `W`; the rest is
-    /// upper-case alphanumeric and no account is as short as the words that
-    /// land here.
+    /// upper-case ASCII alphanumeric.
+    ///
+    /// The case rule is what rejects a placeholder. `pending`, and any other
+    /// lower-case word Slack might write where an account goes, fails on the
+    /// first character. Nine is Slack's historical minimum of `U` plus eight
+    /// and admits `USLACKBOT`; the shortest account in any recording on disk is
+    /// eleven, so the bound is deliberately below anything measured rather than
+    /// fitted to it.
+    ///
+    /// ASCII explicitly. `isUppercase` and `isNumber` are true across the whole
+    /// of Unicode, so without it a Cyrillic or Arabic-Indic run passes as an
+    /// account: measured, `U` followed by eight `Д` did.
     static func isPlausibleUserID(_ id: String) -> Bool {
         guard id.count >= 9, let first = id.first, "UWB".contains(first) else { return false }
-        return id.allSatisfy { $0.isNumber || ($0.isLetter && $0.isUppercase) }
+        return id.allSatisfy { $0.isASCII && ($0.isNumber || $0.isUppercase) }
     }
 
     public static func isSelf(_ identifier: String) -> Bool {

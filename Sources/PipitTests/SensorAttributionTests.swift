@@ -994,6 +994,12 @@ enum SensorAttributionTests {
                 expect.isNil(SlackHuddleTileParser.userID(
                     from: "huddle-grid-gridcell-self_U1-a11y_huddle_peer_tile_description"
                 ))
+                // The description node is rejected for being a description, not
+                // for how its trailing token happens to look. Pinned with one
+                // whose token would otherwise pass.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-a11y_huddle_peer_tile_description_U0BSR53NYHG"
+                ))
             },
 
             test("a placeholder tile is not a person") { expect in
@@ -1019,9 +1025,29 @@ enum SensorAttributionTests {
                     SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_B0B17GB9VPA"),
                     "B0B17GB9VPA"
                 )
+                // Slack's own bot, and a classic nine-character account. The
+                // bound has to admit both: the shortest account in any recording
+                // on disk is eleven, so a length fitted to what was measured
+                // would silently drop every account shorter than the corpus.
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_USLACKBOT"),
+                    "USLACKBOT"
+                )
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_U023BECGF"),
+                    "U023BECGF"
+                )
                 // Too short to be one, and lowercase never is.
                 expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_U01"))
                 expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_u0b17gb9vpa"))
+                // Upper-case and numeric span the whole of Unicode, so the
+                // check is ASCII or a Cyrillic run reads as an account.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-abc_U\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}"
+                ))
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-abc_U\u{0661}\u{0662}\u{0663}\u{0664}\u{0665}\u{0666}\u{0667}\u{0668}"
+                ))
             },
 
             test("the display name comes out of the profile description") { expect in

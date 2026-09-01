@@ -34,10 +34,13 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
         refreshButton()
 
-        runtime.observeStatus { [weak self] in
+        MainMenu.install(
+            target: self, showAbout: #selector(openAbout), showSettings: #selector(openSettings)
+        )
+        runtime.observeStatus { [weak self, weak windows] in
             self?.refreshButton()
             self?.syncProvisionalPrompt()
-            DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
+            windows?.refreshDockPresence()
             self?.applyLoginItemIfChanged(runtime.settings.launchAtLogin)
         }
         let timer = DispatchSource.makeTimerSource(queue: .main)

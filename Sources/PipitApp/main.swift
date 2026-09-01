@@ -15,11 +15,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         runtime = PipitRuntime()
-        // Applied from the loaded settings rather than hardcoded, and again on
-        // every settings change through the menu bar controller's observer.
-        DockPresence.apply(showsDockIcon: runtime.settings.showsDockIcon)
         LoginItem.apply(launchAtLogin: runtime.settings.launchAtLogin)
         windows = WindowManager(runtime: runtime)
+        // Applied from the loaded settings rather than hardcoded, and again on
+        // every settings change through the menu bar controller's observer and
+        // whenever a window opens or closes.
+        windows.refreshDockPresence()
         menuBar = MenuBarController(runtime: runtime, windows: windows)
         notificationRouter = NotificationRouter(runtime: runtime, windows: windows)
         runtime.start()

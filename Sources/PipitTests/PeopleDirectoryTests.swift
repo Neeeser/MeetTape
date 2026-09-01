@@ -181,6 +181,10 @@ enum PeopleDirectoryTests {
                 )
             },
 
+            test("the list follows the highlight only when the keyboard moves it") {
+                expect in try await aHoveredRowDoesNotScrollTheList(expect)
+            },
+
             test("the line under a name says the organization and why they are offered") {
                 expect in
                 expect.equal(
@@ -993,6 +997,30 @@ enum PeopleDirectoryTests {
     enum MigrationFixtureError: Error {
         case cannotOpen
         case schemaFailed(String)
+    }
+
+    // MARK: - the picker popover
+
+    /// A wheel scroll slides rows under a cursor that never moved, so the row
+    /// beneath it changes and hover highlights it. Scrolling to that highlight
+    /// puts the row back where it started and the gesture goes nowhere, which
+    /// is why the list follows the arrow keys and a narrowed query but not the
+    /// pointer.
+    @MainActor
+    static func aHoveredRowDoesNotScrollTheList(_ expect: Expect) {
+        let picker = PeoplePickerModel()
+        picker.moveHighlight(to: IdentityID(1), follow: true)
+        let arrowed = picker.follows
+
+        picker.moveHighlight(to: IdentityID(2), follow: false)
+        expect.equal(picker.highlight, IdentityID(2), "hover still highlights the row it lands on")
+        expect.equal(picker.follows, arrowed, "and the list stays where the scroll put it")
+
+        picker.moveHighlight(to: IdentityID(1), follow: true)
+        expect.equal(
+            picker.follows, arrowed + 1,
+            "arrowing back to the row hover left behind still scrolls to it"
+        )
     }
 
     // MARK: - the right-click menu

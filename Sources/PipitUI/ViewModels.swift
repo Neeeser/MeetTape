@@ -431,23 +431,30 @@ public final class MeetingReviewModel {
     /// halves keeps a speaker map per half, and both number their speakers from
     /// zero, so a name written against the conversation landed on a different
     /// person in the other half.
+    ///
+    /// Every key the chip stands for, because the diarizer splits one voice
+    /// into several clusters and the chip is the person. Writing only the one
+    /// the row is keyed on left the rest reading the old name, and the chip
+    /// split back into several on the next read.
     public func assignCluster(
-        _ clusterID: String, in recordingID: String, to entry: SpeakerDirectoryEntry
+        _ clusterIDs: [String], in recordingID: String, to entry: SpeakerDirectoryEntry
     ) {
         runtime.assignSpeaker(
-            name: entry.identity.resolvedName, key: clusterID, meetingID: recordingID,
+            name: entry.identity.resolvedName, keys: clusterIDs, meetingID: recordingID,
             identityID: entry.id
         )
     }
 
-    public func assignCluster(_ clusterID: String, in recordingID: String, toNewPerson name: String) {
+    public func assignCluster(
+        _ clusterIDs: [String], in recordingID: String, toNewPerson name: String
+    ) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        runtime.assignSpeaker(name: trimmed, key: clusterID, meetingID: recordingID)
+        runtime.assignSpeaker(name: trimmed, keys: clusterIDs, meetingID: recordingID)
     }
 
-    public func clearCluster(_ clusterID: String, in recordingID: String) {
-        runtime.assignSpeaker(name: "", key: clusterID, meetingID: recordingID)
+    public func clearCluster(_ clusterIDs: [String], in recordingID: String) {
+        runtime.assignSpeaker(name: "", keys: clusterIDs, meetingID: recordingID)
     }
 
     /// Renames every line of one turn.
@@ -561,7 +568,7 @@ public final class MeetingReviewModel {
         } else if let block = namingBlock {
             assignBlock(block, toNewPerson: newPersonDraft)
         } else if let cluster = namingCluster {
-            assignCluster(cluster.clusterID, in: cluster.recordingID, toNewPerson: newPersonDraft)
+            assignCluster([cluster.clusterID], in: cluster.recordingID, toNewPerson: newPersonDraft)
         }
         cancelNaming()
     }

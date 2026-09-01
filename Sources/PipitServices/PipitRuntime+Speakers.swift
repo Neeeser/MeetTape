@@ -46,6 +46,14 @@ public struct MeetingSuggestionRow: Sendable, Equatable, Identifiable {
 
 public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     public var clusterID: String
+    /// The other keys in this recording that are the same person.
+    ///
+    /// The diarizer splits one voice across several clusters and the meeting
+    /// client names every one of them from its roster, so a two-person huddle
+    /// arrives as eleven keys. The row stands for the person, `clusterID` is
+    /// the key that speaks longest, and every operation on the row reaches all
+    /// of them.
+    public var otherClusterIDs: [String]
     /// The recording this cluster was diarized in.
     ///
     /// A cluster identifier only means something inside one recording, and both
@@ -78,6 +86,9 @@ public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
 
     public var id: String { "\(recordingID)/\(clusterID)" }
 
+    /// Every key this row stands for, the longest-speaking one first.
+    public var allClusterIDs: [String] { [clusterID] + otherClusterIDs }
+
     /// Whether this row is worth putting in front of a reader.
     ///
     /// A diarizer can emit a label that ends up owning no transcript time: one
@@ -94,12 +105,14 @@ public struct MeetingSpeakerRow: Sendable, Equatable, Identifiable {
     }
 
     public init(
-        clusterID: String, recordingID: String, displayName: String, isUnnamed: Bool,
+        clusterID: String, otherClusterIDs: [String] = [], recordingID: String,
+        displayName: String, isUnnamed: Bool,
         band: SpeakerConfidenceBand,
         origin: SpeakerAssignmentOrigin, identity: Identity?, speechSeconds: Double,
         provenance: SpeakerProvenance?, meetingCount: Int
     ) {
         self.clusterID = clusterID
+        self.otherClusterIDs = otherClusterIDs
         self.recordingID = recordingID
         self.displayName = displayName
         self.isUnnamed = isUnnamed
@@ -690,6 +703,7 @@ extension PipitRuntime {
             guard let transcript = try? recording.store.readCanonicalTranscript(),
                   let map = try? recording.store.readSpeakerMap()
             else { continue }
+            var perKey: [MeetingSpeakerRow] = []
             for speaker in transcript.speakers {
                 let key = speaker.key
                 // Words no interval claimed are not a speaker. Offering the row
@@ -711,7 +725,7 @@ extension PipitRuntime {
                 let fallback = recordings.count > 1
                     ? "\(SpeakerMap.fallbackName(for: key)), part \(index + 1)"
                     : SpeakerMap.fallbackName(for: key)
-                rows.append(MeetingSpeakerRow(
+                perKey.append(MeetingSpeakerRow(
                     clusterID: key,
                     recordingID: recording.metadata.id,
                     displayName: stored ?? fallback,
@@ -728,8 +742,56 @@ extension PipitRuntime {
                     meetingCount: heardIn
                 ))
             }
+            rows.append(contentsOf: Self.collapsed(perKey, named: map))
         }
         return rows
+    }
+
+    /// One row per person rather than one per diarization cluster.
+    ///
+    /// Grouped inside a recording only. A cluster identifier means something in
+    /// the recording it was diarized in, both halves of a rejoined call number
+    /// theirs from zero, and naming a row writes one recording's speaker map, so
+    /// a row that spanned both halves could not be written.
+    ///
+    /// The key that speaks longest leads, and it is what the row's name, origin
+    /// and identity are read from. A named key leads an unnamed one whatever the
+    /// two lengths are: a sensor key covering four seconds still says who the
+    /// person is, and letting the silent-but-unnamed cluster lead would draw the
+    /// row as asking for a name it already has.
+    private static func collapsed(
+        _ rows: [MeetingSpeakerRow], named map: SpeakerMap
+    ) -> [MeetingSpeakerRow] {
+        let byKey = Dictionary(rows.map { ($0.clusterID, $0) }, uniquingKeysWith: { first, _ in first })
+        let groups = SpeakerGrouping.groups(rows.map { row in
+            SpeakerGroupMember(
+                key: row.clusterID,
+                displayName: map.displayName(for: row.clusterID),
+                identityID: map.entries[row.clusterID]?.identityID,
+                participantID: map.entries[row.clusterID]?.participantID
+            )
+        })
+        return groups.compactMap { group in
+            let members = group.compactMap { byKey[$0.key] }
+            guard var leader = members.max(by: { left, right in
+                if left.isUnnamed != right.isUnnamed { return left.isUnnamed }
+                return left.speechSeconds < right.speechSeconds
+            }) else { return nil }
+            leader.otherClusterIDs = members
+                .filter { $0.clusterID != leader.clusterID }
+                .map(\.clusterID)
+            leader.speechSeconds = members.reduce(0) { $0 + $1.speechSeconds }
+            // The person behind the group, from whichever key carries them. The
+            // stage that links a voice profile writes the identifier on one key
+            // and the roster names the rest, so the longest-speaking key is
+            // routinely the one without it, and the chip drew a coloured face
+            // for a person it was showing as unrecognised.
+            if leader.identity == nil, let known = members.first(where: { $0.identity != nil }) {
+                leader.identity = known.identity
+                leader.meetingCount = known.meetingCount
+            }
+            return leader
+        }
     }
 
     /// Names the model proposed for speakers this meeting could not name.

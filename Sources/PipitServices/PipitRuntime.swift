@@ -708,14 +708,32 @@ public final class PipitRuntime {
     public func assignSpeaker(
         name: String, key: String, meetingID: String, identityID: IdentityID? = nil
     ) {
+        assignSpeaker(name: name, keys: [key], meetingID: meetingID, identityID: identityID)
+    }
+
+    /// Names every key one person's speech was split across.
+    ///
+    /// The identity the first key resolves to carries to the rest. Each key
+    /// left to resolve on its own promotes its own anonymous voice, so one
+    /// person ended up as several profiles holding the same name, and because
+    /// their centroids are then near identical the margin gate meant that
+    /// person was never recognised again.
+    public func assignSpeaker(
+        name: String, keys: [String], meetingID: String, identityID: IdentityID? = nil
+    ) {
+        guard !keys.isEmpty else { return }
         runProcessing { [weak self] in
             guard let self else { return }
-            do {
-                _ = try await pipeline.applySpeakerName(
-                    name, to: key, meetingID: meetingID, identityID: identityID
-                )
-            } catch {
-                Log.app.error("speaker not saved: \(logSafeDescription(error), privacy: .public)")
+            var resolved = identityID
+            for key in keys {
+                do {
+                    let assigned = try await pipeline.applySpeakerName(
+                        name, to: key, meetingID: meetingID, identityID: resolved
+                    )
+                    if resolved == nil { resolved = assigned }
+                } catch {
+                    Log.app.error("speaker not saved: \(logSafeDescription(error), privacy: .public)")
+                }
             }
             onProcessingUpdate?(meetingID)
         }

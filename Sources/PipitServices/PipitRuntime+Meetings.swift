@@ -79,7 +79,8 @@ extension PipitRuntime {
                     return MeetingRowSpeaker(
                         key: key,
                         displayName: assignment.displayName,
-                        identityID: assignment.identityID
+                        identityID: assignment.identityID,
+                        participantID: assignment.participantID
                     )
                 }
                 .sorted { $0.key < $1.key }

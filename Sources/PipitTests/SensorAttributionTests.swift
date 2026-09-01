@@ -898,6 +898,34 @@ enum SensorAttributionTests {
                 ))
             },
 
+            test("a placeholder tile is not a person") { expect in
+                // Slack renders a tile before its session resolves and writes
+                // `pending` where the user id goes. Two recordings on disk carry
+                // it beside the same person's real id, so it duplicates the
+                // roster. It has never held the floor, and the damage if it did
+                // is not a stray label: naming it binds `slack/pending` as a
+                // durable handle, and every later placeholder tile in every
+                // later meeting is then that person before a second of audio is
+                // scored.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-0a5e5133-729a-48f9-b964-00b1690d7b37_pending"
+                ))
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-self_pending"))
+                // Shape, not a list of known ids. A workspace id this app has
+                // never seen still has to read as a person.
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-self_W012ABCDEFG"),
+                    "W012ABCDEFG"
+                )
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_B0B17GB9VPA"),
+                    "B0B17GB9VPA"
+                )
+                // Too short to be one, and lowercase never is.
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_U01"))
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_u0b17gb9vpa"))
+            },
+
             test("the display name comes out of the profile description") { expect in
                 expect.equal(
                     SlackHuddleTileParser.displayName(from: "View Andrew Neeser\'s profile"),

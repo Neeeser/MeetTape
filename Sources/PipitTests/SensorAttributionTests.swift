@@ -816,16 +816,16 @@ enum SensorAttributionTests {
                         participant("d406", "Andrew Neeser"),
                         participant("d409", "Grace"),
                     ],
-                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                    turns: [("d406", 0, 60), ("d409", 60, 120)]
                 )
-                let scoped = raw.markingSelf(using: speech(seconds: 20, talking: [(0, 10)]))
+                let scoped = raw.markingSelf(using: speech(seconds: 120, talking: [(0, 60)]))
                 expect.equal(scoped.participants.filter(\.isSelf).count, 1)
                 expect.isTrue(scoped.participants.first { $0.id == "d406" }?.isSelf == true)
                 // Marked, not removed: the turns stay and simply stop being
                 // nameable, which is what keeps the margin rule working.
                 expect.equal(scoped.turns.count, 2)
                 let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 0, 10), interval("b", 10, 20)], sensors: scoped
+                    intervals: [interval("a", 0, 60), interval("b", 60, 120)], sensors: scoped
                 )
                 expect.equal(result.matches.count, 1)
                 expect.equal(result.matches.first?.displayName, "Grace")
@@ -842,9 +842,9 @@ enum SensorAttributionTests {
                         participant("d381", "Andrew Neeser"),
                         participant("d382", "Andrew Neeser"),
                     ],
-                    turns: [("d381", 0, 10), ("d382", 10, 20)]
+                    turns: [("d381", 0, 60), ("d382", 60, 120)]
                 )
-                let scoped = raw.markingSelf(using: speech(seconds: 20, talking: [(0, 10)]))
+                let scoped = raw.markingSelf(using: speech(seconds: 120, talking: [(0, 60)]))
                 expect.equal(scoped.participants.filter(\.isSelf).count, 1)
                 expect.isTrue(scoped.participants.first { $0.id == "d381" }?.isSelf == true)
                 expect.isFalse(scoped.participants.first { $0.id == "d382" }?.isSelf == true)
@@ -866,6 +866,74 @@ enum SensorAttributionTests {
                     using: speech(seconds: 20, talking: [], echoDuring: [(0, 10)])
                 )
                 expect.equal(scoped.participants.filter(\.isSelf).count, 0)
+            },
+
+            test("a sliver of turn is not enough to call somebody the local user") { expect in
+                // The dangerous direction. Being marked self removes a
+                // participant from the roster entries, from word attribution
+                // and from enrolment, so their name never lands anywhere. A
+                // participant whose whole presence is one short turn that
+                // happens to fall under the local user's speech would otherwise
+                // score a clean 1.0: across the recordings on disk, 86 of 771
+                // turns clear the threshold on their own, and 79 of those are
+                // five seconds or shorter.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 2), ("U2", 10, 120)]
+                )
+                let scoped = raw.markingSelf(
+                    using: speech(seconds: 200, talking: [(0, 2), (10, 120)])
+                )
+                // Grace has the evidence to be judged and is the local user.
+                // Ada has two seconds and is left alone.
+                expect.isFalse(scoped.participants.first { $0.id == "U1" }?.isSelf == true)
+                expect.isTrue(scoped.participants.first { $0.id == "U2" }?.isSelf == true)
+            },
+
+            test("a recording with no far end judges nobody") { expect in
+                // A process tap that produced nothing leaves no far-end series,
+                // so the level and echo clauses cannot answer and the detector
+                // alone would decide. On speakers that marks everybody self and
+                // the meeting loses every sensor name.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 60), ("U2", 60, 120)]
+                )
+                var oneTrack = speech(seconds: 120, talking: [(0, 120)])
+                oneTrack.remoteLevels = []
+                oneTrack.micEchoReturnLoss = []
+                expect.equal(raw.markingSelf(using: oneTrack).participants.filter(\.isSelf).count, 0)
+            },
+
+            test("the microphone being quieter than the far end is not the user") { expect in
+                // The clause that carries the most weight on real data, taking
+                // the worst non-self reading from 0.215 to 0.118. Isolated here:
+                // the detector fires throughout and the echo measure stays
+                // clear, so only the level comparison can reject these windows.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 60)]
+                )
+                var quiet = speech(seconds: 60, talking: [(0, 60)])
+                quiet.micLevels = quiet.micLevels.map { _ in Int8(-50) }
+                quiet.remoteLevels = quiet.remoteLevels.map { _ in Int8(-20) }
+                expect.equal(raw.markingSelf(using: quiet).participants.filter(\.isSelf).count, 0)
+            },
+
+            test("a turn timed past the end of the world is not walked") { expect in
+                // The loop steps a quarter second at a time to the turn's end.
+                // A reader that wrote milliseconds where seconds go would spend
+                // billions of iterations inside an actor; SpeechEvidence already
+                // refuses spans it cannot place, and this has to refuse the walk
+                // before it starts.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")],
+                    turns: [("U1", 0, 1_000_000_000)]
+                )
+                expect.equal(
+                    raw.markingSelf(using: speech(seconds: 60, talking: [(0, 60)]))
+                        .participants.filter(\.isSelf).count,
+                    0
+                )
             },
 
             test("evidence nobody measured marks nobody") { expect in

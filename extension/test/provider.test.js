@@ -12,6 +12,7 @@ import {
   rosterFromTiles,
   zoomParticipantFromLabel,
   createSpeakingTracker,
+  meetTileName,
 } from '../shared/provider.js';
 
 const leaveControl = { ariaLabel: 'Leave call' };
@@ -289,4 +290,84 @@ test('an empty or roleless-empty zoom label is nobody', () => {
   assert.equal(zoomParticipantFromLabel(''), null);
   assert.equal(zoomParticipantFromLabel('   '), null);
   assert.equal(zoomParticipantFromLabel('(Host, me),computer audio muted,video off'), null);
+});
+
+// --- Meet tile names -------------------------------------------------------
+
+test('a grid tile name is the first line', () => {
+  assert.equal(meetTileName('Chris Latimer\nsomething else'), 'Chris Latimer');
+  assert.equal(meetTileName('  Nicol\u00f2 Boschi  '), 'Nicol\u00f2 Boschi');
+});
+
+test('a people-panel row is cut back to the name', () => {
+  // Measured from a real recording. A panel row has no line break, so taking
+  // the first line returned the whole run: the name, the host badge, an icon
+  // ligature, and the mute tooltip, truncated mid-word at 80 characters.
+  assert.equal(
+    meetTileName("Chris LatimerMeeting hostdevicesYou can't remotely mute Chris Latimer's microphone"),
+    'Chris Latimer',
+  );
+  assert.equal(
+    meetTileName('2303 TLVdomain_disabledVisitorAdmitmore_vertMore actions'),
+    '2303 TLV',
+  );
+});
+
+test('a row that is chrome all the way down yields no name', () => {
+  // Nothing is better than something wrong: an unnamed sensor key renders
+  // through the fallback and waits for a person, and a wrong name does not.
+  assert.equal(meetTileName('more_vertMore actions'), undefined);
+  assert.equal(meetTileName('   '), undefined);
+  assert.equal(meetTileName(null), undefined);
+});
+
+// --- Who holds the floor ---------------------------------------------------
+
+const metered = (id, meter) => ({ id, meter, hasMeter: true });
+
+test('tiles changing together name nobody', () => {
+  // The 863-second turn. Meet renamed the meter element, every tile fell back
+  // to its whole class string, and any DOM churn moved all of them at once.
+  // The tie went to whichever tile was seen first, so one participant held the
+  // floor for fourteen minutes and every remote word in the meeting was filed
+  // under their name.
+  const tracker = createSpeakingTracker();
+  tracker.update([metered('a', '1'), metered('b', '1'), metered('c', '1')], 0);
+  assert.equal(
+    tracker.update([metered('a', '2'), metered('b', '2'), metered('c', '2')], 500),
+    null,
+  );
+});
+
+test('one tile changing alone still holds the floor', () => {
+  const tracker = createSpeakingTracker();
+  tracker.update([metered('a', '1'), metered('b', '1')], 0);
+  assert.equal(tracker.update([metered('a', '2'), metered('b', '1')], 500), 'a');
+});
+
+test('a tile with no meter cannot hold the floor while another has one', () => {
+  // A people-panel row carries no level meter, so its churn is layout rather
+  // than audio. It stays in the roster and out of the floor.
+  const tracker = createSpeakingTracker();
+  tracker.update([metered('grid', '1'), { id: 'panel', meter: 'x', hasMeter: false }], 0);
+  assert.equal(
+    tracker.update([metered('grid', '1'), { id: 'panel', meter: 'y', hasMeter: false }], 500),
+    null,
+  );
+  assert.equal(
+    tracker.update([metered('grid', '2'), { id: 'panel', meter: 'z', hasMeter: false }], 1000),
+    'grid',
+  );
+});
+
+test('with no meter anywhere the old tie-break still decides', () => {
+  // Meet rotates the meter element's name. When it does, no tile has one and
+  // this falls back to what shipped before: something is named rather than
+  // nothing. Returning null here instead would collapse every turn to a single
+  // read and name nobody for the whole call, which is the failure this file
+  // already records having shipped once.
+  const tracker = createSpeakingTracker();
+  const soup = (id, meter) => ({ id, meter, hasMeter: false });
+  tracker.update([soup('a', '1'), soup('b', '1')], 0);
+  assert.equal(tracker.update([soup('a', '2'), soup('b', '2')], 500), 'a');
 });

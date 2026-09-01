@@ -125,6 +125,49 @@ export function rosterFromTiles(tiles) {
   return [...byID.values()].slice(0, 50);
 }
 
+// Text Meet renders inside a participant row that is a control rather than a
+// person. A people-panel row concatenates all of it onto the name with no
+// separator, so the name is whatever comes before the first of these.
+const MEET_TILE_CHROME = [
+  'Meeting host', 'More actions', 'More options', 'Remove from meeting',
+  'Deny entry', 'Admit', 'Visitor', 'Presenting', 'is presenting',
+  'Pin to screen', "You can't remotely mute", 'Mute for everyone',
+];
+// Material icon ligatures render as their own text inside the row:
+// `domain_disabled`, `more_vert`, `mic_off`, and the bare word `devices`. No
+// display name contains an underscore, which is what makes this safe to cut on.
+const MEET_TILE_LIGATURE = /[a-z]+_[a-z_]+|(?:^|(?<=[a-z]))devices(?![a-z])/;
+
+/// The person's name out of a Meet participant row.
+///
+/// Grid tiles put the name on its own line, so the first line is the answer and
+/// always was. Panel rows do not: measured on a real call, one read
+/// `Chris LatimerMeeting hostdevicesYou can't remotely mute Chris Latimer's
+/// microphone` on a single line, and taking that line whole put the entire run
+/// into the roster, truncated mid-word at the 80-character cap. The roster is
+/// what names a voice, so that string became a speaker's name.
+///
+/// Both rows are read on purpose. A name can render in the panel a beat before
+/// the grid tile has one, and `rosterFromTiles` merges them, so dropping panel
+/// rows would lose names rather than fix them.
+///
+/// Undefined rather than a placeholder where nothing survives the cut. An
+/// unnamed sensor key renders through the fallback and waits for a person; a
+/// wrong one does not ask to be corrected.
+export function meetTileName(raw) {
+  const line = String(raw ?? '').split('\n')[0];
+  if (!line.trim()) return undefined;
+  let cut = line.length;
+  for (const marker of MEET_TILE_CHROME) {
+    const at = line.indexOf(marker);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  const ligature = line.search(MEET_TILE_LIGATURE);
+  if (ligature >= 0 && ligature < cut) cut = ligature;
+  const name = line.slice(0, cut).trim();
+  return name ? name.slice(0, 80) : undefined;
+}
+
 /// Decides who holds the floor from a per-participant level meter.
 ///
 /// Meet animates a meter inside each participant's tile while that person is
@@ -139,12 +182,41 @@ export function rosterFromTiles(tiles) {
 /// seconds that make somebody a speaker, and Meet named nobody. It also has to
 /// outlast a natural pause inside a sentence, which is the same order as Slack's
 /// own release of about 1.5 s.
+/// Two rules keep a moving string from being read as a voice.
+///
+/// Only a tile carrying a real meter can hold the floor, and only while some
+/// tile does. A people-panel row has no meter, so what changes under it is
+/// layout; without this it competed for the floor on equal terms. When no tile
+/// anywhere has one the meter element has been renamed, and every tile falls
+/// back to its class string exactly as before.
+///
+/// And a tie among those candidates names nobody. The comparison used to be
+/// `at > mostRecent`, which is strict, so tiles that changed in the same tick
+/// were settled by which was seen first. With every tile falling back to its
+/// whole class string that was every tick, and one participant held the floor
+/// for fourteen straight minutes. A tick where they all moved says nothing
+/// about who is talking, and saying nothing is the honest answer.
+///
+/// The tie rule is scoped to candidates for the same reason the fallback
+/// exists. Applied when no tile has a meter it would return nothing on every
+/// tick, and `SensorTimelineBuilder` closes a turn on every nothing, so a
+/// renamed meter element would produce zero turns and name nobody for a whole
+/// call. That is the failure the hold below already records having shipped.
 export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
   const lastMeter = new Map();
   const lastChange = new Map();
   return {
     update(tiles, now) {
-      for (const tile of tiles || []) {
+      const present = tiles || [];
+      const metered = present.filter((tile) => tile && tile.id && tile.hasMeter);
+      // The candidates this tick, and whether they were chosen by meter or by
+      // there being no meter to choose on.
+      const scoped = metered.length > 0;
+      const candidates = new Set((scoped ? metered : present)
+        .filter((tile) => tile && tile.id)
+        .map((tile) => tile.id));
+
+      for (const tile of present) {
         if (!tile || !tile.id) continue;
         const meter = String(tile.meter ?? '');
         if (lastMeter.has(tile.id) && lastMeter.get(tile.id) !== meter) {
@@ -152,12 +224,25 @@ export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
         }
         lastMeter.set(tile.id, meter);
       }
+      // Evicted rather than filtered at selection, so a tile that stops being a
+      // candidate cannot win the floor when it becomes one again on the
+      // strength of a change made while it was not. It also bounds these maps,
+      // which otherwise grow for the life of a call.
+      for (const id of [...lastChange.keys()]) {
+        if (!candidates.has(id)) lastChange.delete(id);
+      }
+      for (const id of [...lastMeter.keys()]) {
+        if (!candidates.has(id)) lastMeter.delete(id);
+      }
+
       let floor = null;
       let mostRecent = -Infinity;
+      let tied = false;
       for (const [id, at] of lastChange) {
         if (now - at > holdMs) continue;
-        if (at > mostRecent) { mostRecent = at; floor = id; }
+        if (at > mostRecent) { mostRecent = at; floor = id; tied = false; } else if (at === mostRecent) { tied = true; }
       }
+      if (tied && scoped) return null;
       return floor;
     },
   };

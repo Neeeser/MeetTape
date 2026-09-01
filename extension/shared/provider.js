@@ -133,10 +133,17 @@ const MEET_TILE_CHROME = [
   'Deny entry', 'Admit', 'Visitor', 'Presenting', 'is presenting',
   'Pin to screen', "You can't remotely mute", 'Mute for everyone',
 ];
-// Material icon ligatures render as their own text inside the row:
-// `domain_disabled`, `more_vert`, `mic_off`, and the bare word `devices`. No
-// display name contains an underscore, which is what makes this safe to cut on.
-const MEET_TILE_LIGATURE = /[a-z]+_[a-z_]+|(?:^|(?<=[a-z]))devices(?![a-z])/;
+// Material icon ligatures render as their own text inside the row, glued onto
+// the name with no separator. Matched as whole known tokens rather than by
+// pattern: a pattern for "a lowercase run containing an underscore" starts at
+// the run, and the run begins inside the name, so `Chris Latimermore_vert` cut
+// back to `Chris L`. A ligature this list does not know leaves the name
+// uncut, which is the safe direction.
+const MEET_TILE_LIGATURE = [
+  'domain_disabled', 'more_vert', 'more_horiz', 'push_pin', 'present_to_all',
+  'mic_off', 'mic_none', 'videocam_off', 'devices', 'volume_up',
+  'do_not_disturb_on', 'visibility_off',
+];
 
 /// The person's name out of a Meet participant row.
 ///
@@ -155,17 +162,53 @@ const MEET_TILE_LIGATURE = /[a-z]+_[a-z_]+|(?:^|(?<=[a-z]))devices(?![a-z])/;
 /// unnamed sensor key renders through the fallback and waits for a person; a
 /// wrong one does not ask to be corrected.
 export function meetTileName(raw) {
-  const line = String(raw ?? '').split('\n')[0];
+  // Trimmed before the split, not after. A tile whose text opens with a blank
+  // line would otherwise yield the empty first line and no name at all, and
+  // because only a name that survives is cached, that tile would be re-read
+  // with innerText on every tick forever.
+  const line = String(raw ?? '').trim().split('\n')[0];
   if (!line.trim()) return undefined;
   let cut = line.length;
-  for (const marker of MEET_TILE_CHROME) {
+  for (const marker of [...MEET_TILE_CHROME, ...MEET_TILE_LIGATURE]) {
     const at = line.indexOf(marker);
     if (at >= 0 && at < cut) cut = at;
   }
-  const ligature = line.search(MEET_TILE_LIGATURE);
-  if (ligature >= 0 && ligature < cut) cut = ligature;
-  const name = line.slice(0, cut).trim();
+  // A cut lands mid-phrase often enough that the punctuation leading into it
+  // survives: "Bob (Presenting)" would otherwise read "Bob (".
+  const name = line.slice(0, cut).replace(/[\s(\[{,\-\u2013\u2014]+$/, '').trim();
   return name ? name.slice(0, 80) : undefined;
+}
+
+/// One entry per participant, from the several nodes Meet renders for each.
+///
+/// The grid tile and the people-panel row carry the same
+/// `data-participant-id`, which `rosterFromTiles` relies on to merge a name
+/// that reached one before the other. The floor cannot be decided from them
+/// unmerged: two entries under one id write that id's meter twice per tick with
+/// two different strings, so every participant registers a change on every
+/// tick whether or not anyone is speaking, and the floor goes to whichever id
+/// was seen first for the rest of the call. That is the 863-second turn.
+///
+/// The metered node wins the meter, because a panel row has none and its churn
+/// is layout.
+export function collapseMeetTiles(tiles) {
+  const byID = new Map();
+  for (const tile of tiles || []) {
+    if (!tile || !tile.id) continue;
+    const existing = byID.get(tile.id);
+    if (!existing) {
+      byID.set(tile.id, { ...tile });
+      continue;
+    }
+    if (!existing.name && tile.name) existing.name = tile.name;
+    if (tile.isSelf) existing.isSelf = true;
+    if (typeof tile.muted === 'boolean') existing.muted = tile.muted;
+    if (tile.hasMeter && !existing.hasMeter) {
+      existing.hasMeter = true;
+      existing.meter = tile.meter;
+    }
+  }
+  return [...byID.values()];
 }
 
 /// Decides who holds the floor from a per-participant level meter.
@@ -205,9 +248,13 @@ export function meetTileName(raw) {
 export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
   const lastMeter = new Map();
   const lastChange = new Map();
+  // The last tick that named somebody without ambiguity, so a moment of
+  // crosstalk does not read as silence.
+  let held = null;
+  let heldAt = -Infinity;
   return {
     update(tiles, now) {
-      const present = tiles || [];
+      const present = collapseMeetTiles(tiles);
       const metered = present.filter((tile) => tile && tile.id && tile.hasMeter);
       // The candidates this tick, and whether they were chosen by meter or by
       // there being no meter to choose on.
@@ -224,26 +271,38 @@ export function createSpeakingTracker({ holdMs = 1_500 } = {}) {
         }
         lastMeter.set(tile.id, meter);
       }
-      // Evicted rather than filtered at selection, so a tile that stops being a
-      // candidate cannot win the floor when it becomes one again on the
-      // strength of a change made while it was not. It also bounds these maps,
-      // which otherwise grow for the life of a call.
+      // Only the change clock is evicted, so a tile that stops being a
+      // candidate cannot win the floor on the strength of a change made while
+      // it was not one. `lastMeter` is kept: dropping the baseline too means
+      // the tile's next change goes unseen, which costs a speaker an extra
+      // tick every time their meter node flickers.
       for (const id of [...lastChange.keys()]) {
         if (!candidates.has(id)) lastChange.delete(id);
       }
-      for (const id of [...lastMeter.keys()]) {
-        if (!candidates.has(id)) lastMeter.delete(id);
-      }
 
-      let floor = null;
-      let mostRecent = -Infinity;
-      let tied = false;
-      for (const [id, at] of lastChange) {
-        if (now - at > holdMs) continue;
-        if (at > mostRecent) { mostRecent = at; floor = id; tied = false; } else if (at === mostRecent) { tied = true; }
+      const live = [...lastChange.entries()].filter(([, at]) => now - at <= holdMs);
+      // Every meter has settled, so nobody is talking. This is the hold
+      // expiring, and it is the only path that ends a turn on purpose.
+      if (live.length === 0) return null;
+
+      const newest = live.reduce((best, [, at]) => Math.max(best, at), -Infinity);
+      const movers = live.filter(([, at]) => at === newest);
+      if (movers.length === 1 || !scoped) {
+        // Not scoped means no tile anywhere has a meter, so every tile is
+        // reporting its subtree's churn and ties are the norm. Refusing to
+        // answer there would close every turn and name nobody for a whole
+        // call, which is the failure the hold above records having shipped.
+        held = movers[0][0];
+        heldAt = newest;
+        return held;
       }
-      if (tied && scoped) return null;
-      return floor;
+      // Several candidates moved at once, which says nothing about who is
+      // talking. The last tick that did say still stands, while it is inside
+      // the hold: answering null instead suppressed the floor for the full
+      // 1.5 s and split a turn one moment of crosstalk should not have. Where
+      // nothing has ever said, as when a stuck reader ties on every tick from
+      // the first, there is nothing to stand and the answer is nobody.
+      return held !== null && now - heldAt <= holdMs ? held : null;
     },
   };
 }

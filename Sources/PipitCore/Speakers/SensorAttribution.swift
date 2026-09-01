@@ -292,10 +292,13 @@ extension SensorAttribution {
     /// explain a voice heard there. Removing those turns looked equivalent and
     /// was not: it left the runner-up at zero, so the margin rule stopped
     /// guarding and second place won the cluster outright.
+    /// The record arrives already marked: the pipeline reads it through
+    /// `sensorRecord`, which is where the microphone evidence lives. Marking it
+    /// again here would need evidence this has no reason to take.
     public static func assignments(
-        diarization: RawDiarization, sensors: RawSensors, localUserName: String = ""
+        diarization: RawDiarization, sensors: RawSensors
     ) -> [(key: String, assignment: SpeakerAssignment)] {
-        let scoped = sensors.markingSelf(named: localUserName)
+        let scoped = sensors
         guard !scoped.turns.isEmpty else { return [] }
 
         var out: [(key: String, assignment: SpeakerAssignment)] = []

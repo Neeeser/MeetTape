@@ -22,6 +22,44 @@ enum SensorAttributionTests {
         DiarizationInterval(start: start, end: end, clusterID: cluster)
     }
 
+    /// Evidence in which the local user is audibly speaking over `talking` and
+    /// nowhere else.
+    ///
+    /// Outside those spans the microphone is quiet and below the far end, which
+    /// is what the far end playing while the user listens looks like.
+    private static func speech(
+        seconds: Double, talking: [(Double, Double)],
+        echoDuring: [(Double, Double)] = [], window: Double = 0.25
+    ) -> SpeechEvidence {
+        let count = Int(seconds / window)
+        var mic = [Int8](repeating: -80, count: count)
+        var remote = [Int8](repeating: -30, count: count)
+        var probability = [Int8](repeating: 0, count: count)
+        var echo = [Int16](repeating: 0, count: count)
+        func windows(_ spans: [(Double, Double)]) -> [Int] {
+            spans.flatMap { Array(Int($0.0 / window)..<min(count, Int($0.1 / window))) }
+        }
+        for index in windows(talking) {
+            mic[index] = -20
+            remote[index] = -40
+            probability[index] = 90
+        }
+        // Leakage: the microphone hears speech and reads louder than the far
+        // end's own quietly recorded track, and only the echo measure separates
+        // it from the user actually talking.
+        for index in windows(echoDuring) {
+            mic[index] = -20
+            remote[index] = -40
+            probability[index] = 90
+            echo[index] = 12
+        }
+        return SpeechEvidence(
+            levelWindowSeconds: window, speechWindowSeconds: window,
+            micLevels: mic, remoteLevels: remote,
+            micSpeech: probability, micEchoReturnLoss: echo
+        )
+    }
+
     private static func sensors(
         participants: [SensorParticipant], turns: [(String, Double, Double)],
         unmuted: [String]? = nil
@@ -713,9 +751,12 @@ enum SensorAttributionTests {
                 expect.equal(map.entries["remote-001_speaker_01"]?.identityID, identity)
             },
 
-            test("the local user is excluded by configured name, not only by flag") { expect in
+            test("the local user is the one the microphone heard") { expect in
                 // Meet marks its own tile with the English word "You", so a
-                // client in any other language reports nobody as self.
+                // client in any other language reports nobody as self. Matching
+                // the configured name instead is what shipped, and it never
+                // fired: Meet renders "Andrew Neeser" where the setting reads
+                // "Andrew". Every Meet recording on disk has nobody marked.
                 let raw = sensors(
                     participants: [
                         participant("d406", "Andrew Neeser"),
@@ -723,8 +764,9 @@ enum SensorAttributionTests {
                     ],
                     turns: [("d406", 0, 10), ("d409", 10, 20)]
                 )
-                let scoped = raw.markingSelf(named: "andrew neeser")
+                let scoped = raw.markingSelf(using: speech(seconds: 20, talking: [(0, 10)]))
                 expect.equal(scoped.participants.filter(\.isSelf).count, 1)
+                expect.isTrue(scoped.participants.first { $0.id == "d406" }?.isSelf == true)
                 // Marked, not removed: the turns stay and simply stop being
                 // nameable, which is what keeps the margin rule working.
                 expect.equal(scoped.turns.count, 2)
@@ -733,6 +775,56 @@ enum SensorAttributionTests {
                 )
                 expect.equal(result.matches.count, 1)
                 expect.equal(result.matches.first?.displayName, "Grace")
+            },
+
+            test("two tiles under one name are told apart") { expect in
+                // A real recording: the local user appears on two Meet devices
+                // rendering the identical display name, and only one of them is
+                // them. Name matching marked both and threw away 264 seconds of
+                // a real participant's speech. What the microphone heard
+                // separates them.
+                let raw = sensors(
+                    participants: [
+                        participant("d381", "Andrew Neeser"),
+                        participant("d382", "Andrew Neeser"),
+                    ],
+                    turns: [("d381", 0, 10), ("d382", 10, 20)]
+                )
+                let scoped = raw.markingSelf(using: speech(seconds: 20, talking: [(0, 10)]))
+                expect.equal(scoped.participants.filter(\.isSelf).count, 1)
+                expect.isTrue(scoped.participants.first { $0.id == "d381" }?.isSelf == true)
+                expect.isFalse(scoped.participants.first { $0.id == "d382" }?.isSelf == true)
+            },
+
+            test("the far end leaking into the microphone is not the user") { expect in
+                // Without headphones the call comes back through the speakers,
+                // the microphone's gain lifts it to the far end's own level, and
+                // every level clause keeps it. Only subtracting a filtered copy
+                // of the far end separates whose sound it is from how loud it
+                // is, which is why LocalSpeechPolicy needed a fourth measure.
+                // Marking a remote participant self deletes their turns
+                // outright, so this has to fail closed.
+                let raw = sensors(
+                    participants: [participant("d406", "Grace"), participant("d409", "Ada")],
+                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                )
+                let scoped = raw.markingSelf(
+                    using: speech(seconds: 20, talking: [], echoDuring: [(0, 10)])
+                )
+                expect.equal(scoped.participants.filter(\.isSelf).count, 0)
+            },
+
+            test("evidence nobody measured marks nobody") { expect in
+                // A meeting recorded before the measurement existed, and any
+                // path that reaches this before the audio has been read. Absent
+                // evidence is not evidence that nobody is the local user, so the
+                // record comes back untouched rather than guessed at.
+                let raw = sensors(
+                    participants: [participant("d406", "Andrew"), participant("d409", "Grace")],
+                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                )
+                expect.equal(raw.markingSelf(using: nil).participants.filter(\.isSelf).count, 0)
+                expect.equal(raw.markingSelf(using: nil).turns.count, 2)
             },
 
             test("a reader cannot change mid-recording") { expect in
@@ -807,11 +899,14 @@ enum SensorAttributionTests {
                 expect.equal(result.matches.first?.displayName, "Grace")
             },
 
-            test("a namesake beside a real self flag keeps their own turns") { expect in
+            test("an authoritative self flag short-circuits the measurement") { expect in
                 // The case that shipped broken twice under the old design.
-                // Where the platform said who the local user is, a colleague
-                // wearing the same display name is a different person: their
-                // turns still attribute, and their name still lands.
+                // Where the platform said who the local user is, nothing else
+                // gets to add a second: a colleague on a noisy line whose share
+                // crossed the threshold would otherwise be marked too, and a
+                // participant marked self has their turns dropped from word
+                // attribution entirely. Their turns still attribute, and their
+                // name still lands.
                 let raw = sensors(
                     participants: [
                         participant("me", "Andrew", isSelf: true),
@@ -823,7 +918,10 @@ enum SensorAttributionTests {
                 )
                 var authoritative = raw
                 authoritative.selfIsAuthoritative = true
-                let marked = authoritative.markingSelf(named: "Andrew")
+                // Evidence that would otherwise mark U2 as well.
+                let marked = authoritative.markingSelf(
+                    using: speech(seconds: 120, talking: [(0, 30), (30, 60)])
+                )
                 expect.equal(
                     marked.participants.filter(\.isSelf).count, 1,
                     "the platform already said who the local user is"

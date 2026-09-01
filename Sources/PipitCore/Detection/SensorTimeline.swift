@@ -117,34 +117,111 @@ public struct RawSensors: Codable, Sendable, Equatable {
         participants.first { $0.id == id }
     }
 
-    /// The same record with the local user marked by name as well as by flag.
+    /// Share of a participant's turn windows that have to hold the local user's
+    /// own voice before they are the local user.
+    ///
+    /// Measured over the seven recordings on disk carrying both a usable
+    /// timeline and speech evidence, twenty-two participants: the local user
+    /// reads 0.736 to 0.903 and everybody else reads 0.000 to 0.095. The
+    /// threshold sits 2.1x below the lowest of the first group and 3.7x above
+    /// the highest of the second, and nothing crosses it.
+    public static let selfTurnLocalSpeechShare: Double = 0.35
+
+    /// The same record with the local user marked by what the microphone heard.
     ///
     /// The page's own answer is not enough. Meet marks the local tile with an
     /// English word, so a client in any other language reports nobody as self,
-    /// and Zoom marks nobody at all. The app does know who its user is.
-    public func markingSelf(named localUserName: String) -> RawSensors {
+    /// and Zoom marks nobody at all. Every Meet recording on disk has nobody
+    /// marked, so the local user's turns compete for remote clusters and put
+    /// their name on a track that by construction cannot hold their voice.
+    ///
+    /// What replaced the guess is not another guess. While the client says a
+    /// participant holds the floor, either the microphone is carrying that
+    /// person or it is not, and the recording already measured that for
+    /// `LocalSpeechPolicy`. Matching the configured display name was the
+    /// previous answer and it is deliberately gone: it never fired here, where
+    /// the roster reads "Andrew Neeser" and the setting reads "Andrew", and
+    /// where it does fire it cannot tell two tiles under one name apart. One
+    /// recording has exactly that, and marking both would have deleted a real
+    /// participant's speech.
+    ///
+    /// Three clauses, the same three `LocalSpeechPolicy` needed and for the same
+    /// reasons. The detector has to fire. The microphone has to be no quieter
+    /// than the far end. And a filtered copy of the far end must not account for
+    /// the microphone's energy, which is the clause that survives a call played
+    /// out of the laptop's speakers: there the gain control lifts the leakage to
+    /// the far end's own level and every comparison of loudness keeps it. Being
+    /// wrong here deletes a real participant's turns outright, so it fails
+    /// closed.
+    public func markingSelf(using evidence: SpeechEvidence?) -> RawSensors {
         // A fallback, not a supplement. Where the reader authoritatively named
         // the local user, somebody else carrying the same display name is a
         // different person, and marking them too was the whole bug: they left
         // the speaker count, the recording re-clustered one voice short, and two
         // people were merged into one.
         //
-        // Where the reader only guessed, a second guess costs nothing: the count
-        // is already off the table, and the only effect is to leave another
-        // cluster unnamed.
+        // It also bounds this measurement. A colleague on a leaking line whose
+        // share crossed the threshold would otherwise be marked beside a self
+        // the platform had already named for certain.
         guard !(selfIsAuthoritative && participants.contains(where: \.isSelf)) else { return self }
-        let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty else { return self }
+        // Absent evidence is not evidence that nobody is the local user. A
+        // meeting recorded before the measurement existed comes back untouched,
+        // which is the behaviour those meetings already have.
+        guard let evidence else { return self }
+
+        var byParticipant: [String: [SensorTurn]] = [:]
+        for turn in turns where !(participant(turn.participantID)?.isSelf ?? false) {
+            byParticipant[turn.participantID, default: []].append(turn)
+        }
+        var found: Set<String> = []
+        for (id, held) in byParticipant
+        where Self.localSpeechShare(of: held, in: evidence) >= Self.selfTurnLocalSpeechShare {
+            found.insert(id)
+        }
+        guard !found.isEmpty else { return self }
         var marked = self
         marked.participants = participants.map { person in
-            guard !person.isSelf, let name = person.displayName,
-                  name.caseInsensitiveCompare(wanted) == .orderedSame
-            else { return person }
+            guard found.contains(person.id) else { return person }
             var updated = person
             updated.isSelf = true
             return updated
         }
         return marked
+    }
+
+    /// How much of these turns the local user was audibly speaking through.
+    ///
+    /// Window by window rather than across the whole turn, because the question
+    /// is what share of it holds their voice. `SpeechEvidence.reading` reports
+    /// the loudest sample and the highest detector reading over whatever span it
+    /// is handed, so asking it about a whole turn would answer "was the user
+    /// heard at any point in these thirty seconds", which a single cough passes.
+    static func localSpeechShare(of turns: [SensorTurn], in evidence: SpeechEvidence) -> Double {
+        let window = evidence.levelWindowSeconds
+        guard window > 0 else { return 0 }
+        var measured = 0
+        var carrying = 0
+        for turn in turns {
+            var at = turn.start
+            while at < turn.end {
+                defer { at += window }
+                guard let reading = evidence.reading(from: at, to: min(at + window, turn.end))
+                else { continue }
+                measured += 1
+                guard let probability = reading.speechProbability,
+                      probability >= LocalSpeechPolicy.speechProbability
+                else { continue }
+                if let echo = reading.echoReturnLossDB,
+                   echo >= LocalSpeechPolicy.echoReturnLossDB { continue }
+                // No far end to be quieter than means one track, and a
+                // one-track recording has no far-end mixdown to be excluded
+                // from in the first place.
+                if let difference = reading.medianDifferenceDB, difference < 0 { continue }
+                carrying += 1
+            }
+        }
+        guard measured > 0 else { return 0 }
+        return Double(carrying) / Double(measured)
     }
 
     /// The same record moved onto a different origin.

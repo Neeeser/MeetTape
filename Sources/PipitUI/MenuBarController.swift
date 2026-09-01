@@ -138,7 +138,35 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let copy = image?.copy() as? NSImage else { return nil }
         copy.size = NSSize(width: 18, height: 18)
         copy.isTemplate = true
-        return copy
+        // A recording icon already carries the state that matters most. The
+        // add-on warning waits until the icon is otherwise idle.
+        guard status.sensorNeedsAttention, !status.isCapturing else { return copy }
+        return badged(copy)
+    }
+
+    /// Stamps a warning mark into the corner of the menu bar icon.
+    ///
+    /// The icon is a template, so the mark cannot be a second colour. A hole
+    /// cleared around it is what keeps it readable against the icon behind.
+    private static func badged(_ base: NSImage) -> NSImage {
+        guard let mark = NSImage(
+            systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: nil
+        ) else { return base }
+        let badged = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            let diameter = rect.width * 0.6
+            let box = NSRect(
+                x: rect.maxX - diameter, y: rect.minY, width: diameter, height: diameter
+            )
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: box.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            mark.draw(in: box)
+            return true
+        }
+        badged.isTemplate = true
+        return badged
     }
 
     /// Keeps `swift run Pipit` usable outside the assembled application
@@ -155,6 +183,9 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func accessibilityLabel(for status: RuntimeStatus) -> String {
+        if status.sensorNeedsAttention, !status.isCapturing {
+            return "Pipit, the Firefox add-on is not loaded"
+        }
         if status.isInReconnectWindow {
             let title = status.title ?? status.provider.displayName
             return "Pipit, \(title) disconnected, recording paused"
@@ -173,6 +204,20 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let status = runtime.status
+
+        if status.sensorNeedsAttention {
+            let warning = NSMenuItem(
+                title: "Firefox add-on not loaded",
+                action: #selector(openBrowserSettings),
+                keyEquivalent: ""
+            )
+            warning.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil
+            )
+            warning.target = self
+            menu.addItem(warning)
+            menu.addItem(.separator())
+        }
 
         if status.isRecording {
             addRecordingSection(to: menu, status: status)
@@ -342,6 +387,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() { windows.showSettings() }
+    @objc private func openBrowserSettings() { windows.showSettings(pane: .browsers) }
 
     @objc private func openAbout() { windows.showAbout() }
 

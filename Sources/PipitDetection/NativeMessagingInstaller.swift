@@ -128,6 +128,14 @@ public struct NativeMessagingInstaller: Sendable {
         return FileManager.default.fileExists(atPath: manifest.path) ? manifest : nil
     }
 
+    /// The signed add-on, which release Firefox installs permanently. Absent
+    /// from a local build, which leaves the temporary add-on as the only route.
+    public static func bundledFirefoxAddOnURL(bundle: Bundle = .main) -> URL? {
+        guard let resources = bundle.resourceURL else { return nil }
+        let addOn = resources.appendingPathComponent("extension/pipit-sensor.xpi")
+        return FileManager.default.fileExists(atPath: addOn.path) ? addOn : nil
+    }
+
     public static func bundledHostURL(bundle: Bundle = .main) -> URL? {
         if let helpers = bundle.executableURL?.deletingLastPathComponent() {
             let candidate = helpers.appendingPathComponent("pipit-nativehost")

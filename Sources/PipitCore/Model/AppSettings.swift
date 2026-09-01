@@ -356,6 +356,13 @@ public struct AppSettings: Codable, Sendable, Equatable {
     /// How long a paused meeting waits for a rejoin before it is saved. A
     /// rejoin after this becomes a separate meeting.
     public var meetingReconnectWindowSeconds: Double
+    /// Whether the Firefox add-on has ever connected on this machine.
+    ///
+    /// A latch rather than a preference. It is what separates an add-on that
+    /// was dropped, which Firefox does to a temporary add-on every time it
+    /// quits, from one the user never installed. Only the first is worth
+    /// warning about.
+    public var firefoxSensorHasConnected: Bool
 
     public init(
         version: Int = AppSettings.currentVersion,
@@ -377,7 +384,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
         echoCancellation: Bool = true,
         meetingEndGraceSeconds: Double = SessionController.Configuration().endGraceSeconds,
         meetingReconnectWindowSeconds: Double = SessionController.Configuration()
-            .reconnectWindowSeconds
+            .reconnectWindowSeconds,
+        firefoxSensorHasConnected: Bool = false
     ) {
         self.version = version
         self.storageRootPath = storageRootPath
@@ -398,6 +406,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.echoCancellation = echoCancellation
         self.meetingEndGraceSeconds = meetingEndGraceSeconds
         self.meetingReconnectWindowSeconds = meetingReconnectWindowSeconds
+        self.firefoxSensorHasConnected = firefoxSensorHasConnected
     }
 
     /// Every field decodes with its default when absent, so a settings file
@@ -489,6 +498,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         meetingReconnectWindowSeconds =
             try container.decodeIfPresent(Double.self, forKey: .meetingReconnectWindowSeconds)
             ?? defaults.meetingReconnectWindowSeconds
+        firefoxSensorHasConnected =
+            try container.decodeIfPresent(Bool.self, forKey: .firefoxSensorHasConnected)
+            ?? defaults.firefoxSensorHasConnected
         // The stored number gated the migrations above; the decoded struct is
         // current-schema, and writing it back as such is what stops a
         // migration from re-running against a value the user has since chosen.

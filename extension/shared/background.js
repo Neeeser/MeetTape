@@ -5,15 +5,36 @@ const HOST_NAME = 'com.pipit.sensor';
 
 let port = null;
 
+// Retry after a dropped connection, backing off to a minute. Pipit not running
+// is the common case, and each attempt spawns a host process that exits at
+// once, so this trades a spawn per minute for Pipit seeing the add-on within a
+// minute of starting up.
+const RECONNECT_MIN_MS = 5_000;
+const RECONNECT_MAX_MS = 60_000;
+let reconnectDelay = RECONNECT_MIN_MS;
+let reconnectTimer = null;
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+}
+
 function connect() {
   if (port) return port;
   try {
     port = api.runtime.connectNative(HOST_NAME);
     port.onDisconnect.addListener(() => {
       port = null;
+      scheduleReconnect();
     });
     port.onMessage.addListener(() => {
-      // The host acknowledges; nothing here depends on the reply.
+      // The host answered, so this connection reached Pipit. Anything that
+      // drops it after this is a fresh problem and gets the short retry again.
+      reconnectDelay = RECONNECT_MIN_MS;
     });
     port.postMessage({
       type: 'hello',
@@ -22,6 +43,7 @@ function connect() {
     });
   } catch {
     port = null;
+    scheduleReconnect();
   }
   return port;
 }
@@ -100,6 +122,10 @@ async function injectIntoOpenTabs() {
   }
 }
 
-// The native host is connected lazily on the first meeting-shaped observation,
-// rather than spawned at browser start whether or not one ever happens.
 injectIntoOpenTabs();
+
+// Connecting at startup is what lets Pipit tell a loaded add-on from a missing
+// one. Waiting for the first meeting made the two look identical, so Settings
+// reported "not installed" for an add-on that was loaded and working, and the
+// menu bar could not warn when a temporary add-on was dropped.
+connect();

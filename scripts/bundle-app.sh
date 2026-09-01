@@ -37,6 +37,14 @@ cp "$BIN_DIR/Pipit" "$APP_DIR/Contents/MacOS/Pipit"
 # copy it to a stable absolute path outside any TCC-protected directory.
 cp "$BIN_DIR/pipit-nativehost" "$APP_DIR/Contents/MacOS/pipit-nativehost"
 cp -R "$REPO_ROOT/extension/dist" "$APP_DIR/Contents/Resources/extension"
+# The signed add-on, when scripts/sign-extension.sh has produced one. Without it
+# the app falls back to walking the user through about:debugging, which loads the
+# extension until Firefox quits.
+if [ -f "$REPO_ROOT/extension/signed/pipit-sensor.xpi" ]; then
+    cp "$REPO_ROOT/extension/signed/pipit-sensor.xpi" \
+        "$APP_DIR/Contents/Resources/extension/pipit-sensor.xpi"
+    echo "==> bundled the signed Firefox add-on"
+fi
 cp "$REPO_ROOT/Assets/Pipit/AppIcons/Pipit.icns" "$APP_DIR/Contents/Resources/Pipit.icns"
 for state in idle recording paused warning; do
     cp "$REPO_ROOT/Assets/Pipit/MenuBar/pipit-$state.png" "$APP_DIR/Contents/Resources/"

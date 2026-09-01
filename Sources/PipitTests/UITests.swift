@@ -493,6 +493,40 @@ enum UITests {
                 expect.equal(status.displayHealth, .idle, "an idle session shows no health")
             },
 
+            test("the add-on warning is for one that was dropped, not one never installed") { expect in
+                var status = RuntimeStatus()
+                status.isFirefoxRunning = true
+                status.sensorConnection = .absent
+                expect.isFalse(
+                    status.sensorNeedsAttention,
+                    "a machine that never had the add-on is not missing anything"
+                )
+
+                status.firefoxSensorHasConnected = true
+                expect.isTrue(
+                    status.sensorNeedsAttention,
+                    "it worked before and Firefox is open, so it was dropped"
+                )
+
+                status.sensorConnection = .stale
+                expect.isFalse(
+                    status.sensorNeedsAttention,
+                    "a held connection with no meeting on screen is the ordinary state"
+                )
+
+                status.sensorConnection = .fresh
+                expect.isFalse(status.sensorNeedsAttention)
+
+                status.sensorConnection = .disconnected
+                expect.isTrue(status.sensorNeedsAttention, "the transport dropped")
+
+                status.isFirefoxRunning = false
+                expect.isFalse(
+                    status.sensorNeedsAttention,
+                    "nothing to fix while Firefox is closed"
+                )
+            },
+
             test("menu-bar icons identify the Pipit state") { expect in
                 await MainActor.run {
                     var status = RuntimeStatus()

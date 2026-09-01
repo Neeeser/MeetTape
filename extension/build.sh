@@ -21,6 +21,9 @@ for browser in firefox chrome; do
     cp "$ROOT/shared/content.js" "$DIST/$browser/shared/content.js"
     cp "$ROOT/shared/background.js" "$DIST/$browser/shared/background.js"
     cp "$ROOT/$browser/manifest.json" "$DIST/$browser/manifest.json"
+    # The app icon, which is what the browser shows in its add-on list and in
+    # the install prompt. Without it the browser draws a generic puzzle piece.
+    cp -R "$ROOT/icons" "$DIST/$browser/icons"
 
     for file in provider.js content.js background.js; do
         if grep -qE '^\s*(import|export)\s' "$DIST/$browser/shared/$file"; then

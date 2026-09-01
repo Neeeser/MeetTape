@@ -46,15 +46,19 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
 public struct SettingsView: View {
     let model: SettingsModel
-    @State private var pane: SettingsPane = .general
 
     public init(model: SettingsModel) {
         self.model = model
     }
 
+    private var pane: SettingsPane { model.pane }
+
     public var body: some View {
         NavigationSplitView {
-            List(SettingsPane.allCases, selection: $pane) { entry in
+            List(
+                SettingsPane.allCases,
+                selection: Binding(get: { model.pane }, set: { model.pane = $0 })
+            ) { entry in
                 Label(entry.title, systemImage: entry.symbol).tag(entry)
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 220)

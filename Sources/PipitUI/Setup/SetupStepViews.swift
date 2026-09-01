@@ -385,6 +385,19 @@ struct OptionalPermissionsStep: View {
 struct FirefoxStep: View {
     let model: SetupModel
 
+    /// A release build installs the add-on Firefox has signed. A local build has
+    /// no signed add-on to offer, so it walks through the temporary load.
+    private var addOnInstructions: String {
+        if FirefoxAddOn.bundledAddOn != nil {
+            return "Firefox installs add-ons through its own interface. This opens it there "
+                + "and asks you to confirm, and it stays installed after that."
+        }
+        return "Firefox only installs add-ons through its own interface. Open "
+            + "about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, and "
+            + "select manifest.json in the folder below. A temporary add-on is dropped when "
+            + "Firefox quits, so this repeats each launch until the extension is signed."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             StepHeader(
@@ -408,26 +421,15 @@ struct FirefoxStep: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Step 2, load the add-on in Firefox").font(.body.weight(.medium))
-                Text(
-                    "Firefox only installs add-ons through its own interface. Open "
-                        + "about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, "
-                        + "and select manifest.json in the folder below. A temporary add-on is "
-                        + "dropped when Firefox quits, so this repeats each launch until the "
-                        + "extension is signed and published."
+                Text("Step 2, add it to Firefox").font(.body.weight(.medium))
+                Text(addOnInstructions)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                FirefoxAddOnControls(
+                    revealExtension: FirefoxAddOn.bundledAddOn == nil
+                        ? { model.revealExtension() } : nil
                 )
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-                HStack {
-                    Button("Show extension folder") { model.revealExtension() }
-                    Button("Copy about:debugging") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            "about:debugging#/runtime/this-firefox", forType: .string
-                        )
-                    }
-                }
             }
         }
     }

@@ -61,6 +61,12 @@ public final class WindowManager {
         }
     }
 
+    /// Opens Settings on one page, for a menu item that is about that page.
+    func showSettings(pane: SettingsPane) {
+        showSettings()
+        settingsModel?.pane = pane
+    }
+
     public func showSettings() {
         if let window = settingsWindow {
             present(window)

@@ -77,6 +77,37 @@ public enum SensorAttribution {
     /// its beginning and still refuses its end.
     public static let wordAttributionTailSeconds: Double = 1
 
+    /// How long one turn may run before it stops being an observation.
+    ///
+    /// A turn says the client marked somebody as holding the floor between two
+    /// readings that said so. An indicator that has not moved in five minutes is
+    /// more likely stuck than accurate, and a stuck one is not a small error: a
+    /// Meet recording produced two turns for a twenty-two minute call, one of
+    /// them 863 seconds, and every remote word went to whoever held it while the
+    /// diarizer had cleanly separated three voices underneath.
+    ///
+    /// The longest turn anybody genuinely held, across all eight recordings on
+    /// disk with a sensor timeline, is 128 seconds, and the 95th percentiles run
+    /// from 19 to 62 seconds. This sits 2.3x above the longest of those and 2.9x
+    /// below the stuck one. Applying it changes nothing on any of the seven
+    /// healthy recordings, in either word attribution or enrolment.
+    ///
+    /// A genuine monologue past this loses very little. `attribute` reads the
+    /// turns whole, so the speaker's cluster is still matched and still named;
+    /// what changes is that the words go to the diarizer, which on one voice
+    /// returns that same cluster carrying that same name. Enrolment does lose
+    /// the audio, and a person who talks for five unbroken minutes has other
+    /// turns to be enrolled from.
+    ///
+    /// The sample is 15 to 48 minute meetings. Nothing here is validated against
+    /// a two-hour all-hands with a single presenter.
+    public static let maximumFloorSeconds: Double = 300
+
+    /// Whether a turn is short enough to be a claim about who was speaking.
+    static func isFloorObservation(_ turn: SensorTurn) -> Bool {
+        turn.duration <= maximumFloorSeconds
+    }
+
     static func attributableEnd(of turn: SensorTurn) -> Double {
         turn.end - min(wordAttributionTailSeconds, turn.duration / 2)
     }
@@ -95,7 +126,7 @@ public enum SensorAttribution {
     public static func wordIntervals(sensors: RawSensors) -> [DiarizationInterval] {
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
         return sensors.turns
-            .filter { !selfIDs.contains($0.participantID) }
+            .filter { !selfIDs.contains($0.participantID) && isFloorObservation($0) }
             .compactMap { turn -> DiarizationInterval? in
                 // The tail belongs to the diarizer, and never more than half
                 // the turn, so a short exchange keeps its beginning.
@@ -143,7 +174,8 @@ public enum SensorAttribution {
         }
         let solo = DiarizationInterval.soloSpeech(diarized)
         var byParticipant: [String: [DiarizationInterval]] = [:]
-        for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
+        for turn in sensors.turns
+        where !selfIDs.contains(turn.participantID) && isFloorObservation(turn) {
             guard let clusters = clustersOf[turn.participantID] else { continue }
             for interval in solo where clusters.contains(interval.clusterID) {
                 let start = max(turn.start, interval.start)

@@ -597,6 +597,50 @@ enum SensorAttributionTests {
                 expect.close(intervals.first?.end ?? 0, 0.6, tolerance: 0.001)
             },
 
+            test("an indicator that never moved claims no words") { expect in
+                // A Meet recording produced two turns for twenty-two minutes,
+                // one of them 863 seconds, and every remote word went to it.
+                // The client had stopped moving its indicator; the diarizer had
+                // separated three voices cleanly underneath. The longest turn
+                // anybody genuinely held across every recording on disk is 128
+                // seconds.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 400), ("U2", 400, 600)]
+                )
+                let intervals = SensorAttribution.wordIntervals(sensors: raw)
+                expect.equal(intervals.count, 1)
+                expect.equal(intervals.first?.clusterID, SpeakerLabel.sensor(participantID: "U2"))
+            },
+
+            test("an indicator that never moved enrols no voice") { expect in
+                // The half that lasts. A wrong word label lives in one
+                // transcript; a centroid built from three people's speech is
+                // permanent and reaches every later meeting through the profile
+                // that recognises them. On the recording above this embedded
+                // 573 seconds of the far end under one person's name, and that
+                // key already carried somebody's hand-typed confirmation.
+                let overLong = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 400)]
+                )
+                expect.equal(
+                    SensorAttribution.enrollmentIntervals(
+                        sensors: overLong, diarized: [interval("a", 0, 400)]
+                    ),
+                    []
+                )
+                // A turn under the ceiling still enrols, so this cannot be
+                // passing because enrolment is broken.
+                let ordinary = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 200)]
+                )
+                expect.isFalse(
+                    SensorAttribution.enrollmentIntervals(
+                        sensors: ordinary, diarized: [interval("a", 0, 200)]
+                    ).isEmpty
+                )
+            },
+
             test("a participant whose turns dominate no cluster enrolls nothing") { expect in
                 // Two people splitting one cluster evenly means the diarizer
                 // merged them, and embedding either half would put a two-voice

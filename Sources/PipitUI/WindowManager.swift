@@ -16,16 +16,24 @@ public final class WindowManager {
     private var setupWindow: NSWindow?
     private var setupModel: SetupModel?
     private var setupPlacementToken: NSObjectProtocol?
-    /// Until when a permission prompt's aftermath should be treated as focus
-    /// Pipit is owed rather than as the user choosing another application.
-    private var setupRaiseDeadline: Date?
     private var meetingsWindow: NSWindow?
     private var meetingsModel: MeetingsWindowModel?
     private var provisionalWindow: NSWindow?
     private var provisionalPromptID: String?
+    /// The windows currently on screen that Pipit has to stay reachable behind.
+    private var openWindows: Set<ObjectIdentifier> = []
+    /// One per open window, so a window closed by any route is noticed.
+    private var closeTokens: [ObjectIdentifier: NSObjectProtocol] = [:]
+    /// Puts the activation policy into force. Injected so a test can read the
+    /// decision without turning the test process into a Dock application.
+    private let applyPolicy: @MainActor (NSApplication.ActivationPolicy) -> Void
 
-    public init(runtime: PipitRuntime) {
+    public init(
+        runtime: PipitRuntime,
+        applyPolicy: @escaping @MainActor (NSApplication.ActivationPolicy) -> Void = DockPresence.apply
+    ) {
         self.runtime = runtime
+        self.applyPolicy = applyPolicy
         // An open meetings window tracks processing on its own. When a
         // transcript lands, the row and the pane show it without a manual
         // refresh.
@@ -73,8 +81,8 @@ public final class WindowManager {
 
     /// What Pipit is and where it puts things.
     ///
-    /// Pipit has no app menu bar, so this opens from the status menu rather
-    /// than from an About item macOS would provide.
+    /// Opened from the status menu, and from the About item in the menu bar
+    /// menu while a window keeps Pipit in the Dock.
     public func showAbout() {
         if let window = aboutWindow {
             present(window)
@@ -160,7 +168,8 @@ public final class WindowManager {
         // What is left of the problem is handled without a window level: the
         // wizard asks for focus back when a prompt closes, and steps aside when
         // System Settings comes forward, so it is beside the pane rather than
-        // lost behind it.
+        // lost behind it. The Dock icon a window brings with it is what makes
+        // that focus request land.
         //
         // Follows the user rather than making them find it: ordered front, the
         // window comes to whichever space they are on, including alongside a
@@ -168,18 +177,7 @@ public final class WindowManager {
         // system prompts still sit above it.
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.collectionBehavior.insert(.fullScreenAuxiliary)
-        model.onNeedsFocus = { [weak self] in
-            guard let self else { return }
-            // A permission prompt belongs to another process, and closing it
-            // hands activation back to what macOS considers the previous
-            // application, which for an accessory application with no Dock
-            // presence is usually not us. Anything activating in the next couple
-            // of seconds is that handover rather than the user picking an
-            // application, so the workspace observer re-raises instead of
-            // standing down.
-            self.setupRaiseDeadline = Date().addingTimeInterval(2.5)
-            self.raiseSetup()
-        }
+        model.onNeedsFocus = { [weak self] in self?.raiseSetup() }
         setupWindow = window
         setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -187,13 +185,6 @@ public final class WindowManager {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
                 guard let self else { return }
-                // Reacting to the activation itself rather than to a timer: the
-                // window drops and comes back within one frame instead of
-                // blinking out for as long as the next scheduled attempt.
-                if let deadline = self.setupRaiseDeadline, Date() < deadline,
-                    app?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                    self.raiseSetup()
-                }
                 if app?.bundleIdentifier == SetupWindowPlacement.systemSettingsBundleID {
                     self.moveSetupAsideFromSystemSettings()
                 }
@@ -202,17 +193,15 @@ public final class WindowManager {
         present(window)
     }
 
-    /// Brings the setup window to the front.
+    /// Brings the setup window back after a permission prompt closes.
     ///
-    /// `orderFrontRegardless` does the work. macOS refuses to make an accessory
-    /// application active at all: measured here, Pipit stayed behind Finder as
-    /// the active application while its window sat ahead of Finder's in the
-    /// window list. Activation is the part that is refused; raising is not.
+    /// The prompt belongs to another process. macOS hands activation back to
+    /// the previous application, which is Pipit while a window keeps it in the
+    /// Dock, so this asks for the front rather than fighting for it.
     private func raiseSetup() {
         guard let window = setupWindow else { return }
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
     }
 
     /// Moves the setup window off System Settings when it comes forward.
@@ -252,7 +241,6 @@ public final class WindowManager {
             NSWorkspace.shared.notificationCenter.removeObserver(setupPlacementToken)
         }
         setupPlacementToken = nil
-        setupRaiseDeadline = nil
         // The observer polls while the window is up, so closing it by any route
         // has to stop that, not only pressing Done.
         setupModel?.end()
@@ -307,7 +295,7 @@ public final class WindowManager {
     /// otherwise run with nothing on screen to say it had started.
     public func showProvisionalPrompt(_ prompt: ProvisionalPrompt) {
         if provisionalPromptID == prompt.id, let window = provisionalWindow {
-            present(window, activating: false)
+            present(window, activating: false, holdsDockPresence: false)
             return
         }
         closeProvisionalPrompt()
@@ -334,7 +322,7 @@ public final class WindowManager {
         window.level = .floating
         provisionalWindow = window
         provisionalPromptID = prompt.id
-        present(window, activating: false)
+        present(window, activating: false, holdsDockPresence: false)
     }
 
     public func closeProvisionalPrompt() {
@@ -354,7 +342,18 @@ public final class WindowManager {
         return window
     }
 
-    private func present(_ window: NSWindow, activating: Bool = true) {
+    /// Shows a window, and with it the Dock icon that keeps the window
+    /// reachable.
+    ///
+    /// `holdsDockPresence` is false only for the keep-or-discard prompt, which
+    /// sits at the floating level and is answered where it stands.
+    private func present(
+        _ window: NSWindow, activating: Bool = true, holdsDockPresence: Bool = true
+    ) {
+        // Before activating, not after. A policy raised while the application is
+        // already inactive does not bring it back: measured, an inactive
+        // application stayed inactive across the change.
+        if holdsDockPresence { hold(window) }
         if activating {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
@@ -362,6 +361,40 @@ public final class WindowManager {
             // Saving a meeting should not pull the user out of what they are doing.
             window.orderFrontRegardless()
         }
+    }
+
+    /// Counts a window as open until it closes.
+    private func hold(_ window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        if openWindows.insert(key).inserted {
+            closeTokens[key] = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.release(key) }
+            }
+        }
+        refreshDockPresence()
+    }
+
+    private func release(_ key: ObjectIdentifier) {
+        openWindows.remove(key)
+        if let token = closeTokens.removeValue(forKey: key) {
+            NotificationCenter.default.removeObserver(token)
+        }
+        refreshDockPresence()
+    }
+
+    /// Whether a window Pipit has to stay reachable behind is on screen.
+    public var hasOpenWindow: Bool { !openWindows.isEmpty }
+
+    /// Applies the policy the setting and the open windows ask for. Called at
+    /// launch, on every settings change, and whenever a window opens or closes.
+    public func refreshDockPresence() {
+        applyPolicy(
+            DockPresence.policy(
+                showsDockIcon: runtime.settings.showsDockIcon, hasOpenWindow: hasOpenWindow
+            )
+        )
     }
 }
 

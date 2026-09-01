@@ -20,6 +20,7 @@ suites += DetectionTests.all
 suites += SessionTests.all
 suites += HardeningTests.all
 suites.append(UITests.suite)
+suites.append(DockPresenceTests.suite)
 suites.append(SetupFlowTests.suite)
 suites += LocalConfigurationTests.all
 suites += SpeakerIdentityTests.all

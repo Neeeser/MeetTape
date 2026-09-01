@@ -476,16 +476,6 @@ public actor SpeakerStore {
         return found
     }
 
-    public func setLocalUser(_ id: IdentityID, now: Date = Date()) throws {
-        try database.transaction {
-            try database.run("UPDATE identity SET is_local_user = 0 WHERE is_local_user = 1")
-            try database.run(
-                "UPDATE identity SET is_local_user = 1, updated_at = ? WHERE id = ?",
-                [.date(now), .int64(id.rawValue)]
-            )
-        }
-    }
-
     /// Points `source` at `target`.
     ///
     /// Nothing is rewritten. The source keeps its rows and its embeddings, reads
@@ -504,11 +494,31 @@ public actor SpeakerStore {
         // and recomputed a profile nothing reads.
         guard let resolved = try current(target) else { return }
         if resolved.id == source { return }
+        // Read before the write below moves it. `current` resolves through
+        // tombstones, so it is the row's own flag that is wanted here.
+        var sourceIsLocalUser = false
+        try database.query(
+            "SELECT is_local_user FROM identity WHERE id = ?", [.int64(source.rawValue)]
+        ) { sourceIsLocalUser = $0.bool(0) }
         try database.transaction {
             try database.run(
                 "UPDATE identity SET merged_into = ?, updated_at = ? WHERE id = ?",
                 [.int64(resolved.id.rawValue), .date(now), .int64(source.rawValue)]
             )
+            // The flag saying which row is the person at this Mac follows the
+            // survivor. Left on the tombstone, localUser() finds nothing: the
+            // microphone track stops resolving to a named person and the launch
+            // sync creates a second "Me" beside the row just merged.
+            if sourceIsLocalUser {
+                try database.run(
+                    "UPDATE identity SET is_local_user = 0, updated_at = ? WHERE id = ?",
+                    [.date(now), .int64(source.rawValue)]
+                )
+                try database.run(
+                    "UPDATE identity SET is_local_user = 1, updated_at = ? WHERE id = ?",
+                    [.date(now), .int64(resolved.id.rawValue)]
+                )
+            }
             // The source's own centroid is now unreachable and would otherwise
             // keep answering profileStatus for it.
             try database.run(

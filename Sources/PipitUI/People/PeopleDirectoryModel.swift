@@ -507,6 +507,32 @@ public final class PeopleDirectoryModel {
         await reload()
     }
 
+    /// The row the "You" badge is on, if one has been created yet.
+    public var localUser: SpeakerDirectoryEntry? {
+        entries.first { $0.identity.isLocalUser }
+    }
+
+    /// Whether this row can be told it is also you. Not you already, and only
+    /// once there is a you to merge into.
+    public func canBeYou(_ entry: SpeakerDirectoryEntry) -> Bool {
+        guard let localUser else { return false }
+        return entry.id != localUser.id
+    }
+
+    /// Folds a second row for the person at this Mac into the one that already
+    /// is. Slack names a huddle's participants and the microphone track is
+    /// named from nothing, so the same person routinely arrives as two rows.
+    ///
+    /// The row picked survives and keeps its name, because it is the one that
+    /// carries the name from the platform. Merging leaves both rows in place
+    /// and is undone by clearing one column, so a mistake here costs nothing.
+    public func makeYou(_ entry: SpeakerDirectoryEntry) async {
+        guard let localUser, entry.id != localUser.id else { return }
+        await runtime.mergeIdentities(localUser.id, into: entry.id)
+        selection = [entry.id]
+        await reload()
+    }
+
     public func beginSetOrganization() { beginSetOrganization(selectedEntries) }
 
     public func beginSetOrganization(_ targets: [SpeakerDirectoryEntry]) {

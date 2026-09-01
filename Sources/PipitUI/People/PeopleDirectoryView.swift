@@ -171,6 +171,13 @@ public struct PeopleDirectoryView: View {
     /// is part of it, and on that row alone otherwise.
     @ViewBuilder private func menu(_ entry: SpeakerDirectoryEntry) -> some View {
         let targets = model.contextTargets(for: entry)
+        if targets.count == 1, model.canBeYou(entry) {
+            // The row the microphone track built and the row Slack named are
+            // one person. Merging them is what puts the mic-track voice and the
+            // platform's name on one profile.
+            Button("This is also you") { Task { await model.makeYou(entry) } }
+            Divider()
+        }
         Button("Set organization…") { model.beginSetOrganization(targets) }
         if targets.count == 1 {
             Button("Forget learned voice…") { model.confirmForgetVoice(of: entry) }

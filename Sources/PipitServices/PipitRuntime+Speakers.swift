@@ -291,28 +291,6 @@ extension PipitRuntime {
         }
     }
 
-    /// Says which person in the directory is the one using this Mac.
-    ///
-    /// The identity owns the answer and Settings caches their name from it. The
-    /// two used to be set separately: a free-text field held a name, the store
-    /// held a flag, and `ensureLocalUserIdentity` pushed the name onto the
-    /// flagged row at every launch, so picking the wrong one left the
-    /// microphone track labelled from a field that named nobody.
-    public func setLocalUser(_ identityID: IdentityID) async {
-        guard let store = speakerStore else { return }
-        do {
-            guard let identity = try await store.current(identityID) else { return }
-            try await store.setLocalUser(identity.id)
-            var updated = settings
-            updated.processing.localUserIdentityID = identity.id
-            updated.localUserName = identity.resolvedName
-            update(settings: updated)
-            Log.app.info("local user set to identity \(identity.id.rawValue, privacy: .public)")
-        } catch {
-            Log.app.error("local user not set: \(logSafeDescription(error), privacy: .public)")
-        }
-    }
-
     /// Repairs the archive once, for meetings recorded before the microphone
     /// track was written into voice memory.
     func backfillLocalUserOccurrences() async {
@@ -391,6 +369,24 @@ extension PipitRuntime {
         } catch {
             Log.app.error("people list unavailable: \(logSafeDescription(error), privacy: .public)")
             return []
+        }
+    }
+
+    /// Records that the user reached for this person just now.
+    ///
+    /// The same stamp recognition writes when it matches a voice. Naming
+    /// somebody by hand is at least as strong a signal, and the picker orders
+    /// its "Recent" section by it.
+    public func notePersonUsed(_ identityID: IdentityID) {
+        guard let store = speakerStore else { return }
+        Task {
+            do {
+                try await store.noteSeen(identityID, at: Date())
+            } catch {
+                Log.app.error(
+                    "last-seen not recorded: \(logSafeDescription(error), privacy: .public)"
+                )
+            }
         }
     }
 
@@ -532,7 +528,18 @@ extension PipitRuntime {
     public func mergeIdentities(_ source: IdentityID, into target: IdentityID) async {
         guard let store = speakerStore else { return }
         do {
+            let wasLocalUser = try await store.current(source)?.isLocalUser == true
             try await store.merge(source, into: target)
+            // Settings caches which row is you and what it is called. Reads
+            // resolve through the tombstone either way, but the launch sync
+            // writes the cached name onto whatever row is flagged, so leaving
+            // the old name here renamed the survivor back on the next start.
+            if wasLocalUser, let survivor = try await store.current(target) {
+                var updated = settings
+                updated.processing.localUserIdentityID = survivor.id
+                updated.localUserName = survivor.resolvedName
+                update(settings: updated)
+            }
             try await pipeline.refreshCachedNames(for: source)
             refreshRecentMeetings()
         } catch {

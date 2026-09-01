@@ -683,6 +683,32 @@ enum UITests {
             VoiceEnrollmentView(model: VoiceEnrollmentModel(runtime: runtime), onClose: {}),
             size: NSSize(width: 520, height: 520)
         )
+
+        peoplePickerBuilds(model.entries)
+    }
+
+    /// Every state the picker popover reaches: nobody in the directory yet, a
+    /// full list, a query that narrows it, and a query that matches nobody,
+    /// which is the state that offers to create the person typed.
+    @MainActor
+    static func peoplePickerBuilds(_ entries: [SpeakerDirectoryEntry]) {
+        let picker = PeoplePickerModel()
+        func build(_ people: [SpeakerDirectoryEntry]) -> some View {
+            PeoplePickerView(
+                people: people,
+                context: people.first.map { [$0.id: PeoplePickerContext.onAChip] } ?? [:],
+                model: picker,
+                leaveUnnamedTitle: "Leave unnamed",
+                onPick: { _ in },
+                onNewPerson: { _ in }
+            )
+        }
+        render(build([]), size: NSSize(width: 300, height: 200))
+        render(build(entries), size: NSSize(width: 300, height: 400))
+        picker.query = "an"
+        render(build(entries), size: NSSize(width: 300, height: 400))
+        picker.query = "nobody by this name"
+        render(build(entries), size: NSSize(width: 300, height: 200))
     }
 }
 

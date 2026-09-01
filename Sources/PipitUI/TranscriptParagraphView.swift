@@ -36,10 +36,15 @@ public struct SelectedLineRange: Equatable {
 struct TranscriptParagraph: NSViewRepresentable {
     var text: String
     var spans: [TranscriptWordSpan]
+    /// The people already in this meeting, and nobody else.
+    ///
+    /// An `NSMenu` holds no search field, so the long tail of the directory is
+    /// not offered here: the submenu carries the short list that answers this
+    /// nearly every time, and hands the rest to the picker.
     var people: [SpeakerDirectoryEntry]
     var onAction: (TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void
-    /// Chosen "New person…", so the panel can ask for a name.
-    var onNewPerson: (TranscriptParagraphAction) -> Void
+    /// Chose "Someone else…", so the panel can open the picker.
+    var onSomeoneElse: (TranscriptParagraphAction) -> Void
 
     func makeNSView(context: Context) -> TranscriptTextView {
         let view = TranscriptTextView()
@@ -68,7 +73,7 @@ struct TranscriptParagraph: NSViewRepresentable {
         view.spans = spans
         view.people = people
         view.onAction = onAction
-        view.onNewPerson = onNewPerson
+        view.onSomeoneElse = onSomeoneElse
     }
 
     func sizeThatFits(
@@ -88,7 +93,7 @@ public final class TranscriptTextView: NSTextView {
     public var spans: [TranscriptWordSpan] = []
     var people: [SpeakerDirectoryEntry] = []
     var onAction: ((TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void)?
-    var onNewPerson: ((TranscriptParagraphAction) -> Void)?
+    var onSomeoneElse: ((TranscriptParagraphAction) -> Void)?
 
     /// The height this paragraph needs at a given width. Laid out rather than
     /// estimated, because a turn can be one line or twenty.
@@ -132,8 +137,8 @@ public final class TranscriptTextView: NSTextView {
             })
         }
         if !people.isEmpty { submenu.addItem(.separator()) }
-        submenu.addItem(ClosureMenuItem(title: "New person…") {
-            [weak self] in self?.onNewPerson?(action)
+        submenu.addItem(ClosureMenuItem(title: "Someone else…") {
+            [weak self] in self?.onSomeoneElse?(action)
         })
         item.submenu = submenu
         menu.insertItem(item, at: 0)

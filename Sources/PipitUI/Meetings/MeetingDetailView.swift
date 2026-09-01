@@ -333,7 +333,6 @@ public struct MeetingDetailView: View {
             if !detail.speakerSuggestions.isEmpty {
                 SuggestionPills(model: model, detail: detail)
             }
-            if detail.namingCluster != nil { namingField }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -414,35 +413,6 @@ public struct MeetingDetailView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .disabled(detail.isReanalyzing)
-    }
-
-    private var namingField: some View {
-        HStack {
-            TextField("Name", text: detail.text(\.newPersonDraft))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 260)
-                .onSubmit { commitNaming() }
-            Button("Save") { commitNaming() }
-                .disabled(detail.newPersonDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-            Button("Cancel") { detail.cancelNaming() }
-            Spacer()
-        }
-    }
-
-    /// Routed through the window model so the naming of a whole cluster still
-    /// reports what it rewrote. The detail model's own `commitNaming` covers
-    /// the cases the transcript raises, which report themselves.
-    private func commitNaming() {
-        if let cluster = detail.namingCluster,
-            let row = detail.speakerRows.first(where: {
-                $0.clusterID == cluster.clusterID && $0.recordingID == cluster.recordingID
-            }) {
-            let name = detail.newPersonDraft
-            detail.cancelNaming()
-            model.assignCluster(row, toNewPerson: name)
-            return
-        }
-        detail.commitNaming()
     }
 
     // MARK: - tabs and content
@@ -735,21 +705,29 @@ struct SpeakerChips: View {
                 identityID: row.identity?.id,
                 side: 20
             )
-            Menu(row.displayName) {
-                Text(chipDetail(row))
-                Divider()
-                ForEach(detail.knownPeople) { person in
-                    Button(person.identity.resolvedName) { model.assignCluster(row, to: person) }
+            Button(row.displayName) { detail.beginNaming(target(row)) }
+                .buttonStyle(.plain)
+                .font(.callout)
+                .popover(isPresented: picking(row), arrowEdge: .bottom) {
+                    PeoplePickerView(
+                        people: detail.knownPeople,
+                        context: detail.pickerContext,
+                        model: detail.picker,
+                        leaveUnnamedTitle: row.isUnnamed ? nil : "Leave unnamed",
+                        onPick: { person in
+                            detail.cancelNaming()
+                            model.assignCluster(row, to: person)
+                        },
+                        onNewPerson: { name in
+                            detail.cancelNaming()
+                            model.assignCluster(row, toNewPerson: name)
+                        },
+                        onLeaveUnnamed: {
+                            detail.cancelNaming()
+                            model.clearCluster(row)
+                        }
+                    )
                 }
-                if !detail.knownPeople.isEmpty { Divider() }
-                Button("New person…") {
-                    detail.beginNamingCluster(row.clusterID, in: row.recordingID)
-                }
-                Button("Leave unnamed") { model.clearCluster(row) }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .font(.callout)
             Text(Format.shortDuration(row.speechSeconds))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -764,6 +742,18 @@ struct SpeakerChips: View {
             if unnamed { Capsule().stroke(Color.orange.opacity(0.55), lineWidth: 1) }
         }
         .help(chipDetail(row))
+    }
+
+    private func target(_ row: MeetingSpeakerRow) -> SpeakerNamingTarget {
+        .cluster(row.allClusterIDs, in: row.recordingID)
+    }
+
+    private func picking(_ row: MeetingSpeakerRow) -> Binding<Bool> {
+        let id = target(row).id
+        return Binding(
+            get: { detail.isNaming(id) },
+            set: { open in if !open, detail.isNaming(id) { detail.cancelNaming() } }
+        )
     }
 
     /// What the automatic decision was, in words rather than a number.

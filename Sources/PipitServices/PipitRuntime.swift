@@ -571,15 +571,6 @@ public final class PipitRuntime {
         onStatusChange?()
     }
 
-    /// Applies a settings change that also has to reach the identity store,
-    /// which is where the local user's name lives once they have a profile.
-    public func updateSettingsAndIdentity(_ newSettings: AppSettings) {
-        let renamed = newSettings.localUserName != settings.localUserName
-        update(settings: newSettings)
-        guard renamed else { return }
-        enqueue { [weak self] in await self?.ensureLocalUserIdentity() }
-    }
-
     // MARK: - import
 
     /// Imports an existing recording. The original is copied in and left untouched.

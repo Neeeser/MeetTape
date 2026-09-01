@@ -145,10 +145,15 @@ public struct SessionController: Sendable {
         /// buffered audio is dropped.
         public var candidateEvidenceGraceSeconds: Double
 
+        /// The range Settings offers for each of the two waits the user sets.
+        /// Held here so the pickers and a value read off disk agree.
+        public static let endGraceRange: ClosedRange<Double> = 2...20
+        public static let reconnectWindowRange: ClosedRange<Double> = 10...180
+
         public init(
-            reconnectWindowSeconds: Double = 90,
+            reconnectWindowSeconds: Double = 30,
             candidateTimeoutSeconds: Double = 600,
-            endGraceSeconds: Double = 6,
+            endGraceSeconds: Double = 4,
             candidateEvidenceGraceSeconds: Double = 20
         ) {
             self.reconnectWindowSeconds = reconnectWindowSeconds

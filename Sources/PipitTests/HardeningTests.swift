@@ -618,6 +618,35 @@ enum HardeningTests {
                 }
             },
 
+            test("a settings file without the meeting waits gets the current ones") { expect in
+                // Every installation predates the two keys, and the point of
+                // adding them was that the waits they replace were too long.
+                let settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+                expect.equal(settings.meetingEndGraceSeconds, 4)
+                expect.equal(settings.meetingReconnectWindowSeconds, 30)
+                let configuration = settings.sessionConfiguration
+                expect.equal(configuration.endGraceSeconds, 4)
+                expect.equal(configuration.reconnectWindowSeconds, 30)
+            },
+
+            test("hand-edited meeting waits are clamped to the supported range") { expect in
+                // The pickers cannot produce these. A hand-edited file can, and a
+                // zero-second wait ends a meeting on one dropped poll.
+                let json = Data(
+                    #"{"meetingEndGraceSeconds":0,"meetingReconnectWindowSeconds":86400}"#.utf8
+                )
+                let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+                let configuration = settings.sessionConfiguration
+                expect.equal(
+                    configuration.endGraceSeconds,
+                    SessionController.Configuration.endGraceRange.lowerBound
+                )
+                expect.equal(
+                    configuration.reconnectWindowSeconds,
+                    SessionController.Configuration.reconnectWindowRange.upperBound
+                )
+            },
+
             test("a provider set to never record does not suppress another one") { expect in
                 var policies = ProviderPolicies()
                 policies.zoom = ProviderPolicy(autoStart: .never, autoStop: true)

@@ -26,6 +26,27 @@ enum SessionTests {
         )
     }
 
+    /// Runs a confirmed meeting and then withholds all evidence, returning how
+    /// many seconds passed before the meeting was finished.
+    static func secondsUntilFinish(
+        _ controller: inout SessionController, step: Double = 0.5, limit: Double = 400
+    ) -> Double? {
+        let wall = Date(timeIntervalSince1970: 1_787_070_000)
+        let start = 100.0
+        _ = controller.update(
+            evidence: [meetEvidence(confidence: .confirmed)], now: start, wallClock: wall
+        )
+        var now = start
+        while now - start < limit {
+            now += step
+            let actions = controller.update(evidence: [], now: now, wallClock: wall)
+            if actions.contains(where: { if case .finishRecording = $0 { true } else { false } }) {
+                return now - start
+            }
+        }
+        return nil
+    }
+
     static var suite: Suite {
         Suite("SessionController", [
             test("a candidate arms capture before anything reaches disk") { expect in
@@ -259,24 +280,30 @@ enum SessionTests {
             },
 
             test("a meeting that does not come back is finished after the window") { expect in
-                var controller = SessionController()
-                let wall = Date(timeIntervalSince1970: 1_787_070_000)
-                _ = controller.update(
-                    evidence: [meetEvidence(confidence: .confirmed)], now: 100, wallClock: wall
+                let configuration = SessionController.Configuration()
+                var controller = SessionController(configuration: configuration)
+                let elapsed = try expect.unwrap(
+                    secondsUntilFinish(&controller), "the meeting should end once the reconnect window expires"
                 )
-                var now = 100.0
-                var finished = false
-                for _ in 0..<400 {
-                    now += 0.5
-                    let actions = controller.update(evidence: [], now: now, wallClock: wall)
-                    if actions.contains(where: { if case .finishRecording = $0 { true } else { false } }) {
-                        finished = true
-                        break
-                    }
-                }
-                expect.isTrue(finished, "the meeting should end once the reconnect window expires")
                 expect.equal(controller.snapshot.state, .idle)
-                expect.isTrue(now - 100 >= 90, "ended too early: \(now - 100)s")
+                let waited = configuration.endGraceSeconds + configuration.reconnectWindowSeconds
+                expect.isTrue(elapsed >= waited, "ended too early: \(elapsed)s, expected \(waited)s")
+                expect.isTrue(elapsed < waited + 1, "ended too late: \(elapsed)s, expected \(waited)s")
+            },
+
+            test("a shorter configured wait ends the meeting sooner") { expect in
+                // The two waits are settings, so the lifecycle has to read them
+                // rather than the numbers it was written against.
+                var controller = SessionController(
+                    configuration: SessionController.Configuration(
+                        reconnectWindowSeconds: 10, endGraceSeconds: 2
+                    )
+                )
+                let elapsed = try expect.unwrap(
+                    secondsUntilFinish(&controller), "the meeting should end once the configured wait expires"
+                )
+                expect.isTrue(elapsed >= 12, "ended before the configured wait: \(elapsed)s")
+                expect.isTrue(elapsed < 13, "ignored the configured wait: \(elapsed)s")
             },
 
             test("provider state never stops a manually started recording") { expect in

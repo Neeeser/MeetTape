@@ -165,7 +165,9 @@ public final class PipitRuntime {
         // Reads the current setting on every use, so a folder chosen in Settings
         // applies straight away.
         self.repository = MeetingRepository(rootProvider: { snapshot.withLock { $0.storageRoot } })
-        self.sessionController = SessionController(policies: loaded.providers)
+        self.sessionController = SessionController(
+            configuration: loaded.sessionConfiguration, policies: loaded.providers
+        )
 
         captureEngine = CaptureEngine(
             clock: clock,
@@ -551,6 +553,9 @@ public final class PipitRuntime {
             }
         }
         sessionController.policies = newSettings.providers
+        // Read on every poll, so a shorter wait chosen mid-call applies to the
+        // call in progress.
+        sessionController.configuration = newSettings.sessionConfiguration
         detectionEngine.updateGenericConfiguration(newSettings.genericDetectorConfiguration)
         status.detectionPaused = newSettings.providers.detectionPaused
         // A different model choice changes which units count as installed. On

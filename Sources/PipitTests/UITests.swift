@@ -495,26 +495,47 @@ enum UITests {
 
             test("the Firefox card reads the connection and what the build carries") { expect in
                 expect.equal(
-                    FirefoxAddOnState(connection: .fresh, hasBundledAddOn: true), .reporting
+                    FirefoxAddOnState(
+                        connection: .fresh, isInProfile: true, hasBundledAddOn: true
+                    ),
+                    .reporting
                 )
                 expect.equal(
-                    FirefoxAddOnState(connection: .stale, hasBundledAddOn: true), .installed,
+                    FirefoxAddOnState(
+                        connection: .stale, isInProfile: true, hasBundledAddOn: true
+                    ),
+                    .installed,
                     "a held connection with no meeting on screen is installed and idle"
                 )
                 expect.equal(
-                    FirefoxAddOnState(connection: .stale, hasBundledAddOn: false), .installed,
-                    "an add-on loaded by hand reads as installed, signed or not"
+                    FirefoxAddOnState(
+                        connection: .stale, isInProfile: false, hasBundledAddOn: false
+                    ),
+                    .installed,
+                    "a temporary add-on is on no profile's disk and still installed"
                 )
                 expect.equal(
-                    FirefoxAddOnState(connection: .absent, hasBundledAddOn: true), .missing,
-                    "not connected, and this build has one to offer"
+                    FirefoxAddOnState(
+                        connection: .disconnected, isInProfile: true, hasBundledAddOn: true
+                    ),
+                    .connecting,
+                    "restarting Pipit drops the connection of an add-on that is still there"
                 )
                 expect.equal(
-                    FirefoxAddOnState(connection: .disconnected, hasBundledAddOn: false),
+                    FirefoxAddOnState(
+                        connection: .absent, isInProfile: false, hasBundledAddOn: true
+                    ),
+                    .missing,
+                    "nothing installed, and this build has one to offer"
+                )
+                expect.equal(
+                    FirefoxAddOnState(
+                        connection: .absent, isInProfile: false, hasBundledAddOn: false
+                    ),
                     .unavailable,
-                    "not connected, and there is nothing to install"
+                    "nothing installed, and there is nothing to install"
                 )
-                expect.isTrue(FirefoxAddOnState.reporting.isInstalled)
+                expect.isTrue(FirefoxAddOnState.connecting.isInstalled)
                 expect.isFalse(FirefoxAddOnState.missing.isInstalled)
             },
 
@@ -544,6 +565,13 @@ enum UITests {
 
                 status.sensorConnection = .disconnected
                 expect.isTrue(status.sensorNeedsAttention, "the transport dropped")
+
+                status.firefoxAddOnInProfile = true
+                expect.isFalse(
+                    status.sensorNeedsAttention,
+                    "an add-on still in the profile is between connections, not gone"
+                )
+                status.firefoxAddOnInProfile = false
 
                 status.isFirefoxRunning = false
                 expect.isFalse(

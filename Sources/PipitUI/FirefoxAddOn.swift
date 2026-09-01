@@ -46,27 +46,38 @@ enum FirefoxAddOn {
     }
 }
 
-/// What the Firefox card reports, from the two facts that decide it.
+/// What the Firefox card reports, from the facts that decide it.
 public enum FirefoxAddOnState: Equatable {
     /// Installed and holding a connection, with no meeting on screen.
     case installed
     /// Installed and reporting a meeting right now.
     case reporting
-    /// Not connected, and this build has an add-on to install.
+    /// In a Firefox profile, but not talking to Pipit yet. Restarting Pipit
+    /// drops the connection, and the add-on waits out a backoff before calling
+    /// in again, so this is an ordinary state rather than a fault.
+    case connecting
+    /// Not connected, not in a profile, and this build has one to install.
     case missing
-    /// Not connected, and this build carries no signed add-on to offer.
+    /// The same, except this build carries no signed add-on to offer.
     case unavailable
 
-    public init(connection: BrowserSensorTracker.Connection, hasBundledAddOn: Bool) {
-        switch (connection, hasBundledAddOn) {
-        case (.fresh, _): self = .reporting
-        case (.stale, _): self = .installed
-        case (_, true): self = .missing
-        case (_, false): self = .unavailable
+    public init(
+        connection: BrowserSensorTracker.Connection,
+        isInProfile: Bool,
+        hasBundledAddOn: Bool
+    ) {
+        switch (connection, isInProfile, hasBundledAddOn) {
+        case (.fresh, _, _): self = .reporting
+        case (.stale, _, _): self = .installed
+        case (_, true, _): self = .connecting
+        case (_, false, true): self = .missing
+        case (_, false, false): self = .unavailable
         }
     }
 
-    public var isInstalled: Bool { self == .installed || self == .reporting }
+    public var isInstalled: Bool {
+        self == .installed || self == .reporting || self == .connecting
+    }
 
     var title: String {
         isInstalled ? "Add-on installed" : "Add-on not installed"
@@ -75,6 +86,7 @@ public enum FirefoxAddOnState: Equatable {
     var symbol: String {
         switch self {
         case .installed, .reporting: "checkmark.circle.fill"
+        case .connecting: "clock.fill"
         case .missing: "exclamationmark.circle.fill"
         case .unavailable: "circle.slash"
         }
@@ -83,8 +95,8 @@ public enum FirefoxAddOnState: Equatable {
     var color: Color {
         switch self {
         case .installed, .reporting: .green
+        case .connecting, .unavailable: .secondary
         case .missing: .orange
-        case .unavailable: .secondary
         }
     }
 
@@ -94,6 +106,9 @@ public enum FirefoxAddOnState: Equatable {
         switch self {
         case .reporting: "Reporting a meeting."
         case .installed: "Watching for Meet and Zoom calls."
+        case .connecting:
+            "In Firefox, and not connected to Pipit yet. It calls in within a minute, "
+                + "or as soon as you open a call."
         case .missing:
             "Meet and Zoom still record, from window titles and microphone state. "
                 + "Recording starts at the prejoin screen rather than when you join."

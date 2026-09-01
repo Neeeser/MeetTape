@@ -17,6 +17,7 @@ struct BrowsersSettingsPane: View {
     private var addOnState: FirefoxAddOnState {
         FirefoxAddOnState(
             connection: runtime.status.sensorConnection,
+            isInProfile: runtime.status.firefoxAddOnInProfile,
             hasBundledAddOn: FirefoxAddOn.bundledAddOn != nil
         )
     }

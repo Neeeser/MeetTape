@@ -388,6 +388,7 @@ struct FirefoxStep: View {
     private var addOnState: FirefoxAddOnState {
         FirefoxAddOnState(
             connection: model.runtime.status.sensorConnection,
+            isInProfile: model.runtime.status.firefoxAddOnInProfile,
             hasBundledAddOn: FirefoxAddOn.bundledAddOn != nil
         )
     }

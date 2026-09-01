@@ -11,6 +11,10 @@ suites.append(StorageTests.suite)
 suites.append(MeetingFolderNameTests.suite)
 suites.append(MeetingFolderRenameTests.suite)
 suites.append(TitleSuggestionTests.suite)
+suites.append(FolderMatchTests.suite)
+suites.append(FolderStorageTests.suite)
+suites.append(RecurringSeriesTests.suite)
+suites.append(FolderPlacementTests.suite)
 suites.append(AudioTests.suite)
 suites += DetectionTests.all
 suites += SessionTests.all

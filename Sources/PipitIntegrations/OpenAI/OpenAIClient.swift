@@ -280,6 +280,25 @@ public struct OpenAIClient: AIBackend {
             properties["notes"] = ["type": "string"]
             required.append("notes")
         }
+        let asksAboutFolders = !request.folders.isEmpty
+        if asksAboutFolders {
+            properties["folder_candidates"] = [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": [
+                        "folder": ["type": "string"],
+                        "confidence": ["type": "number"],
+                        "why": ["type": "string"],
+                        "quote": ["type": "string"],
+                        "at_seconds": ["type": "number"],
+                    ],
+                    "required": ["folder", "confidence", "why", "quote", "at_seconds"],
+                ],
+            ]
+            required.append("folder_candidates")
+        }
         guard !required.isEmpty else { return MeetingEnrichment() }
 
         let schema: [String: Any] = [
@@ -288,7 +307,7 @@ public struct OpenAIClient: AIBackend {
             "properties": properties,
             "required": required,
         ]
-        let instructions = """
+        var instructions = """
         You summarise meeting transcripts. Write plainly and specifically: state \
         what was decided, who owns what, and what happens next. The title is a \
         short noun phrase naming the meeting, under eight words, with no trailing \
@@ -296,7 +315,38 @@ public struct OpenAIClient: AIBackend {
         of decisions and action items. Never invent participants, dates or figures \
         that are not in the transcript.
         """
+        if asksAboutFolders {
+            instructions += """
+            \n\nYou also decide whether this meeting belongs in one of the user's \
+            existing folders. Return folder_candidates as at most two entries, best \
+            first, and only for folders in the list you are given. Never invent a \
+            folder name. Every entry needs a verbatim quote from the transcript and \
+            the time in seconds where it appears; an entry you cannot quote for is \
+            an entry to leave out. confidence runs from 0 to 1. why is one short \
+            clause naming the evidence, under twelve words, with no trailing \
+            punctuation.
+
+            Return an empty array when no folder fits. That is the ordinary \
+            answer, not a failure. Two examples of it. A one to one whose only \
+            link to a client folder is that one person in the call also appears \
+            in that folder: a person is not a topic, so return nothing. A \
+            technical review of a model evaluation, where every folder is a \
+            client: the subject belongs to none of them, so return nothing.
+            """
+        }
         var context = "Provider: \(request.provider.displayName). Duration: \(Int(request.durationSeconds / 60)) minutes."
+        if asksAboutFolders {
+            let catalogue = request.folders.map { folder -> String in
+                var line = "- \(folder.name)"
+                if !folder.about.isEmpty { line += ": \(folder.about)" }
+                if let rule = folder.rule, !rule.isEmpty { line += " [files: \(rule)]" }
+                if !folder.recentTitles.isEmpty {
+                    line += "\n  holds: \(folder.recentTitles.joined(separator: "; "))"
+                }
+                return line
+            }.joined(separator: "\n")
+            context += "\n\nThe folders that exist:\n\(catalogue)"
+        }
         if !request.participants.isEmpty {
             context += "\nParticipants: \(request.participants.joined(separator: ", "))"
         }
@@ -335,8 +385,31 @@ public struct OpenAIClient: AIBackend {
             title: object["title"] as? String,
             summary: object["summary"] as? String,
             description: object["description"] as? String,
-            notes: object["notes"] as? String
+            notes: object["notes"] as? String,
+            folderCandidates: Self.folderCandidates(from: object["folder_candidates"])
         )
+    }
+
+    /// Reads the folder answers, keeping the two best and dropping anything
+    /// malformed. A model that returns six is answering a different question
+    /// from the one asked, and the matcher only ever looks at two.
+    static func folderCandidates(from value: Any?) -> [ModelFolderCandidate] {
+        guard let entries = value as? [[String: Any]] else { return [] }
+        return entries.compactMap { entry -> ModelFolderCandidate? in
+            guard let folder = entry["folder"] as? String, !folder.isEmpty,
+                  let confidence = entry["confidence"] as? Double
+            else { return nil }
+            return ModelFolderCandidate(
+                folderName: folder,
+                confidence: min(max(confidence, 0), 1),
+                why: (entry["why"] as? String) ?? "",
+                quote: entry["quote"] as? String,
+                atSeconds: entry["at_seconds"] as? Double
+            )
+        }
+        .sorted { $0.confidence > $1.confidence }
+        .prefix(2)
+        .map { $0 }
     }
 
     // MARK: - transport

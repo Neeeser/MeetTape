@@ -132,6 +132,27 @@ public final class Expect: Sendable {
         }
     }
 
+    /// Asserts the specific error, not merely that one was thrown. A typed
+    /// domain error is part of the contract, and a test that accepts any error
+    /// passes when the code throws the wrong one.
+    public func throwsError<E: Error & Equatable>(
+        _ expected: E,
+        _ body: () throws -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        do {
+            try body()
+            fail("expected \(expected)", file: file, line: line)
+        } catch let error as E {
+            if error != expected {
+                fail("expected \(expected), got \(error)", file: file, line: line)
+            }
+        } catch {
+            fail("expected \(expected), got \(error)", file: file, line: line)
+        }
+    }
+
     public func throwsError(
         _ body: () async throws -> Void,
         _ message: @autoclosure () -> String = "expected an error",

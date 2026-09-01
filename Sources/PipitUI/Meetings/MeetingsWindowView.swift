@@ -52,6 +52,7 @@ public struct MeetingsWindowView: View {
         } message: {
             Text(model.trashProblem ?? "")
         }
+        .folderPrompts(model: model)
         // Writes a half-typed title or note before the window goes away. The
         // model saves 1.5 seconds after typing stops, so without this a close
         // inside that window loses what was typed.
@@ -68,7 +69,10 @@ public struct MeetingsWindowView: View {
         let visible = sections.reduce(0) { $0 + $1.rows.count }
         return VStack(spacing: 0) {
             VStack(spacing: 8) {
-                searchField
+                HStack(spacing: 8) {
+                    searchField
+                    modeSwitch
+                }
                 Picker("", selection: Binding(
                     get: { model.filter }, set: { model.filter = $0 }
                 )) {
@@ -79,10 +83,99 @@ public struct MeetingsWindowView: View {
             }
             .padding(10)
             Divider()
-            list(sections)
+            if let open = model.openFolderRow {
+                breadcrumb(open)
+                Divider()
+            }
+            if model.showsFolderList {
+                folderList
+            } else {
+                list(sections)
+            }
             Divider()
             footer(visible: visible)
         }
+    }
+
+    /// Which of the two lists is showing. Two icons rather than a second
+    /// segmented row: the four filters below already own that row, and they
+    /// apply to both views.
+    private var modeSwitch: some View {
+        Picker("", selection: Binding(
+            get: { model.mode }, set: { model.show($0) }
+        )) {
+            ForEach(MeetingsListMode.allCases) { mode in
+                Image(systemName: mode.symbol).tag(mode)
+                    .help(mode.label)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    private func breadcrumb(_ folder: FolderRow) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                model.closeFolder()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
+                    Text("Folders")
+                }
+            }
+            .buttonStyle(.link)
+            Text("/").foregroundStyle(.tertiary)
+            Image(systemName: "folder.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(FolderTint.color(folder.folder.tintIndex))
+            Text(folder.name).fontWeight(.semibold).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.callout)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private var folderList: some View {
+        let folders = model.visibleFolders
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if folders.isEmpty {
+                    emptyFolderList
+                } else {
+                    Text("Folders · \(folders.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 10)
+                        .padding(.bottom, 4)
+                    ForEach(folders) { folder in
+                        FolderRowView(model: model, row: folder)
+                    }
+                }
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder private var emptyFolderList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if model.query.isEmpty {
+                Text("No folders yet")
+                Text(
+                    "A folder is an ordinary directory under Meetings/Folders. Right-click a "
+                        + "meeting on the timeline to file it into a new one."
+                )
+                .foregroundStyle(.secondary)
+            } else {
+                Text("No match")
+                Text("Folder names and what they are for.").foregroundStyle(.secondary)
+            }
+        }
+        .font(.callout)
+        .padding(12)
     }
 
     private var searchField: some View {
@@ -166,20 +259,45 @@ public struct MeetingsWindowView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Button {
-                model.revealArchive()
-            } label: {
-                Label("Open folder", systemImage: "folder")
-                    .font(.caption)
+            if model.showsFolderList {
+                Button {
+                    model.pendingNewFolder = NewFolderRequest(filing: [])
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus").font(.caption)
+                }
+                .buttonStyle(.link)
+            } else {
+                Button {
+                    model.revealArchive()
+                } label: {
+                    Label("Open folder", systemImage: "folder")
+                        .font(.caption)
+                }
+                .buttonStyle(.link)
+                .help("Every meeting is an ordinary folder. Opening it changes nothing.")
             }
-            .buttonStyle(.link)
-            .help("Every meeting is an ordinary folder. Opening it changes nothing.")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
     }
 
     private func footerText(visible: Int) -> String {
+        if model.showsFolderList {
+            let folders = model.visibleFolders
+            let filed = folders.reduce(0) { $0 + $1.meetingCount }
+            let unfiled = model.rows.count { !$0.isArchived && $0.summary.folderName == nil }
+            return "\(folders.count) \(folders.count == 1 ? "folder" : "folders") · "
+                + "\(filed) filed · \(unfiled) unfiled"
+        }
+        if let open = model.openFolderRow {
+            return "\(open.name) · \(open.meetingCount) "
+                + "\(open.meetingCount == 1 ? "meeting" : "meetings") · "
+                + Format.shortDuration(open.totalDuration)
+        }
+        return meetingFooterText(visible: visible)
+    }
+
+    private func meetingFooterText(visible: Int) -> String {
         // Against what the filter holds rather than the whole archive. With
         // anything archived, All never shows every row and the footer read
         // "14 of 15" with nothing typed in the search field.
@@ -199,6 +317,8 @@ public struct MeetingsWindowView: View {
     @ViewBuilder private var detail: some View {
         if model.selection.count > 1 {
             MeetingsSelectionView(model: model)
+        } else if model.selection.isEmpty, let folder = model.openFolderRow {
+            FolderDetailView(model: model, row: folder)
         } else if let detail = model.detail {
             MeetingDetailView(model: model, detail: detail)
         } else {
@@ -230,7 +350,13 @@ struct MeetingRowView: View {
             kindIcon
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.title).font(.callout).lineLimit(1)
-                Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    if let folder = model.folderTag(for: row) {
+                        Spacer(minLength: 3)
+                        FolderTagView(row: folder)
+                    }
+                }
             }
             Spacer(minLength: 4)
             trailing
@@ -262,6 +388,30 @@ struct MeetingRowView: View {
         }
         Button(many ? "Rebuild \(targets.count) transcripts" : "Rebuild transcript") {
             model.rebuildTargets(targets)
+        }
+        Divider()
+        Menu(many ? "Move \(targets.count) to Folder" : "Move to Folder") {
+            ForEach(model.folderRows) { folder in
+                Button {
+                    model.file(targets, in: folder.name)
+                } label: {
+                    // A tick on the folder every one of them is already in, so
+                    // the menu says where the selection stands as well as where
+                    // it could go.
+                    if targets.allSatisfy({ $0.summary.folderName == folder.name }) {
+                        Label(folder.name, systemImage: "checkmark")
+                    } else {
+                        Text(folder.name)
+                    }
+                }
+            }
+            if !model.folderRows.isEmpty { Divider() }
+            Button("New Folder…") {
+                model.pendingNewFolder = NewFolderRequest(filing: targets.map(\.id))
+            }
+            if targets.contains(where: { $0.summary.folderName != nil }) {
+                Button("Remove from Folder") { model.file(targets, in: nil) }
+            }
         }
         Divider()
         if targets.allSatisfy(\.isArchived) {
@@ -386,6 +536,21 @@ struct MeetingsSelectionView: View {
                     HStack(spacing: 8) {
                         Button("Reveal in Finder") { model.revealSelection() }
                         Button("Rebuild transcripts") { model.rebuildSelection() }
+                        Menu("Move to Folder") {
+                            ForEach(model.folderRows) { folder in
+                                Button(folder.name) {
+                                    model.file(model.selectedRows, in: folder.name)
+                                }
+                            }
+                            if !model.folderRows.isEmpty { Divider() }
+                            Button("New Folder…") {
+                                model.pendingNewFolder = NewFolderRequest(
+                                    filing: model.selectedRows.map(\.id)
+                                )
+                            }
+                            Button("Remove from Folder") { model.file(model.selectedRows, in: nil) }
+                        }
+                        .fixedSize()
                         if model.selectedRows.allSatisfy(\.isArchived) {
                             Button("Put back") { model.setArchived(false, model.selectedRows) }
                         } else {

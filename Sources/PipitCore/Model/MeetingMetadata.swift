@@ -122,6 +122,11 @@ public struct TitleCandidates: Codable, Sendable, Equatable {
 
 public struct CalendarLink: Codable, Sendable, Equatable {
     public var eventIdentifier: String
+    /// Shared by every occurrence of a repeating event, where `eventIdentifier`
+    /// is unique per occurrence. It is what lets a folder recognise the next
+    /// meeting in a series it already holds, whatever the occurrence is called
+    /// that week. Absent on meetings linked before folders existed.
+    public var seriesIdentifier: String?
     public var title: String
     public var startDate: Date
     public var endDate: Date
@@ -131,10 +136,12 @@ public struct CalendarLink: Codable, Sendable, Equatable {
     public var confidence: Double
 
     public init(
-        eventIdentifier: String, title: String, startDate: Date, endDate: Date,
+        eventIdentifier: String, seriesIdentifier: String? = nil, title: String,
+        startDate: Date, endDate: Date,
         organizer: String?, attendees: [String], confidence: Double
     ) {
         self.eventIdentifier = eventIdentifier
+        self.seriesIdentifier = seriesIdentifier
         self.title = title
         self.startDate = startDate
         self.endDate = endDate
@@ -233,6 +240,18 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// stays where it is. Archiving changes which list a meeting is in and
     /// nothing else.
     public var archivedAt: Date?
+    /// The folder this meeting is filed in, which is also the directory holding
+    /// it. Nil for a meeting still under `Meetings/YYYY/MM`. The path is the
+    /// truth and this is the record of it, so a folder renamed in Finder is
+    /// noticed the same way a meeting folder renamed in Finder is.
+    public var folderName: String?
+    /// Set when the user turned down the offered folder, so the bar is never
+    /// shown for this meeting again. The same shape as `generatedTitleDeclined`,
+    /// and for the same reason: the suggestion stays on disk as evidence.
+    public var folderSuggestionDeclined: Bool?
+    /// Folders the user has taken this meeting out of. Never offered again,
+    /// because being moved out is a clearer answer than any rule.
+    public var removedFromFolders: [String]?
 
     public enum ProvisionalDecision: String, Codable, Sendable {
         case pending
@@ -281,6 +300,9 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.hadOtherAudibleTabs = false
         self.audioArchive = nil
         self.archivedAt = nil
+        self.folderName = nil
+        self.folderSuggestionDeclined = nil
+        self.removedFromFolders = nil
     }
 
     public var displayTitle: String { titles.resolved }
@@ -294,4 +316,10 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     }
 
     public var isProcessingComplete: Bool { processing.state == .complete }
+
+    /// Whether this meeting may be offered a folder at all. One offer per
+    /// meeting for its whole life, and none once it is already filed.
+    public var acceptsFolderSuggestion: Bool {
+        folderSuggestionDeclined != true && folderName == nil
+    }
 }

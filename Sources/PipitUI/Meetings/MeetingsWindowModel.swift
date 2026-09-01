@@ -22,6 +22,57 @@ public enum MeetingDetailTab: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Which list the sidebar is showing.
+///
+/// Two views rather than one, because they answer different questions. The
+/// timeline holds every meeting in clock order and says which folder each one
+/// is in. The folder list holds folders alone, so a folder you have not met in
+/// for a month is in the same place it was last month.
+public enum MeetingsListMode: String, CaseIterable, Identifiable, Sendable {
+    case timeline
+    case folders
+
+    public var id: String { rawValue }
+
+    public var symbol: String {
+        switch self {
+        case .timeline: "list.bullet"
+        case .folders: "folder"
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .timeline: "Timeline"
+        case .folders: "Folders"
+        }
+    }
+}
+
+/// The New Folder prompt: a name to type, and what to put in it.
+public struct NewFolderRequest: Identifiable, Equatable {
+    public var meetingIDs: [String]
+    public var name: String = ""
+
+    public var id: String { meetingIDs.joined(separator: ",") }
+
+    public init(filing meetingIDs: [String], name: String = "") {
+        self.meetingIDs = meetingIDs
+        self.name = name
+    }
+}
+
+/// The offer to make a rule out of a meeting that was just filed by hand.
+public struct RecurringOffer: Identifiable, Equatable {
+    public var meetingID: String
+    public var folderName: String
+    public var proposal: RecurringProposal
+    public var ticked: Set<RecurringProposal.Clause.Kind>
+    public var facts: MeetingFacts
+
+    public var id: String { meetingID }
+}
+
 /// What the last speaker change did, in one line.
 ///
 /// Shown because the change reaches files the user opens in the Finder, and a
@@ -49,6 +100,22 @@ public final class MeetingsWindowModel {
     public var selection: Set<String> = []
     public var tab = MeetingDetailTab.transcript
     public var receipt: MeetingReceipt?
+    /// Which of the two lists the sidebar is showing.
+    public var mode = MeetingsListMode.timeline
+    /// The folder the list has been opened into, in the folders view. Nil there
+    /// means the folder list itself.
+    public var openFolder: String?
+    public var folderRows: [FolderRow] = []
+    /// The offer to turn a hand-filed meeting into a rule, shown as a sheet.
+    public var recurringOffer: RecurringOffer?
+    /// Set when a folder cannot be made or renamed, so the reason is said out
+    /// loud rather than swallowed.
+    public var folderProblem: String?
+    /// The New Folder prompt, and the meetings it should file once the folder
+    /// exists.
+    public var pendingNewFolder: NewFolderRequest?
+    /// The folder whose name is being edited in the pane.
+    public var pendingFolderRename: String?
     /// The focused meeting's own model, which owns reading and editing its
     /// files. One at a time: a window holding forty transcripts in memory is a
     /// window that stops scrolling.
@@ -140,6 +207,7 @@ public final class MeetingsWindowModel {
             await detail.reloadAll()
         }
         startIndexing()
+        await reloadFolders()
     }
 
     /// Reads the transcripts the index does not hold, in the background, and
@@ -249,8 +317,39 @@ public final class MeetingsWindowModel {
 
     public var sections: [MeetingsSection] {
         MeetingsDirectoryFilter.sections(
-            rows, filter: filter, query: query, transcripts: transcripts
+            listedRows, filter: filter, query: query, transcripts: transcripts
         )
+    }
+
+    /// The meetings the list is drawing from: every one of them on the
+    /// timeline, and one folder's worth inside a folder.
+    public var listedRows: [MeetingRow] {
+        guard mode == .folders, let openFolder else { return rows }
+        return rows.filter { $0.summary.folderName == openFolder }
+    }
+
+    /// The folder list, once the query has narrowed it. Searching inside a
+    /// folder searches its meetings; searching the folder list searches names.
+    public var visibleFolders: [FolderRow] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return folderRows }
+        return folderRows.filter {
+            $0.name.lowercased().contains(needle) || $0.folder.about.lowercased().contains(needle)
+        }
+    }
+
+    /// Whether the sidebar is showing the folder list itself.
+    public var showsFolderList: Bool { mode == .folders && openFolder == nil }
+
+    public var openFolderRow: FolderRow? {
+        folderRows.first { $0.name == openFolder }
+    }
+
+    /// The folder a meeting row should draw a tag for. Nothing inside a folder,
+    /// where every row would draw the same one.
+    public func folderTag(for row: MeetingRow) -> FolderRow? {
+        guard mode == .timeline, let name = row.summary.folderName else { return nil }
+        return folderRows.first { $0.name == name }
     }
 
     public var selectedRows: [MeetingRow] {
@@ -260,7 +359,7 @@ public final class MeetingsWindowModel {
     /// The rows this filter holds, before the search query narrows them. What
     /// the footer counts against, because with anything archived the archive's
     /// own total is a number no list on screen adds up to.
-    public var filteredRows: [MeetingRow] { rows.filter { filter.admits($0) } }
+    public var filteredRows: [MeetingRow] { listedRows.filter { filter.admits($0) } }
 
     /// The total of the meetings this filter holds, for the footer.
     public var totalDuration: Double { PipitRuntime.totalDuration(of: filteredRows) }
@@ -663,6 +762,197 @@ public final class MeetingsWindowModel {
     }
 
     public func revealArchive() { runtime.revealArchive() }
+
+    // MARK: - folders
+
+    /// Reads the folder list again. Cheap enough to run beside every archive
+    /// read, and it has to: filing a meeting changes a count on a folder row.
+    public func reloadFolders() async {
+        folderRows = await runtime.folderRows()
+    }
+
+    public func show(_ mode: MeetingsListMode) {
+        guard self.mode != mode else { return }
+        self.mode = mode
+        openFolder = nil
+        // The query means something different in each list, and carrying one
+        // across left the folder list looking empty for no stated reason.
+        query = ""
+    }
+
+    public func open(folder: String) {
+        openFolder = folder
+        query = ""
+        // Nothing selected, so the pane shows the folder itself: what it holds,
+        // what it files on its own, and what has been suggested for it. A
+        // meeting in the list is one click from there.
+        selection = []
+        detail?.saveEdits()
+        detail = nil
+    }
+
+    public func closeFolder() {
+        openFolder = nil
+        query = ""
+    }
+
+    /// Files meetings, from the row menu or the batch panel.
+    public func file(_ rows: [MeetingRow], in folder: String?) {
+        guard !rows.isEmpty else { return }
+        let failures = runtime.file(meetingIDs: rows.map(\.id), in: folder)
+        if let first = failures.values.first {
+            folderProblem = (first as? MeetingFolderError)?.message
+                ?? "The meeting could not be moved."
+        }
+        archiveChanges += 1
+        receipt = MeetingReceipt(
+            text: folder.map { "Moved to \($0)" } ?? "Taken out of its folder",
+            meetingID: rows[0].id
+        )
+        // One meeting filed by hand is the moment to ask whether the rest of
+        // its series should follow. A batch is not: the user has already said
+        // what they meant about all of them.
+        if let folder, rows.count == 1, failures.isEmpty {
+            offerRuleAfterFiling(rows[0].id, folder: folder)
+        }
+        Task { await reload() }
+    }
+
+    /// Makes the folder the prompt asked for and files what it was opened with.
+    public func commitNewFolder() {
+        guard let request = pendingNewFolder else { return }
+        pendingNewFolder = nil
+        let targets = rows.filter { request.meetingIDs.contains($0.id) }
+        createFolder(named: request.name, filing: targets)
+    }
+
+    public func createFolder(named name: String, filing rows: [MeetingRow] = []) {
+        do {
+            let folder = try runtime.createFolder(name: name)
+            if !rows.isEmpty { file(rows, in: folder.name) } else { Task { await reload() } }
+        } catch let error as MeetingFolderError {
+            folderProblem = error.message
+        } catch {
+            folderProblem = "The folder could not be made."
+        }
+    }
+
+    public func renameFolder(_ name: String, to newName: String) {
+        do {
+            let renamed = try runtime.renameFolder(name, to: newName)
+            if openFolder == name { openFolder = renamed.name }
+            Task { await reload() }
+        } catch let error as MeetingFolderError {
+            folderProblem = error.message
+        } catch {
+            folderProblem = "The folder could not be renamed."
+        }
+    }
+
+    public func deleteFolder(_ name: String) {
+        let failures = runtime.deleteFolder(name)
+        if !failures.isEmpty {
+            folderProblem =
+                "\(failures.count) \(failures.count == 1 ? "meeting" : "meetings") could not be "
+                + "moved out, so the folder is still there."
+        }
+        if openFolder == name { openFolder = nil }
+        archiveChanges += 1
+        Task { await reload() }
+    }
+
+    public func setFilesAutomatically(_ files: Bool, on name: String) {
+        guard var folder = runtime.folderStore.folder(named: name) else { return }
+        folder.filesAutomatically = files
+        try? runtime.updateFolder(folder)
+        Task { await reloadFolders() }
+    }
+
+    public func setAbout(_ about: String, on name: String) {
+        guard var folder = runtime.folderStore.folder(named: name) else { return }
+        guard folder.about != about else { return }
+        folder.about = about
+        try? runtime.updateFolder(folder)
+        Task { await reloadFolders() }
+    }
+
+    // MARK: - the offer
+
+    /// The folder a meeting was offered, from the row the last archive read
+    /// built. A folder renamed or deleted since then is checked here, because
+    /// an offer to file into somewhere that is gone is worse than no offer.
+    public func folderSuggestion(for meetingID: String) -> FolderSuggestion? {
+        guard let suggestion = rows.first(where: { $0.id == meetingID })?.folderSuggestion
+        else { return nil }
+        guard folderRows.contains(where: { $0.name == suggestion.folderName }) else { return nil }
+        return suggestion
+    }
+
+    /// Takes the offered folder, and puts the recurring question on screen when
+    /// there is a series behind the meeting.
+    public func acceptFolderSuggestion(for meetingID: String) {
+        guard let suggestion = folderSuggestion(for: meetingID) else { return }
+        let proposal = runtime.acceptFolderSuggestion(for: meetingID)
+        archiveChanges += 1
+        receipt = MeetingReceipt(
+            text: "Moved to \(suggestion.folderName)", meetingID: meetingID
+        )
+        offerRule(proposal, for: meetingID, folder: suggestion.folderName)
+        Task { await reload() }
+    }
+
+    public func dismissFolderSuggestion(for meetingID: String) {
+        runtime.dismissFolderSuggestion(for: meetingID)
+        Task { await refreshRow(meetingID) }
+    }
+
+    /// Offers to make a rule after a meeting was filed by hand.
+    public func offerRuleAfterFiling(_ meetingID: String, folder: String) {
+        offerRule(runtime.recurringProposal(for: meetingID), for: meetingID, folder: folder)
+    }
+
+    private func offerRule(_ proposal: RecurringProposal?, for meetingID: String, folder: String) {
+        guard let proposal else { return }
+        guard let found = runtime.repository.findMeeting(id: meetingID) else { return }
+        recurringOffer = RecurringOffer(
+            meetingID: meetingID, folderName: folder, proposal: proposal,
+            ticked: proposal.defaultTicks, facts: MeetingFacts(metadata: found.metadata)
+        )
+    }
+
+    public func toggleOfferClause(_ kind: RecurringProposal.Clause.Kind) {
+        guard var offer = recurringOffer else { return }
+        if offer.ticked.contains(kind) { offer.ticked.remove(kind) } else { offer.ticked.insert(kind) }
+        recurringOffer = offer
+    }
+
+    /// How many meetings on disk the ticked clauses would catch.
+    public func offerMatchCount() -> Int {
+        guard let offer = recurringOffer else { return 0 }
+        return runtime.meetingsMatching(offer.proposal.rule(ticking: offer.ticked, from: offer.facts))
+    }
+
+    public func saveOfferedRule() {
+        guard let offer = recurringOffer else { return }
+        let rule = offer.proposal.rule(ticking: offer.ticked, from: offer.facts)
+        guard !rule.isEmpty else {
+            folderProblem = "Tick at least one line, or the rule would take every new meeting."
+            return
+        }
+        do {
+            try runtime.saveRule(rule, on: offer.folderName)
+            receipt = MeetingReceipt(
+                text: "Matching meetings will move to \(offer.folderName) on their own",
+                meetingID: offer.meetingID
+            )
+        } catch let error as MeetingFolderError {
+            folderProblem = error.message
+        } catch {
+            folderProblem = "The rule could not be saved."
+        }
+        recurringOffer = nil
+        Task { await reloadFolders() }
+    }
 
     public func rebuildSelection() { rebuildTargets(selectedRows) }
 

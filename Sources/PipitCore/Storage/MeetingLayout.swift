@@ -36,6 +36,10 @@ public struct MeetingLayout: Sendable, Equatable {
     /// Deliberately not part of `speakers.map.json`: that file is what the
     /// meeting concluded, and a proposal is not a conclusion.
     public var speakerSuggestions: URL { raw.appendingPathComponent("speaker.suggestions.json") }
+    /// The folder this meeting was thought to belong in. A proposal, so it sits
+    /// beside the speaker suggestions rather than anywhere the meeting's own
+    /// location is decided.
+    public var folderSuggestion: URL { raw.appendingPathComponent("folder.suggestion.json") }
     /// What the meeting client said about the call: the roster, who was seen
     /// unmuted, and who held the floor when. Immutable like the diarization beside it,
     /// because it is evidence about a recording rather than a conclusion about
@@ -122,12 +126,50 @@ public struct MeetingArchiveLayout: Sendable {
             .appendingPathComponent(month, isDirectory: true)
     }
 
+    /// Where the folders a person made live. One directory per folder, holding
+    /// the meeting directories themselves.
+    ///
+    /// A sibling of the year directories rather than a level above them,
+    /// because an unfiled meeting keeps the `YYYY/MM` path it has always had.
+    /// The name cannot collide with a year: `Folders` is not four digits.
+    public var foldersRoot: URL { root.appendingPathComponent("Folders", isDirectory: true) }
+
+    public func folderDirectory(_ name: String) -> URL {
+        foldersRoot.appendingPathComponent(name, isDirectory: true)
+    }
+
+    /// `folder.json`, beside the meetings it describes.
+    public func folderManifest(_ name: String) -> URL {
+        folderDirectory(name).appendingPathComponent("folder.json")
+    }
+
     /// Where a folder of this name would sit. The name is
     /// `MeetingFolderName.base` for a meeting recorded now, and the meeting's
     /// identifier for one recorded before folder names and identifiers parted.
-    public func directory(named name: String, startedAt: Date) -> URL {
-        monthDirectory(startedAt: startedAt)
+    ///
+    /// `folder` names the meeting folder it is filed in. A filed meeting sits
+    /// directly under it, flat, because the date is already in its own name.
+    public func directory(named name: String, startedAt: Date, folder: String? = nil) -> URL {
+        parent(startedAt: startedAt, folder: folder)
             .appendingPathComponent(name, isDirectory: true)
+    }
+
+    /// The folder a meeting directory is filed in, read from where it sits.
+    ///
+    /// The path is the truth. A folder renamed in Finder changes what a meeting
+    /// is in, and metadata that disagrees is stale rather than authoritative.
+    public func folderName(ofDirectory directory: URL) -> String? {
+        let parent = directory.deletingLastPathComponent()
+        let grandparent = parent.deletingLastPathComponent()
+        guard grandparent.standardizedFileURL.path == foldersRoot.standardizedFileURL.path
+        else { return nil }
+        return parent.lastPathComponent
+    }
+
+    /// The directory a meeting's own folder sits inside.
+    public func parent(startedAt: Date, folder: String?) -> URL {
+        guard let folder, !folder.isEmpty else { return monthDirectory(startedAt: startedAt) }
+        return folderDirectory(folder)
     }
 
     /// `2026-08-18-1418-slack-engineering-huddle`
@@ -175,12 +217,12 @@ public struct MeetingArchiveLayout: Sendable {
     /// Reaching the suffix takes two meetings sharing a title and a starting
     /// minute, because the name already carries the time.
     public func uniqueDirectoryName(
-        base: String, startedAt: Date, excluding existing: URL? = nil
+        base: String, startedAt: Date, excluding existing: URL? = nil, folder: String? = nil
     ) -> String {
         var candidate = base
         var suffix = 2
         while true {
-            let target = directory(named: candidate, startedAt: startedAt)
+            let target = directory(named: candidate, startedAt: startedAt, folder: folder)
             // A folder being renamed collides with itself, and reporting that
             // as taken would append a suffix on every settle. Compared the way
             // the volume compares: `fileExists` on a case-insensitive volume

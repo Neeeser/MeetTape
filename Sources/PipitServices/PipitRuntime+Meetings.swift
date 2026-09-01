@@ -93,8 +93,19 @@ extension PipitRuntime {
             let text = store.readNotes()
             if !text.isEmpty { notes.append(text) }
         }
+        // Only for a meeting that could still act on one. A filed meeting and a
+        // meeting that turned the offer down are the common cases, and neither
+        // costs a read.
+        let offered = stores.first.flatMap { store -> FolderSuggestion? in
+            guard summary.folderName == nil else { return nil }
+            guard let metadata = try? store.readMetadata(),
+                  metadata.acceptsFolderSuggestion
+            else { return nil }
+            return store.readFolderSuggestion()
+        }
         return MeetingRow(
-            summary: summary, speakers: speakers, notes: notes.joined(separator: "\n")
+            summary: summary, speakers: speakers, notes: notes.joined(separator: "\n"),
+            folderSuggestion: offered
         )
     }
 

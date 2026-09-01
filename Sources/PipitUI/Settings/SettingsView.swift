@@ -11,6 +11,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case processing
     case cloud
     case browsers
+    case folders
     case storage
     case permissions
 
@@ -23,6 +24,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .processing: "Processing"
         case .cloud: "Cloud"
         case .browsers: "Browsers"
+        case .folders: "Folders"
         case .storage: "Storage"
         case .permissions: "Permissions"
         }
@@ -35,7 +37,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .processing: "waveform.badge.magnifyingglass"
         case .cloud: "sparkles"
         case .browsers: "globe"
-        case .storage: "folder"
+        case .folders: "folder.badge.gearshape"
+        case .storage: "internaldrive"
         case .permissions: "lock.shield"
         }
     }
@@ -71,6 +74,7 @@ public struct SettingsView: View {
         case .processing: ProcessingSettingsPane(model: model)
         case .cloud: CloudSettingsPane(model: model)
         case .browsers: BrowsersSettingsPane(model: model)
+        case .folders: FoldersSettingsPane(model: model)
         case .storage: StorageSettingsPane(model: model)
         case .permissions: PermissionsSettingsPane(model: model)
         }

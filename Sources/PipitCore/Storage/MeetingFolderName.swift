@@ -103,7 +103,7 @@ public enum MeetingFolderName {
     /// Case, spaces and accented letters survive. `MeetingArchiveLayout.slugify`
     /// folds those away because the names it builds are typed at a shell; these
     /// are read in Finder, so `Café sync` stays as written.
-    private static func sanitize(_ text: String) -> String {
+    public static func sanitize(_ text: String) -> String {
         var out = ""
         var pendingSpace = false
         for character in text {

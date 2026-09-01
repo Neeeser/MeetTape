@@ -44,6 +44,13 @@ public struct MeetingDetailView: View {
                 suggestionBar(suggestion)
                 Divider()
             }
+            // Under the title bar rather than over it. Accepting a title
+            // renames the directory, and the folder offer quotes that title, so
+            // the title is the question to answer first.
+            if let folder = model.folderSuggestion(for: detail.meetingID) {
+                folderSuggestionBar(folder)
+                Divider()
+            }
             speakerStrip
             if let receipt = model.receipt, receipt.meetingID == detail.meetingID {
                 receiptBar(receipt.text)
@@ -97,7 +104,7 @@ public struct MeetingDetailView: View {
             .padding(.top, 4)
 
             HStack(spacing: 8) {
-                Image(systemName: "folder").font(.caption)
+                folderMenu
                 Text(archivePath)
                     .lineLimit(1)
                     .truncationMode(.head)
@@ -160,6 +167,94 @@ public struct MeetingDetailView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.08))
+    }
+
+    /// Which folder this meeting is in, and the way to change it.
+    ///
+    /// On the path line because the path line is where the folder already was:
+    /// with folders on disk, what that line prints and what this control sets
+    /// are the same fact.
+    @ViewBuilder private var folderMenu: some View {
+        let current = model.rows.first { $0.id == detail.meetingID }?.summary.folderName
+        let tint = current
+            .flatMap { name in model.folderRows.first { $0.name == name } }
+            .map { FolderTint.color($0.folder.tintIndex) }
+        Menu {
+            ForEach(model.folderRows) { folder in
+                Button {
+                    file(in: folder.name)
+                } label: {
+                    if folder.name == current {
+                        Label(folder.name, systemImage: "checkmark")
+                    } else {
+                        Text(folder.name)
+                    }
+                }
+            }
+            if !model.folderRows.isEmpty { Divider() }
+            Button("New Folder…") {
+                model.pendingNewFolder = NewFolderRequest(filing: [detail.meetingID])
+            }
+            if current != nil {
+                Button("Remove from Folder") { file(in: nil) }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "folder.fill").font(.system(size: 9))
+                Text(current ?? "Not in a folder")
+            }
+            .font(.caption)
+            .foregroundStyle(tint ?? .secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .help("Filing a meeting moves its folder on disk. Nothing inside it is rewritten.")
+    }
+
+    private func file(in folder: String?) {
+        guard let row = model.rows.first(where: { $0.id == detail.meetingID }) else { return }
+        model.file([row], in: folder)
+    }
+
+    /// The folder this meeting was thought to belong in.
+    ///
+    /// The same bar as the suggested title above it, with one difference that
+    /// matters: the icon says whether a model was involved. A repeat arrow means
+    /// metadata matched metadata and nothing was read.
+    private func folderSuggestionBar(_ suggestion: FolderSuggestion) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: suggestion.reason == .model ? "sparkles" : "arrow.trianglehead.2.clockwise")
+                .foregroundStyle(suggestion.reason == .model ? Color.accentColor : .secondary)
+                .accessibilityHidden(true)
+            Text(suggestion.reason == .model ? "Suggested folder" : "Recurring meeting")
+                .foregroundStyle(.secondary)
+                .layoutPriority(1)
+            Text(suggestion.folderName).layoutPriority(1)
+            Text(suggestion.why)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(quoteHelp(suggestion))
+            Spacer(minLength: 8)
+            Button("Move it") { model.acceptFolderSuggestion(for: detail.meetingID) }
+            Button("Dismiss") { model.dismissFolderSuggestion(for: detail.meetingID) }
+                .buttonStyle(.link)
+        }
+        .font(.callout)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            suggestion.reason == .model
+                ? Color.accentColor.opacity(0.08)
+                : Color.primary.opacity(0.04)
+        )
+    }
+
+    private func quoteHelp(_ suggestion: FolderSuggestion) -> String {
+        guard let quote = suggestion.quote, !quote.isEmpty else { return suggestion.why }
+        guard let at = suggestion.atSeconds else { return "\u{201C}\(quote)\u{201D}" }
+        return "\u{201C}\(quote)\u{201D} at \(Format.duration(at))"
     }
 
     /// The generated title, offered against the name the meeting already has.

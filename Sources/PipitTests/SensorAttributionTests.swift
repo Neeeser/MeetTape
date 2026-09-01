@@ -585,16 +585,26 @@ enum SensorAttributionTests {
                 expect.isTrue(total > 50, "only one cluster was kept: \(total)s")
             },
 
-            test("a short turn keeps its beginning") { expect in
-                // A fixed one-second concession would gut the short turns of an
-                // ordinary back-and-forth, handing away the head of the turn as
-                // well, which is where the sensor is the thing that is right.
+            test("a turn shorter than the concession claims nothing") { expect in
+                // The inverse of what shipped. Keeping half of a short turn was
+                // meant to protect the head of a quick exchange, but the
+                // indicator releases later than the concession allowed for, so
+                // the half that survived was the previous speaker still talking.
+                // A one-second turn at 27.29 s kept 0.5 s and put "I'm glad we"
+                // on the wrong person mid-sentence.
                 let raw = sensors(
                     participants: [participant("U1", "Ada")], turns: [("U1", 0, 1.2)]
                 )
+                expect.equal(SensorAttribution.wordIntervals(sensors: raw), [])
+            },
+
+            test("a turn keeps what the indicator's release does not reach") { expect in
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 10)]
+                )
                 let intervals = SensorAttribution.wordIntervals(sensors: raw)
                 expect.equal(intervals.count, 1)
-                expect.close(intervals.first?.end ?? 0, 0.6, tolerance: 0.001)
+                expect.close(intervals.first?.end ?? 0, 8, tolerance: 0.001)
             },
 
             test("an indicator that never moved claims no words") { expect in

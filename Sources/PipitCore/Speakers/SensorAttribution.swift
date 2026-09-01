@@ -67,15 +67,40 @@ public enum SensorAttribution {
     /// words.
     ///
     /// A turn's end is where the client's indicator moved, sampled at 0.5 s and
-    /// released up to 1.5 s after the voice stopped, so the words at the tail
-    /// can be the next speaker's first words. Inside this margin the diarizer
-    /// decides, because it hears the voice change.
+    /// released after the voice stopped, so the words at the tail can be the
+    /// next speaker's first words. Inside this margin the diarizer decides,
+    /// because it hears the voice change.
     ///
-    /// Never more than half a turn. A fixed second would gut the short turns of
-    /// an ordinary back-and-forth, handing away the head of a turn as well,
-    /// where the sensor is the thing that is right. Half of a short turn keeps
-    /// its beginning and still refuses its end.
-    public static let wordAttributionTailSeconds: Double = 1
+    /// Measured against a reference diarization of two recordings: the client's
+    /// turn boundaries trail the voice by a median of 1.2 s, with a 90th
+    /// percentile of 2.6 s, and 27 of 32 transitions run late. One second was
+    /// inside that, so the tail routinely kept words the next person said.
+    ///
+    /// A turn shorter than this now yields nothing rather than half of itself.
+    /// The half-turn cap was meant to protect the head of a quick exchange,
+    /// where the sensor is the thing that is right, but a turn shorter than the
+    /// release is late by more than its own length, so the half that survived
+    /// was the previous speaker still talking. A one-second turn at 27.29 s kept
+    /// 0.5 s and put "I'm glad we" on the wrong person in the middle of
+    /// somebody else's sentence.
+    ///
+    /// On the words the sensor still claims, so the diarizer's own accuracy is
+    /// not in the denominator, this takes attribution from 93.5% to 97.6%
+    /// against the reference. The diarizer alone scores 96.6% under the same
+    /// harness: the sensor used to be worse than the thing it overrides and is
+    /// now better. Whole-transcript accuracy goes 93.4% to 96.3%, with the words
+    /// handed to the diarizer rising from 436 to 864.
+    ///
+    /// Two seconds is a choice rather than a floor. Wrong words run 288, 207,
+    /// 174, 167, 160 across tails of 1.0 to 3.0 while right words run 4499,
+    /// 4540, 4526, 4503, 4487, so past 2.0 the net is nearly flat and 2.5 is
+    /// about as defensible. This keeps the most sensor contribution at the point
+    /// where it becomes trustworthy.
+    ///
+    /// One constant for every client. The one Meet recording with a working
+    /// timeline shows the same release profile as Slack, and a per-source
+    /// constant would put an unmeasured number in the code.
+    public static let wordAttributionTailSeconds: Double = 2
 
     /// How long one turn may run before it stops being an observation.
     ///
@@ -109,7 +134,7 @@ public enum SensorAttribution {
     }
 
     static func attributableEnd(of turn: SensorTurn) -> Double {
-        turn.end - min(wordAttributionTailSeconds, turn.duration / 2)
+        turn.end - wordAttributionTailSeconds
     }
 
     /// The sensor timeline as intervals the assembler can align words against.
@@ -128,8 +153,9 @@ public enum SensorAttribution {
         return sensors.turns
             .filter { !selfIDs.contains($0.participantID) && isFloorObservation($0) }
             .compactMap { turn -> DiarizationInterval? in
-                // The tail belongs to the diarizer, and never more than half
-                // the turn, so a short exchange keeps its beginning.
+                // The tail belongs to the diarizer. A turn the concession eats
+                // whole vanishes with it, which is the point: it is shorter than
+                // the indicator's own release, so all of it is late.
                 let end = attributableEnd(of: turn)
                 guard end > turn.start else { return nil }
                 return DiarizationInterval(

@@ -38,6 +38,11 @@ public struct MeetingRow: Sendable, Equatable, Identifiable {
     public var speakers: [MeetingRowSpeaker]
     /// The user's own notes, which are searched alongside the title.
     public var notes: String
+    /// The folder this meeting was offered, when it was offered one and has
+    /// neither taken it nor turned it down. Carried on the row rather than read
+    /// where it is drawn: the pane and the folder list both ask for it, and a
+    /// file read per row per redraw is a scroll that stutters.
+    public var folderSuggestion: FolderSuggestion?
 
     public var id: String { summary.id }
     public var title: String { summary.title }
@@ -59,10 +64,17 @@ public struct MeetingRow: Sendable, Equatable, Identifiable {
     }
     public var isArchived: Bool { summary.isArchived }
 
-    public init(summary: MeetingSummary, speakers: [MeetingRowSpeaker], notes: String) {
+    /// The folder this meeting is filed in, from where it sits on disk.
+    public var folderName: String? { summary.folderName }
+
+    public init(
+        summary: MeetingSummary, speakers: [MeetingRowSpeaker], notes: String,
+        folderSuggestion: FolderSuggestion? = nil
+    ) {
         self.summary = summary
         self.speakers = speakers
         self.notes = notes
+        self.folderSuggestion = folderSuggestion
     }
 }
 

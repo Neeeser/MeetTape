@@ -102,19 +102,45 @@ public struct EnrichmentSettings: Codable, Sendable, Equatable {
     public var generateNotes: Bool
     public var generateSummary: Bool
     public var suggestSpeakers: Bool
+    /// Whether a finished meeting is offered a folder at all, and how far the
+    /// offer may reach. Recurrence costs nothing and reads no transcript; the
+    /// model rung rides the request this stage already makes.
+    public var suggestFolders: Bool
+    public var folderReach: SuggestionReach
+    /// Whether a folder with its own switch on may file a matching meeting
+    /// without offering it first. Off here turns every folder's switch off at
+    /// once, without editing any of them.
+    public var filesMatchingMeetings: Bool
+    /// Whether being filed by hand offers to make a rule out of the meetings
+    /// that look like this one.
+    public var noticesRecurringMeetings: Bool
 
     public init(
         generateTitle: Bool = true,
         generateDescription: Bool = true,
         generateNotes: Bool = true,
         generateSummary: Bool = true,
-        suggestSpeakers: Bool = true
+        suggestSpeakers: Bool = true,
+        suggestFolders: Bool = true,
+        folderReach: SuggestionReach = .clearTopics,
+        filesMatchingMeetings: Bool = true,
+        noticesRecurringMeetings: Bool = true
     ) {
         self.generateTitle = generateTitle
         self.generateDescription = generateDescription
         self.generateNotes = generateNotes
         self.generateSummary = generateSummary
         self.suggestSpeakers = suggestSpeakers
+        self.suggestFolders = suggestFolders
+        self.folderReach = folderReach
+        self.filesMatchingMeetings = filesMatchingMeetings
+        self.noticesRecurringMeetings = noticesRecurringMeetings
+    }
+
+    /// The reach in force, which is nothing at all when folder suggestions are
+    /// switched off outright.
+    public var effectiveFolderReach: SuggestionReach {
+        suggestFolders ? folderReach : .recurringOnly
     }
 
     public var wantsAnything: Bool {
@@ -137,6 +163,17 @@ public struct EnrichmentSettings: Codable, Sendable, Equatable {
             ?? defaults.generateSummary
         suggestSpeakers =
             try container.decodeIfPresent(Bool.self, forKey: .suggestSpeakers) ?? defaults.suggestSpeakers
+        suggestFolders =
+            try container.decodeIfPresent(Bool.self, forKey: .suggestFolders) ?? defaults.suggestFolders
+        folderReach =
+            try container.decodeIfPresent(SuggestionReach.self, forKey: .folderReach)
+            ?? defaults.folderReach
+        filesMatchingMeetings =
+            try container.decodeIfPresent(Bool.self, forKey: .filesMatchingMeetings)
+            ?? defaults.filesMatchingMeetings
+        noticesRecurringMeetings =
+            try container.decodeIfPresent(Bool.self, forKey: .noticesRecurringMeetings)
+            ?? defaults.noticesRecurringMeetings
     }
 }
 

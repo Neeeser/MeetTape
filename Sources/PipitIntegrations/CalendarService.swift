@@ -126,6 +126,10 @@ public final class CalendarService: @unchecked Sendable {
         return Match(
             link: CalendarLink(
                 eventIdentifier: best.candidate.identifier,
+                // Every occurrence of a repeating event carries the same
+                // external identifier, so this is what says two meetings are
+                // the same series rather than two events that look alike.
+                seriesIdentifier: event?.calendarItemExternalIdentifier,
                 title: best.candidate.title,
                 startDate: best.candidate.startDate,
                 endDate: best.candidate.endDate,

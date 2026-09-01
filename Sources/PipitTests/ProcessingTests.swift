@@ -32,6 +32,9 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
     /// Runs inside the enrichment request, for the paths that need something to
     /// happen to the meeting while a call is in flight.
     var enrichInterference: (@Sendable () async -> Void)?
+    /// The folder catalogue the last enrichment request carried, so a test can
+    /// check what the model was and was not shown.
+    private(set) var lastEnrichmentFolders: [EnrichmentFolder]?
 
     func isConfigured() async -> Bool { configured }
 
@@ -91,6 +94,7 @@ final class FakeAIBackend: AIBackend, @unchecked Sendable {
 
     func enrich(_ request: EnrichmentRequest, model: String) async throws -> MeetingEnrichment {
         record(Call(kind: "enrich", model: model, file: ""))
+        lock.withLock { lastEnrichmentFolders = request.folders }
         if !configured { throw ProcessingError.missingAPIKey }
         if let enrichInterference { await enrichInterference() }
         if let failEnrichment { throw failEnrichment }

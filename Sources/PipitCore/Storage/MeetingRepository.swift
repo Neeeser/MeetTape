@@ -184,6 +184,18 @@ public struct MeetingStore: Sendable {
     /// corrected person's voice profile. `writeCanonicalTranscript` still stores
     /// what the assembler produced: the cuts live in `speakers.map.json` and are
     /// applied on the way out.
+    /// The folder this meeting was offered, if it was offered one.
+    public func readFolderSuggestion() -> FolderSuggestion? {
+        guard let data = try? Data(contentsOf: layout.folderSuggestion) else { return nil }
+        return try? ArchiveCoding.decode(
+            FolderSuggestion.self, from: data, path: layout.folderSuggestion.path
+        )
+    }
+
+    public func writeFolderSuggestion(_ suggestion: FolderSuggestion) throws {
+        try AtomicFile.write(try ArchiveCoding.encode(suggestion), to: layout.folderSuggestion)
+    }
+
     public func readCanonicalTranscript() throws -> CanonicalTranscript? {
         guard var transcript = try readAssembledTranscript() else { return nil }
         let cuts = ((try? readSpeakerMap()) ?? SpeakerMap()).lineCuts
@@ -371,12 +383,15 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
     /// Whether the user took this meeting out of the list. The files are all
     /// still on disk.
     public let isArchived: Bool
+    /// The folder this meeting is filed in, read from where it sits on disk.
+    /// Nil for one still under `YYYY/MM`.
+    public let folderName: String?
 
     public init(
         id: String, directory: URL, title: String, startedAt: Date, durationSeconds: Double,
         source: MeetingSource, provider: MeetingProvider, processingState: ProcessingState,
         wasInterrupted: Bool, hasTranscript: Bool, recordingCount: Int = 1,
-        isArchived: Bool = false
+        isArchived: Bool = false, folderName: String? = nil
     ) {
         self.id = id
         self.directory = directory
@@ -390,6 +405,7 @@ public struct MeetingSummary: Sendable, Equatable, Identifiable {
         self.hasTranscript = hasTranscript
         self.recordingCount = recordingCount
         self.isArchived = isArchived
+        self.folderName = folderName
     }
 }
 
@@ -550,14 +566,24 @@ public struct MeetingRepository: Sendable {
               recorded == current.lastPathComponent
         else { return current }
 
+        // Where it sits, not what the metadata remembers: a folder renamed in
+        // Finder moves every meeting in it, and renaming one of those must not
+        // drag it back to a folder that no longer exists.
+        let folder = archive.folderName(ofDirectory: current)
         let desired = archive.uniqueDirectoryName(
             base: MeetingFolderName.base(for: found.metadata),
             startedAt: found.metadata.startedAt,
-            excluding: current
+            excluding: current,
+            folder: folder
         )
-        guard desired != current.lastPathComponent else { return current }
+        guard desired != current.lastPathComponent else {
+            repairFolderName(of: found.metadata, at: current, folder: folder)
+            return current
+        }
 
-        let target = archive.directory(named: desired, startedAt: found.metadata.startedAt)
+        let target = archive.directory(
+            named: desired, startedAt: found.metadata.startedAt, folder: folder
+        )
         do {
             try FileManager.default.moveItem(at: current, to: target)
         } catch {
@@ -572,6 +598,7 @@ public struct MeetingRepository: Sendable {
         do {
             _ = try MeetingStore(layout: MeetingLayout(root: target)).updateMetadata {
                 $0.directoryName = desired
+                $0.folderName = folder
             }
         } catch {
             // The name on disk and the name in the metadata have to agree, or
@@ -614,6 +641,140 @@ public struct MeetingRepository: Sendable {
         }
     }
 
+    /// Writes back the folder a meeting is actually in, when the metadata has
+    /// fallen behind the path.
+    ///
+    /// A folder renamed in Finder moves every meeting inside it without
+    /// touching a single `metadata.json`, and the next settle is the first
+    /// thing to notice. Cheap: one comparison per meeting, a write only when
+    /// they disagree.
+    private func repairFolderName(of metadata: MeetingMetadata, at directory: URL, folder: String?) {
+        guard metadata.folderName != folder else { return }
+        _ = try? MeetingStore(layout: MeetingLayout(root: directory)).updateMetadata {
+            $0.folderName = folder
+        }
+    }
+
+    // MARK: filing
+
+    /// Files a meeting into a folder, or takes it out of one.
+    ///
+    /// The directory moves; nothing inside it is rewritten. The identifier does
+    /// not change, so the speakers database, the transcript index and every
+    /// reference by identifier keep working across the move.
+    ///
+    /// Returns where the meeting sits afterwards.
+    @discardableResult
+    public func move(meetingID: String, toFolder folder: String?) throws -> URL {
+        guard let found = findMeeting(id: meetingID, includingMerged: true) else {
+            throw MeetingFolderError.meetingNotFound(meetingID)
+        }
+        let current = found.store.layout.root
+        let metadata = found.metadata
+        // Capture appends segments to paths it holds open, and the pipeline
+        // holds absolute paths for the length of a run. Either way the folder
+        // must not move out from under them.
+        guard metadata.processing.state == .complete || metadata.processing.state == .failed else {
+            throw MeetingFolderError.meetingIsBusy(meetingID)
+        }
+        let destination = folder.map(MeetingFolderStore.sanitize)
+        if let destination {
+            guard !destination.isEmpty else {
+                throw MeetingFolderError.invalidFolderName(folder ?? "")
+            }
+            guard MeetingFolderStore(archive: archive).exists(destination) else {
+                throw MeetingFolderError.folderNotFound(destination)
+            }
+        }
+        let from = archive.folderName(ofDirectory: current)
+        guard from != destination else { return current }
+
+        let desired = archive.uniqueDirectoryName(
+            base: current.lastPathComponent, startedAt: metadata.startedAt, folder: destination
+        )
+        let target = archive.directory(
+            named: desired, startedAt: metadata.startedAt, folder: destination
+        )
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try FileManager.default.moveItem(at: current, to: target)
+        Self.remember(id: metadata.id, directory: target, archiveRoot: archive.root)
+        do {
+            _ = try MeetingStore(layout: MeetingLayout(root: target)).updateMetadata {
+                $0.folderName = destination
+                // Only when Pipit was the one naming the folder. A folder a
+                // person renamed in Finder is left unclaimed, the way a rename
+                // leaves it, so a later settle still keeps its hands off.
+                if $0.directoryName == current.lastPathComponent {
+                    $0.directoryName = desired
+                }
+                // Being moved out is a plainer answer than any rule, so the
+                // folder left behind is never offered for this meeting again.
+                if let from {
+                    var removed = $0.removedFromFolders ?? []
+                    if !removed.contains(from) { removed.append(from) }
+                    $0.removedFromFolders = removed
+                }
+            }
+        } catch {
+            // The metadata is the record and the path is the truth, so a write
+            // that fails leaves them disagreeing. Put the folder back rather
+            // than leave a meeting filed somewhere its own file denies.
+            try? FileManager.default.moveItem(at: target, to: current)
+            Self.remember(id: metadata.id, directory: current, archiveRoot: archive.root)
+            throw error
+        }
+        return target
+    }
+
+    /// Every folder with enough of its contents to judge a new meeting against.
+    ///
+    /// One metadata read per filed meeting, capped per folder: the ladder only
+    /// needs to know what a folder usually looks like, and a folder with two
+    /// hundred meetings in it does not describe itself any better than its
+    /// newest forty do.
+    public func folderProfiles(sampling limit: Int = 40) -> [FolderProfile] {
+        let store = MeetingFolderStore(archive: archive)
+        return store.folders().map { folder in
+            let members = meetingMetadata(inFolder: folder.name, limit: limit)
+            return FolderProfile(
+                name: folder.name,
+                about: folder.about,
+                rule: folder.rule,
+                filesAutomatically: folder.filesAutomatically,
+                members: members.map { MeetingFacts(metadata: $0) }
+            )
+        }
+    }
+
+    /// The metadata of the meetings in one folder, newest first.
+    public func meetingMetadata(inFolder folder: String, limit: Int? = nil) -> [MeetingMetadata] {
+        let directory = archive.folderDirectory(folder)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let all = entries
+            .filter(\.hasDirectoryPath)
+            .compactMap { try? MeetingStore(layout: MeetingLayout(root: $0)).readMetadata() }
+            .filter { $0.mergedIntoMeetingID == nil }
+            .sorted { $0.startedAt > $1.startedAt }
+        guard let limit else { return all }
+        return Array(all.prefix(limit))
+    }
+
+    /// Every meeting in one folder, newest first.
+    public func meetings(inFolder folder: String) -> [MeetingSummary] {
+        let directory = archive.folderDirectory(folder)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return entries
+            .filter(\.hasDirectoryPath)
+            .compactMap { summary(forDirectory: $0) }
+            .sorted { $0.startedAt > $1.startedAt }
+    }
+
     public static func timestampTitle(startedAt: Date, source: MeetingSource) -> String {
         let style = Date.FormatStyle(date: .abbreviated, time: .shortened)
         return "\(source.displayName), \(startedAt.formatted(style))"
@@ -645,7 +806,12 @@ public struct MeetingRepository: Sendable {
         ) else { return [] }
 
         var directories: [URL] = []
+        let foldersRoot = archive.foldersRoot.standardizedFileURL.path
         for year in years where year.hasDirectoryPath {
+            // `Folders` is a sibling of the year directories, and two levels
+            // below it is a meeting, exactly where a month walk expects one.
+            // Without this every filed meeting was listed twice.
+            guard year.standardizedFileURL.path != foldersRoot else { continue }
             guard let months = try? fileManager.contentsOfDirectory(
                 at: year, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
             ) else { continue }
@@ -655,6 +821,26 @@ public struct MeetingRepository: Sendable {
                 ) else { continue }
                 directories.append(contentsOf: meetings.filter(\.hasDirectoryPath))
             }
+        }
+        directories.append(contentsOf: filedMeetingDirectories())
+        return directories
+    }
+
+    /// Every meeting directory sitting inside a folder the user made.
+    ///
+    /// A second place to look rather than a replacement: an unfiled meeting
+    /// keeps the `YYYY/MM` path it has always had, and filing one moves it here.
+    public func filedMeetingDirectories() -> [URL] {
+        let fileManager = FileManager.default
+        guard let folders = try? fileManager.contentsOfDirectory(
+            at: archive.foldersRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var directories: [URL] = []
+        for folder in folders where folder.hasDirectoryPath {
+            guard let meetings = try? fileManager.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            directories.append(contentsOf: meetings.filter(\.hasDirectoryPath))
         }
         return directories
     }
@@ -719,7 +905,10 @@ public struct MeetingRepository: Sendable {
                 || !continuations.isEmpty,
             hasTranscript: FileManager.default.fileExists(atPath: layout.canonicalTranscript.path),
             recordingCount: 1 + continuations.count,
-            isArchived: metadata.isArchived
+            isArchived: metadata.isArchived,
+            // Where it sits, not what the metadata remembers. A folder renamed
+            // in Finder moves every meeting in it without touching a file.
+            folderName: archive.folderName(ofDirectory: directory)
         )
     }
 
@@ -820,7 +1009,9 @@ public struct MeetingRepository: Sendable {
         guard let years = try? fileManager.contentsOfDirectory(
             at: archive.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return nil }
+        let foldersRoot = archive.foldersRoot.standardizedFileURL.path
         for year in years where year.hasDirectoryPath {
+            guard year.standardizedFileURL.path != foldersRoot else { continue }
             guard let months = try? fileManager.contentsOfDirectory(
                 at: year, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
             ) else { continue }
@@ -830,6 +1021,17 @@ public struct MeetingRepository: Sendable {
                 guard fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
                       isDirectory.boolValue
                 else { continue }
+                if holdsMeeting(id: id, at: candidate) { return candidate }
+            }
+        }
+        // A meeting recorded before folder names and identifiers parted keeps
+        // its identifier as a folder name after it is filed, so the same fast
+        // path has to cover the folders as well as the months.
+        if let folders = try? fileManager.contentsOfDirectory(
+            at: archive.foldersRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) {
+            for folder in folders where folder.hasDirectoryPath {
+                let candidate = folder.appendingPathComponent(id, isDirectory: true)
                 if holdsMeeting(id: id, at: candidate) { return candidate }
             }
         }

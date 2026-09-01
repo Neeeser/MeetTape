@@ -43,6 +43,10 @@ public actor ProcessingPipeline {
     }
 
     private let repository: MeetingRepository
+    /// Folder guesses the enrichment response carried, held between that stage
+    /// and the tail of the run, which is the only point where the meeting's
+    /// directory may safely be moved.
+    private var pendingFolderCandidates: [String: [ModelFolderCandidate]] = [:]
     /// The cloud client. Still the only thing that writes titles, summaries and
     /// textual speaker suggestions, and still optional in every configuration.
     private let backend: any AIBackend
@@ -402,7 +406,83 @@ public actor ProcessingPipeline {
         // something else is in the folder too: a re-analysis queued on the job
         // slot captured this folder's paths before it started waiting.
         if !heldByOthers(meetingID, besidesSelf: true) {
+            // Before the rename: filing changes which directory the meeting is
+            // in, and renaming works inside whichever that turns out to be.
+            await placeInFolder(metadata: metadata, settings: settings)
             repository.settleFolderName(for: metadata)
+        }
+    }
+
+    // MARK: folders
+
+    /// The folders as the model is shown them, or nothing when it is not being
+    /// asked.
+    ///
+    /// A folder is described by its outside: what it is called, what it is for,
+    /// what it files on its own, and the titles of a few meetings in it. The
+    /// meetings themselves never leave the Mac for this.
+    private func folderCatalogue(
+        for metadata: MeetingMetadata, settings: AppSettings
+    ) -> [EnrichmentFolder] {
+        guard settings.enrichment.effectiveFolderReach.asksAModel else { return [] }
+        guard metadata.acceptsFolderSuggestion else { return [] }
+        let store = MeetingFolderStore(archive: repository.archive)
+        return store.folders().map { folder in
+            EnrichmentFolder(
+                name: folder.name,
+                about: folder.about,
+                rule: folder.rule.isEmpty ? nil : FolderRuleSummary.text(folder.rule),
+                recentTitles: repository
+                    .meetingMetadata(inFolder: folder.name, limit: 8)
+                    .map(\.displayTitle)
+            )
+        }
+    }
+
+    /// Decides where a finished meeting belongs, records the answer, and files
+    /// it when the answer is one that may file.
+    ///
+    /// The recurrence rungs run whatever the settings say, because they read
+    /// metadata against metadata and cost nothing. Only the model rung is
+    /// gated, and only it is barred from moving anything.
+    private func placeInFolder(metadata: MeetingMetadata, settings: AppSettings) async {
+        let candidates = pendingFolderCandidates.removeValue(forKey: metadata.id) ?? []
+        guard metadata.acceptsFolderSuggestion else { return }
+        let profiles = repository.folderProfiles()
+        guard !profiles.isEmpty else { return }
+
+        let facts = MeetingFacts(metadata: metadata)
+        let suggestion = FolderMatcher.recurrence(of: facts, in: profiles, now: clock.now)
+            ?? FolderMatcher.fromModel(
+                candidates, meeting: facts, profiles: profiles,
+                reach: settings.enrichment.effectiveFolderReach, now: clock.now
+            )
+        guard let suggestion else { return }
+
+        // Written whether or not it files, because the pane shows it either way
+        // and a filed meeting still says what put it there.
+        if let found = repository.findMeeting(id: metadata.id) {
+            try? found.store.writeFolderSuggestion(suggestion)
+        }
+        Log.storage.info(
+            """
+            folder suggestion meeting=\(metadata.id, privacy: .public) \
+            reason=\(suggestion.reason.rawValue, privacy: .public) \
+            confidence=\(suggestion.confidence, privacy: .public)
+            """
+        )
+
+        guard settings.enrichment.filesMatchingMeetings,
+              FolderMatcher.mayFileWithoutAsking(suggestion, in: profiles)
+        else { return }
+        do {
+            try repository.move(meetingID: metadata.id, toFolder: suggestion.folderName)
+        } catch {
+            // The meeting is readable where it is, so a folder that will not
+            // take it is reported and the suggestion stays on the row.
+            Log.storage.error(
+                "filing failed: \(logSafeDescription(error), privacy: .public)"
+            )
         }
     }
 
@@ -2181,10 +2261,12 @@ public actor ProcessingPipeline {
                 wantsTitle: settings.enrichment.generateTitle,
                 wantsDescription: settings.enrichment.generateDescription,
                 wantsSummary: settings.enrichment.generateSummary,
-                wantsNotes: settings.enrichment.generateNotes
+                wantsNotes: settings.enrichment.generateNotes,
+                folders: folderCatalogue(for: metadata, settings: settings)
             ),
             model: settings.models.metadata
         )
+        pendingFolderCandidates[metadata.id] = enrichment.folderCandidates
 
         // A human title always wins; the AI title only fills an empty slot.
         if let title = enrichment.title, !title.isEmpty { metadata.titles.ai = title }

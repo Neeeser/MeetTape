@@ -112,12 +112,39 @@ public struct MeetingEnrichment: Sendable, Equatable, Codable {
     public var summary: String?
     public var description: String?
     public var notes: String?
+    /// Folders the model thought this meeting might belong in, at most two, in
+    /// the order it ranked them. Empty is the expected answer for a meeting
+    /// that belongs in none of them, and the instructions say so.
+    public var folderCandidates: [ModelFolderCandidate]
 
-    public init(title: String? = nil, summary: String? = nil, description: String? = nil, notes: String? = nil) {
+    public init(
+        title: String? = nil, summary: String? = nil, description: String? = nil,
+        notes: String? = nil, folderCandidates: [ModelFolderCandidate] = []
+    ) {
         self.title = title
         self.summary = summary
         self.description = description
         self.notes = notes
+        self.folderCandidates = folderCandidates
+    }
+}
+
+/// One folder as the model is shown it.
+///
+/// The titles are what make two clients tell apart, and `about` is what makes
+/// them tell apart when the titles do not. The meetings themselves are never
+/// sent: a folder is described by its outside.
+public struct EnrichmentFolder: Sendable, Equatable {
+    public var name: String
+    public var about: String
+    public var rule: String?
+    public var recentTitles: [String]
+
+    public init(name: String, about: String, rule: String? = nil, recentTitles: [String] = []) {
+        self.name = name
+        self.about = about
+        self.rule = rule
+        self.recentTitles = recentTitles
     }
 }
 
@@ -131,11 +158,15 @@ public struct EnrichmentRequest: Sendable {
     public var wantsDescription: Bool
     public var wantsSummary: Bool
     public var wantsNotes: Bool
+    /// The folders that exist. Empty leaves the folder question out of the
+    /// request entirely, which is what happens when there are no folders yet
+    /// or when the reach is set to recurring meetings only.
+    public var folders: [EnrichmentFolder]
 
     public init(
         transcript: String, humanNotes: String?, participants: [String], provider: MeetingProvider,
         durationSeconds: Double, wantsTitle: Bool, wantsDescription: Bool,
-        wantsSummary: Bool, wantsNotes: Bool
+        wantsSummary: Bool, wantsNotes: Bool, folders: [EnrichmentFolder] = []
     ) {
         self.transcript = transcript
         self.humanNotes = humanNotes
@@ -146,6 +177,7 @@ public struct EnrichmentRequest: Sendable {
         self.wantsDescription = wantsDescription
         self.wantsSummary = wantsSummary
         self.wantsNotes = wantsNotes
+        self.folders = folders
     }
 }
 

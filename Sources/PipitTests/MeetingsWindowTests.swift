@@ -774,6 +774,16 @@ enum MeetingsWindowTests {
                 try await aFilteredOutMeetingStillOpens(expect)
             },
 
+            test("clusters the meeting client gave one person are one chip") { expect in
+                try await oneAccountIsOneChip(expect)
+            },
+            test("naming that chip writes every cluster behind it") { expect in
+                try await namingOneChipWritesEveryClusterBehindIt(expect)
+            },
+            test("the chip keeps the person a shorter cluster was linked to") { expect in
+                try await theChipKeepsTheIdentityOffAShorterCluster(expect)
+            },
+
             test("the list counts the voices a meeting has not named") { expect in
                 try await unnamedVoicesReachTheList(expect)
             },
@@ -1789,6 +1799,171 @@ enum MeetingsWindowTests {
             "both halves number their speakers from zero, so the keys are qualified rather "
                 + "than collided"
         )
+    }
+
+    /// The bug this collapses: a Slack huddle with two people in it came back
+    /// with eleven speaker keys, because the local diarizer splits a voice into
+    /// several clusters and the huddle names every one of them from its roster.
+    /// The strip drew a chip per key, so one person appeared four times.
+    @MainActor
+    static func oneAccountIsOneChip(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(
+            root: root,
+            clusters: [
+                "remote-001_speaker_00", "remote-001_speaker_01", "remote-001_speaker_02",
+            ]
+        )
+        try meeting.store.writeSpeakerMap(sensorNamedMap(
+            ["remote-001_speaker_00", "remote-001_speaker_01", "remote-001_speaker_02"],
+            as: "Chris Latimer", account: "U06"
+        ))
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the strip to read the speakers") {
+            !(model.detail?.speakerRows.isEmpty ?? true)
+        }
+
+        expect.equal(model.detail?.speakerRows.count, 1, "one person, one chip")
+        guard let row = model.detail?.speakerRows.first else { return }
+        expect.equal(row.displayName, "Chris Latimer")
+        expect.equal(
+            row.allClusterIDs,
+            ["remote-001_speaker_00", "remote-001_speaker_01", "remote-001_speaker_02"]
+        )
+        // Three eight-second utterances, so the chip reports what the person
+        // said rather than what one of their clusters did.
+        expect.close(row.speechSeconds, 24, tolerance: 0.001)
+    }
+
+    /// The chip stands for the person, so renaming it has to reach every key
+    /// underneath. Writing only the representative left the other clusters
+    /// reading the old name and the chip split back into several on reload.
+    @MainActor
+    static func namingOneChipWritesEveryClusterBehindIt(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00", "remote-001_speaker_01"]
+        )
+        try meeting.store.writeSpeakerMap(sensorNamedMap(
+            ["remote-001_speaker_00", "remote-001_speaker_01"],
+            as: "Chris Latimer", account: "U06"
+        ))
+
+        let model = MeetingsWindowModel(runtime: makeRuntime(root: root))
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the strip to read the speakers") {
+            (model.detail?.speakerRows.count ?? 0) == 1
+        }
+        guard let row = model.detail?.speakerRows.first else {
+            expect.fail("the person has no chip")
+            return
+        }
+
+        model.assignCluster(row, toNewPerson: "Priya Raman")
+
+        await waitFor(expect, "both clusters to take the new name") {
+            let map = try? meeting.store.readSpeakerMap()
+            return map?.displayName(for: "remote-001_speaker_00") == "Priya Raman"
+                && map?.displayName(for: "remote-001_speaker_01") == "Priya Raman"
+        }
+        let map = try expect.unwrap(try? meeting.store.readSpeakerMap())
+        // One person, so one profile. Promoting each cluster's own anonymous
+        // voice separately left two profiles holding the same name, and two
+        // identical centroids mean the margin gate never recognises either.
+        let identities = Set(
+            ["remote-001_speaker_00", "remote-001_speaker_01"]
+                .compactMap { map.entries[$0]?.identityID }
+        )
+        expect.equal(identities.count, 1, "both clusters name the same person")
+        expect.equal(
+            model.receipt?.text,
+            "Named Priya Raman on 2 lines. transcript.md and the speaker map are rewritten."
+        )
+    }
+
+    /// The voice-matching stage writes the identifier on the one cluster it
+    /// scored and the roster names the rest, so the longest-speaking key is
+    /// routinely the one without a person behind it. Reading the row off that
+    /// key alone drew a grey face for somebody the meeting had already
+    /// recognised.
+    @MainActor
+    static func theChipKeepsTheIdentityOffAShorterCluster(_ expect: Expect) async throws {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = try makeMeeting(
+            root: root, clusters: ["remote-001_speaker_00", "remote-001_speaker_01"]
+        )
+        // The linked cluster speaks for two seconds and the roster-named one for
+        // sixty, so the long key leads the group.
+        try meeting.store.writeCanonicalTranscript(CanonicalTranscript(
+            generatedAt: Date(timeIntervalSince1970: 1_787_070_000),
+            utterances: [
+                Utterance(
+                    id: "u0", start: 0, end: 2, track: .remote,
+                    rawSpeakerLabel: "remote-001_speaker_00", speakerKey: "remote-001_speaker_00",
+                    text: "the northwind renewal", chunkID: "c1", model: "m"
+                ),
+                Utterance(
+                    id: "u1", start: 10, end: 70, track: .remote,
+                    rawSpeakerLabel: "remote-001_speaker_01", speakerKey: "remote-001_speaker_01",
+                    text: "the northwind renewal", chunkID: "c1", model: "m"
+                ),
+            ]
+        ))
+        try meeting.store.writeSpeakerMap(sensorNamedMap(
+            ["remote-001_speaker_00", "remote-001_speaker_01"],
+            as: "Chris Latimer", account: "U06"
+        ))
+
+        let runtime = makeRuntime(root: root)
+        let model = MeetingsWindowModel(runtime: runtime)
+        await model.reload()
+        model.show(meetingID: meeting.id)
+        await waitFor(expect, "the strip to read the speakers") {
+            (model.detail?.speakerRows.count ?? 0) == 1
+        }
+        // Naming the short cluster on its own is what puts a person behind it
+        // and leaves the long one with the roster's name and no identifier.
+        runtime.assignSpeaker(
+            name: "Chris Latimer", key: "remote-001_speaker_00", meetingID: meeting.id
+        )
+        await waitFor(expect, "the short cluster to gain a person") {
+            (try? meeting.store.readSpeakerMap())?
+                .entries["remote-001_speaker_00"]?.identityID != nil
+        }
+        await model.detail?.reloadSpeakers()
+
+        guard let row = model.detail?.speakerRows.first else {
+            expect.fail("the person has no chip")
+            return
+        }
+        expect.equal(model.detail?.speakerRows.count, 1, "still one person")
+        expect.equal(row.clusterID, "remote-001_speaker_01", "the long cluster leads")
+        expect.isTrue(row.identity != nil, "and the chip keeps the person behind the short one")
+    }
+
+    /// A speaker map as the sensor stage writes one: every cluster the client
+    /// attributed to an account carries that account's name and identifier.
+    static func sensorNamedMap(
+        _ keys: [String], as name: String, account: String
+    ) -> SpeakerMap {
+        var map = SpeakerMap()
+        for key in keys {
+            map.assign(
+                SpeakerAssignment(
+                    displayName: name, origin: .sensor, participantID: account,
+                    provenance: SpeakerProvenance(source: .sensor)
+                ),
+                to: key
+            )
+        }
+        return map
     }
 
     /// A cluster identifier names a speaker inside one recording, and both

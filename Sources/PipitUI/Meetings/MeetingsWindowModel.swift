@@ -388,24 +388,28 @@ public final class MeetingsWindowModel {
     /// Names a whole cluster and says what it changed.
     public func assignCluster(_ row: MeetingSpeakerRow, to entry: SpeakerDirectoryEntry) {
         applyClusterChange(
-            clusterID: row.clusterID, recordingID: row.recordingID,
+            clusterIDs: row.allClusterIDs, recordingID: row.recordingID,
             name: entry.identity.resolvedName
         ) {
-            self.detail?.assignCluster(row.clusterID, in: row.recordingID, to: entry)
+            self.detail?.assignCluster(row.allClusterIDs, in: row.recordingID, to: entry)
         }
     }
 
     public func assignCluster(_ row: MeetingSpeakerRow, toNewPerson name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: trimmed) {
-            self.detail?.assignCluster(row.clusterID, in: row.recordingID, toNewPerson: trimmed)
+        applyClusterChange(
+            clusterIDs: row.allClusterIDs, recordingID: row.recordingID, name: trimmed
+        ) {
+            self.detail?.assignCluster(row.allClusterIDs, in: row.recordingID, toNewPerson: trimmed)
         }
     }
 
     public func clearCluster(_ row: MeetingSpeakerRow) {
-        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: nil) {
-            self.detail?.clearCluster(row.clusterID, in: row.recordingID)
+        applyClusterChange(
+            clusterIDs: row.allClusterIDs, recordingID: row.recordingID, name: nil
+        ) {
+            self.detail?.clearCluster(row.allClusterIDs, in: row.recordingID)
         }
     }
 
@@ -413,7 +417,7 @@ public final class MeetingsWindowModel {
     /// happened. Counted first because the assignment re-resolves the names the
     /// count is taken from.
     private func applyClusterChange(
-        clusterID: String, recordingID: String, name: String?, _ apply: () -> Void
+        clusterIDs: [String], recordingID: String, name: String?, _ apply: () -> Void
     ) {
         guard let detail else { return }
         let meetingID = detail.meetingID
@@ -426,8 +430,9 @@ public final class MeetingsWindowModel {
         // line beats the cluster's entry, so that line reads the same after
         // this as before it, and counting it made the receipt claim a line
         // nothing had changed.
+        let keys = Set(clusterIDs)
         let lines = detail.combinedLines.count {
-            $0.recordingID == recordingID && $0.utterance.speakerKey == clusterID
+            $0.recordingID == recordingID && keys.contains($0.utterance.speakerKey)
                 && !$0.isCorrected
         }
         apply()
@@ -453,11 +458,13 @@ public final class MeetingsWindowModel {
         // An existing person where the name is already one, so accepting does
         // not create a second Chris beside the one in the directory.
         let known = detail.knownPeople.first { $0.identity.resolvedName == name }
-        applyClusterChange(clusterID: row.clusterID, recordingID: row.recordingID, name: name) {
+        applyClusterChange(
+            clusterIDs: [row.clusterID], recordingID: row.recordingID, name: name
+        ) {
             if let known {
-                detail.assignCluster(row.clusterID, in: row.recordingID, to: known)
+                detail.assignCluster([row.clusterID], in: row.recordingID, to: known)
             } else {
-                detail.assignCluster(row.clusterID, in: row.recordingID, toNewPerson: name)
+                detail.assignCluster([row.clusterID], in: row.recordingID, toNewPerson: name)
             }
         }
         // The write is asynchronous, and leaving the pill up until it lands

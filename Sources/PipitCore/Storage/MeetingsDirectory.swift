@@ -11,15 +11,23 @@ public struct MeetingRowSpeaker: Sendable, Equatable, Identifiable {
     /// nil for a cluster nobody has named.
     public var displayName: String?
     public var identityID: IdentityID?
+    /// The meeting client's own identifier for the person, where the assignment
+    /// carries one. Kept so the row can tell one person's several clusters
+    /// apart from several people.
+    public var participantID: String?
 
     public var id: String { key }
 
     public var isNamed: Bool { !(displayName ?? "").isEmpty }
 
-    public init(key: String, displayName: String?, identityID: IdentityID?) {
+    public init(
+        key: String, displayName: String?, identityID: IdentityID?,
+        participantID: String? = nil
+    ) {
         self.key = key
         self.displayName = displayName
         self.identityID = identityID
+        self.participantID = participantID
     }
 }
 
@@ -170,19 +178,50 @@ public enum MeetingsDirectoryFilter {
             .filter { $0.isAudible || byKey[$0.key] != nil }
             .map(\.key)
         guard !keys.isEmpty else {
-            return named.map {
-                MeetingRowSpeaker(
-                    key: qualified($0.key), displayName: $0.displayName, identityID: $0.identityID
-                )
-            }
+            return onePerPerson(named, qualifiedBy: qualified)
         }
-        return keys.map { key in
-            let speaker = byKey[key]
-            return MeetingRowSpeaker(
-                key: qualified(key),
-                displayName: speaker?.displayName,
-                identityID: speaker?.identityID
+        return onePerPerson(
+            keys.map { key in
+                let speaker = byKey[key]
+                return MeetingRowSpeaker(
+                    key: key,
+                    displayName: speaker?.displayName,
+                    identityID: speaker?.identityID,
+                    participantID: speaker?.participantID
+                )
+            },
+            qualifiedBy: qualified
+        )
+    }
+
+    /// One face per person rather than one per diarization cluster.
+    ///
+    /// The same rule the speaker strip collapses by. The diarizer splits a voice
+    /// into several clusters and the meeting client names each of them, so a
+    /// call with one other person in it drew that person's face three times.
+    /// The named member of a group leads it, because a face with a name on it
+    /// says more than a grey circle standing for the same voice.
+    ///
+    /// Grouped on the recording's own keys and qualified afterwards. A sensor
+    /// key carries the participant identifier in the key itself, and the
+    /// qualifying prefix hides it.
+    private static func onePerPerson(
+        _ speakers: [MeetingRowSpeaker], qualifiedBy qualified: (String) -> String
+    ) -> [MeetingRowSpeaker] {
+        let byKey = Dictionary(
+            speakers.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let groups = SpeakerGrouping.groups(speakers.map {
+            SpeakerGroupMember(
+                key: $0.key, displayName: $0.displayName, identityID: $0.identityID,
+                participantID: $0.participantID
             )
+        })
+        return groups.compactMap { group -> MeetingRowSpeaker? in
+            let members = group.compactMap { byKey[$0.key] }
+            guard var leader = members.first(where: \.isNamed) ?? members.first else { return nil }
+            leader.key = qualified(leader.key)
+            return leader
         }
     }
 

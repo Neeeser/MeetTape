@@ -69,7 +69,7 @@ public struct PeoplePickerView: View {
         .frame(width: 300)
         .onAppear {
             searchFocused = true
-            model.highlight = visibleIDs.first
+            model.moveHighlight(to: visibleIDs.first, follow: true)
         }
     }
 
@@ -92,7 +92,9 @@ public struct PeoplePickerView: View {
         .padding(.vertical, 7)
         // The list is rebuilt under the cursor as the query narrows, so a
         // highlight left on a row that no longer shows would name nobody.
-        .onChange(of: model.query) { _, _ in model.highlight = visibleIDs.first }
+        .onChange(of: model.query) { _, _ in
+            model.moveHighlight(to: visibleIDs.first, follow: true)
+        }
     }
 
     private var list: some View {
@@ -112,9 +114,12 @@ public struct PeoplePickerView: View {
                 .padding(.bottom, 4)
             }
             .frame(maxHeight: 300)
-            .onChange(of: model.highlight) { _, highlighted in
-                guard let highlighted else { return }
-                scroller.scrollTo(highlighted, anchor: .bottom)
+            // Follows the arrow keys and the query, not the pointer, and with
+            // no anchor: it scrolls the shortest way to bring the row into
+            // view, so arrowing back up scrolls up.
+            .onChange(of: model.follows) { _, _ in
+                guard let highlighted = model.highlight else { return }
+                scroller.scrollTo(highlighted)
             }
         }
     }
@@ -152,7 +157,7 @@ public struct PeoplePickerView: View {
         .contentShape(Rectangle())
         .id(row.id)
         .onTapGesture { onPick(row.entry) }
-        .onHover { inside in if inside { model.highlight = row.id } }
+        .onHover { inside in if inside { model.moveHighlight(to: row.id, follow: false) } }
     }
 
     private var youBadge: some View {
@@ -215,12 +220,12 @@ public struct PeoplePickerView: View {
         let ids = visibleIDs
         guard !ids.isEmpty else { return .ignored }
         guard let current = model.highlight, let index = ids.firstIndex(of: current) else {
-            model.highlight = offset > 0 ? ids.first : ids.last
+            model.moveHighlight(to: offset > 0 ? ids.first : ids.last, follow: true)
             return .handled
         }
         let next = index + offset
         guard ids.indices.contains(next) else { return .handled }
-        model.highlight = ids[next]
+        model.moveHighlight(to: ids[next], follow: true)
         return .handled
     }
 }
@@ -233,9 +238,23 @@ public struct PeoplePickerView: View {
 @Observable
 public final class PeoplePickerModel {
     public var query = ""
-    public var highlight: IdentityID?
+    public private(set) var highlight: IdentityID?
+    /// Counts the moves the list is meant to scroll for. A count rather than
+    /// the row itself: arrowing back onto the row hover left behind is still a
+    /// move to scroll to, and the identifier would not have changed.
+    public private(set) var follows = 0
 
     public init() {}
+
+    /// Puts the highlight on a row, and says whether the list scrolls to it.
+    ///
+    /// The arrow keys and a narrowed query scroll. Hover does not: a wheel
+    /// scroll slides rows under a cursor that never moved, and scrolling to
+    /// the row that lands under it puts the list back where it started.
+    public func moveHighlight(to id: IdentityID?, follow: Bool) {
+        highlight = id
+        if follow { follows += 1 }
+    }
 
     public func reset() {
         query = ""

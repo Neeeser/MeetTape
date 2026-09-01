@@ -22,6 +22,44 @@ enum SensorAttributionTests {
         DiarizationInterval(start: start, end: end, clusterID: cluster)
     }
 
+    /// Evidence in which the local user is audibly speaking over `talking` and
+    /// nowhere else.
+    ///
+    /// Outside those spans the microphone is quiet and below the far end, which
+    /// is what the far end playing while the user listens looks like.
+    private static func speech(
+        seconds: Double, talking: [(Double, Double)],
+        echoDuring: [(Double, Double)] = [], window: Double = 0.25
+    ) -> SpeechEvidence {
+        let count = Int(seconds / window)
+        var mic = [Int8](repeating: -80, count: count)
+        var remote = [Int8](repeating: -30, count: count)
+        var probability = [Int8](repeating: 0, count: count)
+        var echo = [Int16](repeating: 0, count: count)
+        func windows(_ spans: [(Double, Double)]) -> [Int] {
+            spans.flatMap { Array(Int($0.0 / window)..<min(count, Int($0.1 / window))) }
+        }
+        for index in windows(talking) {
+            mic[index] = -20
+            remote[index] = -40
+            probability[index] = 90
+        }
+        // Leakage: the microphone hears speech and reads louder than the far
+        // end's own quietly recorded track, and only the echo measure separates
+        // it from the user actually talking.
+        for index in windows(echoDuring) {
+            mic[index] = -20
+            remote[index] = -40
+            probability[index] = 90
+            echo[index] = 12
+        }
+        return SpeechEvidence(
+            levelWindowSeconds: window, speechWindowSeconds: window,
+            micLevels: mic, remoteLevels: remote,
+            micSpeech: probability, micEchoReturnLoss: echo
+        )
+    }
+
     private static func sensors(
         participants: [SensorParticipant], turns: [(String, Double, Double)],
         unmuted: [String]? = nil
@@ -547,16 +585,117 @@ enum SensorAttributionTests {
                 expect.isTrue(total > 50, "only one cluster was kept: \(total)s")
             },
 
-            test("a short turn keeps its beginning") { expect in
-                // A fixed one-second concession would gut the short turns of an
-                // ordinary back-and-forth, handing away the head of the turn as
-                // well, which is where the sensor is the thing that is right.
+            test("a turn shorter than the concession claims nothing") { expect in
+                // The inverse of what shipped. Keeping half of a short turn was
+                // meant to protect the head of a quick exchange, but the
+                // indicator releases later than the concession allowed for, so
+                // the half that survived was the previous speaker still talking.
+                // A one-second turn at 27.29 s kept 0.5 s and put "I'm glad we"
+                // on the wrong person mid-sentence.
                 let raw = sensors(
                     participants: [participant("U1", "Ada")], turns: [("U1", 0, 1.2)]
                 )
+                expect.equal(SensorAttribution.wordIntervals(sensors: raw), [])
+            },
+
+            test("a turn keeps what the indicator's release does not reach") { expect in
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 10)]
+                )
                 let intervals = SensorAttribution.wordIntervals(sensors: raw)
                 expect.equal(intervals.count, 1)
-                expect.close(intervals.first?.end ?? 0, 0.6, tolerance: 0.001)
+                expect.close(intervals.first?.end ?? 0, 8, tolerance: 0.001)
+            },
+
+            test("an indicator that never moved claims no words") { expect in
+                // A Meet recording produced two turns for twenty-two minutes,
+                // one of them 863 seconds, and every remote word went to it.
+                // The client had stopped moving its indicator; the diarizer had
+                // separated three voices cleanly underneath. The longest turn
+                // anybody genuinely held across every recording on disk is 128
+                // seconds.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 400), ("U2", 400, 600)]
+                )
+                let intervals = SensorAttribution.wordIntervals(sensors: raw)
+                expect.equal(intervals.count, 1)
+                expect.equal(intervals.first?.clusterID, SpeakerLabel.sensor(participantID: "U2"))
+            },
+
+            test("an indicator that never moved names no cluster") { expect in
+                // Dropping the turn from word attribution alone made the
+                // recording worse, not better. The words moved onto cluster
+                // keys, and those clusters were still named from the very turn
+                // that had just been refused, so a transcript that read one
+                // wrong name went on reading it. On the recording this is
+                // named after, the name in question is the local user's own,
+                // on a track that by construction cannot hold them.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 400)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 130), interval("b", 140, 260),
+                                interval("c", 270, 390)],
+                    sensors: raw
+                )
+                expect.equal(result.matches.count, 0)
+            },
+
+            test("a turn under the ceiling still names its cluster") { expect in
+                // The other half of the rule, so the ceiling cannot pass by
+                // breaking naming outright.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 120)]
+                )
+                let result = SensorAttribution.attribute(
+                    intervals: [interval("a", 0, 120)], sensors: raw
+                )
+                expect.equal(result.matches.first?.displayName, "Ada")
+            },
+
+            test("a participant whose every turn is refused gets no entry") { expect in
+                // speakerEntries keyed on holding any turn at all, so a
+                // participant the ceiling or the concession leaves with no
+                // interval still got a named key that no utterance uses. It
+                // reaches the folder's people list and the enrichment prompt,
+                // and the confirm-a-voice control offers a name with no audio
+                // behind it.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 400), ("U2", 400, 401), ("U2", 500, 560)]
+                )
+                let keys = Set(SensorAttribution.speakerEntries(sensors: raw).map(\.key))
+                expect.isFalse(keys.contains(SpeakerLabel.sensor(participantID: "U1")))
+                expect.isTrue(keys.contains(SpeakerLabel.sensor(participantID: "U2")))
+            },
+
+            test("an indicator that never moved enrols no voice") { expect in
+                // The half that lasts. A wrong word label lives in one
+                // transcript; a centroid built from three people's speech is
+                // permanent and reaches every later meeting through the profile
+                // that recognises them. On the recording above this embedded
+                // 573 seconds of the far end under one person's name, and that
+                // key already carried somebody's hand-typed confirmation.
+                let overLong = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 400)]
+                )
+                expect.equal(
+                    SensorAttribution.enrollmentIntervals(
+                        sensors: overLong, diarized: [interval("a", 0, 400)]
+                    ),
+                    []
+                )
+                // A turn under the ceiling still enrols, so this cannot be
+                // passing because enrolment is broken.
+                let ordinary = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 200)]
+                )
+                expect.isFalse(
+                    SensorAttribution.enrollmentIntervals(
+                        sensors: ordinary, diarized: [interval("a", 0, 200)]
+                    ).isEmpty
+                )
             },
 
             test("a participant whose turns dominate no cluster enrolls nothing") { expect in
@@ -713,26 +852,148 @@ enum SensorAttributionTests {
                 expect.equal(map.entries["remote-001_speaker_01"]?.identityID, identity)
             },
 
-            test("the local user is excluded by configured name, not only by flag") { expect in
+            test("the local user is the one the microphone heard") { expect in
                 // Meet marks its own tile with the English word "You", so a
-                // client in any other language reports nobody as self.
+                // client in any other language reports nobody as self. Matching
+                // the configured name instead is what shipped, and it never
+                // fired: Meet renders "Andrew Neeser" where the setting reads
+                // "Andrew". Every Meet recording on disk has nobody marked.
                 let raw = sensors(
                     participants: [
                         participant("d406", "Andrew Neeser"),
                         participant("d409", "Grace"),
                     ],
-                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                    turns: [("d406", 0, 60), ("d409", 60, 120)]
                 )
-                let scoped = raw.markingSelf(named: "andrew neeser")
+                let scoped = raw.markingSelf(using: speech(seconds: 120, talking: [(0, 60)]))
                 expect.equal(scoped.participants.filter(\.isSelf).count, 1)
+                expect.isTrue(scoped.participants.first { $0.id == "d406" }?.isSelf == true)
                 // Marked, not removed: the turns stay and simply stop being
                 // nameable, which is what keeps the margin rule working.
                 expect.equal(scoped.turns.count, 2)
                 let result = SensorAttribution.attribute(
-                    intervals: [interval("a", 0, 10), interval("b", 10, 20)], sensors: scoped
+                    intervals: [interval("a", 0, 60), interval("b", 60, 120)], sensors: scoped
                 )
                 expect.equal(result.matches.count, 1)
                 expect.equal(result.matches.first?.displayName, "Grace")
+            },
+
+            test("two tiles under one name are told apart") { expect in
+                // A real recording: the local user appears on two Meet devices
+                // rendering the identical display name, and only one of them is
+                // them. Name matching marked both and threw away 264 seconds of
+                // a real participant's speech. What the microphone heard
+                // separates them.
+                let raw = sensors(
+                    participants: [
+                        participant("d381", "Andrew Neeser"),
+                        participant("d382", "Andrew Neeser"),
+                    ],
+                    turns: [("d381", 0, 60), ("d382", 60, 120)]
+                )
+                let scoped = raw.markingSelf(using: speech(seconds: 120, talking: [(0, 60)]))
+                expect.equal(scoped.participants.filter(\.isSelf).count, 1)
+                expect.isTrue(scoped.participants.first { $0.id == "d381" }?.isSelf == true)
+                expect.isFalse(scoped.participants.first { $0.id == "d382" }?.isSelf == true)
+            },
+
+            test("the far end leaking into the microphone is not the user") { expect in
+                // Without headphones the call comes back through the speakers,
+                // the microphone's gain lifts it to the far end's own level, and
+                // every level clause keeps it. Only subtracting a filtered copy
+                // of the far end separates whose sound it is from how loud it
+                // is, which is why LocalSpeechPolicy needed a fourth measure.
+                // Marking a remote participant self deletes their turns
+                // outright, so this has to fail closed.
+                let raw = sensors(
+                    participants: [participant("d406", "Grace"), participant("d409", "Ada")],
+                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                )
+                let scoped = raw.markingSelf(
+                    using: speech(seconds: 20, talking: [], echoDuring: [(0, 10)])
+                )
+                expect.equal(scoped.participants.filter(\.isSelf).count, 0)
+            },
+
+            test("a sliver of turn is not enough to call somebody the local user") { expect in
+                // The dangerous direction. Being marked self removes a
+                // participant from the roster entries, from word attribution
+                // and from enrolment, so their name never lands anywhere. A
+                // participant whose whole presence is one short turn that
+                // happens to fall under the local user's speech would otherwise
+                // score a clean 1.0: across the recordings on disk, 86 of 771
+                // turns clear the threshold on their own, and 79 of those are
+                // five seconds or shorter.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 2), ("U2", 10, 120)]
+                )
+                let scoped = raw.markingSelf(
+                    using: speech(seconds: 200, talking: [(0, 2), (10, 120)])
+                )
+                // Grace has the evidence to be judged and is the local user.
+                // Ada has two seconds and is left alone.
+                expect.isFalse(scoped.participants.first { $0.id == "U1" }?.isSelf == true)
+                expect.isTrue(scoped.participants.first { $0.id == "U2" }?.isSelf == true)
+            },
+
+            test("a recording with no far end judges nobody") { expect in
+                // A process tap that produced nothing leaves no far-end series,
+                // so the level and echo clauses cannot answer and the detector
+                // alone would decide. On speakers that marks everybody self and
+                // the meeting loses every sensor name.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 60), ("U2", 60, 120)]
+                )
+                var oneTrack = speech(seconds: 120, talking: [(0, 120)])
+                oneTrack.remoteLevels = []
+                oneTrack.micEchoReturnLoss = []
+                expect.equal(raw.markingSelf(using: oneTrack).participants.filter(\.isSelf).count, 0)
+            },
+
+            test("the microphone being quieter than the far end is not the user") { expect in
+                // The clause that carries the most weight on real data, taking
+                // the worst non-self reading from 0.215 to 0.118. Isolated here:
+                // the detector fires throughout and the echo measure stays
+                // clear, so only the level comparison can reject these windows.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 60)]
+                )
+                var quiet = speech(seconds: 60, talking: [(0, 60)])
+                quiet.micLevels = quiet.micLevels.map { _ in Int8(-50) }
+                quiet.remoteLevels = quiet.remoteLevels.map { _ in Int8(-20) }
+                expect.equal(raw.markingSelf(using: quiet).participants.filter(\.isSelf).count, 0)
+            },
+
+            test("a turn timed past the end of the world is not walked") { expect in
+                // The loop steps a quarter second at a time to the turn's end.
+                // A reader that wrote milliseconds where seconds go would spend
+                // billions of iterations inside an actor; SpeechEvidence already
+                // refuses spans it cannot place, and this has to refuse the walk
+                // before it starts.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada")],
+                    turns: [("U1", 0, 1_000_000_000)]
+                )
+                expect.equal(
+                    raw.markingSelf(using: speech(seconds: 60, talking: [(0, 60)]))
+                        .participants.filter(\.isSelf).count,
+                    0
+                )
+            },
+
+            test("evidence nobody measured marks nobody") { expect in
+                // A meeting recorded before the measurement existed, and any
+                // path that reaches this before the audio has been read. Absent
+                // evidence is not evidence that nobody is the local user, so the
+                // record comes back untouched rather than guessed at.
+                let raw = sensors(
+                    participants: [participant("d406", "Andrew"), participant("d409", "Grace")],
+                    turns: [("d406", 0, 10), ("d409", 10, 20)]
+                )
+                expect.equal(raw.markingSelf(using: nil).participants.filter(\.isSelf).count, 0)
+                expect.equal(raw.markingSelf(using: nil).turns.count, 2)
             },
 
             test("a reader cannot change mid-recording") { expect in
@@ -807,11 +1068,14 @@ enum SensorAttributionTests {
                 expect.equal(result.matches.first?.displayName, "Grace")
             },
 
-            test("a namesake beside a real self flag keeps their own turns") { expect in
+            test("an authoritative self flag short-circuits the measurement") { expect in
                 // The case that shipped broken twice under the old design.
-                // Where the platform said who the local user is, a colleague
-                // wearing the same display name is a different person: their
-                // turns still attribute, and their name still lands.
+                // Where the platform said who the local user is, nothing else
+                // gets to add a second: a colleague on a noisy line whose share
+                // crossed the threshold would otherwise be marked too, and a
+                // participant marked self has their turns dropped from word
+                // attribution entirely. Their turns still attribute, and their
+                // name still lands.
                 let raw = sensors(
                     participants: [
                         participant("me", "Andrew", isSelf: true),
@@ -823,7 +1087,10 @@ enum SensorAttributionTests {
                 )
                 var authoritative = raw
                 authoritative.selfIsAuthoritative = true
-                let marked = authoritative.markingSelf(named: "Andrew")
+                // Evidence that would otherwise mark U2 as well.
+                let marked = authoritative.markingSelf(
+                    using: speech(seconds: 120, talking: [(0, 30), (30, 60)])
+                )
                 expect.equal(
                     marked.participants.filter(\.isSelf).count, 1,
                     "the platform already said who the local user is"
@@ -895,6 +1162,60 @@ enum SensorAttributionTests {
                 expect.isNil(SlackHuddleTileParser.userID(from: "Pbrowse-huddles"))
                 expect.isNil(SlackHuddleTileParser.userID(
                     from: "huddle-grid-gridcell-self_U1-a11y_huddle_peer_tile_description"
+                ))
+                // The description node is rejected for being a description, not
+                // for how its trailing token happens to look. Pinned with one
+                // whose token would otherwise pass.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-a11y_huddle_peer_tile_description_U0BSR53NYHG"
+                ))
+            },
+
+            test("a placeholder tile is not a person") { expect in
+                // Slack renders a tile before its session resolves and writes
+                // `pending` where the user id goes. Two recordings on disk carry
+                // it beside the same person's real id, so it duplicates the
+                // roster. It has never held the floor, and the damage if it did
+                // is not a stray label: naming it binds `slack/pending` as a
+                // durable handle, and every later placeholder tile in every
+                // later meeting is then that person before a second of audio is
+                // scored.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-0a5e5133-729a-48f9-b964-00b1690d7b37_pending"
+                ))
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-self_pending"))
+                // Shape, not a list of known ids. A workspace id this app has
+                // never seen still has to read as a person.
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-self_W012ABCDEFG"),
+                    "W012ABCDEFG"
+                )
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_B0B17GB9VPA"),
+                    "B0B17GB9VPA"
+                )
+                // Slack's own bot, and a classic nine-character account. The
+                // bound has to admit both: the shortest account in any recording
+                // on disk is eleven, so a length fitted to what was measured
+                // would silently drop every account shorter than the corpus.
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_USLACKBOT"),
+                    "USLACKBOT"
+                )
+                expect.equal(
+                    SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_U023BECGF"),
+                    "U023BECGF"
+                )
+                // Too short to be one, and lowercase never is.
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_U01"))
+                expect.isNil(SlackHuddleTileParser.userID(from: "huddle-grid-gridcell-abc_u0b17gb9vpa"))
+                // Upper-case and numeric span the whole of Unicode, so the
+                // check is ASCII or a Cyrillic run reads as an account.
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-abc_U\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}\u{0414}"
+                ))
+                expect.isNil(SlackHuddleTileParser.userID(
+                    from: "huddle-grid-gridcell-abc_U\u{0661}\u{0662}\u{0663}\u{0664}\u{0665}\u{0666}\u{0667}\u{0668}"
                 ))
             },
 

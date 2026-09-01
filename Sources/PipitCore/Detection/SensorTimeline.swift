@@ -26,9 +26,9 @@ public struct SensorParticipant: Codable, Sendable, Equatable, Identifiable {
 /// One stretch where one person held the floor, on the meeting timeline.
 ///
 /// A turn is not an utterance. Slack marks one speaker at a time and releases
-/// about 1.5 s after the voice stops, so a turn's edges are the client's opinion
-/// about who was talking, drifting later than the audio. Boundaries stay with
-/// the diarizer; this says whose they are.
+/// after the voice stops, measured at a median of 1.2 s, so a turn's edges are
+/// the client's opinion about who was talking, drifting later than the audio.
+/// Boundaries stay with the diarizer; this says whose they are.
 public struct SensorTurn: Codable, Sendable, Equatable {
     public var start: Double
     public var end: Double
@@ -72,9 +72,8 @@ public struct RawSensors: Codable, Sendable, Equatable {
     /// whose name happens to be You.
     ///
     /// Recorded as evidence of how the local user was identified. Where the
-    /// platform said so, a namesake in the roster is a different person and the
-    /// display-name fallback stands down; where it only guessed, the fallback
-    /// may mark a second participant, which costs at most one unnamed cluster.
+    /// platform said so, a namesake in the roster is a different person and
+    /// `markingSelf` stands down entirely rather than looking for a second.
     public var selfIsAuthoritative: Bool
 
     public init(
@@ -117,34 +116,162 @@ public struct RawSensors: Codable, Sendable, Equatable {
         participants.first { $0.id == id }
     }
 
-    /// The same record with the local user marked by name as well as by flag.
+    /// Share of a participant's turn windows that have to hold the local user's
+    /// own voice before they are the local user.
+    ///
+    /// Measured over the seven recordings on disk carrying both a usable
+    /// timeline and speech evidence, twenty-two participants: the local user
+    /// reads 0.763 to 0.914 and everybody else reads 0.000 to 0.118. The
+    /// threshold sits 2.18x below the lowest of the first group and 2.96x above
+    /// the highest of the second, and nothing crosses it.
+    ///
+    /// The middle clause is what earns that. On the detector alone the worst
+    /// reading from somebody who is not the local user is 0.215, which 0.35
+    /// still clears but not by much.
+    public static let selfTurnLocalSpeechShare: Double = 0.35
+
+    /// Turn seconds a participant needs before the share above is asked at all.
+    ///
+    /// The share is a ratio, so a participant seen for half a second scores 0 or
+    /// 1 and nothing in between. Across the recordings on disk 86 of 771 turns
+    /// clear the threshold on their own, and 79 of those run five seconds or
+    /// less. Being wrong in this direction is not a mislabelled word: a
+    /// participant marked self is dropped from the roster entries, from word
+    /// attribution and from enrolment, so their name never lands anywhere.
+    ///
+    /// Thirty seconds sits 2.3x below the least the local user has ever held in
+    /// any recording measured, which is 69.5 s, and it keeps all seven of them.
+    /// A local user who genuinely holds the floor for less than this is not
+    /// marked, and the misattribution that costs is bounded by the seconds they
+    /// held.
+    public static let minimumSelfEvidenceSeconds: Double = 30
+
+    /// The same record with the local user marked by what the microphone heard.
     ///
     /// The page's own answer is not enough. Meet marks the local tile with an
     /// English word, so a client in any other language reports nobody as self,
-    /// and Zoom marks nobody at all. The app does know who its user is.
-    public func markingSelf(named localUserName: String) -> RawSensors {
+    /// and Zoom marks nobody at all. Every Meet recording on disk has nobody
+    /// marked, so the local user's turns compete for remote clusters and put
+    /// their name on a track that by construction cannot hold their voice.
+    ///
+    /// What replaced the guess is not another guess. While the client says a
+    /// participant holds the floor, either the microphone is carrying that
+    /// person or it is not, and the recording already measured that for
+    /// `LocalSpeechPolicy`. Matching the configured display name was the
+    /// previous answer and it is deliberately gone: it never fired here, where
+    /// the roster reads "Andrew Neeser" and the setting reads "Andrew", and
+    /// where it does fire it cannot tell two tiles under one name apart. One
+    /// recording has exactly that, and marking both would have deleted a real
+    /// participant's speech.
+    ///
+    /// Three clauses, the same three `LocalSpeechPolicy` needed and for the same
+    /// reasons. The detector has to fire. The microphone has to be no quieter
+    /// than the far end. And a filtered copy of the far end must not account for
+    /// the microphone's energy, which is the clause that survives a call played
+    /// out of the laptop's speakers: there the gain control lifts the leakage to
+    /// the far end's own level and every comparison of loudness keeps it. Being
+    /// wrong here deletes a real participant's turns outright, so it fails
+    /// closed.
+    public func markingSelf(using evidence: SpeechEvidence?) -> RawSensors {
         // A fallback, not a supplement. Where the reader authoritatively named
-        // the local user, somebody else carrying the same display name is a
-        // different person, and marking them too was the whole bug: they left
-        // the speaker count, the recording re-clustered one voice short, and two
-        // people were merged into one.
-        //
-        // Where the reader only guessed, a second guess costs nothing: the count
-        // is already off the table, and the only effect is to leave another
-        // cluster unnamed.
+        // the local user, a second self is always wrong: marking one was the
+        // whole bug, because they left the speaker count, the recording
+        // re-clustered one voice short, and two people were merged into one.
+        // A colleague on a leaking line whose share crossed the threshold would
+        // otherwise be marked beside a self the platform already named.
         guard !(selfIsAuthoritative && participants.contains(where: \.isSelf)) else { return self }
-        let wanted = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty else { return self }
+        // Absent evidence is not evidence that nobody is the local user. A
+        // meeting recorded before the measurement existed comes back untouched,
+        // which is the behaviour those meetings already have.
+        guard let evidence else { return self }
+
+        // No far end recorded means the two clauses that separate the user's
+        // own voice from the room's cannot answer, and the detector alone would
+        // decide. On speakers that marks everybody, and a participant marked
+        // self loses their name everywhere. A process tap that produced nothing
+        // is the realistic way to get here.
+        guard !evidence.remoteLevels.isEmpty else { return self }
+
+        let selfIDs = Set(participants.filter(\.isSelf).map(\.id))
+        var byParticipant: [String: [SensorTurn]] = [:]
+        // The same ceiling word attribution applies. A turn past it is a stuck
+        // indicator rather than a claim about who was talking, and a stuck one
+        // is no better as evidence of who the local user is than it is as
+        // evidence of who spoke.
+        for turn in turns
+        where !selfIDs.contains(turn.participantID)
+            && SensorAttribution.isFloorObservation(turn) {
+            byParticipant[turn.participantID, default: []].append(turn)
+        }
+        var found: Set<String> = []
+        for (id, held) in byParticipant {
+            // Thin evidence is not evidence. A participant whose whole presence
+            // is a couple of seconds that happen to fall under the local user's
+            // speech scores a clean 1.0, and 86 of the 771 turns on disk clear
+            // the threshold on their own. Being wrong here deletes somebody, so
+            // a participant this has barely seen is left alone.
+            let measurement = Self.localSpeechShare(of: held, in: evidence)
+            // Seconds actually examined, not seconds the record claims. A turn
+            // timed past the end of the recording offers no more evidence than
+            // the part of it the audio covers.
+            guard measurement.seconds >= Self.minimumSelfEvidenceSeconds else { continue }
+            guard measurement.share >= Self.selfTurnLocalSpeechShare else { continue }
+            found.insert(id)
+        }
+        guard !found.isEmpty else { return self }
         var marked = self
         marked.participants = participants.map { person in
-            guard !person.isSelf, let name = person.displayName,
-                  name.caseInsensitiveCompare(wanted) == .orderedSame
-            else { return person }
+            guard found.contains(person.id) else { return person }
             var updated = person
             updated.isSelf = true
             return updated
         }
         return marked
+    }
+
+    /// How much of these turns the local user was audibly speaking through.
+    ///
+    /// Window by window rather than across the whole turn, because the question
+    /// is what share of it holds their voice. `SpeechEvidence.reading` reports
+    /// the loudest sample and the highest detector reading over whatever span it
+    /// is handed, so asking it about a whole turn would answer "was the user
+    /// heard at any point in these thirty seconds", which a single cough passes.
+    static func localSpeechShare(
+        of turns: [SensorTurn], in evidence: SpeechEvidence
+    ) -> (share: Double, seconds: Double) {
+        let window = evidence.levelWindowSeconds
+        guard window > 0 else { return (0, 0) }
+        // What the evidence covers at all. A turn timed past it is walked a
+        // window at a time for nothing, and a reader that wrote milliseconds
+        // where seconds go would spend billions of iterations doing it inside an
+        // actor. `SpeechEvidence` already refuses to place such a span; this
+        // refuses to walk to it.
+        let measurable = Double(evidence.micLevels.count) * window
+        var measured = 0
+        var carrying = 0
+        for turn in turns {
+            guard turn.start.isFinite, turn.end.isFinite, turn.start >= 0 else { continue }
+            let stop = min(turn.end, measurable)
+            var at = turn.start
+            while at < stop {
+                defer { at += window }
+                guard let reading = evidence.reading(from: at, to: min(at + window, stop))
+                else { continue }
+                measured += 1
+                guard let probability = reading.speechProbability,
+                      probability >= LocalSpeechPolicy.speechProbability
+                else { continue }
+                if let echo = reading.echoReturnLossDB,
+                   echo >= LocalSpeechPolicy.echoReturnLossDB { continue }
+                // No far end to be quieter than means one track, and a
+                // one-track recording has no far-end mixdown to be excluded
+                // from in the first place.
+                if let difference = reading.medianDifferenceDB, difference < 0 { continue }
+                carrying += 1
+            }
+        }
+        guard measured > 0 else { return (0, 0) }
+        return (Double(carrying) / Double(measured), Double(measured) * window)
     }
 
     /// The same record moved onto a different origin.

@@ -1040,6 +1040,15 @@ public actor ProcessingPipeline {
         let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
 
+        // Before the run, because enrolment happens inside it and needs to know
+        // which turns are the local user's. Measuring in the following stage
+        // meant the file did not exist yet on a first pass, nobody was marked,
+        // and the local user's turns reached the enrolment intervals: a profile
+        // built from a track that holds everyone except them. It writes once and
+        // guards on the file already being there, so the later call is a no-op
+        // and re-analysis still reaches it.
+        await measureSpeech(store: store, metadata: metadata)
+
         if diarizer.isLocal { try await prepareLocalModels(metadata: metadata) }
 
         if diarizer.limits.requiresChunking {
@@ -1229,7 +1238,7 @@ public actor ProcessingPipeline {
     ) async {
         guard let service = backends.speakers, let extractor = backends.embeddings else { return }
         guard let sensors = store.readRawSensors() else { return }
-        let marked = sensors.markingSelf(named: settingsProvider().localUserName)
+        let marked = sensors.markingSelf(using: store.readSpeechEvidence())
         // The extractor reads the submitted audio, whose zero is the track's
         // own first frame rather than the meeting timeline's.
         let intervals = SensorAttribution.enrollmentIntervals(
@@ -1414,7 +1423,7 @@ public actor ProcessingPipeline {
     private func sensorRecord(store: MeetingStore, metadata: MeetingMetadata) -> RawSensors? {
         guard metadata.source.micTrackIsLocalUser else { return nil }
         guard let sensors = store.readRawSensors() else { return nil }
-        return sensors.markingSelf(named: settingsProvider().localUserName)
+        return sensors.markingSelf(using: store.readSpeechEvidence())
     }
 
     /// Names speakers from what the meeting client said, where it said enough.

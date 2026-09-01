@@ -67,18 +67,79 @@ public enum SensorAttribution {
     /// words.
     ///
     /// A turn's end is where the client's indicator moved, sampled at 0.5 s and
-    /// released up to 1.5 s after the voice stopped, so the words at the tail
-    /// can be the next speaker's first words. Inside this margin the diarizer
-    /// decides, because it hears the voice change.
+    /// released after the voice stopped, so the words at the tail can be the
+    /// next speaker's first words. Inside this margin the diarizer decides,
+    /// because it hears the voice change.
     ///
-    /// Never more than half a turn. A fixed second would gut the short turns of
-    /// an ordinary back-and-forth, handing away the head of a turn as well,
-    /// where the sensor is the thing that is right. Half of a short turn keeps
-    /// its beginning and still refuses its end.
-    public static let wordAttributionTailSeconds: Double = 1
+    /// Measured against a reference diarization: on the Aug 31 2:14 PM huddle
+    /// the client's turn boundaries trail the voice by a median of 1.2 s with a
+    /// 90th percentile of 2.6 s, and 27 of 32 matched transitions run late. One
+    /// second was inside that, so the tail routinely kept words the next person
+    /// said.
+    ///
+    /// A turn shorter than this now yields nothing rather than half of itself.
+    /// The half-turn cap was meant to protect the head of a quick exchange,
+    /// where the sensor is the thing that is right, but a turn shorter than the
+    /// release is late by more than its own length, so the half that survived
+    /// was the previous speaker still talking. A one-second turn at 27.29 s kept
+    /// 0.5 s and put "I'm glad we" on the wrong person in the middle of
+    /// somebody else's sentence.
+    ///
+    /// On the words the sensor still claims, so the diarizer's own accuracy is
+    /// not in the denominator, this takes attribution from 93.5% to 97.6%
+    /// against the reference. The diarizer alone scores 96.6% under the same
+    /// harness: the sensor used to be worse than the thing it overrides and is
+    /// now better. Whole-transcript accuracy goes 93.4% to 96.3%, with the words
+    /// handed to the diarizer rising from 436 to 864.
+    ///
+    /// Two seconds is a choice rather than a floor. Wrong words run 288, 207,
+    /// 174, 167, 160 across tails of 1.0 to 3.0 while right words run 4499,
+    /// 4540, 4526, 4503, 4487, so past 2.0 the net is nearly flat and 2.5 is
+    /// about as defensible. This keeps the most sensor contribution at the point
+    /// where it becomes trustworthy.
+    ///
+    /// One constant for every client, and Meet was measured rather than assumed.
+    /// Its turns are much shorter, a median of 1.5 s against Slack's 2.5 to
+    /// 11.5, and 60% of them are inside this concession, so the same number
+    /// discards far more of them. It still helps: on the Sep 01 standup, scored
+    /// the same way, 83.3% becomes 86.9%, improving monotonically to 2.5 exactly
+    /// as it does on Slack. A per-source constant would buy little and would
+    /// have to justify two numbers instead of one.
+    public static let wordAttributionTailSeconds: Double = 2
+
+    /// How long one turn may run before it stops being an observation.
+    ///
+    /// A turn says the client marked somebody as holding the floor between two
+    /// readings that said so. An indicator that has not moved in five minutes is
+    /// more likely stuck than accurate, and a stuck one is not a small error: a
+    /// Meet recording produced two turns for a twenty-two minute call, one of
+    /// them 863 seconds, and every remote word went to whoever held it while the
+    /// diarizer had cleanly separated three voices underneath.
+    ///
+    /// The longest turn anybody genuinely held, across all eight recordings on
+    /// disk with a sensor timeline, is 128 seconds, and the 95th percentiles run
+    /// from 19 to 62 seconds. This sits 2.3x above the longest of those and 2.9x
+    /// below the stuck one. Applying it changes nothing on any of the seven
+    /// healthy recordings, in either word attribution or enrolment.
+    ///
+    /// A genuine monologue past this loses very little. `attribute` reads the
+    /// turns whole, so the speaker's cluster is still matched and still named;
+    /// what changes is that the words go to the diarizer, which on one voice
+    /// returns that same cluster carrying that same name. Enrolment does lose
+    /// the audio, and a person who talks for five unbroken minutes has other
+    /// turns to be enrolled from.
+    ///
+    /// The sample is 15 to 48 minute meetings. Nothing here is validated against
+    /// a two-hour all-hands with a single presenter.
+    public static let maximumFloorSeconds: Double = 300
+
+    /// Whether a turn is short enough to be a claim about who was speaking.
+    static func isFloorObservation(_ turn: SensorTurn) -> Bool {
+        turn.duration <= maximumFloorSeconds
+    }
 
     static func attributableEnd(of turn: SensorTurn) -> Double {
-        turn.end - min(wordAttributionTailSeconds, turn.duration / 2)
+        max(turn.start, turn.end - wordAttributionTailSeconds)
     }
 
     /// The sensor timeline as intervals the assembler can align words against.
@@ -95,10 +156,11 @@ public enum SensorAttribution {
     public static func wordIntervals(sensors: RawSensors) -> [DiarizationInterval] {
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
         return sensors.turns
-            .filter { !selfIDs.contains($0.participantID) }
+            .filter { !selfIDs.contains($0.participantID) && isFloorObservation($0) }
             .compactMap { turn -> DiarizationInterval? in
-                // The tail belongs to the diarizer, and never more than half
-                // the turn, so a short exchange keeps its beginning.
+                // The tail belongs to the diarizer. A turn the concession eats
+                // whole vanishes with it, which is the point: it is shorter than
+                // the indicator's own release, so all of it is late.
                 let end = attributableEnd(of: turn)
                 guard end > turn.start else { return nil }
                 return DiarizationInterval(
@@ -143,7 +205,8 @@ public enum SensorAttribution {
         }
         let solo = DiarizationInterval.soloSpeech(diarized)
         var byParticipant: [String: [DiarizationInterval]] = [:]
-        for turn in sensors.turns where !selfIDs.contains(turn.participantID) {
+        for turn in sensors.turns
+        where !selfIDs.contains(turn.participantID) && isFloorObservation(turn) {
             guard let clusters = clustersOf[turn.participantID] else { continue }
             for interval in solo where clusters.contains(interval.clusterID) {
                 let start = max(turn.start, interval.start)
@@ -168,16 +231,24 @@ public enum SensorAttribution {
 
     /// The speaker-map entries behind the sensor keys word attribution writes.
     ///
-    /// One entry per non-self participant who held the floor and whose name the
-    /// client rendered. A participant the client never named gets no entry: the
-    /// key still appears in the transcript, renders through the fallback, and
-    /// waits for a person to fill it in.
+    /// One entry per non-self participant whose speech survived attribution and
+    /// whose name the client rendered. A participant the client never named gets
+    /// no entry: the key still appears in the transcript, renders through the
+    /// fallback, and waits for a person to fill it in.
+    ///
+    /// Keyed on the intervals rather than on the turns. Holding a turn is not
+    /// the same as keeping one now that the concession can eat a short turn
+    /// whole and the ceiling can refuse a long one, and an entry for a key no
+    /// utterance uses is not harmless: it reaches the folder's people list and
+    /// the enrichment prompt, and the control that confirms a voice offers a
+    /// name with no audio behind it.
     public static func speakerEntries(
         sensors: RawSensors
     ) -> [(key: String, assignment: SpeakerAssignment)] {
-        let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
-        let held = Set(sensors.turns.map(\.participantID)).subtracting(selfIDs)
-        return held.sorted().compactMap { id in
+        let kept = Set(wordIntervals(sensors: sensors).compactMap {
+            SpeakerLabel.sensorParticipantID(from: $0.clusterID)
+        })
+        return kept.sorted().compactMap { id in
             let name = (sensors.participant(id)?.displayName ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return nil }
@@ -214,8 +285,19 @@ public enum SensorAttribution {
         // where they can still stop somebody else's name landing on the local
         // user's speech, but they never become a name.
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        // The same ceiling word attribution applies. Refusing a stuck turn
+        // there and honouring it here was worse than doing neither: the words
+        // moved onto cluster keys and those clusters were still named from the
+        // turn that had just been refused, so a recording that read one wrong
+        // name went on reading it under a different key.
+        //
+        // What a genuine monologue loses is its name, where that monologue is
+        // the only turn its speaker held. That is the honest answer: a client
+        // whose indicator did not move for five minutes did not observe who was
+        // talking, and an unnamed speaker asks to be filled in.
+        let turns = sensors.turns.filter(isFloorObservation)
 
-        guard !intervals.isEmpty, !sensors.turns.isEmpty else {
+        guard !intervals.isEmpty, !turns.isEmpty else {
             return Result(coverage: 0)
         }
 
@@ -229,7 +311,7 @@ public enum SensorAttribution {
             guard length > 0 else { continue }
             totalSpeech += length
             clusterSeconds[interval.clusterID, default: 0] += length
-            for turn in sensors.turns {
+            for turn in turns {
                 let overlap = min(interval.end, turn.end) - max(interval.start, turn.start)
                 guard overlap > 0 else { continue }
                 perCluster[interval.clusterID, default: [:]][turn.participantID, default: 0] += overlap
@@ -292,10 +374,13 @@ extension SensorAttribution {
     /// explain a voice heard there. Removing those turns looked equivalent and
     /// was not: it left the runner-up at zero, so the margin rule stopped
     /// guarding and second place won the cluster outright.
+    /// The record arrives already marked: the pipeline reads it through
+    /// `sensorRecord`, which is where the microphone evidence lives. Marking it
+    /// again here would need evidence this has no reason to take.
     public static func assignments(
-        diarization: RawDiarization, sensors: RawSensors, localUserName: String = ""
+        diarization: RawDiarization, sensors: RawSensors
     ) -> [(key: String, assignment: SpeakerAssignment)] {
-        let scoped = sensors.markingSelf(named: localUserName)
+        let scoped = sensors
         guard !scoped.turns.isEmpty else { return [] }
 
         var out: [(key: String, assignment: SpeakerAssignment)] = []

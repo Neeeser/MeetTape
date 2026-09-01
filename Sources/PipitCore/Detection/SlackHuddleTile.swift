@@ -44,9 +44,41 @@ public enum SlackHuddleTileParser {
         guard identifier.hasPrefix(identifierPrefix) else { return nil }
         guard !identifier.contains(descriptionSuffix) else { return nil }
         guard let id = identifier.split(separator: "_").last.map(String.init),
-              !id.isEmpty, id != identifier
+              !id.isEmpty, id != identifier, isPlausibleUserID(id)
         else { return nil }
         return id
+    }
+
+    /// Whether a trailing token is shaped like a Slack account rather than a
+    /// word Slack put where one goes.
+    ///
+    /// Slack renders a tile before its session resolves and writes `pending`
+    /// in that position. Two recordings on disk carry it beside the same
+    /// person's real id, so it arrives as a second roster entry for someone
+    /// already listed. Neither has held the floor, and a stray label is not
+    /// what makes it worth rejecting: naming a sensor speaker binds its
+    /// identifier as a durable handle, so one confirmation on a placeholder
+    /// would name every later meeting's placeholder as that person, before any
+    /// audio is scored.
+    ///
+    /// Tested by shape rather than against a list, because an id this app has
+    /// never seen still has to read as a person. Accounts are `U`, bots are
+    /// `B`, and org-wide accounts on Enterprise Grid are `W`; the rest is
+    /// upper-case ASCII alphanumeric.
+    ///
+    /// The case rule is what rejects a placeholder. `pending`, and any other
+    /// lower-case word Slack might write where an account goes, fails on the
+    /// first character. Nine is Slack's historical minimum of `U` plus eight
+    /// and admits `USLACKBOT`; the shortest account in any recording on disk is
+    /// eleven, so the bound is deliberately below anything measured rather than
+    /// fitted to it.
+    ///
+    /// ASCII explicitly. `isUppercase` and `isNumber` are true across the whole
+    /// of Unicode, so without it a Cyrillic or Arabic-Indic run passes as an
+    /// account: measured, `U` followed by eight `Д` did.
+    static func isPlausibleUserID(_ id: String) -> Bool {
+        guard id.count >= 9, let first = id.first, "UWB".contains(first) else { return false }
+        return id.allSatisfy { $0.isASCII && ($0.isNumber || $0.isUppercase) }
     }
 
     public static func isSelf(_ identifier: String) -> Bool {

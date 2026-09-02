@@ -79,6 +79,39 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         detector = try container.decodeIfPresent(String.self, forKey: .detector)
     }
 
+    /// The share of far-end windows that has to rise above the silence floor
+    /// before the far end counts as recorded rather than merely present.
+    ///
+    /// Measured over the twenty recordings on disk carrying speech evidence.
+    /// The nineteen whose tap worked rise above the floor in 62.3% to 99.6% of
+    /// their windows; the one whose tap produced nothing reads 0 of 7469. There
+    /// is no middle, so this only has to sit inside a gap that wide, and it
+    /// sits 62x below the lowest working recording so that a tap which died
+    /// part way through still reads as recorded.
+    public static let farEndSignalShare = 0.01
+
+    /// Whether the far-end track holds anything at all.
+    ///
+    /// `remoteLevels` being non-empty says a track was recorded, not that
+    /// anything reached it. A CoreAudio process tap delivers buffers at full
+    /// rate whether or not the tapped application is emitting, because the
+    /// aggregate device is clocked by its output sub-device, so a tap bound to
+    /// a silent application writes hours of digital zero and every window then
+    /// reads the floor `decibels(rms:)` clamps to. One meeting on disk is
+    /// exactly that: 7469 windows, all -120.
+    ///
+    /// Everything that calls the microphone the local user's own track depends
+    /// on the far end being somewhere else, so each of those questions has to
+    /// ask this one first.
+    public var farEndCarriesSignal: Bool {
+        guard !remoteLevels.isEmpty else { return false }
+        let floor = Int8(EmptyTranscriptPolicy.silenceFloorDBFS)
+        let above = remoteLevels.reduce(into: 0) { count, level in
+            if level > floor { count += 1 }
+        }
+        return Double(above) / Double(remoteLevels.count) >= Self.farEndSignalShare
+    }
+
     /// What the audio holds over one span of the meeting timeline, from the
     /// microphone's point of view.
     ///
@@ -89,11 +122,20 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
     public func reading(from start: Double, to end: Double) -> SpeechReading? {
         guard let local = span(micLevels, windowSeconds: levelWindowSeconds, from: start, to: end),
               let loudestLocal = local.max() else { return nil }
-        let far = span(remoteLevels, windowSeconds: levelWindowSeconds, from: start, to: end)
+        // A far end that never rose above the floor is not a reference. Reading
+        // it as one makes every comparison against it trivially true: the
+        // microphone outreads -120 dB everywhere, and a filtered copy of
+        // silence accounts for none of the microphone's energy, so the level
+        // and echo clauses both answer yes to whatever they are asked. The
+        // honest shape for it is the one-track shape.
+        let carriesSignal = farEndCarriesSignal
+        let far = carriesSignal
+            ? span(remoteLevels, windowSeconds: levelWindowSeconds, from: start, to: end)
+            : nil
         let probability = span(micSpeech, windowSeconds: speechWindowSeconds, from: start, to: end)
             .flatMap { $0.max() }
             .map { Double($0) / 100 }
-        let echo = echoReturnLoss(from: start, to: end)
+        let echo = carriesSignal ? echoReturnLoss(from: start, to: end) : nil
         guard let far, let loudestFar = far.max() else {
             return SpeechReading(
                 speechProbability: probability, loudestLocalDB: Double(loudestLocal),

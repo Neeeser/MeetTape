@@ -178,10 +178,18 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         let state: CaptureHealthState
     }
 
+    struct RemoteBind: Sendable, Equatable {
+        let reason: String
+        let processIDs: [Int32]
+        let producing: [Bool]
+        let count: Int
+    }
+
     private struct State {
         var formatChanges: [FormatChange] = []
         var restarts: [Restart] = []
         var healthChanges: [HealthChange] = []
+        var remoteBinds: [RemoteBind] = []
         var failures: [CaptureError] = []
     }
 
@@ -190,6 +198,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     var formatChanges: [FormatChange] { state.withLock { $0.formatChanges } }
     var restarts: [Restart] { state.withLock { $0.restarts } }
     var healthChanges: [HealthChange] { state.withLock { $0.healthChanges } }
+    var remoteBinds: [RemoteBind] { state.withLock { $0.remoteBinds } }
     var failures: [CaptureError] { state.withLock { $0.failures } }
 
     func captureWillChangeFormat(
@@ -204,6 +213,19 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
 
     func captureHealthChanged(track: CaptureTrack, state newState: CaptureHealthState, detail: String?) {
         state.withLock { $0.healthChanges.append(HealthChange(track: track, state: newState)) }
+    }
+
+    func captureDidBindRemote(
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+    ) {
+        state.withLock {
+            $0.remoteBinds.append(RemoteBind(
+                reason: reason.label,
+                processIDs: targets.map(\.processID),
+                producing: targets.map(\.isRunningOutput),
+                count: bindCount
+            ))
+        }
     }
 
     func captureDidFail(track: CaptureTrack, error: CaptureError) {

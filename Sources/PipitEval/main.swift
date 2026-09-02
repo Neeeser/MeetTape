@@ -117,6 +117,7 @@ func usage() -> Never {
           pipit-eval identity --audio FILE [--audio FILE ...]
           pipit-eval voices
           pipit-eval gate     --meeting MEETING_FOLDER
+          pipit-eval reanalyze --meeting MEETING_FOLDER [--speakers N]
           pipit-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
                                  [--diarizer local|lseend|cloud] [--out FILE] [--baseline FILE]
@@ -337,6 +338,14 @@ case "gate":
     guard let folder = arguments.meeting else { usage() }
     let code = await GateCommand.run(
         meeting: folder, applicationSupport: arguments.applicationSupport
+    )
+    if code != 0 { exit(code) }
+
+case "reanalyze":
+    guard let folder = arguments.meeting else { usage() }
+    let code = await ReanalyzeCommand.run(
+        meeting: folder, applicationSupport: arguments.applicationSupport,
+        speakerCount: arguments.speakerCount
     )
     if code != 0 { exit(code) }
 

@@ -190,7 +190,16 @@ public struct RawSensors: Codable, Sendable, Equatable {
         // decide. On speakers that marks everybody, and a participant marked
         // self loses their name everywhere. A process tap that produced nothing
         // is the realistic way to get here.
-        guard !evidence.remoteLevels.isEmpty else { return self }
+        //
+        // Signal rather than presence. A tap bound to a silent application
+        // still writes a full-length track, so the series is there and every
+        // window of it reads the floor. One meeting on disk did exactly that
+        // and this guard let it through: with the far end at -120 the level
+        // difference is +62 dB for every window and the echo clause reads 0.0,
+        // so the share collapses to whether the detector fired on the
+        // microphone, which it does for whoever is talking in the room. All six
+        // participants scored above 0.87 and every one of them was marked self.
+        guard evidence.farEndCarriesSignal else { return self }
 
         let selfIDs = Set(participants.filter(\.isSelf).map(\.id))
         var byParticipant: [String: [SensorTurn]] = [:]

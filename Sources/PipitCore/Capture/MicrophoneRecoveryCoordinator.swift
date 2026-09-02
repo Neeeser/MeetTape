@@ -35,6 +35,12 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
         track: CaptureTrack, from: AudioFormatDescriptor?, to: AudioFormatDescriptor, reason: String
     )
     func captureDidRestart(track: CaptureTrack, reason: RebuildReason, restartCount: Int)
+    /// What the process tap was pointed at, and what CoreAudio said about each
+    /// target's output at that moment. Recorded so a track that came back
+    /// silent can be told from a track nobody was playing into.
+    func captureDidBindRemote(
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+    )
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)
 }

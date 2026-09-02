@@ -73,16 +73,23 @@ public final class RemoteTapCoordinator: Sendable {
         setHealth(.idle, detail: nil)
     }
 
+    /// Records that the tap delivered, without deciding health from it.
+    ///
+    /// A buffer arriving is not evidence the tap is working. The aggregate
+    /// device is clocked by its output sub-device rather than by the tap, so it
+    /// runs whether or not the tapped application is emitting and hands over
+    /// silence when it is not: one meeting on disk carries 717 MB of digital
+    /// zero delivered at full rate for thirty-one minutes.
+    ///
+    /// Declaring `.healthy` from here also fought the poll. `evaluate` writes
+    /// `.idleButBound` on a tick where no target is producing, and the next
+    /// buffer overwrote it milliseconds later, so a quiet stretch logged pairs
+    /// of transitions 43 ms apart instead of one state. The tapped process's own
+    /// output flag is the decidable signal, and now nothing outranks it.
     public func noteBufferArrived(hostTime: Double) {
-        let becameHealthy: Bool = state.withLock { state in
+        state.withLock { state in
             state.policy.noteBufferArrived(at: hostTime)
-            guard state.health != .healthy else { return false }
-            state.health = .healthy
             state.faultSince = nil
-            return true
-        }
-        if becameHealthy {
-            delegate.captureHealthChanged(track: .remote, state: .healthy, detail: nil)
         }
     }
 
@@ -179,14 +186,18 @@ public final class RemoteTapCoordinator: Sendable {
             if format != previous {
                 delegate.captureWillChangeFormat(track: .remote, from: previous, to: format, reason: reason.label)
             }
-            state.withLock { state in
+            let count: Int = state.withLock { state in
                 state.activeFormat = format
                 state.policy.noteBound(to: targets, at: now)
                 state.bindTimestamps.append(now)
                 state.bindTimestamps.removeAll { now - $0 > 300 }
                 state.consecutiveBindFailures = 0
                 state.nextBindAllowedAt = 0
+                return state.policy.bindCount
             }
+            delegate.captureDidBindRemote(
+                targets: targets, reason: reason, bindCount: count
+            )
             setHealth(.recovering, detail: reason.label)
         } catch {
             let failures: Int = state.withLock { state in

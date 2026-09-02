@@ -64,11 +64,18 @@ public final class CaptureEngine: Sendable {
         case recording
     }
 
+    /// Events held over an arm that has not committed. The pre-roll bounds a
+    /// normal arm to seconds; this bounds one that never commits.
+    private static let pendingEventLimit = 256
+
     private struct State {
         var mode: Mode = .idle
         var micWriter: SegmentWriter?
         var remoteWriter: SegmentWriter?
         var manifest: ManifestWriter?
+        /// Events raised while the session is armed, before there is a manifest
+        /// to hold them. Flushed in order at commit.
+        var pendingEvents: [(ManifestEvent, Double, Date)] = []
         var layout: MeetingLayout?
         var capturesRemote = true
         var lastSnapshot = CaptureHealthSnapshot()
@@ -289,8 +296,11 @@ public final class CaptureEngine: Sendable {
         // The ring is drained and handed to the writer queues inside the same
         // locked region that flips the mode, so a live buffer can never be
         // written ahead of the pre-roll it should follow.
+        var pending: [(ManifestEvent, Double, Date)] = []
         let flushed: [(CaptureTrack, Int64, Double, Double?)] = state.withLock { state in
             state.manifest = manifest
+            pending = state.pendingEvents
+            state.pendingEvents = []
             state.layout = layout
             state.micWriter = micWriter
             state.remoteWriter = remoteWriter
@@ -324,6 +334,12 @@ public final class CaptureEngine: Sendable {
             }
             state.mode = .recording
             return summaries
+        }
+
+        // Held while the session was armed, and carrying their own moments, so
+        // the bind that produced the pre-roll reads before the pre-roll does.
+        for (event, hostTime, wallClock) in pending {
+            manifest.append(event, hostTime: hostTime, wallClock: wallClock)
         }
 
         for (track, frames, seconds, earliest) in flushed {
@@ -604,9 +620,27 @@ public final class CaptureEngine: Sendable {
         Log.capture.error("segment write failed: \(error.logSafeDescription, privacy: .public)")
     }
 
+    /// Appends to the manifest, holding the event until there is one.
+    ///
+    /// `state.manifest` is set at commit, and the tap binds while the session is
+    /// still armed, so everything about that first bind was written to nil and
+    /// lost: the recording that most needed its bind provenance had a manifest
+    /// whose first remote entry arrived thirty minutes in. Arming is bounded by
+    /// the pre-roll, and the cap is there so an arm that never commits cannot
+    /// grow without limit.
     fileprivate func recordManifest(_ event: ManifestEvent) {
-        let manifest = state.withLock { $0.manifest }
-        manifest?.append(event, hostTime: clock.monotonicSeconds, wallClock: clock.now)
+        let hostTime = clock.monotonicSeconds
+        let wallClock = clock.now
+        let manifest = state.withLock { state -> ManifestWriter? in
+            guard let manifest = state.manifest else {
+                if state.pendingEvents.count < CaptureEngine.pendingEventLimit {
+                    state.pendingEvents.append((event, hostTime, wallClock))
+                }
+                return nil
+            }
+            return manifest
+        }
+        manifest?.append(event, hostTime: hostTime, wallClock: wallClock)
     }
 
     fileprivate func applyFormatChange(
@@ -666,6 +700,24 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         queue.async {
             engine?.recordManifest(
                 .captureRestart(.init(track: track, reason: reason.label, restartCount: restartCount))
+            )
+        }
+    }
+
+    func captureDidBindRemote(
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+    ) {
+        let engine = target
+        let recorded = targets.map {
+            ManifestEvent.RemoteBind.Target(
+                processID: $0.processID,
+                bundleIdentifier: $0.bundleIdentifier,
+                isRunningOutput: $0.isRunningOutput
+            )
+        }
+        queue.async {
+            engine?.recordManifest(
+                .remoteBind(.init(reason: reason.label, targets: recorded, bindCount: bindCount))
             )
         }
     }

@@ -952,6 +952,62 @@ enum SensorAttributionTests {
                 expect.equal(raw.markingSelf(using: oneTrack).participants.filter(\.isSelf).count, 0)
             },
 
+            test("a far end recorded as digital silence judges nobody") { expect in
+                // The sibling of the case above, and the one that shipped. A
+                // process tap bound to an application that emits nothing still
+                // writes a full-length track, because the aggregate device is
+                // clocked by its output sub-device rather than by the tap, so
+                // the series is there and every window of it reads the floor.
+                // Guarding on the series being non-empty let this through.
+                //
+                // With the far end at -120 the level difference is +62 dB for
+                // every window and a filtered copy of silence accounts for none
+                // of the microphone's energy, so both clauses answer yes to
+                // whatever they are asked and the share collapses to whether
+                // the detector fired. In the room it fires for whoever is
+                // talking: on the recording this is taken from, all six
+                // participants scored above 0.87 and every one was marked self,
+                // which emptied the roster and left thirty-one minutes under
+                // one name.
+                let raw = sensors(
+                    participants: [
+                        participant("U1", "Ada"), participant("U2", "Grace"),
+                        participant("U3", "Chris"),
+                    ],
+                    turns: [("U1", 0, 60), ("U2", 60, 120), ("U3", 120, 180)]
+                )
+                var silent = speech(seconds: 180, talking: [(0, 180)])
+                silent.remoteLevels = silent.remoteLevels.map { _ in Int8(-120) }
+                silent.micEchoReturnLoss = silent.micEchoReturnLoss.map { _ in Int16(0) }
+                expect.equal(silent.remoteLevels.isEmpty, false)
+                expect.equal(silent.farEndCarriesSignal, false)
+                expect.equal(raw.markingSelf(using: silent).participants.filter(\.isSelf).count, 0)
+                // And the names survive to be used, which is the point of not
+                // marking them.
+                expect.equal(
+                    SensorAttribution.speakerEntries(sensors: raw.markingSelf(using: silent)).count,
+                    3
+                )
+            },
+
+            test("a far end that goes quiet part way through is still a far end") { expect in
+                // The other side of the constant. A tap that worked and then
+                // stopped has recorded a real far end, and refusing to judge
+                // there would give up the measurement on every meeting with a
+                // long silence in it. One percent of windows is 62x below the
+                // least any working recording on disk carries.
+                let raw = sensors(
+                    participants: [participant("U1", "Ada"), participant("U2", "Grace")],
+                    turns: [("U1", 0, 60), ("U2", 60, 120)]
+                )
+                var dying = speech(seconds: 120, talking: [(0, 60)])
+                for index in dying.remoteLevels.indices where index > dying.remoteLevels.count / 20 {
+                    dying.remoteLevels[index] = -120
+                }
+                expect.equal(dying.farEndCarriesSignal, true)
+                expect.equal(raw.markingSelf(using: dying).participants.filter(\.isSelf).count, 1)
+            },
+
             test("the microphone being quieter than the far end is not the user") { expect in
                 // The clause that carries the most weight on real data, taking
                 // the worst non-self reading from 0.215 to 0.118. Isolated here:

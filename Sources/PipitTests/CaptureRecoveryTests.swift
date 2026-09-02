@@ -480,6 +480,12 @@ enum CaptureRecoveryTests {
                 tap.setTargets([makeTarget(pid: 63_100, producing: true)])
                 coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
                 coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                // On the poll rather than on the buffer. A buffer arriving says
+                // the aggregate device is running, which it does whether or not
+                // the tap has anything, so health is settled where the target's
+                // own output flag can be read alongside it.
+                clock.advance(0.5)
+                coordinator.tick()
                 expect.equal(coordinator.health, .healthy)
 
                 tap.setTargets([])
@@ -492,8 +498,69 @@ enum CaptureRecoveryTests {
                 coordinator.tick()
                 expect.equal(coordinator.boundProcessIDs, [63_373])
                 coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                clock.advance(0.5)
+                coordinator.tick()
                 expect.equal(coordinator.health, .healthy)
                 expect.equal(tap.bindCount, 2)
+            },
+
+            test("every bind records what it was pointed at") { expect in
+                // A tap that produced nothing and a tap on an application that
+                // was playing nothing write the same track. The manifest
+                // carried health transitions and never which processes were
+                // bound or whether CoreAudio believed any of them was
+                // producing output, so on the one recording that needed the
+                // answer it is not recoverable.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                expect.equal(delegate.remoteBinds.count, 1)
+                expect.equal(delegate.remoteBinds.first?.reason, "session_start")
+                expect.equal(delegate.remoteBinds.first?.processIDs, [79_590])
+                expect.equal(delegate.remoteBinds.first?.producing, [true])
+
+                // And again when the process moves, so a recording carries the
+                // whole history rather than the first answer.
+                tap.setTargets([makeTarget(pid: 81_002, producing: false)])
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(delegate.remoteBinds.count, 2)
+                expect.equal(delegate.remoteBinds.last?.processIDs, [81_002])
+                expect.equal(delegate.remoteBinds.last?.producing, [false])
+            },
+
+            test("a quiet stretch settles on one state instead of flapping") { expect in
+                // Buffers arrive whether or not the tap has anything, because
+                // the aggregate device is clocked by its output sub-device.
+                // Declaring healthy from the buffer fought the poll's
+                // idleButBound and logged pairs of transitions milliseconds
+                // apart: one recording on disk carries dozens of them, and the
+                // noise is what hid that its far end was digital zero.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: false)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                for _ in 0..<20 {
+                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.equal(coordinator.health, .idleButBound)
+                expect.equal(
+                    delegate.healthChanges.filter { $0.state == .healthy }.count, 0,
+                    "a buffer from a target producing nothing never reads as healthy"
+                )
+                expect.isTrue(
+                    delegate.healthChanges.count <= 2,
+                    "one settled state, not a transition per buffer"
+                )
             },
 
             test("a silent remote source never emits a warning") { expect in

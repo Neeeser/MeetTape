@@ -67,6 +67,9 @@ public struct MeetingsWindowView: View {
     private var sidebar: some View {
         let sections = model.sections
         let visible = sections.reduce(0) { $0 + $1.rows.count }
+        // Once per pass, for the same reason `sections` is: the menu and the
+        // offer both want it, and it walks every row the filter holds.
+        let counts = model.sourceCounts
         return VStack(spacing: 0) {
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
@@ -80,9 +83,20 @@ public struct MeetingsWindowView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                // Meaningless over a list of folders, where no row has a
+                // source of its own.
+                if !model.showsFolderList { sourceMenu(counts) }
             }
             .padding(10)
             Divider()
+            // From the counts already in hand. `model.suggestedSource` walks
+            // the rows again for them, and this runs on every keystroke.
+            if let suggested = MeetingsDirectoryFilter.offeredSource(
+                for: model.query, held: model.sourceFilter, counts: counts,
+                listingFolders: model.showsFolderList
+            ) {
+                sourceOffer(suggested, counts)
+            }
             if let open = model.openFolderRow {
                 breadcrumb(open)
                 Divider()
@@ -183,9 +197,28 @@ public struct MeetingsWindowView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            TextField("Search titles, people, words", text: model.text(\.query))
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
+            if let held = model.sourceFilter { sourceToken(held) }
+            TextField(
+                model.sourceFilter.map { "Search \($0.listName)" }
+                    ?? "Search titles, people, words",
+                text: model.text(\.query)
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 12))
+            .onSubmit { model.takeSuggestedSource() }
+            // Backspace on an empty field drops the token, the way it does in
+            // every other field that holds one.
+            // The general form rather than `onKeyPress(.delete)`, which was
+            // measured not to fire for the Delete key at all while this one
+            // receives it as "\u{7F}".
+            .onKeyPress { press in
+                guard SearchFieldKey.dropsHeldSource(
+                    characters: press.characters, query: model.query,
+                    hasSource: model.sourceFilter != nil
+                ) else { return .ignored }
+                model.sourceFilter = nil
+                return .handled
+            }
         }
         .padding(.horizontal, 7)
         .frame(height: 22)
@@ -196,6 +229,106 @@ public struct MeetingsWindowView: View {
                 ? "Searches titles, notes, speaker names and every word of every transcript"
                 : "Searches titles, notes and speaker names. The transcripts are still being read"
         )
+    }
+
+    /// The source being held, kept in the search field rather than beside it.
+    /// One home for the state: words typed after it search inside it, and this
+    /// is where they are typed.
+    private func sourceToken(_ source: MeetingSource) -> some View {
+        let tint = SourceTint.color(source)
+        return Button {
+            model.sourceFilter = nil
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: source.symbolName).font(.system(size: 8))
+                Text(source.listName)
+                Image(systemName: "xmark").font(.system(size: 7, weight: .bold)).opacity(0.6)
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(0.18)))
+            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help("Showing \(source.displayName) only. Click to drop it.")
+    }
+
+    /// Every source the archive holds, with a count each.
+    ///
+    /// The counts are what this is for. A field answers a question you already
+    /// have, and the menu answers the one nobody can type: what is in here.
+    /// The label stays "Source" while one is held, because the token in the
+    /// field is already saying which.
+    private func sourceMenu(_ counts: [MeetingSource: Int]) -> some View {
+        // The source in force is always listed, whatever the count says. It
+        // drops out of the counts under a filter that holds none of it, and a
+        // menu with nothing ticked left no way to see what was narrowing the
+        // list.
+        let present = MeetingSource.allCases.filter {
+            (counts[$0] ?? 0) > 0 || model.sourceFilter == $0
+        }
+        return HStack(spacing: 5) {
+            Menu {
+                Button("All sources") { model.sourceFilter = nil }
+                if !present.isEmpty { Divider() }
+                ForEach(present, id: \.self) { source in
+                    Button {
+                        model.sourceFilter = source
+                    } label: {
+                        Label(
+                            "\(source.listName)  ·  \(counts[source] ?? 0)",
+                            systemImage: model.sourceFilter == source
+                                ? "checkmark" : source.symbolName
+                        )
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Source")
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 19)
+                .overlay(Capsule().stroke(.quaternary))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The source the typed words name, offered above the list.
+    ///
+    /// In the flow rather than a popover. A popover over a 272 point sidebar
+    /// covers the rows the same words have already found.
+    private func sourceOffer(_ source: MeetingSource, _ counts: [MeetingSource: Int]) -> some View {
+        Button {
+            model.takeSuggestedSource()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: source.symbolName)
+                    .font(.system(size: 11))
+                    .foregroundStyle(SourceTint.color(source))
+                    .frame(width: 15)
+                Text(source.listName)
+                Spacer(minLength: 4)
+                Text("\(counts[source] ?? 0)").foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.14)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .help("Show only \(source.displayName). Return takes it.")
     }
 
     private func list(_ sections: [MeetingsSection]) -> some View {
@@ -237,6 +370,10 @@ public struct MeetingsWindowView: View {
                             + "still being read."
                 )
                 .foregroundStyle(.secondary)
+            } else if let source = model.sourceFilter {
+                Text("No \(source.listName) meetings")
+                Text("Not under this filter. Drop the source in the search field to see the rest.")
+                    .foregroundStyle(.secondary)
             } else if model.filter == .archived {
                 Text("Nothing archived")
                 Text(
@@ -332,6 +469,24 @@ public struct MeetingsWindowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+/// When a key press in the search field drops the source held there.
+///
+/// Backspace, and only with nothing typed after the token: with words in the
+/// field, backspace edits the words. Matched on the characters the press
+/// carries rather than through `onKeyPress(.delete)`, which was measured never
+/// to fire for the Delete key here.
+public enum SearchFieldKey {
+    /// What the Delete key sends. `NSDeleteCharacter`, which is the key labelled
+    /// delete on a Mac keyboard rather than forward delete.
+    private static let backspace = "\u{7F}"
+
+    public static func dropsHeldSource(
+        characters: String, query: String, hasSource: Bool
+    ) -> Bool {
+        characters == backspace && query.isEmpty && hasSource
     }
 }
 
@@ -435,40 +590,49 @@ struct MeetingRowView: View {
         }
     }
 
-    private var kindIcon: some View {
-        // A rounded square rather than a circle, deliberately: a person is a
-        // circle everywhere in this app, and a meeting is not a person.
-        RoundedRectangle(cornerRadius: 7)
-            .fill(kindTint.opacity(0.18))
+    /// The badge every row draws: the application's own mark where this Mac has
+    /// the application, and Pipit's glyph otherwise.
+    ///
+    /// The tinted square is the same either way, so a column of rows reads as
+    /// one thing. It is a rounded square deliberately: a person is a circle
+    /// everywhere in this app, and a meeting is not a person. A real mark comes
+    /// in with its plate keyed off and a little of its saturation taken, so it
+    /// sits on the tint rather than fighting it.
+    @MainActor private var kindIcon: some View {
+        let source = row.summary.source
+        let tint = SourceTint.color(source)
+        return RoundedRectangle(cornerRadius: 7)
+            .fill(tint.opacity(0.18))
             .frame(width: 26, height: 26)
             .overlay {
-                Image(systemName: row.summary.source.symbolName)
-                    .font(.system(size: 13))
-                    .foregroundStyle(kindTint)
+                if let mark = SourceMark.icon(for: source) {
+                    Image(nsImage: mark)
+                        .resizable()
+                        .interpolation(.high)
+                        .saturation(0.85)
+                        .frame(width: 19, height: 19)
+                } else {
+                    Image(systemName: source.symbolName)
+                        .font(.system(size: 13))
+                        .foregroundStyle(tint)
+                }
             }
     }
 
-    private var kindTint: Color {
-        switch row.summary.source {
-        case .inPerson: .orange
-        case .imported: .secondary
-        default: .blue
-        }
-    }
-
+    /// The source leads, because it is the fixed part of the line. A column of
+    /// clock times with the source somewhere after it is harder to run an eye
+    /// down, and the badge beside it is the colour of the same word.
+    ///
     /// The date is spelled out under any heading that does not already name a
     /// day. Only Today and Yesterday do, so under "Earlier this month" and
     /// under a month heading a clock time alone left no way to tell which day a
     /// meeting was without opening it.
     private var subtitle: String {
         var parts = [
-            Format.listDate(row.startedAt), Format.shortDuration(row.summary.durationSeconds),
+            row.summary.source.listName,
+            Format.listDate(row.startedAt),
+            Format.shortDuration(row.summary.durationSeconds),
         ]
-        switch row.summary.source {
-        case .inPerson: parts.append("In person")
-        case .imported: parts.append("Imported")
-        default: break
-        }
         if row.summary.processingState != .complete {
             parts.append(row.summary.processingState.displayName)
         } else if model.filter == .unnamed, row.unnamedCount > 0 {

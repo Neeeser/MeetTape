@@ -94,6 +94,12 @@ public struct MeetingReceipt: Sendable, Equatable {
 public final class MeetingsWindowModel {
     public var rows: [MeetingRow] = []
     public var filter = MeetingsFilter.all
+    /// The source the list is held to, or nil for all of them.
+    ///
+    /// Apart from `filter`, which asks what a meeting needs from you. This asks
+    /// where it came from, and folding the two into one control would make
+    /// both harder to read.
+    public var sourceFilter: MeetingSource?
     public var query = ""
     /// Meetings the user has clicked. More than one puts the batch panel in the
     /// detail pane, as the People window does.
@@ -317,8 +323,34 @@ public final class MeetingsWindowModel {
 
     public var sections: [MeetingsSection] {
         MeetingsDirectoryFilter.sections(
-            listedRows, filter: filter, query: query, transcripts: transcripts
+            listedRows, filter: filter, source: sourceFilter, query: query,
+            transcripts: transcripts
         )
+    }
+
+    /// How many meetings each source holds, for the source menu.
+    ///
+    /// Under the filter above it and before the query and the source itself.
+    /// Counting what is on screen would make every number read 1. Counted over
+    /// the list being shown, so inside a folder these are the folder's.
+    public var sourceCounts: [MeetingSource: Int] {
+        MeetingsDirectoryFilter.sourceCounts(listedRows.filter(filter.admits))
+    }
+
+    /// The source the typed words name, offered above the list.
+    public var suggestedSource: MeetingSource? {
+        MeetingsDirectoryFilter.offeredSource(
+            for: query, held: sourceFilter, counts: sourceCounts,
+            listingFolders: showsFolderList
+        )
+    }
+
+    /// Takes the offer. The words that named the source go with it: they were
+    /// how the filter was asked for, not something to search the archive for.
+    public func takeSuggestedSource() {
+        guard let suggested = suggestedSource else { return }
+        sourceFilter = suggested
+        query = ""
     }
 
     /// The meetings the list is drawing from: every one of them on the
@@ -359,7 +391,11 @@ public final class MeetingsWindowModel {
     /// The rows this filter holds, before the search query narrows them. What
     /// the footer counts against, because with anything archived the archive's
     /// own total is a number no list on screen adds up to.
-    public var filteredRows: [MeetingRow] { listedRows.filter { filter.admits($0) } }
+    public var filteredRows: [MeetingRow] {
+        listedRows.filter {
+            filter.admits($0) && MeetingsDirectoryFilter.admits($0, source: sourceFilter)
+        }
+    }
 
     /// The total of the meetings this filter holds, for the footer.
     public var totalDuration: Double { PipitRuntime.totalDuration(of: filteredRows) }
@@ -783,8 +819,11 @@ public final class MeetingsWindowModel {
         self.mode = mode
         openFolder = nil
         // The query means something different in each list, and carrying one
-        // across left the folder list looking empty for no stated reason.
+        // across left the folder list looking empty for no stated reason. The
+        // source goes with it: a folder list has no source to narrow, so the
+        // token sat in the field holding nothing back.
         query = ""
+        sourceFilter = nil
     }
 
     public func open(folder: String) {
@@ -801,6 +840,7 @@ public final class MeetingsWindowModel {
     public func closeFolder() {
         openFolder = nil
         query = ""
+        sourceFilter = nil
     }
 
     /// Files meetings, from the row menu or the batch panel.
@@ -863,7 +903,8 @@ public final class MeetingsWindowModel {
                 "\(failures.count) \(failures.count == 1 ? "meeting" : "meetings") could not be "
                 + "moved out, so the folder is still there."
         }
-        if openFolder == name { openFolder = nil }
+        // Back on the folder list, where a held source narrows nothing.
+        if openFolder == name { closeFolder() }
         archiveChanges += 1
         Task { await reload() }
     }

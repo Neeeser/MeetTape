@@ -123,6 +123,21 @@ public enum BrowserWindowTitle {
         }
         return nil
     }
+
+    /// The meeting's own name inside a tab title, with the provider's own
+    /// decoration taken off.
+    ///
+    /// The extension relays `document.title` untouched, so a Meet call arrives
+    /// as "Meet - Hindsight Daily" and was filed under that. Nil where what is
+    /// left is a meeting code or the bare product name, neither of which is a
+    /// name anybody chose. A title from a provider with no rules here comes
+    /// back as it went in.
+    public static func meetingName(_ rawTitle: String) -> String? {
+        let trimmed = rawTitle.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        guard let parsed = parse(trimmed) else { return trimmed }
+        return parsed.title
+    }
 }
 
 /// Combines the browser sensor with native signals for one browser.
@@ -270,7 +285,7 @@ public struct BrowserMeetingDetector: Sendable {
             source: .browserSensor,
             meetingID: event.meetingID ?? parsed?.meetingID,
             url: event.url,
-            title: event.title ?? parsed?.title,
+            title: event.title.flatMap(BrowserWindowTitle.meetingName) ?? parsed?.title,
             muted: event.muted,
             otherAudibleTabs: event.otherAudibleTabs,
             browser: browser,

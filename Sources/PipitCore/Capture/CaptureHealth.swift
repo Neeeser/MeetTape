@@ -91,6 +91,23 @@ public struct CaptureThresholds: Sendable, Equatable {
     /// recovers in one rebuild, and the case this was measured on took 119 in
     /// four minutes.
     public var silentRebuildsBeforeBackoff: Int
+    /// Times a backoff may be cleared by something other than audio before it
+    /// stops being cleared at all, until audio arrives.
+    ///
+    /// Two signals clear a wait without proving anything works: a
+    /// configuration change, which says the hardware moved and the device may
+    /// be back, and a device identity that differs from the one the wait
+    /// belongs to. Both are worth trusting a few times and neither is worth
+    /// trusting forever. A driver that emits a change on every failed open
+    /// forgave its own failure on every attempt, and a system whose default
+    /// input flaps between two devices read as a fresh swap on every poll;
+    /// each rebuilt twice a second for as long as it lasted.
+    ///
+    /// Unmeasured, unlike the constants above. The shape it bounds is hardware
+    /// misbehaving rather than anything a recording captured, and it is the
+    /// same number as the silent bound for the same reason: a few attempts
+    /// before the backoff takes over.
+    public var waitClearsBeforeBackoff: Int
 
     public init(
         configurationDebounce: Double = 0.4,
@@ -100,7 +117,8 @@ public struct CaptureThresholds: Sendable, Equatable {
         pollInterval: Double = 0.5,
         wakeSettleDelay: Double = 1.5,
         rebuildBackoffCeiling: Double = 30,
-        silentRebuildsBeforeBackoff: Int = 3
+        silentRebuildsBeforeBackoff: Int = 3,
+        waitClearsBeforeBackoff: Int = 3
     ) {
         self.configurationDebounce = configurationDebounce
         self.rebuildGrace = rebuildGrace
@@ -110,6 +128,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         self.wakeSettleDelay = wakeSettleDelay
         self.rebuildBackoffCeiling = rebuildBackoffCeiling
         self.silentRebuildsBeforeBackoff = silentRebuildsBeforeBackoff
+        self.waitClearsBeforeBackoff = waitClearsBeforeBackoff
     }
 
     public static let validated = CaptureThresholds()

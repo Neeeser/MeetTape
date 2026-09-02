@@ -106,6 +106,23 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         var unhealthySince: Double?
         var consecutiveBuildFailures = 0
         var wait: Wait?
+        /// Waits cleared by a configuration change or by a differing device
+        /// identity since audio last arrived. Neither signal proves anything
+        /// works, and trusting them without limit is what let a driver that
+        /// emits a change on every failed open forgive its own failure every
+        /// time, and a flapping default input read as a fresh swap on every
+        /// poll. Only a buffer resets this, because only a buffer is the
+        /// engine working.
+        var waitClearsWithoutAudio = 0
+
+        /// Clears the wait for a signal that says the hardware moved, while
+        /// such signals are still worth trusting.
+        mutating func clearWaitForHardwareSignal(thresholds: CaptureThresholds) -> Bool {
+            guard waitClearsWithoutAudio < thresholds.waitClearsBeforeBackoff else { return false }
+            waitClearsWithoutAudio += 1
+            wait = nil
+            return true
+        }
 
         /// The first retry is immediate, on the next poll. Each further failure
         /// doubles the wait, up to the ceiling.
@@ -194,6 +211,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.restartTimestamps = []
             state.consecutiveBuildFailures = 0
             state.wait = nil
+            state.waitClearsWithoutAudio = 0
             state.wakeRequestedAt = nil
             state.activeFormat = nil
             state.activeDeviceUID = nil
@@ -229,8 +247,14 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // must not zero the count the build's own failure is about to
             // increment: that let a device emitting a change on every failed
             // open forgive itself on every attempt.
+            // The discriminator below catches a change delivered while the
+            // build is still in flight. Delivery is asynchronous, though:
+            // CoreAudio posts on its own thread, so the same driver's change
+            // can land just after the throw instead, with the wait already
+            // standing. Then it is this clause that forgives, and it forgave on
+            // every attempt: 601 builds in five minutes.
             guard state.wait?.cause == .buildFailed else { return }
-            state.wait = nil
+            guard state.clearWaitForHardwareSignal(thresholds: thresholds) else { return }
             state.consecutiveBuildFailures = 0
         }
     }
@@ -258,6 +282,9 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // failures before this engine are forgiven.
             if state.wait?.cause == .silentEngine { state.wait = nil }
             state.consecutiveBuildFailures = 0
+            // The engine works, so the signals that say the hardware moved are
+            // worth trusting again.
+            state.waitClearsWithoutAudio = 0
             guard state.health != .healthy else { return false }
             state.health = .healthy
             state.unhealthySince = nil
@@ -289,6 +316,9 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.withLock { state in
                 state.wait = nil
                 state.consecutiveBuildFailures = 0
+                // The audio stack re-enumerated, so what it says next is worth
+                // trusting again.
+                state.waitClearsWithoutAudio = 0
                 // The audio stack re-enumerated. Whatever the silent count said,
                 // it said about an engine that no longer exists; carried across,
                 // the wake's own rebuild re-derived the wait the wake had just
@@ -421,7 +451,12 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 else { return false }
                 return state.withLock { state in
                     guard let active = state.activeDeviceUID, current != active else { return false }
-                    state.wait = nil
+                    // A dock or a headset whose profiles present distinct
+                    // identities can alternate on every poll, and each
+                    // alternation reads as a fresh swap. Admitted without limit
+                    // it cleared the wait every poll and restarted the silent
+                    // count each time, so the bound was absent for that shape.
+                    guard state.clearWaitForHardwareSignal(thresholds: thresholds) else { return false }
                     // Whatever was silent was the other device. Carried across,
                     // the new device's first build re-latched at the ceiling.
                     state.policy.noteEngineGone()

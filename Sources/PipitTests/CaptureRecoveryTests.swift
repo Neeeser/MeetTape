@@ -151,7 +151,16 @@ enum CaptureRecoveryTests {
 
                 expect.equal(coordinator.restartCount, 1, "seven events must coalesce into one rebuild")
                 // The queued 0ch/0Hz reading is consumed by the rebuild, and the
-                // previous good format is kept rather than adopted.
+                // previous good format is kept rather than adopted. Asserting
+                // the format alone was not enough: it is equally unchanged when
+                // the rebuild finds no usable device and builds nothing at all,
+                // which is what deleting the fallback does.
+                expect.equal(engine.buildCount, 2, "the rebuild built, rather than giving up on the device")
+                expect.equal(
+                    engine.builds.last?.format,
+                    AudioFormatDescriptor(sampleRate: 48_000, channelCount: 3),
+                    "against the last good format"
+                )
                 expect.equal(coordinator.activeFormat, AudioFormatDescriptor(sampleRate: 48_000, channelCount: 3))
                 for build in engine.builds {
                     expect.isTrue(build.format.isUsable, "built against an unusable format \(build.format)")
@@ -920,6 +929,122 @@ enum CaptureRecoveryTests {
                 expect.equal(seen[40], 6, "by 20 s: the 2 s and 4 s waits")
                 expect.equal(seen[80], 8, "by 40 s: the 8 s and 16 s waits")
                 expect.equal(seen[120], 8, "by 60 s: the ceiling holds until 68.5")
+            },
+
+            test("a change delivered after the throw does not forgive the failure either") { expect in
+                // The sibling test emits the change from inside `buildAndStart`,
+                // where the failure's own wait does not exist yet and the
+                // arrival-time discriminator settles it. CoreAudio posts the
+                // notification on its own thread, so the same driver's change
+                // lands just as often after the throw, with the wait already
+                // standing, and it is the forgiveness clause that answers.
+                // Unbounded, that forgave every failure: 601 builds in five
+                // minutes, teardown and probe and manifest fsync twice a second
+                // for as long as the device flapped.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -10_875))
+                coordinator.start()
+                for _ in 0..<600 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    // After the poll, not inside the build.
+                    coordinator.noteConfigurationChange()
+                }
+                expect.isTrue(
+                    engine.buildCount < 30,
+                    "\(engine.buildCount) attempts in five minutes is the storm the backoff exists to stop"
+                )
+            },
+
+            test("a default input flapping between two devices is bounded") { expect in
+                // A differing device identity admits a change through a silent
+                // engine's wait, because the loop's own footprint reports the
+                // same device. A dock, or a headset whose profiles present
+                // distinct identities, alternates on every poll and reads as a
+                // fresh swap each time: the wait was cleared every poll and the
+                // silent count restarted with it, so the bound was absent for
+                // exactly the shape it exists to bound.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.setDeviceUID("dock-a")
+                coordinator.start()
+                for i in 0..<240 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    engine.setDeviceUID(i.isMultiple(of: 2) ? "dock-b" : "dock-a")
+                    coordinator.noteConfigurationChange()
+                }
+                // Three admissions are allowed, and each one is a device the
+                // coordinator has been told is new, so each earns a fresh silent
+                // count and three more rebuilds at the grace cadence before its
+                // own wait is installed. Twelve, then the ceiling: nineteen
+                // across two minutes, against 240 unbounded, and a lower rate
+                // than the bound the silent tests hold at.
+                expect.isTrue(
+                    coordinator.restartCount <= 24,
+                    "a flapping default input must not clear the bound forever: got \(coordinator.restartCount)"
+                )
+            },
+
+            test("audio restores trust in what the hardware says") { expect in
+                // The budget for clearing a backoff on a hardware signal is
+                // spent by signals that led nowhere. A working engine is what
+                // earns it back: without that, a machine that flapped early in
+                // a meeting would refuse every later reconnect for the rest of
+                // the session, long after the microphone was fine.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                coordinator.start()
+                // Spend the budget: three changes, three forgiven failures.
+                for _ in 0..<20 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    coordinator.noteConfigurationChange()
+                }
+                // The device comes back and delivers.
+                engine.stopFailing()
+                for _ in 0..<70 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    if engine.isRunning { coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds) }
+                }
+                expect.equal(coordinator.health, .healthy, "the microphone recovered")
+
+                // It goes away again, and fails long enough for the backoff to
+                // climb well past a poll. Only a trusted change can produce a
+                // rebuild on the next poll now; the retry alone would wait
+                // seconds, which is what makes this assertion about the budget
+                // rather than about the backoff expiring on its own.
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                for _ in 0..<24 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                let afterLoss = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, afterLoss,
+                    "the backoff is holding, so the next rebuild is the change's or nothing"
+                )
+                coordinator.noteConfigurationChange()
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.isTrue(
+                    coordinator.restartCount > afterLoss,
+                    "a change after audio is trusted again, got \(coordinator.restartCount) from \(afterLoss)"
+                )
             },
 
             test("wake rebuilds proactively after the settle delay") { expect in

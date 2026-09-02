@@ -78,13 +78,26 @@ public struct MicRecoveryPolicy: Sendable {
         rebuildsWithoutAudio += 1
     }
 
-    /// A rebuild whose engine did not build. Whatever the count said about the
-    /// engine before it, that engine is gone, and the one that comes after has
-    /// not yet been silent at all. Left standing, the count went on asserting
-    /// a silent engine through a run of failures, and a device that came back
-    /// during them was held behind the silent engine's wait.
-    public mutating func noteRebuildFailed() {
+    /// The engine the count described is gone: its build threw, no device could
+    /// be found for it, or the machine woke and the audio stack re-enumerated
+    /// underneath it. Whatever comes next has not yet been silent at all. Left
+    /// standing, the count went on asserting a silent engine through a run of
+    /// failures, and a device that came back during them was held behind the
+    /// silent engine's wait; and it re-derived, on the poll after a wake, the
+    /// thirty-second wait the wake had just cleared.
+    public mutating func noteEngineGone() {
         rebuildsWithoutAudio = 0
+    }
+
+    /// A configuration-change decision the coordinator could not act on yet.
+    /// `evaluate` consumed the pending flag and the coalesced count to return
+    /// it; putting both back is what lets the rebuild at expiry be recorded as
+    /// the burst it was, rather than as one change that arrived alone.
+    public mutating func noteConfigurationChangeRefused(coalesced: Int, at now: Double) {
+        guard isRunning else { return }
+        configurationChangePending = true
+        coalescedConfigurationChanges = coalesced
+        lastConfigurationChangeAt = now
     }
 
     /// Whether rebuilding has stopped being a recovery and become a loop.

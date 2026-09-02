@@ -159,15 +159,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         let now = clock.monotonicSeconds
         state.withLock { state in
             state.policy.noteConfigurationChange(at: now)
-            // A silent engine's wait holds. On the device this bound was
+            // A silent engine's wait holds here. On the device this bound was
             // measured against, each rebuild was followed by a configuration
             // change, and clearing the wait on it reopened the loop at the
             // debounce cadence. That was observed with the voice-processing
             // unit installed; whether a plain rebuild still emits one there is
             // unverified, so this guards the shape rather than a measured
-            // property of the current build. A real device switch during the
-            // wait is delayed by at most the ceiling, and the first buffer ends
-            // it.
+            // property of the current build. The decision this change produces
+            // is where a real device switch is told from the footprint: a
+            // change that reports a different device is admitted there, and
+            // only a change reporting the same one waits out the ceiling.
             if state.wait?.cause == .silentEngine { return }
             // Otherwise the hardware changed, so a device that could not be
             // built a moment ago may exist now. The backoff starts again from
@@ -181,12 +182,20 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     /// Called from the audio thread for every delivered buffer.
     public func noteBufferArrived(hostTime: Double) {
         let becameHealthy: Bool = state.withLock { state in
+            // A buffer with a failed build's wait pending is the torn-down tap's
+            // last delivery. No engine exists to have produced it, so it is
+            // evidence of nothing: not that the microphone is healthy, not that
+            // a failure is forgiven, not that silence ended. Recording it did
+            // all three. It zeroed the failure count, so the next failure
+            // started again at a half-second step and a driver that flushed one
+            // buffer per failed open was retried 600 times in five minutes; and
+            // it marked a microphone that never built healthy, which cleared
+            // the unrecovered warning the user should have seen.
+            guard state.wait?.cause != .buildFailed else { return false }
             state.policy.noteBufferArrived(at: hostTime)
             // Audio arriving means the engine works, so a rebuild the hardware
-            // asks for next is not held behind a silent engine's wait. A failed
-            // build's wait is left alone: no engine exists then, and this is a
-            // late buffer from a tap being torn down, which would otherwise
-            // retry against the absent device once more before backing off.
+            // asks for next is not held behind a silent engine's wait, and the
+            // failures before this engine are forgiven.
             if state.wait?.cause == .silentEngine { state.wait = nil }
             state.consecutiveBuildFailures = 0
             guard state.health != .healthy else { return false }
@@ -220,6 +229,11 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.withLock { state in
                 state.wait = nil
                 state.consecutiveBuildFailures = 0
+                // The audio stack re-enumerated. Whatever the silent count said,
+                // it said about an engine that no longer exists; carried across,
+                // the wake's own rebuild re-derived the wait the wake had just
+                // cleared and held the new engine for the ceiling.
+                state.policy.noteEngineGone()
             }
             rebuild(reason: .wake, isInitial: false)
             return
@@ -296,19 +310,32 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         // backoff, including the watchdog. Otherwise a device that has gone away
         // is rebuilt on every poll and each attempt writes health transitions to
         // the manifest, which is an fsync each.
-        let tooSoon: Bool = state.withLock { state in
-            guard !isInitial, let wait = state.wait else { return false }
-            return now < wait.until
+        let pending: Wait? = state.withLock { state in
+            guard !isInitial, let wait = state.wait, now < wait.until else { return nil }
+            return wait
         }
-        if tooSoon {
-            // A watchdog or first-buffer decision re-derives itself from the gap
-            // on the next poll. A configuration change does not: `evaluate`
-            // consumed the pending flag to return it, so refusing it here would
-            // lose a genuine device switch for the length of the wait.
-            if case .configurationChange = reason {
-                state.withLock { $0.policy.noteConfigurationChange(at: now) }
+        if let pending {
+            guard case .configurationChange(let coalesced) = reason else {
+                // A watchdog or first-buffer decision re-derives itself from
+                // the gap on the next poll; nothing is lost by refusing it.
+                return
             }
-            return
+            // A silent engine's wait refuses the change because, on the device
+            // this was measured against, the rebuild is what emitted it. That
+            // footprint reports the same device. A change that reports a
+            // different one is a device the user just plugged in, and it is not
+            // the footprint of anything: it is admitted, whatever the wait.
+            if pending.cause == .silentEngine,
+               let candidate = controller.currentInputFormat(), candidate.isUsable,
+               candidate != state.withLock({ $0.activeFormat }) {
+                state.withLock { $0.wait = nil }
+            } else {
+                // `evaluate` consumed the pending flag and the coalesced count to
+                // return this. Both go back, so the rebuild at expiry is taken
+                // and recorded as the burst it was.
+                state.withLock { $0.policy.noteConfigurationChangeRefused(coalesced: coalesced, at: now) }
+                return
+            }
         }
         state.withLock { state in
             state.policy.noteRebuildStarted(at: now, isInitial: isInitial)
@@ -338,7 +365,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
 
         guard let format = chosen else {
             state.withLock { state in
-                state.policy.noteRebuildFailed()
+                state.policy.noteEngineGone()
                 state.noteBuildFailure(at: now, thresholds: thresholds)
             }
             setHealth(.degraded, detail: "no usable input device")
@@ -377,7 +404,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             }
         } catch {
             state.withLock { state in
-                state.policy.noteRebuildFailed()
+                state.policy.noteEngineGone()
                 state.noteBuildFailure(at: now, thresholds: thresholds)
             }
             setHealth(.failed, detail: "engine start failed")

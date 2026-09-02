@@ -468,6 +468,139 @@ enum CaptureRecoveryTests {
                 )
             },
 
+            test("a wake with a latched silent count does not hold the new engine") { expect in
+                // The wake clears the wait, because the audio stack
+                // re-enumerated and whatever was waiting was waiting on an
+                // engine that is gone. It did not clear the count the wait is
+                // derived from, so the wake's own rebuild found the count at
+                // the ceiling and installed the thirty-second wait the wake had
+                // just removed, against an engine half a second old.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(coordinator.restartCount >= 3, "the silent count is latched")
+
+                coordinator.noteWake()
+                clock.advance(1.6)
+                coordinator.tick()
+                let afterWake = coordinator.restartCount
+
+                // Still silent, so it is rebuilt again, and soon: the count
+                // starts over at the wake rather than resuming at the ceiling.
+                for _ in 0..<12 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    coordinator.restartCount > afterWake,
+                    "a fresh engine is not held for the ceiling on the poll after a wake"
+                )
+            },
+
+            test("a different device plugged in during a silent wait is taken at once") { expect in
+                // The silent engine's wait refuses configuration changes because
+                // the rebuild's own footprint arrives as one. The footprint
+                // reports the same device. A change that reports a different
+                // device is the user plugging one in, and refusing it held a
+                // working microphone for up to thirty seconds behind a wait
+                // that belonged to the device it replaced.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.setSteadyFormat(AudioFormatDescriptor(sampleRate: 48_000, channelCount: 9))
+                coordinator.start()
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(coordinator.restartCount >= 3, "the silent wait is latched")
+
+                let replacement = AudioFormatDescriptor(sampleRate: 44_100, channelCount: 2)
+                engine.setSteadyFormat(replacement)
+                coordinator.noteConfigurationChange()
+                let before = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.restartCount, before + 1, "the new device is built now")
+                expect.equal(coordinator.activeFormat, replacement)
+            },
+
+            test("a buffer flushed by a failed open does not reset the failure backoff") { expect in
+                // A failed build's wait is left alone by a buffer, because no
+                // engine exists and the buffer is the torn-down tap's last
+                // delivery. The failure count that wait is derived from was not,
+                // so the next failure started again at a half-second step. A
+                // driver that flushes one buffer per failed open was retried 600
+                // times in five minutes against the thirty the storm test allows.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -10_875))
+                coordinator.start()
+                for _ in 0..<600 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                }
+                expect.isTrue(
+                    engine.buildCount < 30,
+                    "\(engine.buildCount) attempts in five minutes is the storm the backoff exists to stop"
+                )
+                expect.notEqual(coordinator.health, .healthy, "a microphone that never built is not healthy")
+            },
+
+            test("after a device returns, silence is counted from zero") { expect in
+                // A build that throws ends whatever the silent count said: the
+                // engine it described is gone. Without that, the device that
+                // returned inherited the count, its first successful build read
+                // as the fourth silent one, and it was held for the ceiling
+                // before it had been silent for a single grace window.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+                for _ in 0..<60 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                for _ in 0..<20 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                engine.stopFailing()
+                coordinator.noteConfigurationChange()
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.isTrue(engine.isRunning, "the returned device built")
+                let returned = coordinator.restartCount
+
+                // Silent again, so it is rebuilt again, at the grace cadence: the
+                // count starts over rather than resuming where the old engine's
+                // left off.
+                for _ in 0..<12 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    coordinator.restartCount > returned,
+                    "the new engine is not held for the ceiling on its first silence"
+                )
+            },
+
             test("wake rebuilds proactively after the settle delay") { expect in
                 let engine = FakeMicrophoneEngine()
                 let clock = ManualClock()

@@ -59,9 +59,20 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         mutating func noteBuildFailure(at now: Double, thresholds: CaptureThresholds) {
             lastRebuildFailedAt = now
             consecutiveBuildFailures += 1
-            let steps = Double(min(consecutiveBuildFailures - 1, 6))
-            let delay = min(thresholds.rebuildBackoffCeiling, thresholds.pollInterval * pow(2, steps))
-            nextRebuildAllowedAt = now + delay
+            nextRebuildAllowedAt = now + Self.backoff(step: consecutiveBuildFailures - 1, thresholds: thresholds)
+        }
+
+        /// A build that succeeded and then delivered nothing, for the Nth time in
+        /// a row. The same doubling wait as a build that threw, from the point
+        /// the count stopped looking like a recovery.
+        mutating func noteSilentRebuild(count: Int, at now: Double, thresholds: CaptureThresholds) {
+            let step = count - thresholds.silentRebuildsBeforeBackoff
+            nextRebuildAllowedAt = now + Self.backoff(step: step, thresholds: thresholds)
+        }
+
+        private static func backoff(step: Int, thresholds: CaptureThresholds) -> Double {
+            let steps = Double(min(max(step, 0), 6))
+            return min(thresholds.rebuildBackoffCeiling, thresholds.pollInterval * pow(2, steps))
         }
     }
 
@@ -129,6 +140,10 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     public func noteBufferArrived(hostTime: Double) {
         let becameHealthy: Bool = state.withLock { state in
             state.policy.noteBufferArrived(at: hostTime)
+            // Audio arriving means the last build worked, whatever earned the
+            // wait, so a rebuild the hardware asks for next is not held behind
+            // a stale one.
+            state.nextRebuildAllowedAt = nil
             guard state.health != .healthy else { return false }
             state.health = .healthy
             state.unhealthySince = nil
@@ -278,7 +293,19 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.withLock { state in
                 state.activeFormat = installed
                 state.consecutiveBuildFailures = 0
-                state.nextRebuildAllowedAt = nil
+                // Success is not recovery until a buffer arrives. An engine that
+                // builds cleanly and delivers nothing was rebuilt on every poll
+                // after the grace window, because each success cleared the wait
+                // the failing case had earned: 119 rebuilds in four minutes,
+                // each a teardown, a manifest fsync and another configuration
+                // change. After a few of those the next attempt waits.
+                if state.policy.isRebuildingWithoutAudio {
+                    state.noteSilentRebuild(
+                        count: state.policy.rebuildsWithoutAudio, at: now, thresholds: thresholds
+                    )
+                } else {
+                    state.nextRebuildAllowedAt = nil
+                }
             }
         } catch {
             state.withLock { $0.noteBuildFailure(at: now, thresholds: thresholds) }

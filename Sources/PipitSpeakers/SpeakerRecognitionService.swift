@@ -581,9 +581,9 @@ public actor SpeakerRecognitionService {
         // The microphone track is the local user only when it holds the local
         // user. Nothing cancels the speakers out of the microphone, so on
         // speakers the far end reaches it too, and a listener in a long
-        // presentation is not the dominant voice on their own track. Dominance alone would then enrol
-        // the presenter here, human-verified, into the one profile no person
-        // ever confirms.
+        // presentation is not the dominant voice on their own track. Dominance
+        // alone would then enrol the presenter here, human-verified, into the
+        // one profile no person ever confirms.
         //
         // Anything on this meeting's other track is by construction not the
         // local user, so a strong match against one is bleed.

@@ -79,15 +79,19 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             throw CaptureError.microphonePermissionDenied
         }
 
-        // Plain capture, never the system voice-processing unit. That unit
-        // cancels only what its own host application plays, and Pipit plays
-        // nothing, so it never subtracted the far end from a call taken on
-        // speakers; measured 2026-08-25, and the bleed is handled after the
-        // fact by `EchoReturnLossProfile` instead. What the unit did do for as
-        // long as the engine ran was duck every other application's output.
-        // Its ducking API has no off setting, `.min` is a constant attenuation,
-        // and a person on a Slack huddle heard the other side drop the moment
-        // recording began. Pipit must not change what the user hears.
+        // Plain capture, never the system voice-processing unit.
+        //
+        // The unit was here to subtract the speakers from the microphone. It
+        // does not: measured 2026-08-25 with two standalone AVAudioEngine
+        // binaries, one playing and one capturing with the unit on, AUVoiceIO
+        // cancels only audio its own host renders, and this engine renders
+        // nothing. Speaker bleed is handled after the fact instead, by
+        // `EchoReturnLossProfile` and the clause in `LocalSpeechPolicy` that
+        // reads it. What the unit did do, for as long as the engine ran, was
+        // duck every other application's output. Its ducking API has no off
+        // setting, `.min` is a constant attenuation, and a person on a Slack
+        // huddle heard the other side drop the moment recording began. This
+        // engine must not change what the user hears.
         return try build()
     }
 

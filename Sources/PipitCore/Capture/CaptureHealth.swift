@@ -84,6 +84,13 @@ public struct CaptureThresholds: Sendable, Equatable {
     /// wait doubles from one poll interval, so a device that is simply gone is
     /// retried a few times a minute instead of twice a second.
     public var rebuildBackoffCeiling: Double
+    /// Rebuilds in a row with no buffer arriving before the next one waits for
+    /// the backoff. A build that throws already waits; a build that succeeds
+    /// and delivers nothing did not, and rebuilt on every poll after the grace
+    /// window for as long as the device stayed silent. A real device switch
+    /// recovers in one rebuild, and the case this was measured on took 119 in
+    /// four minutes.
+    public var silentRebuildsBeforeBackoff: Int
 
     public init(
         configurationDebounce: Double = 0.4,
@@ -92,7 +99,8 @@ public struct CaptureThresholds: Sendable, Equatable {
         remoteCallbackTimeout: Double = 5.0,
         pollInterval: Double = 0.5,
         wakeSettleDelay: Double = 1.5,
-        rebuildBackoffCeiling: Double = 30
+        rebuildBackoffCeiling: Double = 30,
+        silentRebuildsBeforeBackoff: Int = 3
     ) {
         self.configurationDebounce = configurationDebounce
         self.rebuildGrace = rebuildGrace
@@ -101,6 +109,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         self.pollInterval = pollInterval
         self.wakeSettleDelay = wakeSettleDelay
         self.rebuildBackoffCeiling = rebuildBackoffCeiling
+        self.silentRebuildsBeforeBackoff = silentRebuildsBeforeBackoff
     }
 
     public static let validated = CaptureThresholds()

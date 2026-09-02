@@ -7,7 +7,8 @@ import Synchronization
 ///
 /// Nothing about meetings: no segments, no manifest, no second track. One wav
 /// with one voice in it, which is what an embedding needs and all it needs.
-///
+/// Plain capture, like the meeting engine: nothing between the microphone and
+/// the file that could gate or reshape a person reading in a quiet room.
 public final class VoiceEnrollmentRecorder: Sendable {
     private struct State {
         var file: AVAudioFile?

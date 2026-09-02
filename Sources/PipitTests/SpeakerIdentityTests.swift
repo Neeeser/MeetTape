@@ -732,8 +732,8 @@ enum SpeakerIdentityTests {
                     humanVerified: false, wasExpectedParticipant: false
                 )
 
-                // Echo cancellation was unavailable and the user was listening,
-                // so the presenter dominates the microphone track too.
+                // Nothing subtracts the speakers from the microphone, and the
+                // user was listening, so the presenter dominates that track too.
                 let declined = try await service.learnLocalUserVoice(
                     meetingID: "m1", identityID: me.id, vector: presenter,
                     speechSeconds: 1_800, quality: 1,

@@ -23,6 +23,10 @@ public struct MicRecoveryPolicy: Sendable {
     public private(set) var coalescedConfigurationChanges = 0
     public private(set) var suppressedWatchdogTrips = 0
     public private(set) var restartCount = 0
+    /// Rebuilds in a row since the last buffer arrived. An engine that builds
+    /// without error and then delivers nothing looks healthy to every check
+    /// but this one.
+    public private(set) var rebuildsWithoutAudio = 0
 
     private var lastConfigurationChangeAt: Double = 0
     private var rebuildStartedAt: Double?
@@ -43,8 +47,10 @@ public struct MicRecoveryPolicy: Sendable {
         if isInitial {
             startedAt = now
             lastBufferAt = nil
+            rebuildsWithoutAudio = 0
         } else {
             restartCount += 1
+            rebuildsWithoutAudio += 1
         }
     }
 
@@ -60,6 +66,17 @@ public struct MicRecoveryPolicy: Sendable {
     public mutating func noteBufferArrived(at now: Double) {
         lastBufferAt = now
         rebuildStartedAt = nil
+        rebuildsWithoutAudio = 0
+    }
+
+    /// Whether rebuilding has stopped being a recovery and become a loop.
+    ///
+    /// Whatever the cause. A driver that opens muted, a virtual input, a unit
+    /// that advertises a format and never fills it: each builds cleanly and
+    /// delivers nothing, and each rebuild into it is another teardown, another
+    /// manifest fsync and another configuration change for nothing.
+    public var isRebuildingWithoutAudio: Bool {
+        rebuildsWithoutAudio >= thresholds.silentRebuildsBeforeBackoff
     }
 
     public mutating func stop() {
@@ -67,6 +84,7 @@ public struct MicRecoveryPolicy: Sendable {
         configurationChangePending = false
         rebuildStartedAt = nil
         lastBufferAt = nil
+        rebuildsWithoutAudio = 0
     }
 
     /// Seconds since the last buffer, or nil when none has arrived yet.

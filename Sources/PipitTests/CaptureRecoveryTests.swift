@@ -204,6 +204,60 @@ enum CaptureRecoveryTests {
                 )
             },
 
+            test("an engine that builds and delivers nothing is not rebuilt forever") { expect in
+                // Measured on a Mac whose default output was an 8-channel virtual
+                // device: the engine built without error, reported a format,
+                // delivered 0.09 s of audio and then nothing, and each rebuild
+                // produced another configuration change. 119 rebuilds in four
+                // minutes. The cause that time was the voice-processing unit,
+                // since removed; a driver that opens muted or a virtual input
+                // produces the same shape, and the bound has to hold whatever
+                // is behind it.
+                //
+                // A build that throws already backs off. One that succeeds and
+                // then never delivers did not, because success cleared the
+                // backoff on every attempt.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+
+                // Sixty seconds of polling with not one buffer.
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+
+                // Unbounded, this is a rebuild every poll after the 1.5 s grace:
+                // about thirty in a minute. Three immediate attempts and then a
+                // doubling wait capped at the ceiling is under a dozen.
+                expect.isTrue(
+                    coordinator.restartCount <= 12,
+                    "rebuilding into the same silent engine is the storm: got \(coordinator.restartCount)"
+                )
+                expect.isTrue(
+                    coordinator.restartCount >= 3,
+                    "it still tries before it waits: got \(coordinator.restartCount)"
+                )
+                expect.notEqual(coordinator.health, .healthy, "nothing arrived, so nothing is healthy")
+                expect.isTrue(
+                    coordinator.warnings().contains {
+                        if case .microphoneUnrecovered = $0 { return true }
+                        return false
+                    },
+                    "and the user is told, rather than the loop running quietly"
+                )
+
+                // The first buffer ends it: the counter clears and the next
+                // rebuild, if one is ever needed, is not held behind a stale wait.
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.health, .healthy)
+            },
+
             test("wake rebuilds proactively after the settle delay") { expect in
                 let engine = FakeMicrophoneEngine()
                 let clock = ManualClock()

@@ -188,6 +188,12 @@ public final class CaptureEngine: Sendable {
                 // Warnings are per meeting; a failure in the last one must not
                 // suppress the same warning in this one.
                 state.warningsRaised.removeAll()
+                // So is anything held from an arm that never committed. A
+                // detected call the user never confirmed still binds a tap, and
+                // carrying that bind forward would file it as provenance for
+                // whichever meeting commits next, dated before that meeting
+                // began.
+                state.pendingEvents.removeAll()
                 state.micLastSegmentIndex = 0
                 state.remoteLastSegmentIndex = 0
             }
@@ -370,6 +376,7 @@ public final class CaptureEngine: Sendable {
             self.state.withLock { state in
                 state.mode = .idle
                 state.lastSnapshot = CaptureHealthSnapshot()
+                state.pendingEvents.removeAll()
             }
         }
     }
@@ -434,6 +441,11 @@ public final class CaptureEngine: Sendable {
             state.micWriter = nil
             state.remoteWriter = nil
             state.manifest = nil
+            // The coordinators were stopped just above and their idle
+            // transitions reach the relay asynchronously, so they land after
+            // the manifest is gone and would otherwise be held for whichever
+            // meeting arms next.
+            state.pendingEvents.removeAll()
             return values
         }
         closing.0?.finish(reason: reason)

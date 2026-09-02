@@ -990,22 +990,37 @@ enum SensorAttributionTests {
                 )
             },
 
-            test("a far end that goes quiet part way through is still a far end") { expect in
-                // The other side of the constant. A tap that worked and then
-                // stopped has recorded a real far end, and refusing to judge
-                // there would give up the measurement on every meeting with a
-                // long silence in it. One percent of windows is 62x below the
-                // least any working recording on disk carries.
+            test("a far end that stopped is judged only where it was recorded") { expect in
+                // A tap that captured the opening and then died leaves a track
+                // that carries signal overall and nothing after the moment it
+                // stopped. Both halves of that have to be respected.
+                //
+                // The recording still has a far end, so the track selection and
+                // the enrolment guard leave it alone. But a window whose far end
+                // reads the floor was measured against nothing: the level clause
+                // reads +100 dB and the echo clause reads zero, so counting
+                // those windows marks whoever was talking as the local user, one
+                // participant at a time, for the rest of the meeting.
                 let raw = sensors(
                     participants: [participant("U1", "Ada"), participant("U2", "Grace")],
-                    turns: [("U1", 0, 60), ("U2", 60, 120)]
+                    turns: [("U1", 0, 60), ("U2", 120, 180)]
                 )
-                var dying = speech(seconds: 120, talking: [(0, 60)])
-                for index in dying.remoteLevels.indices where index > dying.remoteLevels.count / 20 {
-                    dying.remoteLevels[index] = -120
+                var stopped = speech(seconds: 200, talking: [(0, 60), (120, 180)])
+                let died = Int(120 / 0.25)
+                for index in stopped.remoteLevels.indices where index >= died {
+                    stopped.remoteLevels[index] = -120
                 }
-                expect.equal(dying.farEndCarriesSignal, true)
-                expect.equal(raw.markingSelf(using: dying).participants.filter(\.isSelf).count, 1)
+                expect.equal(stopped.farEndCarriesSignal, true, "a far end was recorded")
+
+                let scoped = raw.markingSelf(using: stopped)
+                expect.isTrue(
+                    scoped.participants.first { $0.id == "U1" }?.isSelf == true,
+                    "judged on the windows the tap did capture"
+                )
+                expect.isFalse(
+                    scoped.participants.first { $0.id == "U2" }?.isSelf == true,
+                    "not judged on windows measured against silence"
+                )
             },
 
             test("the microphone being quieter than the far end is not the user") { expect in

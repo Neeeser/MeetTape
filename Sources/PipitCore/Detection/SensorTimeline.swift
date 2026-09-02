@@ -256,6 +256,9 @@ public struct RawSensors: Codable, Sendable, Equatable {
         // actor. `SpeechEvidence` already refuses to place such a span; this
         // refuses to walk to it.
         let measurable = Double(evidence.micLevels.count) * window
+        // Once for the walk rather than once per window.
+        let farEndUsable = evidence.farEndCarriesSignal
+        let floor = EmptyTranscriptPolicy.silenceFloorDBFS
         var measured = 0
         var carrying = 0
         for turn in turns {
@@ -264,8 +267,19 @@ public struct RawSensors: Codable, Sendable, Equatable {
             var at = turn.start
             while at < stop {
                 defer { at += window }
-                guard let reading = evidence.reading(from: at, to: min(at + window, stop))
+                guard let reading = evidence.reading(
+                    from: at, to: min(at + window, stop), farEndUsable: farEndUsable
+                )
                 else { continue }
+                // A window whose far end reads the silence floor was not
+                // measured against anything, whatever the rest of the series
+                // holds. A tap that captured the first minutes and then stopped
+                // leaves a track that carries signal overall and nothing at all
+                // after it, and counting those windows is the same mistake as
+                // trusting a track that never carried any: the level clause
+                // reads +100 dB and the echo clause reads zero, so every one of
+                // them says the microphone holds the local user.
+                if farEndUsable, let far = reading.loudestFarDB, far <= floor { continue }
                 measured += 1
                 guard let probability = reading.speechProbability,
                       probability >= LocalSpeechPolicy.speechProbability

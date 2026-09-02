@@ -120,6 +120,19 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
     /// keeps the segment: evidence that was never measured must not read as
     /// evidence of silence.
     public func reading(from start: Double, to end: Double) -> SpeechReading? {
+        reading(from: start, to: end, farEndUsable: farEndCarriesSignal)
+    }
+
+    /// The same, for a caller walking many spans of one recording.
+    ///
+    /// `farEndCarriesSignal` is a property of the whole series and costs a pass
+    /// over it. `localSpeechShare` asks for one reading per level window per
+    /// turn, so recomputing it inside made the walk quadratic in the recording's
+    /// length: a thirty-one minute meeting with 259 turns spent 7469 comparisons
+    /// on each of about 6900 readings.
+    public func reading(
+        from start: Double, to end: Double, farEndUsable: Bool
+    ) -> SpeechReading? {
         guard let local = span(micLevels, windowSeconds: levelWindowSeconds, from: start, to: end),
               let loudestLocal = local.max() else { return nil }
         // A far end that never rose above the floor is not a reference. Reading
@@ -128,14 +141,13 @@ public struct SpeechEvidence: Codable, Sendable, Equatable {
         // silence accounts for none of the microphone's energy, so the level
         // and echo clauses both answer yes to whatever they are asked. The
         // honest shape for it is the one-track shape.
-        let carriesSignal = farEndCarriesSignal
-        let far = carriesSignal
+        let far = farEndUsable
             ? span(remoteLevels, windowSeconds: levelWindowSeconds, from: start, to: end)
             : nil
         let probability = span(micSpeech, windowSeconds: speechWindowSeconds, from: start, to: end)
             .flatMap { $0.max() }
             .map { Double($0) / 100 }
-        let echo = carriesSignal ? echoReturnLoss(from: start, to: end) : nil
+        let echo = farEndUsable ? echoReturnLoss(from: start, to: end) : nil
         guard let far, let loudestFar = far.max() else {
             return SpeechReading(
                 speechProbability: probability, loudestLocalDB: Double(loudestLocal),

@@ -38,6 +38,21 @@ enum ManifestTests {
                         reason: "config_change"
                     )),
                     .captureRestart(.init(track: .mic, reason: "watchdog", restartCount: 1)),
+                    .remoteBind(.init(
+                        reason: "session_start",
+                        targets: [
+                            .init(
+                                processID: 79_590, bundleIdentifier: "org.mozilla.firefox",
+                                isRunningOutput: true
+                            ),
+                            .init(
+                                processID: 45_082,
+                                bundleIdentifier: "com.tinyspeck.slackmacgap.helper",
+                                isRunningOutput: false
+                            ),
+                        ],
+                        bindCount: 1
+                    )),
                     .sourceHealth(.init(track: .remote, state: .idleButBound, detail: nil)),
                     .preRollFlushed(.init(track: .mic, frameCount: 720_000, seconds: 15, earliestHostTime: 1.0)),
                     .marker(.init(label: "user note")),

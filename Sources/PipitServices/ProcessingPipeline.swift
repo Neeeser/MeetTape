@@ -1435,8 +1435,14 @@ public actor ProcessingPipeline {
                 // is the local user by construction, and the entry still says
                 // the pipeline wrote it rather than a person, so the link is
                 // the one this meeting would be given if it ran again.
+                // The transcript here is whatever is on disk, which for a
+                // meeting processed before the microphone was measured still
+                // carries every word under the local user's key. Backfilling
+                // from it would bank a room full of people against one person,
+                // so the same question gates the row as gates the link.
+                guard micHoldsLocalUserAlone(metadata, evidence: store.readSpeechEvidence())
+                else { continue }
                 if let localUserID,
-                   micHoldsLocalUserAlone(metadata, evidence: store.readSpeechEvidence()),
                    speakers.entries[SpeakerLabel.localUser]?.identityID == nil,
                    speakers.entries[SpeakerLabel.localUser]?.origin == .deterministic {
                     speakers.linkIdentity(localUserID, to: SpeakerLabel.localUser, named: nil)

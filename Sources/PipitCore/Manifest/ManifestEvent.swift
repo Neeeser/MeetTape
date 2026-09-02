@@ -289,6 +289,7 @@ extension ManifestLine: Codable {
         case "marker": event = .marker(try .init(from: decoder))
         case "session_end": event = .sessionEnd(try .init(from: decoder))
         case "crash_tail_adopted": event = .crashTailAdopted(try .init(from: decoder))
+        case "remote_bind": event = .remoteBind(try .init(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .event, in: container, debugDescription: "unknown manifest event \(name)"

@@ -65,6 +65,19 @@ public final class SettingsModel {
         hasStoredKey = await Task.detached { KeychainAPIKeyStore().hasKey }.value
     }
 
+    /// Keeps the browser rows current while that page is open.
+    ///
+    /// Separate from `refresh`, which reads the keychain and every permission,
+    /// and is far too heavy to run on a timer.
+    public func pollSensor() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            sensorStatus = runtime.sensorStatus
+            hostStatus = NativeMessagingInstaller().status()
+        }
+    }
+
     public func request(_ kind: PermissionKind) async {
         let status = await runtime.permissions.request(kind)
         statuses = await runtime.permissions.allStatuses()
@@ -771,6 +784,29 @@ public final class MeetingReviewModel {
         reload()
     }
     public func reveal() { runtime.revealInFinder(meetingID: meetingID) }
+
+    /// `transcript.md` as it stands on disk, both halves of a rejoined call in
+    /// order.
+    ///
+    /// Read here rather than rendered from what the pane holds. A rename or a
+    /// rebuild rewrites the file, and this is the file.
+    public func transcriptMarkdown() -> String? {
+        guard let logical = runtime.repository.logicalMeeting(id: meetingID) else { return nil }
+        let parts = logical.recordings.compactMap { $0.store.readTranscriptMarkdown() }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// Puts the transcript on the clipboard. False where there is nothing to
+    /// copy, so the caller can leave the confirmation alone.
+    @discardableResult
+    public func copyTranscript() -> Bool {
+        guard let markdown = transcriptMarkdown() else { return false }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
+        return true
+    }
 
     public func titleBinding() -> Binding<String> {
         Binding(get: { self.title }, set: { self.title = $0; self.scheduleEditSave() })

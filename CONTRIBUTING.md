@@ -53,6 +53,13 @@ npm test
 npm run build
 ```
 
+To try the changed extension in Firefox, load it as a temporary add-on: open
+`about:debugging#/runtime/this-firefox`, choose Load Temporary Add-on, and select
+`extension/dist/firefox/manifest.json`. Firefox drops a temporary add-on when it
+quits, so this repeats each launch. Pipit itself only offers the signed add-on a
+release build carries, because release Firefox refuses an unsigned one; see
+[releasing](docs/RELEASING.md) for how that gets signed.
+
 Run the full application and extension tests before opening a pull request:
 
 ```sh

@@ -252,6 +252,11 @@ public struct MeetingStore: Sendable {
         var utterances: [Line]
     }
 
+    /// `transcript.md` as it stands on disk, or nil where none was rendered.
+    public func readTranscriptMarkdown() -> String? {
+        try? String(contentsOf: layout.transcriptMarkdown, encoding: .utf8)
+    }
+
     public func writeTranscriptMarkdown(_ text: String) throws {
         try AtomicFile.writeText(text, to: layout.transcriptMarkdown)
     }

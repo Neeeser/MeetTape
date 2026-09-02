@@ -23,6 +23,9 @@ public struct RuntimeStatus: Sendable, Equatable {
     /// from settings so the menu bar can tell "dropped" from "never installed".
     public var firefoxSensorHasConnected = false
     public var isFirefoxRunning = false
+    /// Whether a Firefox profile holds the add-on, which is the answer while it
+    /// is installed but has not called in yet.
+    public var firefoxAddOnInProfile = false
     public var slackState: SlackHuddleDetector.State = .idle
     public var lastWarning: CaptureWarning?
 
@@ -55,7 +58,11 @@ public struct RuntimeStatus: Sendable, Equatable {
     /// recordings keep happening, they just start at the prejoin screen again.
     /// Nothing is claimed for a machine where the add-on was never installed.
     public var sensorNeedsAttention: Bool {
-        firefoxSensorHasConnected && isFirefoxRunning && !sensorConnection.isLoaded
+        guard firefoxSensorHasConnected, isFirefoxRunning, !sensorConnection.isLoaded
+        else { return false }
+        // An add-on sitting in the profile is installed and between
+        // connections, which restarting Pipit causes and which fixes itself.
+        return !firefoxAddOnInProfile
     }
 
     /// Never show a healthy recording while a required source is known to be
@@ -433,6 +440,10 @@ public final class PipitRuntime {
     func detectionDidUpdate(_ snapshot: DetectionSnapshot) {
         status.sensorConnection = snapshot.browserSensor
         status.isFirefoxRunning = BrowserPresence.isRunning(.firefox)
+        // A live connection is proof enough; the profile is only read when
+        // there is nothing talking.
+        status.firefoxAddOnInProfile =
+            snapshot.browserSensor.isLoaded || FirefoxProfile.hasInstalledAddOn()
         // The latch is written once, the first time the add-on ever reports.
         // From then on a silent sensor is a dropped add-on rather than one that
         // was never installed.

@@ -286,16 +286,4 @@ public final class SetupModel {
         runtime.update(settings: settings)
         storagePath = url.path
     }
-
-    public func revealExtension() {
-        let candidates = [
-            Bundle.main.url(forResource: "extension", withExtension: nil),
-            Bundle.main.resourceURL?.appendingPathComponent("extension"),
-        ].compactMap { $0 }
-        if let existing = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-            NSWorkspace.shared.activateFileViewerSelecting([existing])
-        } else {
-            NSWorkspace.shared.open(SensorTransport.defaultApplicationSupport)
-        }
-    }
 }

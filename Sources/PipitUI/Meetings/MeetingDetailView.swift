@@ -11,6 +11,8 @@ import SwiftUI
 public struct MeetingDetailView: View {
     let model: MeetingsWindowModel
     let detail: MeetingReviewModel
+    /// Confirms a copy for two seconds, because the clipboard says nothing.
+    @State private var copied = false
 
     public init(model: MeetingsWindowModel, detail: MeetingReviewModel) {
         self.model = model
@@ -426,9 +428,34 @@ public struct MeetingDetailView: View {
             .labelsHidden()
             .frame(width: 268)
             Spacer()
+            copyTranscriptButton
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+    }
+
+    /// Puts `transcript.md` on the clipboard.
+    ///
+    /// On the tab row rather than in the transcript itself: it copies the whole
+    /// document whichever tab is open, and the row is the one bar that stays on
+    /// screen while the transcript scrolls.
+    private var copyTranscriptButton: some View {
+        Button {
+            guard detail.copyTranscript() else { return }
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                copied = false
+            }
+        } label: {
+            Label(
+                copied ? "Copied" : "Copy transcript",
+                systemImage: copied ? "checkmark" : "doc.on.doc"
+            )
+        }
+        .controlSize(.small)
+        .disabled(detail.transcript == nil)
+        .help("Copies transcript.md, the whole transcript as it stands on disk.")
     }
 
     @ViewBuilder private var content: some View {

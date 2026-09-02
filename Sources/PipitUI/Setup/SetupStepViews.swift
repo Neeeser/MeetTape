@@ -385,51 +385,36 @@ struct OptionalPermissionsStep: View {
 struct FirefoxStep: View {
     let model: SetupModel
 
-    /// A release build installs the add-on Firefox has signed. A local build has
-    /// no signed add-on to offer, so it walks through the temporary load.
-    private var addOnInstructions: String {
-        if FirefoxAddOn.bundledAddOn != nil {
-            return "Firefox installs add-ons through its own interface. This opens it there "
-                + "and asks you to confirm, and it stays installed after that."
-        }
-        return "Firefox only installs add-ons through its own interface. Open "
-            + "about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, and "
-            + "select manifest.json in the folder below. A temporary add-on is dropped when "
-            + "Firefox quits, so this repeats each launch until the extension is signed."
+    private var addOnState: FirefoxAddOnState {
+        FirefoxAddOnState(
+            connection: model.runtime.status.sensorConnection,
+            isInProfile: model.runtime.status.firefoxAddOnInProfile,
+            hasBundledAddOn: FirefoxAddOn.bundledAddOn != nil
+        )
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             StepHeader(
                 eyebrow: "Optional, and it makes browser calls precise",
-                title: "Firefox extension",
-                message: "The extension reports when you join and leave a Meet or Zoom call. Without "
+                title: "Firefox add-on",
+                message: "The add-on reports when you join and leave a Meet or Zoom call. Without "
                     + "it those calls are still recorded, from window titles and microphone "
                     + "state, so recording starts before you have actually joined."
             )
 
             HStack(spacing: 8) {
-                Image(
-                    systemName: model.hostStatus?.isReadyForFirefox == true
-                        ? "checkmark.circle.fill" : "circle"
-                )
-                .foregroundStyle(model.hostStatus?.isReadyForFirefox == true ? .green : .secondary)
-                Text("Step 1, the native messaging host")
+                Image(systemName: addOnState.symbol)
+                    .foregroundStyle(addOnState.color)
+                Text(addOnState.title)
                 Spacer()
-                Button("Install host") { model.installHost() }
-                    .disabled(model.hostStatus?.isReadyForFirefox == true)
             }
+            Text(addOnState.detail)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Step 2, add it to Firefox").font(.body.weight(.medium))
-                Text(addOnInstructions)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                FirefoxAddOnControls(
-                    revealExtension: FirefoxAddOn.bundledAddOn == nil
-                        ? { model.revealExtension() } : nil
-                )
+            if !addOnState.isInstalled, addOnState != .unavailable {
+                FirefoxAddOnInstallButton(prepareRelay: { model.installHost() })
             }
         }
     }

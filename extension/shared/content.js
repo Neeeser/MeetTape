@@ -61,13 +61,19 @@ function readMeetTiles() {
   // local user held the floor cannot explain a voice heard there. Without this
   // flag their turns compete for remote clusters and put their own name on
   // whoever they talked over.
+  // The top document alone, unlike Zoom: Meet renders its client in the page
+  // rather than in an iframe, so walking frames here would cost a scan per tick
+  // and find nothing.
   const tiles = [];
   for (const node of document.querySelectorAll('[data-participant-id]')) {
     const id = node.getAttribute('data-participant-id');
     if (!id) continue;
+    // Only a name that survived the chrome cut is cached, so a row read while
+    // the panel was open cannot pin a control's text as somebody's name for
+    // the rest of the call.
     let name = meetNames.get(id);
     if (!name) {
-      name = (node.innerText || '').trim().split('\n')[0].trim();
+      name = meetTileName(node.innerText);
       if (name) meetNames.set(id, name);
     }
     // The meter element, by the name Meet currently gives it. When that
@@ -92,6 +98,10 @@ function readMeetTiles() {
     tiles.push({
       id,
       name: name || undefined,
+      // Whether this string is a level meter or the subtree's own churn. A
+      // people-panel row has no meter, and the tracker uses this to keep
+      // layout from reading as audio while a real meter is available.
+      hasMeter: !!meter,
       // Meet writes "You" as the local user's own tile name in English, and a
       // probed live call showed the self tile can render no name at all. A
       // hint, never the only mechanism: the app marks the local user by

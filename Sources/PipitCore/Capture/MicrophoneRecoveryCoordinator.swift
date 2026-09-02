@@ -94,6 +94,12 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         /// the engine started; a first buffer landing inside that gap is
         /// dropped, and the next one, about 85 ms behind it, is recorded.
         var engineInstalled = false
+        /// When the rebuild that produced the installed engine was committed
+        /// to. `engineInstalled` says an engine exists now; this says which
+        /// buffers are its. A buffer already in flight on the render thread
+        /// while the old tap was removed can take the lock after the new build
+        /// has been recorded, and it carries the old engine's timestamp.
+        var buildCommittedAt: Double = 0
         var health: CaptureHealthState = .idle
         var wakeRequestedAt: Double?
         var restartTimestamps: [Double] = []
@@ -114,7 +120,14 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         /// the settle window is still in its debounce, and the change's own
         /// rebuild is the one that should run, under its own name.
         mutating func noteBuildFailure(at now: Double, thresholds: CaptureThresholds) {
-            guard !policy.configurationChangePending else {
+            // Only a change that arrived before this build was committed to.
+            // One that arrived during it was, on the device that motivated
+            // this, emitted by the failing open itself, and honouring it made
+            // every failure forgive itself: 601 builds in five minutes. That
+            // change stays pending, is refused by the wait, and is taken when
+            // the wait expires, so a real reconnect during a failing build
+            // costs at most the current step.
+            if policy.configurationChangePending, policy.lastConfigurationChangeAt < buildCommittedAt {
                 wait = nil
                 consecutiveBuildFailures = 0
                 return
@@ -196,6 +209,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     public func noteConfigurationChange() {
         let now = clock.monotonicSeconds
         state.withLock { state in
+            guard state.policy.isRunning else { return }
             state.policy.noteConfigurationChange(at: now)
             // A silent engine's wait holds here. On the device this bound was
             // measured against, each rebuild was followed by a configuration
@@ -207,11 +221,15 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // is where a real device switch is told from the footprint: a
             // change that reports a different device is admitted there, and
             // only a change reporting the same one waits out the ceiling.
-            if state.wait?.cause == .silentEngine { return }
-            // Otherwise the hardware changed, so a device that could not be
-            // built a moment ago may exist now. The backoff starts again from
-            // nothing, and the rebuild this change decides is the one that
-            // tries it.
+            // A failed build's wait is the one a change forgives: the device
+            // that could not be built may exist now, so the backoff starts
+            // again from nothing and the rebuild this change decides is the one
+            // that tries it. Only that wait. With no failed build waiting there
+            // is nothing to forgive, and a change that arrives during a build
+            // must not zero the count the build's own failure is about to
+            // increment: that let a device emitting a change on every failed
+            // open forgive itself on every attempt.
+            guard state.wait?.cause == .buildFailed else { return }
             state.wait = nil
             state.consecutiveBuildFailures = 0
         }
@@ -233,7 +251,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // cause instead was not enough, because the retry clears the wait
             // before the build runs and the build is where that driver's buffer
             // arrives.
-            guard state.engineInstalled else { return false }
+            guard state.engineInstalled, hostTime >= state.buildCommittedAt else { return false }
             state.policy.noteBufferArrived(at: hostTime)
             // Audio arriving means the engine works, so a rebuild the hardware
             // asks for next is not held behind a silent engine's wait, and the
@@ -278,6 +296,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 state.policy.noteEngineGone()
             }
             rebuild(reason: .wake, isInitial: false)
+            refreshHealth(at: now)
             return
         }
 
@@ -290,13 +309,18 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         // torn down on the poll after a wake or a reconnect.
         let retryFailedBuild: Bool = state.withLock { state in
             guard let wait = state.wait, wait.cause == .buildFailed, state.policy.isRunning,
-                  now >= wait.until
+                  now >= wait.until,
+                  // A pending change decides the rebuild instead, under its own
+                  // name; taken here it was filed as manual and the change,
+                  // still pending, rebuilt again a poll later.
+                  !state.policy.configurationChangePending
             else { return false }
             state.wait = nil
             return true
         }
         if retryFailedBuild {
             rebuild(reason: .manual, isInitial: false)
+            refreshHealth(at: now)
             return
         }
 
@@ -398,6 +422,9 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 return state.withLock { state in
                     guard let active = state.activeDeviceUID, current != active else { return false }
                     state.wait = nil
+                    // Whatever was silent was the other device. Carried across,
+                    // the new device's first build re-latched at the ceiling.
+                    state.policy.noteEngineGone()
                     return true
                 }
             }()
@@ -405,7 +432,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 // `evaluate` consumed the pending flag and the coalesced count to
                 // return this. Both go back, so the rebuild at expiry is taken
                 // and recorded as the burst it was.
-                state.withLock { $0.policy.noteConfigurationChangeRefused(coalesced: coalesced, at: now) }
+                state.withLock { $0.policy.noteConfigurationChangeRefused(coalesced: coalesced) }
                 return
             }
         }
@@ -415,9 +442,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.restartTimestamps.removeAll { now - $0 > 300 }
             // From here the old engine is being replaced. Nothing it delivers
             // from now on is evidence about anything, including the buffer a
-            // driver flushes as the tap is torn down.
+            // driver flushes as the tap is torn down, and including a buffer
+            // stamped before this moment that reaches the lock after the new
+            // engine has been recorded.
             state.engineInstalled = false
             state.activeDeviceUID = nil
+            state.buildCommittedAt = now
+            // Whatever wait this rebuild was allowed past is spent: expired, or
+            // admitted. Left in place it was still there to be forgiven by a
+            // change arriving during the build.
+            state.wait = nil
         }
         setHealth(.recovering, detail: reason.label)
         if !isInitial {
@@ -463,6 +497,15 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 state.activeDeviceUID = deviceUID
                 state.engineInstalled = true
                 if !isInitial { state.policy.noteRebuildSucceeded() }
+                // This build read the device fresh, which is all a change that
+                // arrived before it was asking for. Left pending, a change from
+                // a wake's settle window rebuilt the engine the wake had just
+                // built. One that arrived during the build stays: it may be the
+                // footprint, and it may be a device that arrived just now.
+                if state.policy.configurationChangePending,
+                   state.policy.lastConfigurationChangeAt < state.buildCommittedAt {
+                    state.policy.clearPendingConfigurationChange()
+                }
                 // Success is not recovery until a buffer arrives, for the wait
                 // and for the failure count alike. An engine that builds cleanly
                 // and delivers nothing was rebuilt on every poll after the grace

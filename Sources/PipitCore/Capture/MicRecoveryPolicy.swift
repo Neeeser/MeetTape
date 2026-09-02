@@ -30,7 +30,10 @@ public struct MicRecoveryPolicy: Sendable {
     /// said of it.
     public private(set) var rebuildsWithoutAudio = 0
 
-    private var lastConfigurationChangeAt: Double = 0
+    /// When the pending change arrived, or was last re-armed. Read by the
+    /// coordinator to tell a change that predates a failed build, which may
+    /// mean the device is back, from one the failing build emitted itself.
+    public private(set) var lastConfigurationChangeAt: Double = 0
     private var rebuildStartedAt: Double?
     private var lastBufferAt: Double?
     private var startedAt: Double = 0
@@ -95,15 +98,28 @@ public struct MicRecoveryPolicy: Sendable {
         rebuildStartedAt = nil
     }
 
+    /// A pending change the coordinator has answered by other means: a wake
+    /// rebuild reads the device fresh, so a change that arrived in the settle
+    /// window would only rebuild the engine the wake just built.
+    public mutating func clearPendingConfigurationChange() {
+        configurationChangePending = false
+        coalescedConfigurationChanges = 0
+    }
+
     /// A configuration-change decision the coordinator could not act on yet.
     /// `evaluate` consumed the pending flag and the coalesced count to return
     /// it; putting both back is what lets the rebuild at expiry be recorded as
     /// the burst it was, rather than as one change that arrived alone.
-    public mutating func noteConfigurationChangeRefused(coalesced: Int, at now: Double) {
+    ///
+    /// The arrival time is left as it was. It says when the change arrived,
+    /// which is what tells a change that predates a failed build from one the
+    /// failing build emitted; restamping it on every refusal made the latter
+    /// look like the former on the next attempt, and every failure forgave
+    /// itself.
+    public mutating func noteConfigurationChangeRefused(coalesced: Int) {
         guard isRunning else { return }
         configurationChangePending = true
         coalescedConfigurationChanges = coalesced
-        lastConfigurationChangeAt = now
     }
 
     /// Whether rebuilding has stopped being a recovery and become a loop.

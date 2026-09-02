@@ -538,6 +538,19 @@ enum CaptureRecoveryTests {
                 clock.advance(0.5)
                 coordinator.tick()
                 expect.equal(coordinator.restartCount, before + 1, "the new device is built now")
+
+                // And it starts from nothing. Whatever was silent was the other
+                // device; carried across, this one's first build re-latched the
+                // wait at the ceiling before it had been silent for a single
+                // grace window.
+                for _ in 0..<16 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    coordinator.restartCount >= before + 3,
+                    "the new device's silence is counted from zero: got \(coordinator.restartCount - before) rebuilds in 8 s"
+                )
             },
 
             test("a device renegotiating its format during a silent wait is still the footprint") { expect in
@@ -779,6 +792,134 @@ enum CaptureRecoveryTests {
                 )
                 expect.isTrue(engine.isRunning)
                 expect.equal(coordinator.health, .healthy)
+            },
+
+            test("a buffer stamped before the rebuild is not the new engine's") { expect in
+                // A buffer already in flight on the render thread while the old
+                // tap is removed can reach the lock after the new build has been
+                // recorded. It carries the old engine's timestamp. Counted as
+                // the new engine's, it zeroed the silent count, released the
+                // silent engine's wait and marked the microphone healthy, once
+                // per rebuild: 119 rebuilds in a minute, the figure the bound
+                // exists to prevent, through the one door that does not close
+                // synchronously.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+                var rebuilds = coordinator.restartCount
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    // After each rebuild, one buffer the old tap had in flight:
+                    // it reaches the lock now, stamped from before the rebuild
+                    // was committed to.
+                    if coordinator.restartCount != rebuilds {
+                        rebuilds = coordinator.restartCount
+                        coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds - 0.6)
+                    }
+                }
+                expect.isTrue(
+                    coordinator.restartCount <= 12,
+                    "a stale buffer must not read as the new engine delivering: got \(coordinator.restartCount)"
+                )
+                expect.notEqual(coordinator.health, .healthy, "nothing this engine produced has arrived")
+            },
+
+            test("a change emitted by a failing open does not forgive the failure") { expect in
+                // A change that arrived before a build failed may mean the
+                // device is back, and it clears the failure's wait. One that
+                // arrives during the failing build was emitted by the open
+                // itself, on the device that motivated this, and honouring it
+                // let every failure forgive itself: 601 builds in five minutes.
+                // It stays pending, is refused by the wait, and is taken when
+                // the wait expires.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -10_875))
+                engine.setDuringBuild { coordinator.noteConfigurationChange() }
+                coordinator.start()
+                for _ in 0..<600 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    engine.buildCount < 30,
+                    "\(engine.buildCount) attempts in five minutes is the storm the backoff exists to stop"
+                )
+                // Each retry is the pending change's, and the manifest says so.
+                // Taken by the failed-build retry first it was filed as manual.
+                let reasons = delegate.restarts.map(\.reason)
+                expect.isTrue(
+                    !reasons.contains("manual"),
+                    "a rebuild a change is waiting on is recorded as the change's: got \(reasons)"
+                )
+            },
+
+            test("a wake answers the change that arrived while it settled") { expect in
+                // The wake rebuild reads the device fresh, which is all a
+                // configuration change asks for. Left pending, the change
+                // rebuilt the engine the wake had just built, half a second
+                // old, for nothing.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                coordinator.start()
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                coordinator.noteWake()
+                clock.advance(1.0)
+                coordinator.noteConfigurationChange()
+                clock.advance(0.6)
+                coordinator.tick()
+                expect.equal(delegate.restarts.map(\.reason), ["wake"])
+                for _ in 0..<4 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                }
+                expect.equal(delegate.restarts.map(\.reason), ["wake"], "one rebuild, the wake's")
+                expect.equal(coordinator.health, .healthy)
+            },
+
+            test("the silent wait doubles from the threshold and stops at the ceiling") { expect in
+                // The bounds elsewhere pass for any wait between a few seconds
+                // and the ceiling. This is the schedule itself: three rebuilds
+                // at the grace cadence, then one poll interval past the
+                // threshold, doubling, capped. A changed constant fails here
+                // and nowhere else, which is the point.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                coordinator.start()
+                var seen: [Int: Int] = [:]
+                for i in 1...120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    if [20, 40, 80, 120].contains(i) { seen[i] = coordinator.restartCount }
+                }
+                // The first buffer is owed at 3.5 s (timeout plus grace), so the
+                // first rebuild is at 4.0, and each one restarts the 1.5 s grace:
+                // 4.0, 5.5, 7.0 are the three free. The count is then 3 and the
+                // wait is one interval past the threshold, 1 s, which expires at
+                // 8.0 inside the grace window, so the rebuild is at 8.5. Then
+                // 2 s → 10.5, 4 s → 14.5, 8 s → 22.5, 16 s → 38.5, and the step
+                // caps at 32 s → the 30 s ceiling → 68.5.
+                expect.equal(seen[20], 4, "by 10 s: three free rebuilds and the first waited one")
+                expect.equal(seen[40], 6, "by 20 s: the 2 s and 4 s waits")
+                expect.equal(seen[80], 8, "by 40 s: the 8 s and 16 s waits")
+                expect.equal(seen[120], 8, "by 60 s: the ceiling holds until 68.5")
             },
 
             test("wake rebuilds proactively after the settle delay") { expect in

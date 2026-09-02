@@ -661,14 +661,38 @@ enum UITests {
                 var object = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: store.url)
                 ) as! [String: Any]
-                object.removeValue(forKey: "echoCancellation")
                 object.removeValue(forKey: "preferBuiltInMicrophone")
                 try JSONSerialization.data(withJSONObject: object).write(to: store.url)
 
                 let reloaded = store.load()
                 expect.equal(reloaded.localUserName, "Andrew", "existing values must survive")
                 expect.isTrue(reloaded.hasCompletedOnboarding, "onboarding must not reappear")
-                expect.isTrue(reloaded.echoCancellation, "the missing field takes its default")
+                expect.isFalse(reloaded.preferBuiltInMicrophone, "the missing field takes its default")
+            },
+
+            test("a settings file from a build that had the echo-cancellation toggle still loads") { expect in
+                // The toggle was removed with the voice-processing unit behind it,
+                // which ducked every other application's output for as long as
+                // the microphone ran. Every settings file written before that
+                // carries the key, on either value, and a file that stopped
+                // loading would reset everything the user had chosen.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let store = SettingsStore(directory: root)
+
+                var settings = AppSettings()
+                settings.localUserName = "Andrew"
+                settings.hasCompletedOnboarding = true
+                try store.save(settings)
+                var object = try JSONSerialization.jsonObject(
+                    with: Data(contentsOf: store.url)
+                ) as! [String: Any]
+                object["echoCancellation"] = false
+                try JSONSerialization.data(withJSONObject: object).write(to: store.url)
+
+                let reloaded = store.load()
+                expect.equal(reloaded.localUserName, "Andrew", "the key is ignored, not fatal")
+                expect.isTrue(reloaded.hasCompletedOnboarding)
             },
 
             test("every menu row draws in a colour that is readable on a dark menu") { expect in

@@ -13,24 +13,18 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     private struct State {
         var engine: AVAudioEngine?
         var observer: NSObjectProtocol?
-        /// Set when the coordinator gives up on the voice unit for this session.
-        var voiceProcessingSuppressed = false
     }
 
     private let state = LockedBox(State())
     private let sink: AudioBufferSink
     private let onConfigurationChange: @Sendable () -> Void
-    /// Read at build time so a settings change applies to the next engine.
-    private let voiceProcessingWanted: @Sendable () -> Bool
 
     public init(
         sink: @escaping AudioBufferSink,
-        onConfigurationChange: @escaping @Sendable () -> Void,
-        voiceProcessing: @escaping @Sendable () -> Bool = { true }
+        onConfigurationChange: @escaping @Sendable () -> Void
     ) {
         self.sink = sink
         self.onConfigurationChange = onConfigurationChange
-        self.voiceProcessingWanted = voiceProcessing
         observeConfigurationChanges()
     }
 
@@ -85,41 +79,24 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             throw CaptureError.microphonePermissionDenied
         }
 
-        // Voice processing subtracts what the speakers are playing from the
-        // microphone signal. Without it, a user on speakers gets the remote side
-        // of the call transcribed onto their own track. It refuses to build for
-        // some input/output pairings (a virtual output device, AirPods input
-        // with built-in output), so a failed attempt falls back to plain
-        // capture rather than costing the meeting.
-        if voiceProcessingWanted(), !state.withLock({ $0.voiceProcessingSuppressed }) {
-            do {
-                return try build(voiceProcessing: true)
-            } catch {
-                Log.capture.notice(
-                    "voice processing unavailable, capturing without echo cancellation: \(logSafeDescription(error), privacy: .public)"
-                )
-            }
-        }
-        return try build(voiceProcessing: false)
+        // Plain capture, never the system voice-processing unit. That unit
+        // cancels only what its own host application plays, and Pipit plays
+        // nothing, so it never subtracted the far end from a call taken on
+        // speakers; measured 2026-08-25, and the bleed is handled after the
+        // fact by `EchoReturnLossProfile` instead. What the unit did do for as
+        // long as the engine ran was duck every other application's output.
+        // Its ducking API has no off setting, `.min` is a constant attenuation,
+        // and a person on a Slack huddle heard the other side drop the moment
+        // recording began. Pipit must not change what the user hears.
+        return try build()
     }
 
-    private func build(voiceProcessing: Bool) throws -> AudioFormatDescriptor {
+    private func build() throws -> AudioFormatDescriptor {
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        if voiceProcessing {
-            try input.setVoiceProcessingEnabled(true)
-            // The voice unit ducks every other audio stream by default, which
-            // quiets the meeting audio being recorded on the remote track.
-            if #available(macOS 14.0, *) {
-                input.voiceProcessingOtherAudioDuckingConfiguration = .init(
-                    enableAdvancedDucking: false, duckingLevel: .min
-                )
-            }
-        }
         // Install against the node's own format. Passing a format the hardware is
         // not actually running at throws inside CoreAudio, so `preferred` informs
-        // the choice but the node decides. With voice processing on, the node's
-        // format is the voice unit's, which can differ from the raw device.
+        // the choice but the node decides.
         let tapFormat = input.outputFormat(forBus: 0)
         guard tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
             throw CaptureError.microphoneEngineStartFailed(status: -1)
@@ -148,21 +125,6 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         return AudioFormatDescriptor(
             sampleRate: tapFormat.sampleRate, channelCount: Int(tapFormat.channelCount)
         )
-    }
-
-    /// Gives up on echo cancellation, or asks for it again.
-    ///
-    /// The voice unit builds successfully on pairings where it then delivers no
-    /// buffers at all, so refusing to build is not the only way it fails and a
-    /// build-time check cannot see this one.
-    public func setVoiceProcessingSuppressed(_ suppressed: Bool) {
-        let changed = state.withLock { state -> Bool in
-            guard state.voiceProcessingSuppressed != suppressed else { return false }
-            state.voiceProcessingSuppressed = suppressed
-            return true
-        }
-        guard changed, suppressed else { return }
-        Log.capture.notice("giving up on echo cancellation: the voice unit recorded nothing")
     }
 
     /// The format the engine is actually running at, which is what segments are

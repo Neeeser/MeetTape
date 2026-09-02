@@ -20,14 +20,6 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     /// what segments must be written in.
     @discardableResult
     func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor
-    /// Stops or resumes asking for echo cancellation on subsequent builds.
-    ///
-    /// The voice-processing unit can build without error and then deliver
-    /// nothing, which no build-time check can see, so giving up on it is a
-    /// decision only the coordinator can reach. Cleared at the start of each
-    /// capture session, because the pairing that broke it may be gone. A source
-    /// with no voice unit implements this as nothing.
-    func setVoiceProcessingSuppressed(_ suppressed: Bool)
 }
 
 public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
@@ -61,7 +53,6 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         var lastRebuildFailedAt: Double?
         var consecutiveBuildFailures = 0
         var nextRebuildAllowedAt: Double?
-        var gaveUpOnVoiceProcessing = false
 
         /// The first retry is immediate, on the next poll. Each further failure
         /// doubles the wait, up to the ceiling.
@@ -100,10 +91,6 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
 
     /// Starts capture. Safe to call once; further starts are rebuilds.
     public func start() {
-        // The pairing that broke the voice unit last time may be gone, so every
-        // session asks for echo cancellation again.
-        state.withLock { $0.gaveUpOnVoiceProcessing = false }
-        controller.setVoiceProcessingSuppressed(false)
         rebuild(reason: .sessionStart, isInitial: true)
     }
 
@@ -119,7 +106,6 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.nextRebuildAllowedAt = nil
             state.wakeRequestedAt = nil
             state.activeFormat = nil
-            state.gaveUpOnVoiceProcessing = false
         }
         controller.teardown()
         setHealth(.idle, detail: nil)
@@ -281,18 +267,6 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             setHealth(.degraded, detail: "no usable input device")
             return
         }
-
-        // A voice unit that builds and then records nothing looks exactly like a
-        // healthy one until the buffers do not arrive, and rebuilding into it
-        // emits another configuration change, so the rebuild is what sustains
-        // the loop. Give it up and build plainly instead.
-        let giveUp: Bool = state.withLock { state in
-            guard !state.gaveUpOnVoiceProcessing, state.policy.voiceProcessingLooksFaulty
-            else { return false }
-            state.gaveUpOnVoiceProcessing = true
-            return true
-        }
-        if giveUp { controller.setVoiceProcessingSuppressed(true) }
 
         do {
             let installed = try controller.buildAndStart(preferred: format)

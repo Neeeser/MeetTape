@@ -8,9 +8,6 @@ import Synchronization
 /// Nothing about meetings: no segments, no manifest, no second track. One wav
 /// with one voice in it, which is what an embedding needs and all it needs.
 ///
-/// Voice processing is off. It exists to subtract what the speakers are playing
-/// from the microphone, and there is nothing playing here; leaving it on would
-/// gate and duck a person reading in a quiet room.
 public final class VoiceEnrollmentRecorder: Sendable {
     private struct State {
         var file: AVAudioFile?
@@ -113,8 +110,7 @@ public final class VoiceEnrollmentRecorder: Sendable {
                     state.speechSeconds += Self.speechSeconds(in: buffer)
                 }
             },
-            onConfigurationChange: {},
-            voiceProcessing: { false }
+            onConfigurationChange: {}
         )
         state.withLock { $0.closed = false }
         engine.withLock { $0 = source }

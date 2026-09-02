@@ -92,7 +92,7 @@ These paths still need direct observation:
 - Chrome sensor delivery through a packed extension
 - A full Google Meet join, refresh, leave, and reconnect through the sensor
 - Sleep, wake, screen lock, and Bluetooth device changes during capture
-- Near-end speech while echo cancellation processes far-end audio
+- Other applications' playback level is unchanged from the moment recording starts
 - A signed and notarized build installed on a clean Mac
 - Installation and removal through the published Homebrew cask
 - Calendar matching against a real calendar

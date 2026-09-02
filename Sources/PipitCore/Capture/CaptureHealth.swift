@@ -84,11 +84,6 @@ public struct CaptureThresholds: Sendable, Equatable {
     /// wait doubles from one poll interval, so a device that is simply gone is
     /// retried a few times a minute instead of twice a second.
     public var rebuildBackoffCeiling: Double
-    /// Rebuilds in a row that deliver no audio at all before echo cancellation
-    /// is given up on. The voice unit can build without error and then record
-    /// nothing, and rebuilding into it produces another configuration change, so
-    /// nothing else breaks the loop. A real device switch recovers in one.
-    public var voiceProcessingFailureRebuilds: Int
 
     public init(
         configurationDebounce: Double = 0.4,
@@ -97,8 +92,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         remoteCallbackTimeout: Double = 5.0,
         pollInterval: Double = 0.5,
         wakeSettleDelay: Double = 1.5,
-        rebuildBackoffCeiling: Double = 30,
-        voiceProcessingFailureRebuilds: Int = 3
+        rebuildBackoffCeiling: Double = 30
     ) {
         self.configurationDebounce = configurationDebounce
         self.rebuildGrace = rebuildGrace
@@ -107,7 +101,6 @@ public struct CaptureThresholds: Sendable, Equatable {
         self.pollInterval = pollInterval
         self.wakeSettleDelay = wakeSettleDelay
         self.rebuildBackoffCeiling = rebuildBackoffCeiling
-        self.voiceProcessingFailureRebuilds = voiceProcessingFailureRebuilds
     }
 
     public static let validated = CaptureThresholds()

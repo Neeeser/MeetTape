@@ -23,8 +23,6 @@ public struct MicRecoveryPolicy: Sendable {
     public private(set) var coalescedConfigurationChanges = 0
     public private(set) var suppressedWatchdogTrips = 0
     public private(set) var restartCount = 0
-    /// Rebuilds in a row after which not one buffer arrived.
-    public private(set) var silentRebuilds = 0
 
     private var lastConfigurationChangeAt: Double = 0
     private var rebuildStartedAt: Double?
@@ -45,10 +43,8 @@ public struct MicRecoveryPolicy: Sendable {
         if isInitial {
             startedAt = now
             lastBufferAt = nil
-            silentRebuilds = 0
         } else {
             restartCount += 1
-            silentRebuilds += 1
         }
     }
 
@@ -64,13 +60,6 @@ public struct MicRecoveryPolicy: Sendable {
     public mutating func noteBufferArrived(at now: Double) {
         lastBufferAt = now
         rebuildStartedAt = nil
-        silentRebuilds = 0
-    }
-
-    /// Whether the engine has been rebuilt enough times without recording
-    /// anything that echo cancellation is the likeliest cause.
-    public var voiceProcessingLooksFaulty: Bool {
-        silentRebuilds >= thresholds.voiceProcessingFailureRebuilds
     }
 
     public mutating func stop() {
@@ -78,7 +67,6 @@ public struct MicRecoveryPolicy: Sendable {
         configurationChangePending = false
         rebuildStartedAt = nil
         lastBufferAt = nil
-        silentRebuilds = 0
     }
 
     /// Seconds since the last buffer, or nil when none has arrived yet.

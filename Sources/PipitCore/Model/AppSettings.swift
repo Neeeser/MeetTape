@@ -345,10 +345,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     /// Prefer the built-in microphone when a Bluetooth headset is used for output,
     /// which avoids the hands-free profile dropping input to 16 kHz.
     public var preferBuiltInMicrophone: Bool
-    /// Run the microphone through the system voice-processing unit, which
-    /// subtracts what the speakers are playing. Without it, a user on speakers
-    /// gets the remote side of the call recorded onto their own track.
-    public var echoCancellation: Bool
     /// How long the call has to be gone before recording pauses. It covers a
     /// flap in the sensors, so a poll that misses one reading does not cut a
     /// meeting in two.
@@ -381,7 +377,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         neverRecordApplications: [String] = [],
         hasCompletedOnboarding: Bool = false,
         preferBuiltInMicrophone: Bool = false,
-        echoCancellation: Bool = true,
         meetingEndGraceSeconds: Double = SessionController.Configuration().endGraceSeconds,
         meetingReconnectWindowSeconds: Double = SessionController.Configuration()
             .reconnectWindowSeconds,
@@ -403,7 +398,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.neverRecordApplications = neverRecordApplications
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.preferBuiltInMicrophone = preferBuiltInMicrophone
-        self.echoCancellation = echoCancellation
         self.meetingEndGraceSeconds = meetingEndGraceSeconds
         self.meetingReconnectWindowSeconds = meetingReconnectWindowSeconds
         self.firefoxSensorHasConnected = firefoxSensorHasConnected
@@ -486,9 +480,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         preferBuiltInMicrophone =
             try container.decodeIfPresent(Bool.self, forKey: .preferBuiltInMicrophone)
             ?? defaults.preferBuiltInMicrophone
-        echoCancellation =
-            try container.decodeIfPresent(Bool.self, forKey: .echoCancellation)
-            ?? defaults.echoCancellation
         // Every file on disk predates these keys, and was written under the
         // longer waits the new defaults replace. Nothing is migrated. An absent
         // key takes the new default, which is the point of shortening them.

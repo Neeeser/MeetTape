@@ -579,10 +579,9 @@ public actor SpeakerRecognitionService {
     ) async throws -> VoiceProfileStatus? {
         guard !spans.isEmpty else { return nil }
         // The microphone track is the local user only when it holds the local
-        // user. Echo cancellation is disabled on some device pairings and falls
-        // back to plain capture, so on speakers the far end reaches the
-        // microphone too, and a listener in a long presentation is not the
-        // dominant voice on their own track. Dominance alone would then enrol
+        // user. Nothing cancels the speakers out of the microphone, so on
+        // speakers the far end reaches it too, and a listener in a long
+        // presentation is not the dominant voice on their own track. Dominance alone would then enrol
         // the presenter here, human-verified, into the one profile no person
         // ever confirms.
         //

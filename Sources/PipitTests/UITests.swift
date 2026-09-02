@@ -684,15 +684,17 @@ enum UITests {
                 settings.localUserName = "Andrew"
                 settings.hasCompletedOnboarding = true
                 try store.save(settings)
-                var object = try JSONSerialization.jsonObject(
-                    with: Data(contentsOf: store.url)
-                ) as! [String: Any]
-                object["echoCancellation"] = false
-                try JSONSerialization.data(withJSONObject: object).write(to: store.url)
+                for stale in [true, false] {
+                    var object = try JSONSerialization.jsonObject(
+                        with: Data(contentsOf: store.url)
+                    ) as! [String: Any]
+                    object["echoCancellation"] = stale
+                    try JSONSerialization.data(withJSONObject: object).write(to: store.url)
 
-                let reloaded = store.load()
-                expect.equal(reloaded.localUserName, "Andrew", "the key is ignored, not fatal")
-                expect.isTrue(reloaded.hasCompletedOnboarding)
+                    let reloaded = store.load()
+                    expect.equal(reloaded.localUserName, "Andrew", "the key is ignored, not fatal")
+                    expect.isTrue(reloaded.hasCompletedOnboarding)
+                }
             },
 
             test("every menu row draws in a colour that is readable on a dark menu") { expect in

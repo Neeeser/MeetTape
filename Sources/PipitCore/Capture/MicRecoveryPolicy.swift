@@ -50,7 +50,6 @@ public struct MicRecoveryPolicy: Sendable {
             rebuildsWithoutAudio = 0
         } else {
             restartCount += 1
-            rebuildsWithoutAudio += 1
         }
     }
 
@@ -67,6 +66,14 @@ public struct MicRecoveryPolicy: Sendable {
         lastBufferAt = now
         rebuildStartedAt = nil
         rebuildsWithoutAudio = 0
+    }
+
+    /// A rebuild whose engine built and started. Counted here rather than when
+    /// the rebuild began, because a build that threw is not a silent engine:
+    /// no engine exists, no buffer could ever release the count, and treating
+    /// it as one held a reconnected device behind the silent-rebuild wait.
+    public mutating func noteRebuildSucceeded() {
+        rebuildsWithoutAudio += 1
     }
 
     /// Whether rebuilding has stopped being a recovery and become a loop.

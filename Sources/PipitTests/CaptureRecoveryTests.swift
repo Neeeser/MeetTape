@@ -230,9 +230,10 @@ enum CaptureRecoveryTests {
                     coordinator.tick()
                 }
 
-                // Unbounded, this is a rebuild every poll after the 1.5 s grace:
-                // about thirty in a minute. Three immediate attempts and then a
-                // doubling wait capped at the ceiling is under a dozen.
+                // Unbounded, this is a rebuild every 1.5 s, each one restarting
+                // the grace window: 38 in a minute, measured. Three immediate
+                // attempts and then a doubling wait capped at the ceiling is
+                // under a dozen.
                 expect.isTrue(
                     coordinator.restartCount <= 12,
                     "rebuilding into the same silent engine is the storm: got \(coordinator.restartCount)"
@@ -269,14 +270,15 @@ enum CaptureRecoveryTests {
             },
 
             test("a rebuild's own configuration change does not reopen the loop") { expect in
-                // The device the bound was measured against emits a
-                // configuration change every time the engine is torn down and
-                // built, which is why it looped: each rebuild produced the
-                // notification that justified the next one. A configuration
-                // change ordinarily clears every wait, because hardware that
-                // changed may be hardware that came back, so the loop's own
-                // footprint cleared the bound at the debounce cadence, faster
-                // than the watchdog storm it was meant to stop.
+                // On the device the bound was measured against, each rebuild
+                // was followed by a configuration change, so each rebuild
+                // produced the notification that justified the next one. That
+                // was seen with the voice-processing unit installed and may not
+                // survive its removal, so this pins the shape rather than the
+                // device. A configuration change ordinarily clears every wait,
+                // because hardware that changed may be hardware that came back,
+                // so the loop's own footprint cleared the bound at the debounce
+                // cadence, faster than the watchdog storm it was meant to stop.
                 let engine = FakeMicrophoneEngine()
                 let clock = ManualClock()
                 let coordinator = MicrophoneRecoveryCoordinator(
@@ -298,6 +300,80 @@ enum CaptureRecoveryTests {
                 expect.isTrue(
                     coordinator.restartCount >= 3,
                     "it still tries before it waits: got \(coordinator.restartCount)"
+                )
+            },
+
+            test("a device that returns while builds are failing is rebuilt on the next poll") { expect in
+                // The wait a silent engine earns is released by its first buffer.
+                // A failed build earns a wait too, and no buffer can ever release
+                // that one, because no engine exists. Counting failed builds as
+                // silent rebuilds made the configuration-change guard hold the
+                // failure wait as well: a USB microphone unplugged mid-meeting
+                // climbed the backoff to its 30 s ceiling, and when it was
+                // plugged back in the notification was refused and capture
+                // resumed up to half a minute later. Before this branch it was
+                // one poll.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                coordinator.start()
+                for _ in 0..<60 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(coordinator.restartCount >= 3, "several failures have climbed the backoff")
+                expect.isFalse(engine.isRunning)
+
+                // Plugged back in: the hardware says so, once.
+                engine.stopFailing()
+                coordinator.noteConfigurationChange()
+                let before = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, before + 1,
+                    "a device that came back is not held behind a wait no buffer can release"
+                )
+                expect.isTrue(engine.isRunning)
+            },
+
+            test("a configuration change refused during the wait is taken when it expires") { expect in
+                // `evaluate` consumes the pending flag to return the decision. If
+                // the wait refuses it, nothing re-derives it: the watchdog and
+                // first-buffer decisions rebuild themselves from the gap on the
+                // next poll, a configuration change does not. Re-arming it is
+                // what keeps the rebuild at expiry recorded for what it was, so
+                // the manifest says a device changed rather than that a buffer
+                // never came.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                coordinator.start()
+                // Twenty silent seconds: the wait is several seconds long by now.
+                for _ in 0..<40 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                let restartsBefore = delegate.restarts.count
+                coordinator.noteConfigurationChange()
+                // Through the rest of the wait and one poll past its expiry.
+                for _ in 0..<12 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.equal(
+                    delegate.restarts.count, restartsBefore + 1,
+                    "exactly one rebuild inside the window: at expiry, not before"
+                )
+                expect.isTrue(
+                    delegate.restarts.last?.reason.hasPrefix("config_change") == true,
+                    "and it is recorded as the device change it was, got \(delegate.restarts.last?.reason ?? "none")"
                 )
             },
 

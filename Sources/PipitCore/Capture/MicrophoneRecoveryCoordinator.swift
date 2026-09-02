@@ -133,12 +133,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         state.withLock { state in
             state.policy.noteConfigurationChange(at: now)
             // A device that is delivering nothing is the one exception. On the
-            // device this bound was measured against, tearing the engine down
-            // and building it again is what emits the configuration change, so
-            // the change is the loop's own footprint rather than news from the
-            // hardware, and clearing the wait on it reopened the loop at the
-            // debounce cadence. A real device switch during that wait is
-            // delayed by at most the ceiling, and the first buffer ends it.
+            // device this bound was measured against, each rebuild was followed
+            // by a configuration change, and clearing the wait on it reopened
+            // the loop at the debounce cadence. That was observed with the
+            // voice-processing unit installed; whether a plain rebuild still
+            // emits one there is unverified, so this guards the shape rather
+            // than a measured property of the current build. A real device
+            // switch during the wait is delayed by at most the ceiling, and the
+            // first buffer ends it. Only a silent engine holds the wait: a
+            // failed build is not counted as one, because no buffer could ever
+            // release it.
             guard !state.policy.isRebuildingWithoutAudio else { return }
             // The hardware changed, so a device that could not be built a moment
             // ago may exist now. The backoff starts again from nothing.
@@ -157,6 +161,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // buffer from a tap being torn down would otherwise retry against
             // the absent device once more before backing off again.
             if state.lastRebuildFailedAt == nil { state.nextRebuildAllowedAt = nil }
+            state.consecutiveBuildFailures = 0
             guard state.health != .healthy else { return false }
             state.health = .healthy
             state.unhealthySince = nil
@@ -314,13 +319,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             }
             state.withLock { state in
                 state.activeFormat = installed
-                state.consecutiveBuildFailures = 0
-                // Success is not recovery until a buffer arrives. An engine that
-                // builds cleanly and delivers nothing was rebuilt on every poll
-                // after the grace window, because each success cleared the wait
-                // the failing case had earned: 119 rebuilds in four minutes,
-                // each a teardown, a manifest fsync and another configuration
-                // change. After a few of those the next attempt waits.
+                if !isInitial { state.policy.noteRebuildSucceeded() }
+                // Success is not recovery until a buffer arrives, for the wait
+                // and for the failure count alike. An engine that builds cleanly
+                // and delivers nothing was rebuilt on every poll after the grace
+                // window, because each success cleared the wait the failing
+                // case had earned: 119 rebuilds in four minutes, each a
+                // teardown, a manifest fsync and another configuration change.
+                // After a few of those the next attempt waits, and a device
+                // that alternates throwing with silent success is not forgiven
+                // its failures by the successes.
                 if state.policy.isRebuildingWithoutAudio {
                     state.noteSilentRebuild(
                         count: state.policy.rebuildsWithoutAudio, at: now, thresholds: thresholds

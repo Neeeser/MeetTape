@@ -244,6 +244,10 @@ enum CaptureRecoveryTests {
                 )
                 expect.notEqual(coordinator.health, .healthy, "nothing arrived, so nothing is healthy")
                 expect.isTrue(
+                    coordinator.health.isLosingAudio,
+                    "and it says so: recovering is the grace window, not the whole silence, got \(coordinator.health)"
+                )
+                expect.isTrue(
                     coordinator.warnings().contains {
                         if case .microphoneUnrecovered = $0 { return true }
                         return false
@@ -663,6 +667,118 @@ enum CaptureRecoveryTests {
                     coordinator.restartCount > returned,
                     "the new engine is not held for the ceiling on its first silence"
                 )
+            },
+
+            test("a buffer flushed during teardown is not evidence for the new build") { expect in
+                // A rebuild decided is an engine being replaced. A driver that
+                // flushes one buffer as the tap is removed delivers it after the
+                // rebuild has begun and before the new build exists. Recorded,
+                // it cleared the grace window the new build had just been given,
+                // zeroed the silent count and the failure count, and released
+                // the silent engine's wait: 23 rebuilds in a minute against a
+                // bound of twelve, through a door the in-build hook does not
+                // reach. The fact that an engine exists is false from the
+                // moment the rebuild is committed to, not from the moment the
+                // teardown returns.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.setDuringTeardown { coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds) }
+                coordinator.start()
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(
+                    coordinator.restartCount <= 12,
+                    "a teardown's flushed buffer must not reopen the loop: got \(coordinator.restartCount)"
+                )
+            },
+
+            test("a device the system cannot name is refused, not admitted") { expect in
+                // The admission compares identities. Where the system cannot
+                // name the current device, there is nothing to compare, and the
+                // safe reading is that nothing changed: the wait holds and the
+                // change is re-armed, which costs one debounce per poll rather
+                // than the ceiling. Read as "different from the recorded name",
+                // a missing name admitted every refused change.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                engine.setDeviceUID("builtin-mic")
+                coordinator.start()
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(coordinator.restartCount >= 3, "the silent wait is latched")
+
+                engine.setDeviceUID(nil)
+                coordinator.noteConfigurationChange()
+                let before = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.restartCount, before, "nothing to compare, so the wait holds")
+
+                // And a device it can name, and which differs, is admitted.
+                engine.setDeviceUID("usb-mic")
+                coordinator.noteConfigurationChange()
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.restartCount, before + 1, "a named, different device is built now")
+            },
+
+            test("a build that throws under a pending change is retried by the change, once") { expect in
+                // A configuration change clears a failed build's wait when it
+                // arrives. One that arrived first had nothing to clear, and the
+                // wait installed after it was one no change would end: the retry
+                // consumed it as `manual`, and the change, still pending, tore
+                // the new engine down on the following poll. The ordering is a
+                // wake whose rebuild throws while a change from the settle
+                // window is still in its debounce.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                coordinator.start()
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+
+                coordinator.noteWake()
+                clock.advance(1.4)
+                // The change lands inside the settle window, so it is pending
+                // and in its debounce when the wake rebuild runs and throws.
+                coordinator.noteConfigurationChange()
+                engine.failNextBuild(with: .microphoneEngineStartFailed(status: -1))
+                clock.advance(0.2)
+                coordinator.tick()
+                expect.equal(delegate.restarts.last?.reason, "wake")
+                expect.isFalse(engine.isRunning, "the wake rebuild threw")
+                let afterThrow = delegate.restarts.count
+
+                // The change's own rebuild, and then nothing: no manual retry
+                // ahead of it, no second teardown behind it. The device is back,
+                // so the engine it builds delivers.
+                for _ in 0..<4 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    if engine.isRunning { coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds) }
+                }
+                expect.equal(
+                    delegate.restarts.count, afterThrow + 1,
+                    "one rebuild after the throw: got \(delegate.restarts.dropFirst(afterThrow).map(\.reason))"
+                )
+                expect.isTrue(
+                    delegate.restarts.last?.reason.hasPrefix("config_change") == true,
+                    "and it is the change's, got \(delegate.restarts.last?.reason ?? "none")"
+                )
+                expect.isTrue(engine.isRunning)
+                expect.equal(coordinator.health, .healthy)
             },
 
             test("wake rebuilds proactively after the settle delay") { expect in

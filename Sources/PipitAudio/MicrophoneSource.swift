@@ -54,6 +54,13 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         )
     }
 
+    /// The default input device, which is the device the engine's input node
+    /// is on: nothing here selects another, so the two coincide. They have to.
+    /// The coordinator records this after each build as the identity of the
+    /// engine it just built, and tells a device the user plugged in from the
+    /// same device renegotiating by comparing against it. Whatever first
+    /// honours a device preference on the input unit has to read that device
+    /// here as well, or the comparison names the wrong one.
     public func currentInputDeviceUID() -> String? {
         CoreAudioSystem.defaultInputDeviceUID()
     }

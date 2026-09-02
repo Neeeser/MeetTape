@@ -125,6 +125,7 @@ public struct MicRecoveryPolicy: Sendable {
     public mutating func stop() {
         isRunning = false
         configurationChangePending = false
+        coalescedConfigurationChanges = 0
         rebuildStartedAt = nil
         lastBufferAt = nil
         rebuildsWithoutAudio = 0
@@ -172,12 +173,29 @@ public struct MicRecoveryPolicy: Sendable {
         return .none
     }
 
-    /// Health implied by the policy alone. The coordinator refines this once it
-    /// knows whether the engine actually came back.
+    /// Health implied by the policy alone, for an engine that exists. The
+    /// coordinator applies it only while one does; with no engine installed its
+    /// own verdict stands.
+    ///
+    /// `rebuildStartedAt` is not "a build is running". It is "a build started
+    /// and no buffer has arrived since", which is what `evaluate` needs, and it
+    /// stays set for as long as the engine stays silent. Read without a bound
+    /// it reported `.recovering` for the whole of that silence, and
+    /// `.recovering` does not count as losing audio, so a microphone that built
+    /// and delivered nothing showed the ordinary recording icon indefinitely.
+    /// Recovering is the grace window, no longer.
     public func health(at now: Double) -> CaptureHealthState {
         guard isRunning else { return .idle }
-        if rebuildStartedAt != nil { return .recovering }
-        guard let gap = gap(at: now) else { return .recovering }
+        if let rebuildStartedAt, now - rebuildStartedAt < thresholds.rebuildGrace {
+            return .recovering
+        }
+        guard let gap = gap(at: now) else {
+            // No buffer has ever arrived. Recovering while a first one could
+            // still reasonably come, degraded once it should have.
+            let elapsed = now - startedAt
+            return elapsed > thresholds.micCallbackTimeout + thresholds.rebuildGrace
+                ? .degraded : .recovering
+        }
         return gap > thresholds.micCallbackTimeout ? .degraded : .healthy
     }
 }

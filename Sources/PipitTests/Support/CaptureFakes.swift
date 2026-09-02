@@ -27,6 +27,10 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         /// a test can put a buffer into the window between teardown and the
         /// build's outcome.
         var duringBuild: (@Sendable () -> Void)?
+        /// Runs inside `teardown`. A driver that flushes a buffer as the tap is
+        /// removed delivers it here, on the coordinator's own call stack, after
+        /// the rebuild has been decided and before the new build begins.
+        var duringTeardown: (@Sendable () -> Void)?
     }
 
     private let state = Mutex(State())
@@ -51,6 +55,10 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
 
     func setDuringBuild(_ hook: (@Sendable () -> Void)?) {
         state.withLock { $0.duringBuild = hook }
+    }
+
+    func setDuringTeardown(_ hook: (@Sendable () -> Void)?) {
+        state.withLock { $0.duringTeardown = hook }
     }
 
     func currentInputDeviceUID() -> String? {
@@ -88,10 +96,13 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     }
 
     func teardown() {
-        state.withLock { state in
+        let hook: (@Sendable () -> Void)? = state.withLock { state in
             state.teardowns += 1
+            let wasRunning = state.running
             state.running = false
+            return wasRunning ? state.duringTeardown : nil
         }
+        hook?()
     }
 
     /// The format the hardware settles on, which may differ from what the

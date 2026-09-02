@@ -81,11 +81,18 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         var activeFormat: AudioFormatDescriptor?
         /// The device the installed engine was built on, by identity.
         var activeDeviceUID: String?
-        /// Whether `buildAndStart` has returned since the last teardown. The
-        /// one fact a buffer and an implied health state are evidence about;
-        /// inferred before from the wait's cause and from a timestamp, and
-        /// both went stale across the build itself, where the wait is nil and
-        /// the timestamp says a rebuild is in flight whether or not it threw.
+        /// Whether `buildAndStart` has returned since the last rebuild was
+        /// decided. The one fact a buffer and an implied health state are
+        /// evidence about; inferred before from the wait's cause and from a
+        /// timestamp, and both went stale across the build itself, where the
+        /// wait is nil and the timestamp says a rebuild is in flight whether or
+        /// not it threw. Cleared the moment a rebuild is committed to, before
+        /// the old engine is torn down: cleared after the teardown returned, a
+        /// buffer the old tap flushed while being torn down was recorded as the
+        /// new build's, and reset the grace window and every count it relied on.
+        /// Set after `buildAndStart` returns, which is a few milliseconds after
+        /// the engine started; a first buffer landing inside that gap is
+        /// dropped, and the next one, about 85 ms behind it, is recorded.
         var engineInstalled = false
         var health: CaptureHealthState = .idle
         var wakeRequestedAt: Double?
@@ -96,7 +103,22 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
 
         /// The first retry is immediate, on the next poll. Each further failure
         /// doubles the wait, up to the ceiling.
+        ///
+        /// Unless a configuration change is already pending. A change that
+        /// arrives clears a failed build's wait, because the device may be
+        /// back; a change that arrived before the failure had nothing to clear,
+        /// and the wait installed after it was one no change would ever end.
+        /// The retry then consumed it as `manual`, and the change, still
+        /// pending, tore the new engine down on the poll after. The one ordering
+        /// that reaches this is a wake whose rebuild throws while a change from
+        /// the settle window is still in its debounce, and the change's own
+        /// rebuild is the one that should run, under its own name.
         mutating func noteBuildFailure(at now: Double, thresholds: CaptureThresholds) {
+            guard !policy.configurationChangePending else {
+                wait = nil
+                consecutiveBuildFailures = 0
+                return
+            }
             consecutiveBuildFailures += 1
             wait = Wait(
                 until: now + Self.backoff(step: consecutiveBuildFailures - 1, thresholds: thresholds),
@@ -284,6 +306,13 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             refreshHealth(at: now)
         case .rebuild(let reason):
             rebuild(reason: reason, isInitial: false)
+            // Whether or not the rebuild ran. While a wait refuses one on
+            // every poll, the decision is `.rebuild` on every poll, and health
+            // was never revisited: it stayed at the `.recovering` the last
+            // rebuild wrote, for as long as the engine stayed silent, and
+            // `.recovering` does not light the icon that says audio is being
+            // lost.
+            refreshHealth(at: now)
         }
     }
 
@@ -347,9 +376,12 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                 // the gap on the next poll; nothing is lost by refusing it.
                 return
             }
-            // Only a silent engine's wait can be pending here: a configuration
-            // change clears a failed build's wait when it arrives. The silent
-            // engine's refuses the change because, on the device this was
+            // Only a silent engine's wait can be pending here. A configuration
+            // change clears a failed build's wait when it arrives, and a build
+            // that fails under a pending change installs none, so no failed
+            // build's wait survives to meet a change; the cause check below is
+            // belt and braces. The silent engine's wait refuses the change
+            // because, on the device this was
             // measured against, the rebuild is what emitted it. That footprint
             // is the same device, whatever format it reports this time; a
             // device the user plugged in is a different one. Identity, not
@@ -381,6 +413,11 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             state.policy.noteRebuildStarted(at: now, isInitial: isInitial)
             if !isInitial { state.restartTimestamps.append(now) }
             state.restartTimestamps.removeAll { now - $0 > 300 }
+            // From here the old engine is being replaced. Nothing it delivers
+            // from now on is evidence about anything, including the buffer a
+            // driver flushes as the tap is torn down.
+            state.engineInstalled = false
+            state.activeDeviceUID = nil
         }
         setHealth(.recovering, detail: reason.label)
         if !isInitial {
@@ -388,7 +425,6 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
 
         controller.teardown()
-        state.withLock { $0.engineInstalled = false }
 
         // Read the device fresh. A burst that has settled reports the real device;
         // an unusable reading here means the hardware is still in transition.

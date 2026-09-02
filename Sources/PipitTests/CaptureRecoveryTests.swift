@@ -315,8 +315,9 @@ enum CaptureRecoveryTests {
                 // one poll.
                 let engine = FakeMicrophoneEngine()
                 let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
                 let coordinator = MicrophoneRecoveryCoordinator(
-                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                    controller: engine, clock: clock, delegate: delegate
                 )
                 engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
                 coordinator.start()
@@ -336,6 +337,96 @@ enum CaptureRecoveryTests {
                 expect.equal(
                     coordinator.restartCount, before + 1,
                     "a device that came back is not held behind a wait no buffer can release"
+                )
+                expect.isTrue(engine.isRunning)
+                expect.isTrue(
+                    delegate.restarts.last?.reason.hasPrefix("config_change") == true,
+                    "recorded as the device change it was, got \(delegate.restarts.last?.reason ?? "none")"
+                )
+                // And once. A retry left standing from the failure would tear
+                // this working engine down again on the very next poll.
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, before + 1,
+                    "the new engine is not torn down again by a stale retry"
+                )
+            },
+
+            test("a silent engine that is then unplugged is rebuilt the poll the device returns") { expect in
+                // The silent engine's wait holds through configuration changes,
+                // because on the motivating device the rebuild emitted them.
+                // That hold must belong to the silent engine and end with it. A
+                // virtual input that built cleanly and delivered nothing for
+                // long enough to latch the hold, then unplugged, left the hold
+                // asserting a silent engine through a run of failed builds, and
+                // the microphone plugged in to replace it was refused for up to
+                // thirty seconds. The build that threw is what ends the claim:
+                // whatever was silent is gone.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+                for _ in 0..<60 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isTrue(coordinator.restartCount >= 3, "the silent hold is latched")
+
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                for _ in 0..<80 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isFalse(engine.isRunning)
+
+                engine.stopFailing()
+                coordinator.noteConfigurationChange()
+                let before = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, before + 1,
+                    "the device that returned is rebuilt now, not after the silent engine's wait"
+                )
+                expect.isTrue(engine.isRunning)
+            },
+
+            test("a wake that follows a failed build does not tear the new engine down again") { expect in
+                // Waking rebuilds once the audio stack settles. When the build
+                // before the wake had failed, the retry that failure scheduled
+                // was still on the books after the wake's build succeeded, and
+                // it fired on the next poll against a half-second-old working
+                // engine. A build that succeeded has nothing to retry.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                engine.failEveryBuild(with: .microphoneEngineStartFailed(status: -1))
+                coordinator.start()
+                for _ in 0..<10 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.isFalse(engine.isRunning)
+
+                engine.stopFailing()
+                coordinator.noteWake()
+                clock.advance(1.6)
+                coordinator.tick()
+                expect.isTrue(engine.isRunning, "the wake rebuilt, and the device is back")
+                expect.equal(delegate.restarts.last?.reason, "wake")
+
+                let after = coordinator.restartCount
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, after,
+                    "no retry is owed for a build that succeeded"
                 )
                 expect.isTrue(engine.isRunning)
             },

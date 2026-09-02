@@ -43,6 +43,33 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
 /// debounce, the 1.5 s post-rebuild grace, the 2 s frame watchdog, refusal to
 /// adopt a transient zero-channel device, and a proactive rebuild after wake.
 public final class MicrophoneRecoveryCoordinator: Sendable {
+    /// Why the next rebuild is waiting. Two things earn a wait and they are
+    /// released by different events, so the wait carries which one it is
+    /// rather than leaving every reader to infer it from side-channels.
+    ///
+    /// That inference is where four rounds of review each found a bug: a
+    /// timestamp that meant both "the last build threw" and "the retry has
+    /// not run", cleared on one of the paths that end a failure; and a
+    /// silent-rebuild count that no failure reset, still asserting an engine
+    /// was silent after the engine was gone. Each fix corrected one reader and
+    /// left the others reading the stale value.
+    private enum WaitCause: Sendable, Equatable {
+        /// The build threw or found no usable device. No engine exists, so no
+        /// buffer can ever release this; a configuration change can, because
+        /// the device may be back, and so can expiry.
+        case buildFailed
+        /// The build succeeded and delivered nothing, several times in a row.
+        /// An engine exists, so its first buffer releases this; a configuration
+        /// change does not, because on the device this was measured against
+        /// the rebuild is what emitted the change.
+        case silentEngine
+    }
+
+    private struct Wait: Sendable, Equatable {
+        var until: Double
+        var cause: WaitCause
+    }
+
     private struct State {
         var policy: MicRecoveryPolicy
         var activeFormat: AudioFormatDescriptor?
@@ -50,16 +77,17 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         var wakeRequestedAt: Double?
         var restartTimestamps: [Double] = []
         var unhealthySince: Double?
-        var lastRebuildFailedAt: Double?
         var consecutiveBuildFailures = 0
-        var nextRebuildAllowedAt: Double?
+        var wait: Wait?
 
         /// The first retry is immediate, on the next poll. Each further failure
         /// doubles the wait, up to the ceiling.
         mutating func noteBuildFailure(at now: Double, thresholds: CaptureThresholds) {
-            lastRebuildFailedAt = now
             consecutiveBuildFailures += 1
-            nextRebuildAllowedAt = now + Self.backoff(step: consecutiveBuildFailures - 1, thresholds: thresholds)
+            wait = Wait(
+                until: now + Self.backoff(step: consecutiveBuildFailures - 1, thresholds: thresholds),
+                cause: .buildFailed
+            )
         }
 
         /// A build that succeeded and then delivered nothing, for the Nth time in
@@ -70,7 +98,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // interval expires on the very poll it was meant to hold, because
             // `tooSoon` is strict and polls land on the grid.
             let step = count - thresholds.silentRebuildsBeforeBackoff + 1
-            nextRebuildAllowedAt = now + Self.backoff(step: step, thresholds: thresholds)
+            wait = Wait(until: now + Self.backoff(step: step, thresholds: thresholds), cause: .silentEngine)
         }
 
         private static func backoff(step: Int, thresholds: CaptureThresholds) -> Double {
@@ -115,9 +143,8 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // recording warn about the previous one's problems.
             state.unhealthySince = nil
             state.restartTimestamps = []
-            state.lastRebuildFailedAt = nil
             state.consecutiveBuildFailures = 0
-            state.nextRebuildAllowedAt = nil
+            state.wait = nil
             state.wakeRequestedAt = nil
             state.activeFormat = nil
         }
@@ -132,21 +159,21 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         let now = clock.monotonicSeconds
         state.withLock { state in
             state.policy.noteConfigurationChange(at: now)
-            // A device that is delivering nothing is the one exception. On the
-            // device this bound was measured against, each rebuild was followed
-            // by a configuration change, and clearing the wait on it reopened
-            // the loop at the debounce cadence. That was observed with the
-            // voice-processing unit installed; whether a plain rebuild still
-            // emits one there is unverified, so this guards the shape rather
-            // than a measured property of the current build. A real device
-            // switch during the wait is delayed by at most the ceiling, and the
-            // first buffer ends it. Only a silent engine holds the wait: a
-            // failed build is not counted as one, because no buffer could ever
-            // release it.
-            guard !state.policy.isRebuildingWithoutAudio else { return }
-            // The hardware changed, so a device that could not be built a moment
-            // ago may exist now. The backoff starts again from nothing.
-            state.nextRebuildAllowedAt = nil
+            // A silent engine's wait holds. On the device this bound was
+            // measured against, each rebuild was followed by a configuration
+            // change, and clearing the wait on it reopened the loop at the
+            // debounce cadence. That was observed with the voice-processing
+            // unit installed; whether a plain rebuild still emits one there is
+            // unverified, so this guards the shape rather than a measured
+            // property of the current build. A real device switch during the
+            // wait is delayed by at most the ceiling, and the first buffer ends
+            // it.
+            if state.wait?.cause == .silentEngine { return }
+            // Otherwise the hardware changed, so a device that could not be
+            // built a moment ago may exist now. The backoff starts again from
+            // nothing, and the rebuild this change decides is the one that
+            // tries it.
+            state.wait = nil
             state.consecutiveBuildFailures = 0
         }
     }
@@ -155,12 +182,12 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     public func noteBufferArrived(hostTime: Double) {
         let becameHealthy: Bool = state.withLock { state in
             state.policy.noteBufferArrived(at: hostTime)
-            // Audio arriving means the last build worked, so a rebuild the
-            // hardware asks for next is not held behind a stale wait. Not when
-            // the wait is a failed build's: no engine exists then, and a late
-            // buffer from a tap being torn down would otherwise retry against
-            // the absent device once more before backing off again.
-            if state.lastRebuildFailedAt == nil { state.nextRebuildAllowedAt = nil }
+            // Audio arriving means the engine works, so a rebuild the hardware
+            // asks for next is not held behind a silent engine's wait. A failed
+            // build's wait is left alone: no engine exists then, and this is a
+            // late buffer from a tap being torn down, which would otherwise
+            // retry against the absent device once more before backing off.
+            if state.wait?.cause == .silentEngine { state.wait = nil }
             state.consecutiveBuildFailures = 0
             guard state.health != .healthy else { return false }
             state.health = .healthy
@@ -191,7 +218,7 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
         if wakeDue {
             state.withLock { state in
-                state.nextRebuildAllowedAt = nil
+                state.wait = nil
                 state.consecutiveBuildFailures = 0
             }
             rebuild(reason: .wake, isInitial: false)
@@ -200,11 +227,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
 
         // A rebuild that could not find a usable device is retried, with a
         // backoff. Retrying every poll against an absent device produced eight
-        // manifest fsyncs a second for as long as the device stayed away.
+        // manifest fsyncs a second for as long as the device stayed away. Only a
+        // failed build's wait is retried here: a silent engine's wait expires
+        // into whatever the policy decides on the next poll, and a build that
+        // succeeded leaves nothing here to retry, so a working engine is never
+        // torn down on the poll after a wake or a reconnect.
         let retryFailedBuild: Bool = state.withLock { state in
-            guard state.lastRebuildFailedAt != nil, state.policy.isRunning else { return false }
-            if let allowedAt = state.nextRebuildAllowedAt, now < allowedAt { return false }
-            state.lastRebuildFailedAt = nil
+            guard let wait = state.wait, wait.cause == .buildFailed, state.policy.isRunning,
+                  now >= wait.until
+            else { return false }
+            state.wait = nil
             return true
         }
         if retryFailedBuild {
@@ -265,8 +297,8 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         // is rebuilt on every poll and each attempt writes health transitions to
         // the manifest, which is an fsync each.
         let tooSoon: Bool = state.withLock { state in
-            guard !isInitial, let allowedAt = state.nextRebuildAllowedAt else { return false }
-            return now < allowedAt
+            guard !isInitial, let wait = state.wait else { return false }
+            return now < wait.until
         }
         if tooSoon {
             // A watchdog or first-buffer decision re-derives itself from the gap
@@ -305,7 +337,10 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
 
         guard let format = chosen else {
-            state.withLock { $0.noteBuildFailure(at: now, thresholds: thresholds) }
+            state.withLock { state in
+                state.policy.noteRebuildFailed()
+                state.noteBuildFailure(at: now, thresholds: thresholds)
+            }
             setHealth(.degraded, detail: "no usable input device")
             return
         }
@@ -334,11 +369,17 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
                         count: state.policy.rebuildsWithoutAudio, at: now, thresholds: thresholds
                     )
                 } else {
-                    state.nextRebuildAllowedAt = nil
+                    // The build worked, so whatever a failed build was waiting
+                    // on is over; the failure count itself is forgiven by the
+                    // first buffer, not by this.
+                    state.wait = nil
                 }
             }
         } catch {
-            state.withLock { $0.noteBuildFailure(at: now, thresholds: thresholds) }
+            state.withLock { state in
+                state.policy.noteRebuildFailed()
+                state.noteBuildFailure(at: now, thresholds: thresholds)
+            }
             setHealth(.failed, detail: "engine start failed")
             delegate.captureDidFail(
                 track: .mic,

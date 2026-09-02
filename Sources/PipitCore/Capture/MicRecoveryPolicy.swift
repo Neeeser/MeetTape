@@ -23,9 +23,11 @@ public struct MicRecoveryPolicy: Sendable {
     public private(set) var coalescedConfigurationChanges = 0
     public private(set) var suppressedWatchdogTrips = 0
     public private(set) var restartCount = 0
-    /// Rebuilds in a row since the last buffer arrived. An engine that builds
-    /// without error and then delivers nothing looks healthy to every check
-    /// but this one.
+    /// Successful rebuilds in a row with no buffer arriving after any of them.
+    /// An engine that builds without error and then delivers nothing looks
+    /// healthy to every check but this one. A build that throws is not counted
+    /// and resets it: no engine exists then, so nothing about silence can be
+    /// said of it.
     public private(set) var rebuildsWithoutAudio = 0
 
     private var lastConfigurationChangeAt: Double = 0
@@ -74,6 +76,15 @@ public struct MicRecoveryPolicy: Sendable {
     /// it as one held a reconnected device behind the silent-rebuild wait.
     public mutating func noteRebuildSucceeded() {
         rebuildsWithoutAudio += 1
+    }
+
+    /// A rebuild whose engine did not build. Whatever the count said about the
+    /// engine before it, that engine is gone, and the one that comes after has
+    /// not yet been silent at all. Left standing, the count went on asserting
+    /// a silent engine through a run of failures, and a device that came back
+    /// during them was held behind the silent engine's wait.
+    public mutating func noteRebuildFailed() {
+        rebuildsWithoutAudio = 0
     }
 
     /// Whether rebuilding has stopped being a recovery and become a loop.

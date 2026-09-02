@@ -325,6 +325,42 @@ enum DetectionTests {
                 expect.equal(back.meetingID, "hzc-josd-epv")
             },
 
+            test("a provider's own tab title decoration comes off the meeting name") { expect in
+                expect.equal(BrowserWindowTitle.meetingName("Meet - Hindsight Daily"), "Hindsight Daily")
+                expect.isNil(
+                    BrowserWindowTitle.meetingName("Meet - abc-defg-hij"),
+                    "a meeting code is not a name"
+                )
+                expect.isNil(BrowserWindowTitle.meetingName("Google Meet"))
+                expect.equal(BrowserWindowTitle.meetingName("Standup - Zoom"), "Standup")
+                expect.isNil(BrowserWindowTitle.meetingName("Zoom"))
+                expect.equal(
+                    BrowserWindowTitle.meetingName("Design review"), "Design review",
+                    "a title from a provider with no rules is left alone"
+                )
+            },
+
+            test("the extension's raw tab title is cleaned before it names the meeting") { expect in
+                // The extension sends document.title untouched, and it won
+                // over the parsed title, so every Meet call was filed as
+                // "Meet - something".
+                var detector = BrowserMeetingDetector(freshnessWindow: 5)
+                let now = 100.0
+                detector.sensorConnected(at: now)
+                detector.receive(
+                    BrowserMeetingEvent(
+                        browser: .firefox, provider: .googleMeet, state: .inCall,
+                        timestamp: now, meetingID: "abc-defg-hij",
+                        title: "Meet - Hindsight Daily"
+                    ),
+                    at: now
+                )
+                let native = BrowserMeetingDetector.NativeSignals(
+                    browserHoldsMicrophone: true, browserProducesOutput: true, windowTitles: []
+                )
+                expect.equal(detector.update(native: native, at: now).title, "Hindsight Daily")
+            },
+
             test("meeting identifiers come out of provider URLs") { expect in
                 expect.equal(
                     MeetingURLParser.meetingID(forURL: "https://meet.google.com/jfp-btbt-owm"),

@@ -76,12 +76,36 @@ public enum MeetingSource: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// The glyph a list draws for this kind of recording. Every video call gets
-    /// the same one. A vendor's own mark is not legible at 13 points, and what
-    /// a row has to say is whether this was a call, a room or a file.
+    /// What a list row calls this source, which is shorter than `displayName`
+    /// for three of the eight.
+    ///
+    /// The row spends a 272 point sidebar on the source, the date, the duration
+    /// and sometimes a state, so "Imported recording · Aug 30, 11:20 AM ·
+    /// 1h 12m" ran off the end. `displayName` stays as it is because folder
+    /// names on disk are built from it and they are already written.
+    public var listName: String {
+        switch self {
+        case .manual: "Manual"
+        case .inPerson: "In person"
+        case .imported: "Imported"
+        case .slackHuddle, .googleMeet, .zoom, .faceTime, .genericCall: displayName
+        }
+    }
+
+    /// The glyph a list draws for this kind of recording, one per source.
+    ///
+    /// Not a vendor's own mark, which is unreadable at 13 points and not ours
+    /// to draw. Each of these is the nearest shape that reads at badge size,
+    /// the way `PersonBadge` picks one for a platform. They are all different
+    /// from each other on purpose: five of them drew the same camera, and a row
+    /// could not say whether a call had been a huddle or a Zoom.
     public var symbolName: String {
         switch self {
-        case .slackHuddle, .googleMeet, .zoom, .faceTime, .genericCall: "video"
+        case .slackHuddle: "headphones"
+        case .googleMeet: "video.fill"
+        case .zoom: "square.grid.2x2.fill"
+        case .faceTime: "person.crop.rectangle.fill"
+        case .genericCall: "phone.fill"
         case .manual: "waveform"
         case .inPerson: "mic"
         case .imported: "tray.and.arrow.down"

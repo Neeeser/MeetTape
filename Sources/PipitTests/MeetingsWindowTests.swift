@@ -11,7 +11,7 @@ import TestKit
 /// Both exist because the archive is only navigable if the two things it is
 /// ordered by are right: when a meeting happened, and who was in it.
 enum MeetingsWindowTests {
-    static var all: [Suite] { [recordedDateSuite, directorySuite, windowSuite] }
+    static var all: [Suite] { [recordedDateSuite, directorySuite, sourceSuite, windowSuite] }
 
     // MARK: helpers
 
@@ -279,6 +279,290 @@ enum MeetingsWindowTests {
                     "a year alone would put the meeting on the first of January"
                 )
                 expect.isNil(RecordedDatePolicy.parseMetadataDate(""))
+            },
+        ])
+    }
+
+    /// The shape of every application icon this has to key: a coloured plate
+    /// with a mark sitting on it, and nothing in the corners.
+    @MainActor static func plateAndMark() -> NSImage {
+        let icon = NSImage(size: NSSize(width: 64, height: 64))
+        icon.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(
+            roundedRect: NSRect(x: 4, y: 4, width: 56, height: 56), xRadius: 12, yRadius: 12
+        ).fill()
+        NSColor.red.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 22, y: 22, width: 20, height: 20)).fill()
+        icon.unlockFocus()
+        return icon
+    }
+
+    /// The image drawn scaled onto a ground, which is what a row does with it.
+    @MainActor static func over(_ image: NSImage, _ ground: NSColor) -> NSBitmapImageRep {
+        let side = 152
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        )!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        ground.setFill()
+        NSRect(x: 0, y: 0, width: side, height: side).fill()
+        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    static func colour(
+        _ rep: NSBitmapImageRep, _ fx: Double, _ fy: Double
+    ) -> (red: Double, green: Double, blue: Double) {
+        let x = Int(fx * Double(rep.pixelsWide - 1))
+        let y = Int(fy * Double(rep.pixelsHigh - 1))
+        guard let colour = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+            return (-1, -1, -1)
+        }
+        return (Double(colour.redComponent), Double(colour.greenComponent),
+                Double(colour.blueComponent))
+    }
+
+    // MARK: - where a meeting came from
+
+    static var sourceSuite: Suite {
+        Suite("MeetingSource", [
+            test("a source filter holds one kind of recording") { expect in
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "Chris Latimer", at: now, source: .slackHuddle),
+                    row("b", title: "Hindsight Daily", at: now, source: .googleMeet),
+                    row("c", title: "Acme onboarding", at: now, source: .zoom),
+                ]
+                let visible = MeetingsDirectoryFilter.sections(
+                    rows, source: .slackHuddle, now: now, calendar: calendar
+                ).flatMap(\.rows)
+                expect.equal(visible.map(\.id), ["a"])
+            },
+
+            test("a query narrows within the source that is held") { expect in
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "Release cut", at: now, source: .slackHuddle),
+                    row("b", title: "Release cut", at: now, source: .googleMeet),
+                    row("c", title: "Chris Latimer", at: now, source: .slackHuddle),
+                ]
+                let visible = MeetingsDirectoryFilter.sections(
+                    rows, source: .slackHuddle, query: "release", now: now, calendar: calendar
+                ).flatMap(\.rows)
+                expect.equal(visible.map(\.id), ["a"])
+            },
+
+            test("the source filter composes with the filter above it") { expect in
+                // Source says where a meeting came from, and the segmented
+                // filter says what it needs. Holding one must not lose the
+                // other.
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "Named", at: now, speakers: [("Andrew", 1)], source: .slackHuddle),
+                    row("b", title: "One left", at: now, speakers: [(nil, nil)], source: .slackHuddle),
+                    row("c", title: "One left", at: now, speakers: [(nil, nil)], source: .zoom),
+                ]
+                let visible = MeetingsDirectoryFilter.sections(
+                    rows, filter: .unnamed, source: .slackHuddle, now: now, calendar: calendar
+                ).flatMap(\.rows)
+                expect.equal(visible.map(\.id), ["b"])
+            },
+
+            test("typing the start of a source name offers it as a filter") { expect in
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "slack"), .slackHuddle)
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "ZO"), .zoom)
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "  face "), .faceTime)
+                expect.equal(
+                    MeetingsDirectoryFilter.suggestedSource(for: "huddle"), .slackHuddle,
+                    "a word inside the name counts, because that is what people call it"
+                )
+            },
+
+            test("nothing is offered over a list of folders") { expect in
+                // The query means folder names there, and taking an offer
+                // would throw those words away to hold a filter that narrows
+                // no folder.
+                expect.isNil(
+                    MeetingsDirectoryFilter.offeredSource(
+                        for: "im", held: nil, counts: [.imported: 4], listingFolders: true
+                    )
+                )
+            },
+
+            test("nothing is offered for a source the archive has none of") { expect in
+                // The menu leaves an empty source out. The offer has to agree,
+                // or Return empties the list and says "No Zoom meetings".
+                expect.isNil(
+                    MeetingsDirectoryFilter.offeredSource(
+                        for: "zo", held: nil, counts: [.manual: 3], listingFolders: false
+                    )
+                )
+            },
+
+            test("nothing is offered while a source is already held") { expect in
+                expect.isNil(
+                    MeetingsDirectoryFilter.offeredSource(
+                        for: "slack", held: .zoom, counts: [.slackHuddle: 2], listingFolders: false
+                    )
+                )
+            },
+
+            test("the offer is the source the words name") { expect in
+                expect.equal(
+                    MeetingsDirectoryFilter.offeredSource(
+                        for: "slack", held: nil, counts: [.slackHuddle: 2], listingFolders: false
+                    ),
+                    .slackHuddle
+                )
+            },
+
+            test("a whole name beats a word inside another name") { expect in
+                // "m" starts "Manual recording" and also starts the word "Meet".
+                // Without a rule the offer flickers between them.
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "m"), .manual)
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "me"), .googleMeet)
+            },
+
+            test("a query no source is called offers nothing") { expect in
+                expect.isNil(MeetingsDirectoryFilter.suggestedSource(for: "northwind"))
+                expect.isNil(MeetingsDirectoryFilter.suggestedSource(for: ""))
+                expect.isNil(MeetingsDirectoryFilter.suggestedSource(for: "   "))
+            },
+
+            test("the menu counts what each source holds") { expect in
+                let now = date("2026-08-24 15:00:00")
+                let rows = [
+                    row("a", title: "One", at: now, source: .slackHuddle),
+                    row("b", title: "Two", at: now, source: .slackHuddle),
+                    row("c", title: "Three", at: now, source: .googleMeet),
+                ]
+                let counts = MeetingsDirectoryFilter.sourceCounts(rows)
+                expect.equal(counts[.slackHuddle], 2)
+                expect.equal(counts[.googleMeet], 1)
+                expect.isNil(counts[.zoom], "a source with nothing in it is left out")
+            },
+
+            test("every source has a name short enough for the row") { expect in
+                // The row spends a 272 point sidebar on the source, the date,
+                // the duration and sometimes a state. "Imported recording ·
+                // Aug 30, 11:20 AM · 1h 12m" ran off the end, so the budget is
+                // what this holds to rather than the three values that changed.
+                for source in MeetingSource.allCases {
+                    expect.isTrue(!source.listName.isEmpty, "\(source) has no name")
+                    expect.isTrue(
+                        source.listName.count <= 12,
+                        "\(source) says \"\(source.listName)\", which is \(source.listName.count) characters"
+                    )
+                }
+            },
+
+            test("search and the offer both know the short name") { expect in
+                let now = date("2026-08-24 15:00:00")
+                let rows = [row("a", title: "Standup", at: now, source: .inPerson)]
+                let visible = MeetingsDirectoryFilter.sections(
+                    rows, query: "in person", now: now, calendar: calendar
+                ).flatMap(\.rows)
+                expect.equal(visible.map(\.id), ["a"], "the row reads \"In person\"")
+                expect.equal(MeetingsDirectoryFilter.suggestedSource(for: "in person"), .inPerson)
+            },
+
+            test("only Slack is drawn from an installed application") { expect in
+                // FaceTime's mark is a plain video camera once its plate comes
+                // off, which is the glyph already. Zoom is not worth a mark
+                // that shows up only on the Macs that have Zoom installed.
+                expect.equal(
+                    SourceMark.bundleIdentifier(for: .slackHuddle), "com.tinyspeck.slackmacgap"
+                )
+                for source in MeetingSource.allCases where source != .slackHuddle {
+                    expect.isNil(
+                        SourceMark.bundleIdentifier(for: source), "\(source) draws its glyph"
+                    )
+                }
+            },
+
+            test("a source with no application of its own draws its glyph") { expect in
+                await MainActor.run {
+                    for source in MeetingSource.allCases where source != .slackHuddle {
+                        expect.isTrue(
+                            SourceMark.icon(for: source) == nil, "\(source) has no icon to read"
+                        )
+                    }
+                }
+            },
+
+            test("an application icon keeps its mark and loses its plate") { expect in
+                await MainActor.run {
+                    guard let keyed = SourceMark.plateRemoved(plateAndMark()) else {
+                        expect.isTrue(false, "the icon came back with nothing in it")
+                        return
+                    }
+                    // Composited over a known ground rather than read for its
+                    // alpha. The buffer is premultiplied, so clearing alpha and
+                    // leaving the colour behind draws the plate back at full
+                    // strength while every alpha reads zero.
+                    let drawn = over(keyed, NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1))
+                    let plate = colour(drawn, 0.5, 0.12)
+                    expect.isTrue(
+                        plate.blue > 0.9 && plate.red < 0.1,
+                        "the plate is gone, so the ground shows through: \(plate)"
+                    )
+                    let mark = colour(drawn, 0.5, 0.5)
+                    expect.isTrue(
+                        mark.red > 0.7 && mark.blue < 0.3, "the mark stays: \(mark)"
+                    )
+                }
+            },
+
+            test("an icon that is all plate keeps nothing and draws its glyph") { expect in
+                await MainActor.run {
+                    let plain = NSImage(size: NSSize(width: 64, height: 64))
+                    plain.lockFocus()
+                    NSColor.white.setFill()
+                    NSBezierPath(
+                        roundedRect: NSRect(x: 4, y: 4, width: 56, height: 56),
+                        xRadius: 12, yRadius: 12
+                    ).fill()
+                    plain.unlockFocus()
+                    expect.isTrue(
+                        SourceMark.plateRemoved(plain) == nil,
+                        "an empty mark is worse than the glyph it replaced"
+                    )
+                }
+            },
+
+            test("backspace drops the held source only when nothing is typed") { expect in
+                // Measured: `onKeyPress(.delete)` never fires for the Delete
+                // key here, while the general form receives it as "\u{7F}".
+                // The rule is matched on the characters for that reason.
+                func drops(_ characters: String, _ query: String, _ held: Bool) -> Bool {
+                    SearchFieldKey.dropsHeldSource(
+                        characters: characters, query: query, hasSource: held
+                    )
+                }
+                expect.isTrue(drops("\u{7F}", "", true))
+                expect.isTrue(
+                    !drops("\u{7F}", "rel", true),
+                    "with words typed, backspace edits the words"
+                )
+                expect.isTrue(!drops("\u{7F}", "", false), "and there is nothing to drop")
+                expect.isTrue(!drops("a", "", true), "another key types")
+            },
+
+            test("no two sources share a glyph") { expect in
+                // Five of the eight drew the same camera, which is the gap the
+                // badge exists to close.
+                let symbols = MeetingSource.allCases.map(\.symbolName)
+                expect.equal(Set(symbols).count, MeetingSource.allCases.count)
+            },
+
+            test("no two sources share a tint") { expect in
+                let tints = MeetingSource.allCases.map(SourceTint.color)
+                expect.equal(Set(tints).count, MeetingSource.allCases.count)
             },
         ])
     }

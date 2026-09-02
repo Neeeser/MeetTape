@@ -149,11 +149,76 @@ public enum MeetingsDirectoryFilter {
     ) -> Bool {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return true }
-        var haystack = [row.title, row.notes, row.summary.source.displayName]
+        var haystack = [
+            row.title, row.notes, row.summary.source.displayName,
+            row.summary.source.listName,
+        ]
         haystack.append(contentsOf: row.speakers.compactMap(\.displayName))
         if haystack.contains(where: { $0.lowercased().contains(needle) }) { return true }
         guard let transcript else { return false }
         return transcript.contains(needle)
+    }
+
+    /// Whether this row came from the source being held. A nil source holds
+    /// everything, which is the list with no filter taken.
+    ///
+    /// Apart from `matches` because it is a different question. The query asks
+    /// what a meeting is about, and this asks where it came from, and a row has
+    /// to answer both.
+    public static func admits(_ row: MeetingRow, source: MeetingSource?) -> Bool {
+        guard let source else { return true }
+        return row.summary.source == source
+    }
+
+    /// The source a query names, offered above the list while somebody types.
+    ///
+    /// A whole name beats a word inside another name, so "m" offers Manual
+    /// recording rather than Google Meet. Words count at all because "huddle"
+    /// and "meet" are what people call these, not "Slack Huddle" and
+    /// "Google Meet".
+    public static func suggestedSource(for query: String) -> MeetingSource? {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return nil }
+        func names(_ source: MeetingSource) -> [String] {
+            [source.displayName.lowercased(), source.listName.lowercased()]
+        }
+        if let whole = MeetingSource.allCases.first(where: {
+            names($0).contains { $0.hasPrefix(needle) }
+        }) {
+            return whole
+        }
+        return MeetingSource.allCases.first { source in
+            names(source).contains { name in
+                name.split(separator: " ").contains { $0.hasPrefix(needle) }
+            }
+        }
+    }
+
+    /// The source to offer above the list, or nothing.
+    ///
+    /// Three reasons there is nothing to offer, and all of them cost the user
+    /// their typed words if the offer is taken anyway. Over a list of folders
+    /// the query means folder names. With a source already held the offer
+    /// narrows to what is showing. A source the archive holds none of empties
+    /// the list, and the menu already leaves those out.
+    public static func offeredSource(
+        for query: String,
+        held: MeetingSource?,
+        counts: [MeetingSource: Int],
+        listingFolders: Bool
+    ) -> MeetingSource? {
+        guard !listingFolders, held == nil else { return nil }
+        guard let suggested = suggestedSource(for: query) else { return nil }
+        return (counts[suggested] ?? 0) > 0 ? suggested : nil
+    }
+
+    /// How many of these rows each source holds, for the source menu.
+    ///
+    /// A source with nothing in it is left out rather than listed as zero: the
+    /// menu is there to say what the archive has, and eight rows of which five
+    /// say nothing is a worse answer than three rows.
+    public static func sourceCounts(_ rows: [MeetingRow]) -> [MeetingSource: Int] {
+        rows.reduce(into: [:]) { counts, row in counts[row.summary.source, default: 0] += 1 }
     }
 
     /// The speakers of one meeting: one per cluster its transcript uses, named
@@ -258,13 +323,17 @@ public enum MeetingsDirectoryFilter {
     public static func sections(
         _ rows: [MeetingRow],
         filter: MeetingsFilter = .all,
+        source: MeetingSource? = nil,
         query: String = "",
         transcripts: [String: String] = [:],
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> [MeetingsSection] {
         let visible = rows
-            .filter { filter.admits($0) && matches($0, query: query, transcript: transcripts[$0.id]) }
+            .filter {
+                filter.admits($0) && admits($0, source: source)
+                    && matches($0, query: query, transcript: transcripts[$0.id])
+            }
             .sorted { $0.startedAt > $1.startedAt }
 
         // One formatter for the whole grouping. Building one costs about

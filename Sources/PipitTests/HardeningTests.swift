@@ -12,8 +12,6 @@ enum HardeningTests {
     // MARK: - fakes that emit audio
 
     final class EmittingMicrophone: MicrophoneEngineController, @unchecked Sendable {
-        func setVoiceProcessingSuppressed(_ suppressed: Bool) {}
-
         private let lock = NSLock()
         private var sinkHandler: AudioBufferSink?
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
@@ -21,6 +19,7 @@ enum HardeningTests {
         init(sink: @escaping AudioBufferSink) { self.sinkHandler = sink }
 
         func currentInputFormat() -> AudioFormatDescriptor? { format }
+        func currentInputDeviceUID() -> String? { "emitting" }
         func teardown() {}
         @discardableResult
         func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor { format }

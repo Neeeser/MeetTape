@@ -23,10 +23,17 @@ public struct MicRecoveryPolicy: Sendable {
     public private(set) var coalescedConfigurationChanges = 0
     public private(set) var suppressedWatchdogTrips = 0
     public private(set) var restartCount = 0
-    /// Rebuilds in a row after which not one buffer arrived.
-    public private(set) var silentRebuilds = 0
+    /// Successful rebuilds in a row with no buffer arriving after any of them.
+    /// An engine that builds without error and then delivers nothing looks
+    /// healthy to every check but this one. A build that throws is not counted
+    /// and resets it: no engine exists then, so nothing about silence can be
+    /// said of it.
+    public private(set) var rebuildsWithoutAudio = 0
 
-    private var lastConfigurationChangeAt: Double = 0
+    /// When the pending change arrived, or was last re-armed. Read by the
+    /// coordinator to tell a change that predates a failed build, which may
+    /// mean the device is back, from one the failing build emitted itself.
+    public private(set) var lastConfigurationChangeAt: Double = 0
     private var rebuildStartedAt: Double?
     private var lastBufferAt: Double?
     private var startedAt: Double = 0
@@ -45,10 +52,9 @@ public struct MicRecoveryPolicy: Sendable {
         if isInitial {
             startedAt = now
             lastBufferAt = nil
-            silentRebuilds = 0
+            rebuildsWithoutAudio = 0
         } else {
             restartCount += 1
-            silentRebuilds += 1
         }
     }
 
@@ -64,21 +70,81 @@ public struct MicRecoveryPolicy: Sendable {
     public mutating func noteBufferArrived(at now: Double) {
         lastBufferAt = now
         rebuildStartedAt = nil
-        silentRebuilds = 0
+        rebuildsWithoutAudio = 0
     }
 
-    /// Whether the engine has been rebuilt enough times without recording
-    /// anything that echo cancellation is the likeliest cause.
-    public var voiceProcessingLooksFaulty: Bool {
-        silentRebuilds >= thresholds.voiceProcessingFailureRebuilds
+    /// A rebuild whose engine built and started. Counted here rather than when
+    /// the rebuild began, because a build that threw is not a silent engine:
+    /// no engine exists, no buffer could ever release the count, and treating
+    /// it as one held a reconnected device behind the silent-rebuild wait.
+    public mutating func noteRebuildSucceeded() {
+        rebuildsWithoutAudio += 1
+    }
+
+    /// The engine the count described is gone: its build threw, no device could
+    /// be found for it, or the machine woke and the audio stack re-enumerated
+    /// underneath it. Whatever comes next has not yet been silent at all. Left
+    /// standing, the count went on asserting a silent engine through a run of
+    /// failures, and a device that came back during them was held behind the
+    /// silent engine's wait; and it re-derived, on the poll after a wake, the
+    /// thirty-second wait the wake had just cleared.
+    ///
+    /// Nor is a rebuild in flight for it. That timestamp was cleared only by a
+    /// buffer, and a build that threw never delivers one, so `health` went on
+    /// reporting a rebuild in progress for a microphone that was simply gone,
+    /// and the icon that says audio is being lost never lit.
+    public mutating func noteEngineGone() {
+        rebuildsWithoutAudio = 0
+        rebuildStartedAt = nil
+    }
+
+    /// A pending change the coordinator has answered by other means: a wake
+    /// rebuild reads the device fresh, so a change that arrived in the settle
+    /// window would only rebuild the engine the wake just built.
+    public mutating func clearPendingConfigurationChange() {
+        configurationChangePending = false
+        coalescedConfigurationChanges = 0
+    }
+
+    /// A configuration-change decision the coordinator could not act on yet.
+    /// `evaluate` consumed the pending flag and the coalesced count to return
+    /// it; putting both back is what lets the rebuild at expiry be recorded as
+    /// the burst it was, rather than as one change that arrived alone.
+    ///
+    /// The arrival time is left as it was. It says when the change arrived,
+    /// which is what tells a change that predates a failed build from one the
+    /// failing build emitted; restamping it on every refusal made the latter
+    /// look like the former on the next attempt, and every failure forgave
+    /// itself.
+    public mutating func noteConfigurationChangeRefused(coalesced: Int) {
+        guard isRunning else { return }
+        configurationChangePending = true
+        coalescedConfigurationChanges = coalesced
+    }
+
+    /// Whether rebuilding has stopped being a recovery and become a loop.
+    ///
+    /// One shape, exactly: an engine that builds cleanly and delivers no
+    /// buffer at all afterwards, rebuild after rebuild. That is the shape
+    /// measured, 119 rebuilds in four minutes at the grace-window cadence, and
+    /// each one is another teardown, another manifest fsync and another
+    /// configuration change for nothing.
+    ///
+    /// Not covered: an engine that delivers a burst after each rebuild and then
+    /// stops, because any buffer resets this, and a driver that delivers
+    /// buffers of zeroes, because arrival is the signal and not amplitude. Both
+    /// still rebuild at the watchdog cadence.
+    public var isRebuildingWithoutAudio: Bool {
+        rebuildsWithoutAudio >= thresholds.silentRebuildsBeforeBackoff
     }
 
     public mutating func stop() {
         isRunning = false
         configurationChangePending = false
+        coalescedConfigurationChanges = 0
         rebuildStartedAt = nil
         lastBufferAt = nil
-        silentRebuilds = 0
+        rebuildsWithoutAudio = 0
     }
 
     /// Seconds since the last buffer, or nil when none has arrived yet.
@@ -123,12 +189,29 @@ public struct MicRecoveryPolicy: Sendable {
         return .none
     }
 
-    /// Health implied by the policy alone. The coordinator refines this once it
-    /// knows whether the engine actually came back.
+    /// Health implied by the policy alone, for an engine that exists. The
+    /// coordinator applies it only while one does; with no engine installed its
+    /// own verdict stands.
+    ///
+    /// `rebuildStartedAt` is not "a build is running". It is "a build started
+    /// and no buffer has arrived since", which is what `evaluate` needs, and it
+    /// stays set for as long as the engine stays silent. Read without a bound
+    /// it reported `.recovering` for the whole of that silence, and
+    /// `.recovering` does not count as losing audio, so a microphone that built
+    /// and delivered nothing showed the ordinary recording icon indefinitely.
+    /// Recovering is the grace window, no longer.
     public func health(at now: Double) -> CaptureHealthState {
         guard isRunning else { return .idle }
-        if rebuildStartedAt != nil { return .recovering }
-        guard let gap = gap(at: now) else { return .recovering }
+        if let rebuildStartedAt, now - rebuildStartedAt < thresholds.rebuildGrace {
+            return .recovering
+        }
+        guard let gap = gap(at: now) else {
+            // No buffer has ever arrived. Recovering while a first one could
+            // still reasonably come, degraded once it should have.
+            let elapsed = now - startedAt
+            return elapsed > thresholds.micCallbackTimeout + thresholds.rebuildGrace
+                ? .degraded : .recovering
+        }
         return gap > thresholds.micCallbackTimeout ? .degraded : .healthy
     }
 }

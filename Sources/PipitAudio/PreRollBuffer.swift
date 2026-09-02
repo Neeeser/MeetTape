@@ -6,9 +6,14 @@ import PipitCore
 ///
 /// Capture starts the moment a call becomes a candidate, but nothing is written to
 /// disk until the call is confirmed. The ring is what makes that affordable:
-/// 15 seconds of 48 kHz stereo float32 is about 5.5 MiB and appending a callback
-/// costs roughly a microsecond, so the first sentence is never lost and an
-/// abandoned prejoin leaves nothing behind.
+/// appending a callback costs roughly a microsecond, so the first sentence is
+/// never lost and an abandoned prejoin leaves nothing behind.
+///
+/// Bounded by seconds, not bytes, so its size follows the device. 15 seconds of
+/// 48 kHz float32 is about 2.7 MiB per channel: 5.5 MiB for a stereo interface,
+/// 25 MiB for the nine-channel input one of the development machines exposes.
+/// The microphone tap runs at the device's own format, so that is the figure
+/// to expect on such a machine.
 public final class PreRollBuffer: Sendable {
     private struct State {
         var packets: [AudioBufferPacket] = []

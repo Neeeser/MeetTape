@@ -116,6 +116,14 @@ public enum CoreAudioSystem {
         uint32(AudioObjectID(kAudioObjectSystemObject), address(kAudioHardwarePropertyDefaultInputDevice))
     }
 
+    /// The default input device's UID, which is the identity a device keeps
+    /// across rate and channel changes. Two devices with the same format are
+    /// still two devices; one device renegotiating is still one.
+    public static func defaultInputDeviceUID() -> String? {
+        guard let device = defaultInputDevice() else { return nil }
+        return string(device, address(kAudioDevicePropertyDeviceUID))
+    }
+
     public static func deviceName(_ device: AudioDeviceID) -> String {
         string(device, address(kAudioObjectPropertyName)) ?? "Unknown device"
     }

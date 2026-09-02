@@ -180,8 +180,9 @@ enum SpeechGateTests {
                 // 1738.80 of the Capital One call: "we use three, yeah" while
                 // the far end said "we use S3... yeah". The user was muted for
                 // the whole meeting. Every level clause keeps it, because the
-                // voice unit's gain control lifts the leakage to 3 dB above the
-                // far end's own quietly recorded track, and the detector calls
+                // leakage was recorded 3 dB above the far end's own quietly
+                // recorded track (with the voice unit's gain control in the
+                // path at the time), and the detector calls
                 // it speech because leakage is speech. Only subtracting the far
                 // end from the microphone tells them apart: a filter of the
                 // remote track accounts for 1.1 dB of this segment's energy.

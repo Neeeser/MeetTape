@@ -653,14 +653,40 @@ public actor ProcessingPipeline {
 
     // MARK: - stages
 
+    /// Whether the microphone track holds the local user and nobody else.
+    ///
+    /// The source says whether it should. The recording says whether it did,
+    /// and the two came apart on a Google Meet call whose process tap wrote
+    /// thirty-one minutes of digital zero: the far end never reached its own
+    /// track, the room reached the microphone, and six people arrived on the
+    /// track this app calls the local user by construction. Every stage that
+    /// treats the microphone as one known person asks here first.
+    ///
+    /// Unmeasured means the source decides, which is what every meeting
+    /// recorded before the measurement existed already does.
+    private func micHoldsLocalUserAlone(
+        _ metadata: MeetingMetadata, evidence: SpeechEvidence?
+    ) -> Bool {
+        guard metadata.source.micTrackIsLocalUser else { return false }
+        guard let evidence else { return true }
+        return evidence.farEndCarriesSignal
+    }
+
     /// Which track holds people whose identity has to be worked out.
     ///
     /// On a remote call it is the meeting audio: the microphone holds the local
     /// user by construction, and taking them out of the diarization problem
     /// measured 97% attribution against 84% for diarizing a mixdown. An
     /// in-person or imported recording has one track holding everyone.
-    private func diarizedTrack(_ metadata: MeetingMetadata) -> CaptureTrack {
-        metadata.source.micTrackIsLocalUser ? .remote : .mic
+    ///
+    /// A remote call whose far end never reached the track is the third case,
+    /// and it reads as the second: the microphone holds everybody, so it is the
+    /// track with people to find. Diarizing the silent one instead returns no
+    /// clusters, and the words then sit on a key that means the local user.
+    private func diarizedTrack(
+        _ metadata: MeetingMetadata, evidence: SpeechEvidence?
+    ) -> CaptureTrack {
+        micHoldsLocalUserAlone(metadata, evidence: evidence) ? .remote : .mic
     }
 
     /// Transcribes every track that needs words.
@@ -675,6 +701,15 @@ public actor ProcessingPipeline {
         let transcriber = backends.transcription(settings, settings.models.transcription)
         let diarizer = backends.diarization(settings, settings.models.diarization)
 
+        // Before the first question that depends on it. Which track holds the
+        // unknown people is now measured rather than assumed, and transcription
+        // is the first stage to ask; measuring inside diarization, where this
+        // used to sit, would let the two stages answer differently on the same
+        // recording. It writes once and returns early when the file is there,
+        // so diarization's own call stays a no-op.
+        await measureSpeech(store: store, metadata: metadata)
+        let evidence = store.readSpeechEvidence()
+
         var tracks: [CaptureTrack] = []
         if metadata.source.micTrackIsLocalUser { tracks.append(.mic) }
         // The cloud diarizer transcribes as it diarizes, so its words serve when
@@ -684,7 +719,7 @@ public actor ProcessingPipeline {
         // an imported recording, whose only track is the diarized one, would not
         // be transcribed locally at all.
         if !diarizer.producesTranscript || transcriberOwnsWords(settings) {
-            let track = diarizedTrack(metadata)
+            let track = diarizedTrack(metadata, evidence: evidence)
             if !tracks.contains(track) { tracks.append(track) }
         }
         guard !tracks.isEmpty else { return }
@@ -1035,19 +1070,20 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: inout MeetingMetadata, settings: AppSettings
     ) async throws {
         let diarizer = backends.diarization(settings, settings.models.diarization)
-        let track = diarizedTrack(metadata)
+        // Before the track is chosen, because the choice reads it, and because
+        // enrolment happens inside the run and needs to know which turns are
+        // the local user's. Measuring in the following stage meant the file did
+        // not exist yet on a first pass, nobody was marked, and the local
+        // user's turns reached the enrolment intervals: a profile built from a
+        // track that holds everyone except them. It writes once and guards on
+        // the file already being there, so transcription's earlier call leaves
+        // this one a no-op and re-analysis still reaches it.
+        await measureSpeech(store: store, metadata: metadata)
+
+        let track = diarizedTrack(metadata, evidence: store.readSpeechEvidence())
         let timeline = try store.readTimeline()
         let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
-
-        // Before the run, because enrolment happens inside it and needs to know
-        // which turns are the local user's. Measuring in the following stage
-        // meant the file did not exist yet on a first pass, nobody was marked,
-        // and the local user's turns reached the enrolment intervals: a profile
-        // built from a track that holds everyone except them. It writes once and
-        // guards on the file already being there, so the later call is a no-op
-        // and re-analysis still reaches it.
-        await measureSpeech(store: store, metadata: metadata)
 
         if diarizer.isLocal { try await prepareLocalModels(metadata: metadata) }
 
@@ -1399,7 +1435,14 @@ public actor ProcessingPipeline {
                 // is the local user by construction, and the entry still says
                 // the pipeline wrote it rather than a person, so the link is
                 // the one this meeting would be given if it ran again.
-                if let localUserID, metadata.source.micTrackIsLocalUser,
+                // The transcript here is whatever is on disk, which for a
+                // meeting processed before the microphone was measured still
+                // carries every word under the local user's key. Backfilling
+                // from it would bank a room full of people against one person,
+                // so the same question gates the row as gates the link.
+                guard micHoldsLocalUserAlone(metadata, evidence: store.readSpeechEvidence())
+                else { continue }
+                if let localUserID,
                    speakers.entries[SpeakerLabel.localUser]?.identityID == nil,
                    speakers.entries[SpeakerLabel.localUser]?.origin == .deterministic {
                     speakers.linkIdentity(localUserID, to: SpeakerLabel.localUser, named: nil)
@@ -1732,13 +1775,16 @@ public actor ProcessingPipeline {
         guard !raw.chunks.isEmpty else { return }
         let diarization = try store.readRawDiarization()
         await measureSpeech(store: store, metadata: metadata)
+        let evidence = store.readSpeechEvidence()
+        let micIsLocalUser = micHoldsLocalUserAlone(metadata, evidence: evidence)
 
         let assembler = TranscriptAssembler()
         let transcript = assembler.assemble(
             raw: raw, diarization: diarization,
-            speech: store.readSpeechEvidence(),
+            speech: evidence,
             sensors: sensorRecord(store: store, metadata: metadata),
-            micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
+            micTrackIsLocalUser: micIsLocalUser,
+            generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
 
@@ -1749,7 +1795,8 @@ public actor ProcessingPipeline {
         // by construction, but "Leave unnamed" is offered on that chip like any
         // other, and writing the name back on the next pass made the control do
         // nothing there.
-        if metadata.source.micTrackIsLocalUser, speakers.entries[SpeakerLabel.localUser] == nil,
+        if micIsLocalUser,
+           speakers.entries[SpeakerLabel.localUser] == nil,
            !speakers.clearedKeys.contains(SpeakerLabel.localUser) {
             speakers.entries[SpeakerLabel.localUser] = SpeakerAssignment(
                 displayName: settings.localUserName,
@@ -2032,7 +2079,7 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: MeetingMetadata, settings: AppSettings
     ) async throws {
         guard settings.processing.speakers.learnMyVoice,
-              metadata.source.micTrackIsLocalUser,
+              micHoldsLocalUserAlone(metadata, evidence: store.readSpeechEvidence()),
               let service = backends.speakers,
               let embed = backends.singleSpeakerEmbedding,
               let identityID = settings.processing.localUserIdentityID
@@ -2046,8 +2093,16 @@ public actor ProcessingPipeline {
         // the local user" to mean anything. Without one there is nothing to
         // check bleed against, and a call taken on a phone on speaker and
         // recorded manually would enrol whoever spoke most.
+        //
+        // The file existing is not that. A tap that produced nothing still
+        // writes a full-length track, so this read passed on the recording that
+        // needed it most: thirty-one minutes of six people, on the microphone,
+        // one gesture away from a permanent centroid. The bleed net cannot
+        // stand in for it either, because a silent far end diarizes to no
+        // clusters and leaves nothing to match against. `micHoldsLocalUserAlone`
+        // above is the guard that means what this comment always claimed.
         guard !store.trackAudioLocation(
-            track: diarizedTrack(metadata), metadata: metadata, timeline: timeline
+            track: .remote, metadata: metadata, timeline: timeline
         ).isEmpty else { return }
         guard await localModelsAvailable() else { return }
         guard let audio = try scratch.trackAudio(
@@ -2201,7 +2256,9 @@ public actor ProcessingPipeline {
                 labels: labels,
                 humanContext: store.readNotes(),
                 nameHints: Array(Set(hints)).sorted(),
-                localUserName: metadata.source.micTrackIsLocalUser ? settings.localUserName : nil
+                localUserName: micHoldsLocalUserAlone(
+                    metadata, evidence: store.readSpeechEvidence()
+                ) ? settings.localUserName : nil
             ),
             model: settings.models.metadata
         )
@@ -2388,7 +2445,9 @@ public actor ProcessingPipeline {
             diarization: diarization,
             speech: found.store.readSpeechEvidence(),
             sensors: sensorRecord(store: found.store, metadata: found.metadata),
-            micTrackIsLocalUser: found.metadata.source.micTrackIsLocalUser,
+            micTrackIsLocalUser: micHoldsLocalUserAlone(
+                found.metadata, evidence: found.store.readSpeechEvidence()
+            ),
             generatedAt: clock.now
         )
         try found.store.writeCanonicalTranscript(transcript)
@@ -2994,7 +3053,7 @@ public actor ProcessingPipeline {
         let store = found.store
         let metadata = (try? store.readMetadata()) ?? found.metadata
         let settings = settingsProvider()
-        let track = diarizedTrack(metadata)
+        let track = diarizedTrack(metadata, evidence: store.readSpeechEvidence())
         let timeline = try store.readTimeline()
         let location = store.trackAudioLocation(track: track, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
@@ -3070,7 +3129,10 @@ public actor ProcessingPipeline {
             raw: raw, diarization: diarization,
             speech: store.readSpeechEvidence(),
             sensors: sensorRecord(store: store, metadata: metadata),
-            micTrackIsLocalUser: metadata.source.micTrackIsLocalUser, generatedAt: clock.now
+            micTrackIsLocalUser: micHoldsLocalUserAlone(
+                metadata, evidence: store.readSpeechEvidence()
+            ),
+            generatedAt: clock.now
         )
         try store.writeCanonicalTranscript(transcript)
         try await recognizeVoices(store: store, metadata: &metadataCopy, settings: settings)

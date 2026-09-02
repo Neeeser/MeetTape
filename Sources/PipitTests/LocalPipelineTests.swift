@@ -220,6 +220,138 @@ enum LocalPipelineTests {
                 expect.notEqual(remote[0].speakerKey, remote[1].speakerKey)
             },
 
+            test("a call whose far end never arrived diarizes the microphone") { expect in
+                // The recording this is taken from: thirty-one minutes of a
+                // six-person standup where the process tap wrote digital zero
+                // from arm to teardown. The far end never reached its own
+                // track, the room reached the microphone, and which track held
+                // the people to find was read off the kind of call it was. It
+                // chose the silent one, which returned no clusters, so every
+                // word stayed on the microphone under the key that means the
+                // local user and six people read as one.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // A tap bound to an application that emits nothing still writes
+                // a full-length track, because the aggregate device is clocked
+                // by its output sub-device rather than by the tap. The series is
+                // there and every window of it reads the floor.
+                try meeting.store.writeSpeechEvidence(SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.25,
+                    micLevels: [Int8](repeating: -20, count: 24),
+                    remoteLevels: [Int8](repeating: -120, count: 24),
+                    micSpeech: [Int8](repeating: 95, count: 24),
+                    micEchoReturnLoss: [Int16](repeating: 0, count: 24),
+                    detector: "silero"
+                ))
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday no we do not", speaker: nil,
+                        words: [
+                            RawTranscriptWord(start: 0.0, end: 0.3, text: " we"),
+                            RawTranscriptWord(start: 0.4, end: 0.8, text: " ship"),
+                            RawTranscriptWord(start: 0.9, end: 1.4, text: " friday"),
+                            RawTranscriptWord(start: 3.0, end: 3.2, text: " no"),
+                            RawTranscriptWord(start: 3.3, end: 3.5, text: " we"),
+                            RawTranscriptWord(start: 3.6, end: 3.8, text: " do"),
+                            RawTranscriptWord(start: 3.9, end: 4.2, text: " not"),
+                        ]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [
+                        DiarizationInterval(start: 0, end: 2, clusterID: "S1"),
+                        DiarizationInterval(start: 2.9, end: 4.5, clusterID: "S2"),
+                    ],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 2)])
+                        + embeddings(cluster: "S2", seed: 42, spans: [(2.9, 4.5)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let diarization = try meeting.store.readRawDiarization()
+                expect.isTrue(
+                    diarization.activeRun(track: .mic) != nil,
+                    "the track carrying the voices is the one that gets diarized"
+                )
+                expect.isTrue(
+                    diarization.activeRun(track: .remote) == nil,
+                    "and nothing is asked of the track that holds no audio"
+                )
+                let transcript = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let mic = transcript.utterances.filter { $0.track == .mic }
+                expect.equal(mic.count, 2, "the segment was split where the speaker changed")
+                expect.equal(
+                    Set(mic.map(\.speakerKey)).count, mic.count,
+                    "two voices, two keys"
+                )
+                expect.isTrue(
+                    !mic.contains { $0.speakerKey == SpeakerLabel.localUser },
+                    "a room full of people is not the local user"
+                )
+            },
+
+            test("a call whose far end arrived keeps diarizing the far end") { expect in
+                // The other side of the same decision, and the one that must
+                // not move. Taking the local user out of the diarization
+                // problem measured 97% attribution against 84% for diarizing a
+                // mixdown, so a recording whose tap worked keeps that, and its
+                // microphone track stays one known person.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                try meeting.store.writeSpeechEvidence(SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.25,
+                    micLevels: [Int8](repeating: -20, count: 24),
+                    remoteLevels: [Int8](repeating: -18, count: 24),
+                    micSpeech: [Int8](repeating: 95, count: 24),
+                    micEchoReturnLoss: [Int16](repeating: 0, count: 24),
+                    detector: "silero"
+                ))
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0.0, end: 0.3, text: " we")]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 43, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let diarization = try meeting.store.readRawDiarization()
+                expect.isTrue(
+                    diarization.activeRun(track: .remote) != nil,
+                    "a far end that arrived is still where the unknown people are"
+                )
+                expect.isTrue(
+                    diarization.activeRun(track: .mic) == nil,
+                    "and the microphone stays the local user's own track"
+                )
+            },
+
             test("a text-only backend's words reach the timeline through the aligner") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

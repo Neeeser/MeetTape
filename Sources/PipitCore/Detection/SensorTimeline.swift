@@ -190,7 +190,16 @@ public struct RawSensors: Codable, Sendable, Equatable {
         // decide. On speakers that marks everybody, and a participant marked
         // self loses their name everywhere. A process tap that produced nothing
         // is the realistic way to get here.
-        guard !evidence.remoteLevels.isEmpty else { return self }
+        //
+        // Signal rather than presence. A tap bound to a silent application
+        // still writes a full-length track, so the series is there and every
+        // window of it reads the floor. One meeting on disk did exactly that
+        // and this guard let it through: with the far end at -120 the level
+        // difference is +62 dB for every window and the echo clause reads 0.0,
+        // so the share collapses to whether the detector fired on the
+        // microphone, which it does for whoever is talking in the room. All six
+        // participants scored above 0.87 and every one of them was marked self.
+        guard evidence.farEndCarriesSignal else { return self }
 
         let selfIDs = Set(participants.filter(\.isSelf).map(\.id))
         var byParticipant: [String: [SensorTurn]] = [:]
@@ -247,6 +256,9 @@ public struct RawSensors: Codable, Sendable, Equatable {
         // actor. `SpeechEvidence` already refuses to place such a span; this
         // refuses to walk to it.
         let measurable = Double(evidence.micLevels.count) * window
+        // Once for the walk rather than once per window.
+        let farEndUsable = evidence.farEndCarriesSignal
+        let floor = EmptyTranscriptPolicy.silenceFloorDBFS
         var measured = 0
         var carrying = 0
         for turn in turns {
@@ -255,8 +267,19 @@ public struct RawSensors: Codable, Sendable, Equatable {
             var at = turn.start
             while at < stop {
                 defer { at += window }
-                guard let reading = evidence.reading(from: at, to: min(at + window, stop))
+                guard let reading = evidence.reading(
+                    from: at, to: min(at + window, stop), farEndUsable: farEndUsable
+                )
                 else { continue }
+                // A window whose far end reads the silence floor was not
+                // measured against anything, whatever the rest of the series
+                // holds. A tap that captured the first minutes and then stopped
+                // leaves a track that carries signal overall and nothing at all
+                // after it, and counting those windows is the same mistake as
+                // trusting a track that never carried any: the level clause
+                // reads +100 dB and the echo clause reads zero, so every one of
+                // them says the microphone holds the local user.
+                if farEndUsable, let far = reading.loudestFarDB, far <= floor { continue }
                 measured += 1
                 guard let probability = reading.speechProbability,
                       probability >= LocalSpeechPolicy.speechProbability

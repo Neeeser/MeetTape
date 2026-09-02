@@ -28,6 +28,7 @@ public enum ManifestEvent: Sendable, Equatable {
     case marker(Marker)
     case sessionEnd(SessionEnd)
     case crashTailAdopted(CrashTailAdopted)
+    case remoteBind(RemoteBind)
 
     public struct SessionStart: Codable, Sendable, Equatable {
         public let meetingID: String
@@ -129,6 +130,41 @@ public enum ManifestEvent: Sendable, Equatable {
         }
     }
 
+    /// What the process tap was pointed at, recorded on every bind.
+    ///
+    /// A tap that produces nothing and a tap on an application that is playing
+    /// nothing write the same track, and until this existed the manifest could
+    /// not tell them apart after the fact: it carried health transitions but
+    /// never which processes were bound or whether CoreAudio believed any of
+    /// them was producing output. One meeting on disk needed exactly this and
+    /// the question is not answerable from what was kept.
+    public struct RemoteBind: Codable, Sendable, Equatable {
+        public struct Target: Codable, Sendable, Equatable {
+            public let processID: Int32
+            public let bundleIdentifier: String
+            /// CoreAudio's own `kAudioProcessPropertyIsRunningOutput` for this
+            /// process at the moment of the bind. The one signal that separates
+            /// a correctly silent tap from a broken one.
+            public let isRunningOutput: Bool
+
+            public init(processID: Int32, bundleIdentifier: String, isRunningOutput: Bool) {
+                self.processID = processID
+                self.bundleIdentifier = bundleIdentifier
+                self.isRunningOutput = isRunningOutput
+            }
+        }
+
+        public let reason: String
+        public let targets: [Target]
+        public let bindCount: Int
+
+        public init(reason: String, targets: [Target], bindCount: Int) {
+            self.reason = reason
+            self.targets = targets
+            self.bindCount = bindCount
+        }
+    }
+
     public struct SourceHealth: Codable, Sendable, Equatable {
         public let track: CaptureTrack
         public let state: CaptureHealthState
@@ -203,6 +239,7 @@ public enum ManifestEvent: Sendable, Equatable {
         case .marker: "marker"
         case .sessionEnd: "session_end"
         case .crashTailAdopted: "crash_tail_adopted"
+        case .remoteBind: "remote_bind"
         }
     }
 }
@@ -232,6 +269,7 @@ extension ManifestLine: Codable {
         case .marker(let payload): try payload.encode(to: encoder)
         case .sessionEnd(let payload): try payload.encode(to: encoder)
         case .crashTailAdopted(let payload): try payload.encode(to: encoder)
+        case .remoteBind(let payload): try payload.encode(to: encoder)
         }
     }
 
@@ -251,6 +289,7 @@ extension ManifestLine: Codable {
         case "marker": event = .marker(try .init(from: decoder))
         case "session_end": event = .sessionEnd(try .init(from: decoder))
         case "crash_tail_adopted": event = .crashTailAdopted(try .init(from: decoder))
+        case "remote_bind": event = .remoteBind(try .init(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .event, in: container, debugDescription: "unknown manifest event \(name)"

@@ -698,13 +698,16 @@ public struct TranscriptAssembler: Sendable {
             current = nil
         }
 
+        // Once per chunk rather than once per segment; it is a property of the
+        // whole series.
+        let farEndUsable = speech?.farEndCarriesSignal ?? false
         for segment in chunk.segments.sorted(by: { $0.start < $1.start }) {
             let text = segment.text.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
             let start = chunk.timelineOffset + segment.start
             let end = chunk.timelineOffset + segment.end
             if isEcho(text, start: start, end: end, reference: echoReference) { continue }
-            if let reading = speech?.reading(from: start, to: end),
+            if let reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable),
                LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
                 continue
             }

@@ -66,7 +66,10 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         /// a row. The same doubling wait as a build that threw, from the point
         /// the count stopped looking like a recovery.
         mutating func noteSilentRebuild(count: Int, at now: Double, thresholds: CaptureThresholds) {
-            let step = count - thresholds.silentRebuildsBeforeBackoff
+            // From one poll interval past the threshold. A wait of exactly one
+            // interval expires on the very poll it was meant to hold, because
+            // `tooSoon` is strict and polls land on the grid.
+            let step = count - thresholds.silentRebuildsBeforeBackoff + 1
             nextRebuildAllowedAt = now + Self.backoff(step: step, thresholds: thresholds)
         }
 
@@ -129,6 +132,14 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         let now = clock.monotonicSeconds
         state.withLock { state in
             state.policy.noteConfigurationChange(at: now)
+            // A device that is delivering nothing is the one exception. On the
+            // device this bound was measured against, tearing the engine down
+            // and building it again is what emits the configuration change, so
+            // the change is the loop's own footprint rather than news from the
+            // hardware, and clearing the wait on it reopened the loop at the
+            // debounce cadence. A real device switch during that wait is
+            // delayed by at most the ceiling, and the first buffer ends it.
+            guard !state.policy.isRebuildingWithoutAudio else { return }
             // The hardware changed, so a device that could not be built a moment
             // ago may exist now. The backoff starts again from nothing.
             state.nextRebuildAllowedAt = nil
@@ -140,10 +151,12 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
     public func noteBufferArrived(hostTime: Double) {
         let becameHealthy: Bool = state.withLock { state in
             state.policy.noteBufferArrived(at: hostTime)
-            // Audio arriving means the last build worked, whatever earned the
-            // wait, so a rebuild the hardware asks for next is not held behind
-            // a stale one.
-            state.nextRebuildAllowedAt = nil
+            // Audio arriving means the last build worked, so a rebuild the
+            // hardware asks for next is not held behind a stale wait. Not when
+            // the wait is a failed build's: no engine exists then, and a late
+            // buffer from a tap being torn down would otherwise retry against
+            // the absent device once more before backing off again.
+            if state.lastRebuildFailedAt == nil { state.nextRebuildAllowedAt = nil }
             guard state.health != .healthy else { return false }
             state.health = .healthy
             state.unhealthySince = nil
@@ -250,7 +263,16 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             guard !isInitial, let allowedAt = state.nextRebuildAllowedAt else { return false }
             return now < allowedAt
         }
-        if tooSoon { return }
+        if tooSoon {
+            // A watchdog or first-buffer decision re-derives itself from the gap
+            // on the next poll. A configuration change does not: `evaluate`
+            // consumed the pending flag to return it, so refusing it here would
+            // lose a genuine device switch for the length of the wait.
+            if case .configurationChange = reason {
+                state.withLock { $0.policy.noteConfigurationChange(at: now) }
+            }
+            return
+        }
         state.withLock { state in
             state.policy.noteRebuildStarted(at: now, isInitial: isInitial)
             if !isInitial { state.restartTimestamps.append(now) }

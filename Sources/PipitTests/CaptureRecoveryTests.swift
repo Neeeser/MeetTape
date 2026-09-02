@@ -250,12 +250,55 @@ enum CaptureRecoveryTests {
                     "and the user is told, rather than the loop running quietly"
                 )
 
-                // The first buffer ends it: the counter clears and the next
-                // rebuild, if one is ever needed, is not held behind a stale wait.
+                // The first buffer ends it. Health alone would not show that,
+                // because a buffer marks the engine healthy whether or not the
+                // wait was released, so the pin is a rebuild that the wait would
+                // otherwise refuse: audio arrives, stops again, and the watchdog
+                // must be allowed to act rather than sit behind a 16 s wait.
                 coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
                 clock.advance(0.5)
                 coordinator.tick()
                 expect.equal(coordinator.health, .healthy)
+                let released = coordinator.restartCount
+                clock.advance(2.5)
+                coordinator.tick()
+                expect.equal(
+                    coordinator.restartCount, released + 1,
+                    "the buffer released the wait, so the watchdog rebuilds"
+                )
+            },
+
+            test("a rebuild's own configuration change does not reopen the loop") { expect in
+                // The device the bound was measured against emits a
+                // configuration change every time the engine is torn down and
+                // built, which is why it looped: each rebuild produced the
+                // notification that justified the next one. A configuration
+                // change ordinarily clears every wait, because hardware that
+                // changed may be hardware that came back, so the loop's own
+                // footprint cleared the bound at the debounce cadence, faster
+                // than the watchdog storm it was meant to stop.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                coordinator.start()
+
+                for _ in 0..<120 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    // What the engine's own rebuild sends back.
+                    coordinator.noteConfigurationChange()
+                }
+
+                expect.isTrue(
+                    coordinator.restartCount <= 12,
+                    "the loop's own footprint must not clear its bound: got \(coordinator.restartCount)"
+                )
+                expect.isTrue(
+                    coordinator.restartCount >= 3,
+                    "it still tries before it waits: got \(coordinator.restartCount)"
+                )
             },
 
             test("wake rebuilds proactively after the settle delay") { expect in

@@ -71,10 +71,16 @@ public struct MicRecoveryPolicy: Sendable {
 
     /// Whether rebuilding has stopped being a recovery and become a loop.
     ///
-    /// Whatever the cause. A driver that opens muted, a virtual input, a unit
-    /// that advertises a format and never fills it: each builds cleanly and
-    /// delivers nothing, and each rebuild into it is another teardown, another
-    /// manifest fsync and another configuration change for nothing.
+    /// One shape, exactly: an engine that builds cleanly and delivers no
+    /// buffer at all afterwards, rebuild after rebuild. That is the shape
+    /// measured, 119 rebuilds in four minutes at the grace-window cadence, and
+    /// each one is another teardown, another manifest fsync and another
+    /// configuration change for nothing.
+    ///
+    /// Not covered: an engine that delivers a burst after each rebuild and then
+    /// stops, because any buffer resets this, and a driver that delivers
+    /// buffers of zeroes, because arrival is the signal and not amplitude. Both
+    /// still rebuild at the watchdog cadence.
     public var isRebuildingWithoutAudio: Bool {
         rebuildsWithoutAudio >= thresholds.silentRebuildsBeforeBackoff
     }

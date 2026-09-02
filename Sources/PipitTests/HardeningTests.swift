@@ -19,6 +19,7 @@ enum HardeningTests {
         init(sink: @escaping AudioBufferSink) { self.sinkHandler = sink }
 
         func currentInputFormat() -> AudioFormatDescriptor? { format }
+        func currentInputDeviceUID() -> String? { "emitting" }
         func teardown() {}
         @discardableResult
         func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor { format }

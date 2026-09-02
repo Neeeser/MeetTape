@@ -85,8 +85,14 @@ public struct MicRecoveryPolicy: Sendable {
     /// failures, and a device that came back during them was held behind the
     /// silent engine's wait; and it re-derived, on the poll after a wake, the
     /// thirty-second wait the wake had just cleared.
+    ///
+    /// Nor is a rebuild in flight for it. That timestamp was cleared only by a
+    /// buffer, and a build that threw never delivers one, so `health` went on
+    /// reporting a rebuild in progress for a microphone that was simply gone,
+    /// and the icon that says audio is being lost never lit.
     public mutating func noteEngineGone() {
         rebuildsWithoutAudio = 0
+        rebuildStartedAt = nil
     }
 
     /// A configuration-change decision the coordinator could not act on yet.

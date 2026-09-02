@@ -20,6 +20,13 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var formatReads = 0
         var installedFormat: AudioFormatDescriptor?
         var failEveryBuild: CaptureError?
+        var deviceUID: String? = "fake-input"
+        /// Runs inside `buildAndStart`, before the build is decided. A driver
+        /// that flushes a buffer while the device is being opened delivers it
+        /// here, on the coordinator's own call stack, which is the only place
+        /// a test can put a buffer into the window between teardown and the
+        /// build's outcome.
+        var duringBuild: (@Sendable () -> Void)?
     }
 
     private let state = Mutex(State())
@@ -33,6 +40,21 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     /// Sets the device reading returned once capture settles.
     func setSteadyFormat(_ format: AudioFormatDescriptor?) {
         state.withLock { $0.steadyFormat = format }
+    }
+
+    /// The identity of the device behind the readings. Changing it is a
+    /// different device; changing only the format is the same device
+    /// renegotiating.
+    func setDeviceUID(_ uid: String?) {
+        state.withLock { $0.deviceUID = uid }
+    }
+
+    func setDuringBuild(_ hook: (@Sendable () -> Void)?) {
+        state.withLock { $0.duringBuild = hook }
+    }
+
+    func currentInputDeviceUID() -> String? {
+        state.withLock { $0.deviceUID }
     }
 
     /// Queues one-shot device readings, consumed in order before the steady value.
@@ -80,6 +102,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
 
     @discardableResult
     func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
+        state.withLock { $0.duringBuild }?()
         let failure: CaptureError? = state.withLock { state in
             if let always = state.failEveryBuild {
                 state.builds.append(Build(format: preferred))

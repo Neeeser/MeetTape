@@ -54,6 +54,10 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         )
     }
 
+    public func currentInputDeviceUID() -> String? {
+        CoreAudioSystem.defaultInputDeviceUID()
+    }
+
     public func teardown() {
         let engine = state.withLock { state -> AVAudioEngine? in
             let engine = state.engine

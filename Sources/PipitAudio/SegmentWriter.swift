@@ -32,6 +32,9 @@ public final class SegmentWriter: Sendable {
         var startFrameOfSegment: Int64 = 0
         var totalFrames: Int64 = 0
         var firstFrameHostTime: Double?
+        /// Host time the next packet should carry if no audio goes missing:
+        /// the last packet's own time plus how long it ran.
+        var nextExpectedHostTime: Double?
         var writeFailures = 0
         var isFinished = false
         /// A failed open is retried on the next buffer rather than ending the
@@ -111,6 +114,20 @@ public final class SegmentWriter: Sendable {
         }
     }
 
+    /// Says the next packet does not follow the last one in time, so the space
+    /// between them is not lost audio and must not be filled.
+    ///
+    /// The pre-roll ring is a rolling window. Its packets run on from each
+    /// other, but the moment after the last of them is whenever live capture
+    /// resumed, and across a reconnect that is deliberately not part of the
+    /// recording. Queued rather than immediate, so it lands after the packets
+    /// already handed over.
+    public func breakContinuity() {
+        queue.async { [self] in
+            state.withLock { $0.nextExpectedHostTime = nil }
+        }
+    }
+
     /// Closes the open segment and starts a new one at `format`. Used when the
     /// device changes underneath capture, so a format change never corrupts a file.
     public func changeFormat(_ format: AVAudioFormat, reason: String) {
@@ -150,6 +167,8 @@ public final class SegmentWriter: Sendable {
             return
         }
 
+        fillGapIfNeeded(before: hostTime, file: file, format: format)
+
         do {
             try file.write(from: buffer)
         } catch {
@@ -181,6 +200,10 @@ public final class SegmentWriter: Sendable {
             if state.firstFrameHostTime == nil { state.firstFrameHostTime = hostTime }
             state.framesInSegment += Int64(buffer.frameLength)
             state.totalFrames += Int64(buffer.frameLength)
+            if state.format.sampleRate > 0 {
+                state.nextExpectedHostTime =
+                    hostTime + Double(buffer.frameLength) / state.format.sampleRate
+            }
             guard state.format.sampleRate > 0 else { return false }
             return Double(state.framesInSegment) / state.format.sampleRate >= segmentSeconds
         }
@@ -188,6 +211,76 @@ public final class SegmentWriter: Sendable {
             closeSegment(reason: "rotate")
             openSegment(reason: "rotate")
         }
+    }
+
+    /// Below this a late packet is the clock, not lost audio.
+    ///
+    /// Measured over 34 recordings: 3750 rotation boundaries have a median gap
+    /// of 11 microseconds and none reaches a millisecond. Every real loss on
+    /// disk is at least a second. Fifty milliseconds sits far above the noise
+    /// and far below anything worth recording.
+    private static let gapFloorSeconds = 0.05
+
+    /// The most silence one gap may write.
+    ///
+    /// A host clock that jumps, or a writer resumed long after it was paused,
+    /// would otherwise pad a meeting out by hours. The longest real loss
+    /// measured is 3.47 s.
+    private static let gapCeilingSeconds = 10.0
+
+    /// Writes the audio nobody recorded, as silence, so the file still says how
+    /// long it was.
+    ///
+    /// The microphone's engine tears down and rebuilds whenever the device
+    /// changes format underneath it, and no audio arrives while it does. The
+    /// frames are gone and cannot be recovered. What can be kept is their
+    /// duration: every reader above treats a track as one contiguous run, so a
+    /// hole that leaves no trace makes everything after it sit early. On the
+    /// 3 September recording that put the microphone 0.74 s ahead of the far
+    /// end for the whole meeting, and every time measured against it was wrong
+    /// by that much.
+    ///
+    /// Written here rather than compensated for when read, because this is the
+    /// only place that knows both what arrived and when it should have. Doing
+    /// it here leaves `leadIn`, the mixdown, compaction and `isContiguous`
+    /// correct with no knowledge of gaps at all.
+    private func fillGapIfNeeded(before hostTime: Double, file: AVAudioFile, format: AVAudioFormat) {
+        let expected: Double? = state.withLock { $0.nextExpectedHostTime }
+        guard let expected, format.sampleRate > 0 else { return }
+        let missing = hostTime - expected
+        guard missing >= SegmentWriter.gapFloorSeconds else { return }
+        let seconds = min(missing, SegmentWriter.gapCeilingSeconds)
+        let frames = AVAudioFrameCount((seconds * format.sampleRate).rounded())
+        guard frames > 0, let silence = AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: frames
+        ) else { return }
+        // A fresh buffer is not documented to be zeroed, and this one is about
+        // to become audio somebody listens to.
+        silence.frameLength = frames
+        for channel in 0..<Int(format.channelCount) {
+            if let data = silence.floatChannelData?[channel] {
+                data.update(repeating: 0, count: Int(frames))
+            }
+        }
+        do {
+            try file.write(from: silence)
+        } catch {
+            // The packet itself is still worth writing, and the write below
+            // reports its own failure. Losing the pad costs alignment, not audio.
+            return
+        }
+        state.withLock { state in
+            if state.firstFrameHostTime == nil { state.firstFrameHostTime = expected }
+            state.framesInSegment += Int64(frames)
+            state.totalFrames += Int64(frames)
+        }
+        manifest.append(
+            .sourceHealth(.init(
+                track: track, state: .recovering,
+                detail: "gap filled \(Int((seconds * 1000).rounded())) ms"
+            )),
+            hostTime: clock.monotonicSeconds, wallClock: clock.now
+        )
     }
 
     private func retryOpenIfNeeded(at hostTime: Double) {

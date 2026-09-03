@@ -178,6 +178,83 @@ enum AudioTests {
                 }
             },
 
+            test("audio lost to an engine rebuild is written as silence") { expect in
+                // Measured across 34 recordings on disk: 3750 rotation
+                // boundaries lose a median of 11 microseconds, and the only
+                // real losses are 9 engine rebuilds costing 1.01 to 3.47 s,
+                // every one of them the microphone changing format underneath
+                // capture.
+                //
+                // The frames are gone either way. What matters is that the file
+                // still says how long the silence was, because everything above
+                // reads a track's audio as one contiguous run: without this the
+                // microphone ran 0.74 s ahead of the far end for a whole
+                // meeting, and every time downstream was measured against it.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: format, segmentSeconds: 60
+                )
+
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 0.5, sampleRate: 48_000), hostTime: 100
+                ))
+                // The engine tears down and rebuilds. Nothing arrives for
+                // 1.13 s, then capture resumes.
+                writer.enqueueSynchronously(AudioBufferPacket(
+                    buffer: makeTone(seconds: 0.5, sampleRate: 48_000), hostTime: 101.6317
+                ))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.close(
+                    timeline.duration(track: .mic), 2.1317, tolerance: 0.01,
+                    "1 s of audio plus the 1.1317 s nobody recorded"
+                )
+                expect.isTrue(
+                    timeline.isContiguous(track: .mic),
+                    "and the track now reads as the unbroken run it claims to be"
+                )
+            },
+
+            test("an ordinary rotation writes no silence") { expect in
+                // The fill has to stay off the path it does not belong on.
+                // A rotation boundary costs microseconds, and padding those
+                // would stretch every meeting a little.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: format, segmentSeconds: 1
+                )
+                for index in 0..<5 {
+                    writer.enqueueSynchronously(AudioBufferPacket(
+                        buffer: makeTone(seconds: 0.5, sampleRate: 48_000),
+                        // A hair late every time, as a real clock is.
+                        hostTime: Double(index) * 0.5 + Double(index) * 0.000_02
+                    ))
+                }
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.close(timeline.duration(track: .mic), 2.5, tolerance: 0.001)
+            },
+
             test("a mid-recording format change opens a new segment and is recorded") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

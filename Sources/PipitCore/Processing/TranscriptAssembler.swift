@@ -730,34 +730,41 @@ public struct TranscriptAssembler: Sendable {
             // segment runs to about thirty seconds and routinely holds both the
             // far end leaking through the speakers and the user's own answer to
             // it, so neither keeping nor dropping the whole thing is right.
-            guard let segment = trimmingEcho(
+            // One run at a time, not one stretch at a time. The cut leaves the
+            // user's own words in runs with the far end's between them, and a
+            // single reading spanning the first run to the last still covers
+            // that leakage: on a Slack huddle recorded on 3 September 2026 it
+            // read 9.9 dB against a 0.4 dB threshold and deleted all 3957 words
+            // the user said, leaving them absent from their own meeting.
+            for segment in trimmingEcho(
                 original, chunkOffset: chunk.timelineOffset, reference: echoReference
-            ) else { continue }
-            let text = segment.text.trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty else { continue }
-            // Measured over what is left, not over what arrived. A stretch the
-            // cut reduced to the user's own words is judged on those.
-            let start = chunk.timelineOffset + segment.start
-            let end = chunk.timelineOffset + segment.end
-            if let reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable),
-               LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
-                continue
+            ) {
+                let text = segment.text.trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { continue }
+                // Measured over what is left, not over what arrived. A run the cut
+                // reduced to the user's own words is judged on those.
+                let start = chunk.timelineOffset + segment.start
+                let end = chunk.timelineOffset + segment.end
+                if let reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable),
+                   LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
+                    continue
+                }
+                if var group = current,
+                   group.speaker == segment.speaker,
+                   segment.start - group.end <= configuration.utteranceGapSeconds,
+                   segment.end - group.start <= configuration.maxUtteranceSeconds {
+                    group.end = max(group.end, segment.end)
+                    group.text += group.text.isEmpty ? text : " \(text)"
+                    group.words += segment.words ?? []
+                    group.timed = group.timed && !(segment.words ?? []).isEmpty
+                    current = group
+                } else {
+                    flush()
+                    current = (
+                        segment.start, segment.end, segment.speaker, text,
+                        segment.words ?? [], !(segment.words ?? []).isEmpty
+                    )
             }
-            if var group = current,
-               group.speaker == segment.speaker,
-               segment.start - group.end <= configuration.utteranceGapSeconds,
-               segment.end - group.start <= configuration.maxUtteranceSeconds {
-                group.end = max(group.end, segment.end)
-                group.text += group.text.isEmpty ? text : " \(text)"
-                group.words += segment.words ?? []
-                group.timed = group.timed && !(segment.words ?? []).isEmpty
-                current = group
-            } else {
-                flush()
-                current = (
-                    segment.start, segment.end, segment.speaker, text,
-                    segment.words ?? [], !(segment.words ?? []).isEmpty
-                )
             }
         }
         flush()
@@ -808,8 +815,8 @@ public struct TranscriptAssembler: Sendable {
     /// whole-segment rules above decided.
     private func trimmingEcho(
         _ segment: RawTranscriptSegment, chunkOffset: Double, reference: [Utterance]
-    ) -> RawTranscriptSegment? {
-        guard !reference.isEmpty, let words = segment.words, !words.isEmpty else { return segment }
+    ) -> [RawTranscriptSegment] {
+        guard !reference.isEmpty, let words = segment.words, !words.isEmpty else { return [segment] }
         let window = configuration.duplicateSearchSeconds
         let start = chunkOffset + segment.start
         let end = chunkOffset + segment.end
@@ -822,7 +829,7 @@ public struct TranscriptAssembler: Sendable {
             let tokens = TextSimilarity.normalise(utterance.text)
             if !tokens.isEmpty { references.append(tokens) }
         }
-        guard !references.isEmpty else { return segment }
+        guard !references.isEmpty else { return [segment] }
 
         let tokens = words.map { TextSimilarity.normalise($0.text).joined() }
         var echoed = [Bool](repeating: false, count: words.count)
@@ -852,27 +859,30 @@ public struct TranscriptAssembler: Sendable {
             for between in left..<right { echoed[between] = true }
         }
 
-        var kept: [RawTranscriptWord] = []
+        var runs: [RawTranscriptSegment] = []
         var index = 0
+        var cutAnything = false
         while index < words.count {
-            guard !echoed[index] else { index += 1; continue }
+            guard !echoed[index] else { index += 1; cutAnything = true; continue }
             var run = index
             while run < words.count, !echoed[run] { run += 1 }
             let slice = Array(words[index..<run])
             let seconds = (slice.last?.end ?? 0) - (slice.first?.start ?? 0)
-            if slice.count >= TranscriptAssembler.keptRunWords
-                || seconds >= TranscriptAssembler.keptRunSeconds {
-                kept += slice
+            defer { index = run }
+            guard slice.count >= TranscriptAssembler.keptRunWords
+                || seconds >= TranscriptAssembler.keptRunSeconds
+            else { cutAnything = true; continue }
+            let text = slice.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty, let first = slice.first, let last = slice.last else {
+                cutAnything = true
+                continue
             }
-            index = run
+            runs.append(RawTranscriptSegment(
+                start: first.start, end: last.end, text: text,
+                speaker: segment.speaker, words: slice
+            ))
         }
-        guard kept.count != words.count else { return segment }
-        let text = kept.map(\.text).joined().trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty, let first = kept.first, let last = kept.last else { return nil }
-        return RawTranscriptSegment(
-            start: first.start, end: last.end, text: text,
-            speaker: segment.speaker, words: kept
-        )
+        return cutAnything ? runs : [segment]
     }
 
     /// A local-track segment that repeats what a diarized track already says

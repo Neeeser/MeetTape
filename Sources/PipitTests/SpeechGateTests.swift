@@ -512,6 +512,79 @@ enum SpeechGateTests {
                 )
             },
 
+            test("the user's own words survive a stretch the far end dominates") { expect in
+                // Measured on a Slack huddle recorded on 3 September 2026, on
+                // speakers. 81% of the microphone's words also appear on the
+                // far end's own track, and the echo clause reads 9.9 dB against
+                // a 0.4 dB threshold, so it fired on every one of the 49
+                // stretches the recogniser produced and deleted all 3957 words.
+                // The user is absent from their own meeting.
+                //
+                // The clause is right about the leakage and wrong about the
+                // size of the vote. One of those stretches held 73 windows
+                // below the threshold and 45 above.
+                let far = "so the pricing runs per node and we would need three of them"
+                let spoken = "well that is kind of what i was asking from the call they seemed to want"
+                let remote = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 6.5, text: far, speaker: nil,
+                        words: far.split(separator: " ").enumerated().map {
+                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
+                        }
+                    )]
+                )
+                // The user speaks, the far end leaks in, then the user speaks
+                // again. Both of their runs are kept by the text cut, but the
+                // span from the first to the last of them still covers the
+                // leakage in the middle, so one reading over the whole thing
+                // still says echo and still deletes both.
+                let opening = "um okay one last quick question about the backups"
+                var words: [RawTranscriptWord] = []
+                for (index, token) in opening.split(separator: " ").enumerated() {
+                    words.append(word(" \(token)", Double(index) * 0.5, Double(index) * 0.5 + 0.4))
+                }
+                for (index, token) in far.split(separator: " ").enumerated() {
+                    words.append(word(" \(token)", 6.0 + Double(index) * 0.5, 6.0 + Double(index) * 0.5 + 0.4))
+                }
+                for (index, token) in spoken.split(separator: " ").enumerated() {
+                    words.append(word(" \(token)", 14.0 + Double(index) * 0.5, 14.0 + Double(index) * 0.5 + 0.4))
+                }
+                let mic = RawTranscriptChunk(
+                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 22, text: "\(opening) \(far) \(spoken)",
+                        speaker: nil, words: words
+                    )]
+                )
+                // The leakage reads as echo; the user's own words do not.
+                let windows = Int(40 / windowSeconds)
+                var loss = [Int16](repeating: 0, count: windows)
+                for index in Int(6.0 / windowSeconds)...Int(12.5 / windowSeconds) { loss[index] = 99 }
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: windowSeconds, speechWindowSeconds: speechWindowSeconds,
+                    micLevels: [Int8](repeating: -24, count: windows),
+                    remoteLevels: [Int8](repeating: -26, count: windows),
+                    micSpeech: [Int8](repeating: 99, count: Int(40 / speechWindowSeconds)),
+                    micEchoReturnLoss: loss, detector: "silero"
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
+                    speech: evidence, micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let text = transcript.utterances.filter { $0.track == .mic }
+                    .map(\.text).joined(separator: " ")
+                expect.isTrue(
+                    text.contains("one last quick question"),
+                    "the user is in their own meeting"
+                )
+                expect.isTrue(text.contains("what i was asking"), "on both sides of the leak")
+                expect.isFalse(text.contains("per node"), "and the far end is not in it twice")
+            },
+
             test("a turn the far end never said is left whole") { expect in
                 // The cut only removes what the far end's own track already
                 // holds. A turn the user held on their own keeps every word,

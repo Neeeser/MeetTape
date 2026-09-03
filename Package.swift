@@ -27,9 +27,37 @@ let package = Package(
         // deterministic and directly testable.
         .target(name: "PipitCore"),
 
+        // WebRTC's acoustic echo canceller, vendored, behind a C surface of six
+        // functions. BSD-3-Clause, from the freedesktop audio-processing tree
+        // (v2.1, WebRTC M131) with abseil, both unmodified. `UPDATING.md` in
+        // that directory says where it came from and how to take a newer one.
+        //
+        // Vendored rather than depended on because nobody publishes this for
+        // SwiftPM: the WebRTC XCFrameworks that exist reach the canceller only
+        // through a live peer connection, and have no offline entry point.
+        // Source rather than a binary so CI builds what ships.
+        //
+        // The x86 and MIPS kernels are left out; the NEON ones are compiled.
+        .target(
+            name: "CWebRTCAEC3",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("webrtc"),
+                .headerSearchPath("."),
+                .headerSearchPath("absl"),
+                .define("WEBRTC_POSIX"),
+                .define("WEBRTC_MAC"),
+                .define("WEBRTC_LIBRARY_IMPL"),
+                .define("WEBRTC_APM_DEBUG_DUMP", to: "0"),
+                .define("WEBRTC_ARCH_ARM64"),
+                .define("WEBRTC_HAS_NEON"),
+                .define("NDEBUG"),
+            ]
+        ),
+
         // AVFoundation + CoreAudio capture: microphone engine, process taps,
         // segment writing, pre-roll, import, mixdown, energy analysis.
-        .target(name: "PipitAudio", dependencies: ["PipitCore"]),
+        .target(name: "PipitAudio", dependencies: ["PipitCore", "CWebRTCAEC3"]),
 
         // Accessibility, window titles, CoreAudio process observation, browser sensor
         // transport. Turns OS signals into provider evidence.
@@ -103,5 +131,6 @@ let package = Package(
             resources: [.copy("Fixtures")]
         ),
     ],
-    swiftLanguageModes: [.v6]
+    swiftLanguageModes: [.v6],
+    cxxLanguageStandard: .cxx17
 )

@@ -178,6 +178,50 @@ enum AudioTests {
                 }
             },
 
+            test("the far end is subtracted from a microphone that heard it") { expect in
+                // The shape of a call taken on speakers: the microphone holds
+                // the user, plus the far end arriving a few milliseconds later
+                // and quieter, because it left the speakers and crossed the
+                // room. Nothing downstream can unmix that, because the mixing
+                // happened in the air.
+                //
+                // The reference is the recording of the far end, which is what
+                // Apple's own unit never had here: it subtracts what its host
+                // plays, and Pipit plays nothing.
+                let canceller = try expect.unwrap(EchoCanceller(sampleRate: 16_000))
+                let block = canceller.blockFrames
+                let blocks = 400
+                let delay = 48  // 3 ms across the desk
+                var far = [Float](repeating: 0, count: block * blocks)
+                for index in far.indices {
+                    let phase: Double = 2.0 * Double.pi * 440.0 * Double(index) / 16_000.0
+                    far[index] = Float(0.5 * sin(phase))
+                }
+                // The user says nothing at all, so everything in the microphone
+                // is the far end coming back.
+                var heard = [Float](repeating: 0, count: far.count)
+                for index in delay..<heard.count { heard[index] = far[index - delay] * 0.35 }
+
+                var before: Double = 0
+                var after: Double = 0
+                for index in 0..<blocks {
+                    let range = (index * block)..<((index + 1) * block)
+                    var microphone = Array(heard[range])
+                    let reference = Array(far[range])
+                    expect.isTrue(canceller.process(microphone: &microphone, reference: reference))
+                    // The filter needs to hear the room before it can subtract
+                    // it, so the score is the second half.
+                    guard index >= blocks / 2 else { continue }
+                    for sample in heard[range] { before += Double(sample) * Double(sample) }
+                    for sample in microphone { after += Double(sample) * Double(sample) }
+                }
+                let removedDB = 10 * log10((before + 1e-12) / (after + 1e-12))
+                expect.isTrue(
+                    removedDB > 20,
+                    "the far end should be gone, removed \(Int(removedDB)) dB"
+                )
+            },
+
             test("audio lost to an engine rebuild is written as silence") { expect in
                 // Measured across 34 recordings on disk: 3750 rotation
                 // boundaries lose a median of 11 microseconds, and the only

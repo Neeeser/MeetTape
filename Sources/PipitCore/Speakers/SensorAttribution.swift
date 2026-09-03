@@ -249,9 +249,7 @@ public enum SensorAttribution {
             SpeakerLabel.sensorParticipantID(from: $0.clusterID)
         })
         return kept.sorted().compactMap { id in
-            let name = (sensors.participant(id)?.displayName ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return nil }
+            guard let name = sensors.participant(id)?.personName else { return nil }
             return (
                 key: SpeakerLabel.sensor(participantID: id),
                 assignment: SpeakerAssignment(
@@ -345,7 +343,7 @@ public enum SensorAttribution {
             matches.append(Match(
                 clusterID: clusterID,
                 participantID: winner.key,
-                displayName: sensors.participant(winner.key)?.displayName,
+                displayName: sensors.participant(winner.key)?.personName,
                 coverage: min(1, winner.value / seconds)
             ))
         }

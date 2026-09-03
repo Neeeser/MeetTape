@@ -766,6 +766,51 @@ enum SensorAttributionTests {
                 expect.equal(entries.first?.assignment.origin, .sensor)
             },
 
+            test("an icon ligature from the page is not a person's name") { expect in
+                // Measured on a real Meet recording on 3 September 2026. The
+                // extension read the pin control's icon ligature off the tile
+                // and sent it as the display name, so four different people
+                // arrived as `keep_outline` and a fifth as `frame_person`.
+                // A speaker chip is keyed by name, so those four voices
+                // collapsed into one chip carrying an icon's name.
+                //
+                // The extension no longer sends these. This is the second
+                // layer: the recordings that already carry them are immutable
+                // and get re-read on every rebuild, and the next icon rename
+                // lands here before anyone has shipped a new extension.
+                let raw = sensors(
+                    participants: [
+                        participant("d406", "keep_outline"),
+                        participant("d411", "frame_person"),
+                        participant("d407", "Fireflies.ai Notetaker Chris"),
+                    ],
+                    turns: [("d406", 0, 30), ("d411", 30, 60), ("d407", 60, 90)]
+                )
+                let entries = SensorAttribution.speakerEntries(sensors: raw)
+                expect.equal(entries.count, 1)
+                expect.equal(
+                    entries.first?.assignment.displayName, "Fireflies.ai Notetaker Chris"
+                )
+            },
+
+            test("a name that merely contains an underscore still names its voice") { expect in
+                // The test is the whole name, not a run inside it. Cutting on a
+                // pattern anywhere in the string is what once took
+                // `Chris Latimermore_vert` back to `Chris L`.
+                let raw = sensors(
+                    participants: [
+                        participant("U1", "Ada Lovelace_"),
+                        participant("U2", "DJ Snake_Eyes"),
+                    ],
+                    turns: [("U1", 0, 30), ("U2", 30, 60)]
+                )
+                let names = Set(
+                    SensorAttribution.speakerEntries(sensors: raw)
+                        .map { $0.assignment.displayName }
+                )
+                expect.equal(names, ["Ada Lovelace_", "DJ Snake_Eyes"])
+            },
+
             test("only Slack's identifier is durable enough for a handle") { expect in
                 // Slack's user id survives every meeting. Meet's device id is
                 // per-conference, so a stored handle never matches again, and

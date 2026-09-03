@@ -721,7 +721,7 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
     }
 
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     ) {
         let engine = target
         let recorded = targets.map {
@@ -733,7 +733,10 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         }
         queue.async {
             engine?.recordManifest(
-                .remoteBind(.init(reason: reason.label, targets: recorded, bindCount: bindCount))
+                .remoteBind(.init(
+                    reason: reason.label, targets: recorded, bindCount: bindCount,
+                    streamCount: binding.streamCount, tapStreamIndex: binding.tapStreamIndex
+                ))
             )
         }
     }

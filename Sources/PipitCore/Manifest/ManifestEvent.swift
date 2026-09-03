@@ -157,11 +157,30 @@ public enum ManifestEvent: Sendable, Equatable {
         public let reason: String
         public let targets: [Target]
         public let bindCount: Int
+        /// Input streams the aggregate device published, and the index the tap's
+        /// audio was read from. Both are absent in manifests written before the
+        /// tap was selected by index, so both decode as nil.
+        public let streamCount: Int?
+        public let tapStreamIndex: Int?
 
-        public init(reason: String, targets: [Target], bindCount: Int) {
+        public init(
+            reason: String, targets: [Target], bindCount: Int,
+            streamCount: Int?, tapStreamIndex: Int?
+        ) {
             self.reason = reason
             self.targets = targets
             self.bindCount = bindCount
+            self.streamCount = streamCount
+            self.tapStreamIndex = tapStreamIndex
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            reason = try container.decode(String.self, forKey: .reason)
+            targets = try container.decode([Target].self, forKey: .targets)
+            bindCount = try container.decode(Int.self, forKey: .bindCount)
+            streamCount = try container.decodeIfPresent(Int.self, forKey: .streamCount)
+            tapStreamIndex = try container.decodeIfPresent(Int.self, forKey: .tapStreamIndex)
         }
     }
 

@@ -367,7 +367,9 @@ enum AudioTests {
                             mDataByteSize: UInt32(frames * tapChannels * MemoryLayout<Float>.size),
                             mData: UnsafeMutableRawPointer(tap.baseAddress)
                         )
-                        return makeBuffer(from: storage.unsafePointer, format: format)
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: nil
+                        ).buffer
                     }
                 }
                 guard let buffer = result else { return expect.fail("no buffer produced") }
@@ -379,6 +381,87 @@ enum AudioTests {
                     Double(buffer.floatChannelData![0][0]), 0.25, tolerance: 0.001,
                     "the audio comes from the tap's stream, not the device's"
                 )
+            },
+
+            test("tap stream is selected by index, not by channel count") { expect in
+                // Jump Desktop Audio and a stereo USB interface both publish a
+                // two-channel input stream ahead of the tap. Matching on channel
+                // count reads that device's silence and the far side of the call
+                // is lost, so the tap is taken from the index the aggregate's
+                // input stream count gives.
+                let frames = 512
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var silent = [Float](repeating: 0, count: frames * 2)
+                var tone = [Float](repeating: 0, count: frames * 2)
+                for frame in 0..<frames {
+                    let sample = Float(sin(2 * Double.pi * 1_000 * Double(frame) / 48_000))
+                    tone[frame * 2] = sample
+                    tone[frame * 2 + 1] = sample
+                }
+
+                let result: AVAudioPCMBuffer? = silent.withUnsafeMutableBufferPointer { first in
+                    tone.withUnsafeMutableBufferPointer { second in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(first.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(second.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 1
+                        ).buffer
+                    }
+                }
+                guard let buffer = result else { return expect.fail("no buffer produced") }
+                let samples = buffer.floatChannelData![0]
+                var peak: Float = 0
+                for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(samples[frame])) }
+                expect.isTrue(
+                    peak > 0.5,
+                    "the tap's stream carries the tone, and the first stereo stream is silent"
+                )
+            },
+
+            test("an out-of-range tap index falls back to channel-count matching") { expect in
+                // A list that does not line up with the reported stream count
+                // still has to produce audio, so the old match stays as a
+                // fallback and the caller logs that it was used.
+                let frames = 256
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var first = [Float](repeating: 0.4, count: frames * 2)
+                var second = [Float](repeating: 0.9, count: frames * 2)
+
+                let selection: TapStreamSelection = first.withUnsafeMutableBufferPointer { one in
+                    second.withUnsafeMutableBufferPointer { two in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(one.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(two.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 7
+                        )
+                    }
+                }
+                guard let buffer = selection.buffer else { return expect.fail("no buffer produced") }
+                expect.close(
+                    Double(buffer.floatChannelData![0][0]), 0.4, tolerance: 0.001,
+                    "the first stream matching the tap's channel count is read"
+                )
+                expect.isTrue(selection.usedFallback, "the fallback is reported to the caller")
             },
 
             test("a single interleaved stream keeps its frame count") { expect in
@@ -395,7 +478,9 @@ enum AudioTests {
                             mData: UnsafeMutableRawPointer(pointer.baseAddress)
                         )
                     )
-                    return withUnsafePointer(to: &list) { makeBuffer(from: $0, format: format) }
+                    return withUnsafePointer(to: &list) {
+                        makeBuffer(from: $0, format: format, tapStreamIndex: nil).buffer
+                    }
                 }
                 expect.equal(Int(result?.frameLength ?? 0), frames)
             },

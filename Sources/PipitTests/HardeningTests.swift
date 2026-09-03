@@ -59,11 +59,11 @@ enum HardeningTests {
 
         func teardown() {}
 
-        func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+        func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
             lock.lock()
             bindCount += 1
             lock.unlock()
-            return format
+            return RemoteTapBinding(format: format, streamCount: 2, tapStreamIndex: 1)
         }
 
         func emit(seconds: Double, hostTime: Double) {

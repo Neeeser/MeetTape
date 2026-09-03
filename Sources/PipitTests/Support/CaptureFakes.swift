@@ -172,7 +172,7 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         state.withLock { $0.teardowns += 1 }
     }
 
-    func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+    func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
         let failure: CaptureError? = state.withLock { state in
             defer { state.failNextBind = nil }
             return state.failNextBind
@@ -180,7 +180,7 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         if let failure { throw failure }
         return state.withLock { state in
             state.binds.append(targets.map(\.processID).sorted())
-            return state.format
+            return RemoteTapBinding(format: state.format, streamCount: 2, tapStreamIndex: 1)
         }
     }
 }
@@ -244,7 +244,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     }
 
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     ) {
         state.withLock {
             $0.remoteBinds.append(RemoteBind(

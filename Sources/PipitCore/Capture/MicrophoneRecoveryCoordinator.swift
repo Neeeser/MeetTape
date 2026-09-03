@@ -37,7 +37,7 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     /// target's output at that moment. Recorded so a track that came back
     /// silent can be told from a track nobody was playing into.
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)

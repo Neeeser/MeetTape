@@ -51,7 +51,9 @@ enum ManifestTests {
                                 isRunningOutput: false
                             ),
                         ],
-                        bindCount: 1
+                        bindCount: 1,
+                        streamCount: 2,
+                        tapStreamIndex: 1
                     )),
                     .sourceHealth(.init(track: .remote, state: .idleButBound, detail: nil)),
                     .preRollFlushed(.init(track: .mic, frameCount: 720_000, seconds: 15, earliestHostTime: 1.0)),
@@ -74,6 +76,31 @@ enum ManifestTests {
                     expect.equal(line.event, event)
                     expect.equal(line.hostTime, 100)
                 }
+            },
+
+            test("a remote_bind written before stream indexing still decodes") { expect in
+                let directory = try makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let url = directory.appendingPathComponent("manifest.jsonl")
+                // A line as manifests carried it before the tap was selected by
+                // index. Neither new field is present.
+                let line = """
+                {"ev":"remote_bind","host":100,"t":"2026-08-18T14:18:00.000Z",\
+                "reason":"session_start","bindCount":1,\
+                "targets":[{"processID":45082,\
+                "bundleIdentifier":"com.tinyspeck.slackmacgap.helper",\
+                "isRunningOutput":true}]}
+                """
+                try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
+
+                let result = try ManifestReader.read(contentsOf: url)
+                expect.equal(result.unrecognisedLines, 0)
+                guard case .remoteBind(let bind)? = result.lines.first?.event else {
+                    return expect.fail("the line did not decode as remote_bind")
+                }
+                expect.equal(bind.bindCount, 1)
+                expect.isTrue(bind.streamCount == nil, "an absent stream count decodes as nil")
+                expect.isTrue(bind.tapStreamIndex == nil, "an absent tap index decodes as nil")
             },
 
             test("total duration sums per-segment rates, never a global divide") { expect in

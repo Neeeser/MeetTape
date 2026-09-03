@@ -8,8 +8,28 @@ public protocol ProcessTapController: AnyObject, Sendable {
     /// helper processes and survives application restarts under a new PID.
     func resolveTargets(bundlePrefixes: [String]) -> [RemoteAudioTarget]
     func teardown()
-    /// Creates the tap and aggregate device, returning the tap's format.
-    func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor
+    /// Creates the tap and aggregate device, returning what was bound.
+    func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding
+}
+
+/// What one successful bind produced.
+///
+/// The stream index is carried out of the audio layer so the manifest records
+/// which buffer of the aggregate was read as the meeting.
+public struct RemoteTapBinding: Sendable, Equatable {
+    public let format: AudioFormatDescriptor
+    /// Input streams the aggregate device publishes. Nil when CoreAudio would
+    /// not report it.
+    public let streamCount: Int?
+    /// Index of the tap's buffer in the IOProc's list, or nil when the count
+    /// was unavailable.
+    public let tapStreamIndex: Int?
+
+    public init(format: AudioFormatDescriptor, streamCount: Int?, tapStreamIndex: Int?) {
+        self.format = format
+        self.streamCount = streamCount
+        self.tapStreamIndex = tapStreamIndex
+    }
 }
 
 /// Drives `RemoteRecoveryPolicy` against a real process tap.
@@ -181,7 +201,8 @@ public final class RemoteTapCoordinator: Sendable {
         }
 
         do {
-            let format = try controller.bind(to: targets)
+            let binding = try controller.bind(to: targets)
+            let format = binding.format
             let previous = state.withLock { $0.activeFormat }
             if format != previous {
                 delegate.captureWillChangeFormat(track: .remote, from: previous, to: format, reason: reason.label)
@@ -196,7 +217,7 @@ public final class RemoteTapCoordinator: Sendable {
                 return state.policy.bindCount
             }
             delegate.captureDidBindRemote(
-                targets: targets, reason: reason, bindCount: count
+                targets: targets, reason: reason, bindCount: count, binding: binding
             )
             setHealth(.recovering, detail: reason.label)
         } catch {

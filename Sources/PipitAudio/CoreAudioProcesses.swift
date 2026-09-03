@@ -147,6 +147,18 @@ public enum CoreAudioSystem {
         return list.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
+    /// How many input streams a device publishes.
+    ///
+    /// An aggregate device lists its sub-devices' input streams first and the
+    /// process tap's last, so the count says where the tap's buffer sits in an
+    /// IOProc's `AudioBufferList`. Nil when the property read fails.
+    public static func inputStreamCount(of device: AudioObjectID) -> Int? {
+        var address = self.address(kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr else { return nil }
+        return Int(size) / MemoryLayout<AudioStreamID>.size
+    }
+
     public static func fourCharCode(_ status: OSStatus) -> String {
         let value = UInt32(bitPattern: status)
         let bytes = [

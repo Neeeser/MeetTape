@@ -305,7 +305,23 @@ public struct TranscriptAssembler: Sendable {
         let clusters = assignSpans(spans, sensors: sensorIntervals, clusters: intervals)
 
         var pieces: [RawTranscriptSegment] = []
-        var currentSpeaker: String?
+        // Seeded with the first speaker named anywhere in this segment, so the
+        // words before that point join the turn instead of becoming a line of
+        // their own.
+        //
+        // The diarizer's onset runs late on a turn that opens with a short
+        // backchannel. Measured on a Meet recording on 3 September 2026, one
+        // turn's words began at 170.56 and its first interval at 174.30, and
+        // the inheritance below only ever ran forwards: at the head of a
+        // segment there was nothing behind to inherit, so `Okay. Okay,` was cut
+        // off the front of its own sentence and rendered speakerless. Nine
+        // utterances in that meeting were the same cut.
+        //
+        // The recogniser's segment is the unit, not the neighbouring turn. One
+        // segment is one pass over one stretch of speech, so its own first
+        // named speaker is the answer, and a segment naming nobody stays
+        // unattributed rather than borrowing from the segment before it.
+        var currentSpeaker: String? = clusters.compactMap { $0 }.first
         var currentWords: [RawTranscriptWord] = []
 
         func flush() {

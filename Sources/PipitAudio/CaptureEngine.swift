@@ -322,6 +322,9 @@ public final class CaptureEngine: Sendable {
                     seconds += packet.seconds
                     micWriter.enqueue(packet)
                 }
+                // Live capture resumes at whatever moment it resumed at, which
+                // across a reconnect is deliberately later than the ring ends.
+                micWriter.breakContinuity()
                 summaries.append((.mic, frames, seconds, earliest))
             }
             if let remoteWriter {
@@ -335,6 +338,7 @@ public final class CaptureEngine: Sendable {
                         seconds += packet.seconds
                         remoteWriter.enqueue(packet)
                     }
+                    remoteWriter.breakContinuity()
                     summaries.append((.remote, frames, seconds, earliest))
                 }
             }

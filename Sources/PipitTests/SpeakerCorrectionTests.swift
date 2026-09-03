@@ -164,6 +164,83 @@ enum SpeakerCorrectionTests {
                 expect.isTrue(text.contains("yeah"), "an unattributed word is kept, not dropped")
                 expect.equal(Set(transcript.utterances.map(\.speakerKey)).count, 1)
             },
+            test("a turn's opening words stay with the turn") { expect in
+                // Measured on a Meet recording on 3 September 2026. The
+                // diarizer's first interval for a turn can land seconds after
+                // the words start: on that call one turn opened at 170.56 and
+                // the interval began at 174.30. Inheritance ran forwards only,
+                // so the words before it had nothing to inherit and came out as
+                // a speakerless line of their own. Chris B's "Okay. Okay," was
+                // torn off the front of his own sentence nine times over.
+                //
+                // The recogniser's segment is the unit. A leading run takes the
+                // first speaker named inside its own segment rather than the
+                // one before it, because the segment is one pass over one
+                // stretch of speech and its words belong together.
+                let chunk = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 20,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 6, text: "okay okay great we can build it", speaker: nil,
+                        words: [
+                            // The diarizer's interval starts at 3.0, so these
+                            // three fall outside every interval it produced.
+                            word(" okay", 0.0, 0.4), word(" okay", 0.5, 0.9),
+                            word(" great", 1.0, 1.4),
+                            word(" we", 3.1, 3.3), word(" can", 3.4, 3.6),
+                            word(" build", 3.7, 4.0), word(" it", 4.1, 4.3),
+                        ]
+                    )]
+                )
+                var diarization = RawDiarization()
+                diarization.setActive(DiarizationRun(
+                    id: "remote-001", track: .remote, backend: "fluidaudio-offline-0.15.6",
+                    producedAt: Date(), timelineOffset: 0,
+                    clusters: [DiarizationCluster(id: "S1", speechSeconds: 5)],
+                    intervals: [interval(3.0, 6.0, "S1")]
+                ))
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [chunk]), diarization: diarization,
+                    micTrackIsLocalUser: false, generatedAt: Date()
+                )
+                expect.equal(transcript.utterances.count, 1, "the turn is not torn in two")
+                expect.isTrue(
+                    transcript.utterances.first?.text.hasPrefix("okay okay great") == true,
+                    "the opening words stay at the front of the turn"
+                )
+                expect.isFalse(
+                    transcript.utterances.contains { $0.speakerKey.hasSuffix("unattributed") },
+                    "and they are not left speakerless"
+                )
+            },
+
+            test("a segment the diarizer never reached stays unattributed") { expect in
+                // The seed is the segment's own first named speaker, so a
+                // segment holding none keeps today's answer. Nothing is better
+                // than a name borrowed from a stretch of audio nobody scored.
+                let chunk = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 20,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 2, text: "okay", speaker: nil,
+                        words: [word(" okay", 0.0, 0.4)]
+                    )]
+                )
+                var diarization = RawDiarization()
+                diarization.setActive(DiarizationRun(
+                    id: "remote-001", track: .remote, backend: "fluidaudio-offline-0.15.6",
+                    producedAt: Date(), timelineOffset: 0,
+                    clusters: [DiarizationCluster(id: "S1", speechSeconds: 5)],
+                    intervals: [interval(40, 46, "S1")]
+                ))
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [chunk]), diarization: diarization,
+                    micTrackIsLocalUser: false, generatedAt: Date()
+                )
+                expect.isTrue(
+                    transcript.utterances.allSatisfy { $0.speakerKey.hasSuffix("unattributed") }
+                )
+            },
         ])
     }
 
@@ -357,6 +434,60 @@ enum SpeakerCorrectionTests {
                 expect.equal(
                     mine.displayName(for: SpeakerLabel.localUser), "Andrew",
                     "the microphone track is not a guess"
+                )
+            },
+
+            test("one account names one person on every key it holds") { expect in
+                // The people bank is the truth and a platform handle points at
+                // it. Measured on a Slack huddle recorded on 3 September 2026,
+                // the pointer reached exactly one key: `sensor_U0619AZFDT6`
+                // read "Chris L" from the bank while four cluster keys carrying
+                // the same account read Slack's roster string "Chris Latimer"
+                // with no identity at all. One person, two names, one meeting.
+                //
+                // The keys with no identity are the worse half. `refreshName`
+                // follows the identity, so renaming that person in People never
+                // reached them, and the picker could not offer the person the
+                // cluster already belonged to.
+                var map = SpeakerMap()
+                let roster = SpeakerAssignment(
+                    displayName: "Chris Latimer", origin: .sensor,
+                    participantID: "U0619AZFDT6",
+                    provenance: SpeakerProvenance(source: .sensor)
+                )
+                map.applySuggestion(roster, for: "remote-001_speaker_02")
+                map.applySuggestion(roster, for: "remote-002_speaker_03")
+                map.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: "Brian McNamara", origin: .sensor,
+                        participantID: "U0B17GB9VPA"
+                    ),
+                    for: "remote-001_speaker_01"
+                )
+                map.assign("Someone else", to: "remote-001_speaker_09", participantID: "U0619AZFDT6")
+
+                let bound = SpeakerAssignment(
+                    displayName: "Chris L", origin: .sensor,
+                    participantID: "U0619AZFDT6", identityID: IdentityID(2),
+                    provenance: SpeakerProvenance(
+                        source: .sensor, identityID: IdentityID(2), humanVerified: true
+                    )
+                )
+                map.applySuggestion(bound, toParticipant: "U0619AZFDT6")
+
+                expect.equal(map.displayName(for: "remote-001_speaker_02"), "Chris L")
+                expect.equal(map.displayName(for: "remote-002_speaker_03"), "Chris L")
+                expect.equal(
+                    map.entries["remote-002_speaker_03"]?.identityID, IdentityID(2),
+                    "and the key now knows who it belongs to, so a rename reaches it"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_01"), "Brian McNamara",
+                    "another account is untouched"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_09"), "Someone else",
+                    "and a name a person typed is still theirs"
                 )
             },
 

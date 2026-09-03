@@ -1537,7 +1537,11 @@ public actor ProcessingPipeline {
             guard let identity = await speakerStore.identity(
                 handle: participantID, provider: provider
             ), identity.isNamed else { continue }
-            speakers.applySuggestion(
+            // Every key this account holds, not only the key named after it.
+            // The cluster keys carry the same `participantID`, so the pointer
+            // reaches them too: they take the bank's name and its identity
+            // together, which is what lets a later rename in People find them.
+            named += speakers.applySuggestion(
                 SpeakerAssignment(
                     displayName: identity.resolvedName,
                     origin: .sensor,
@@ -1547,9 +1551,8 @@ public actor ProcessingPipeline {
                         source: .sensor, identityID: identity.id, humanVerified: true
                     )
                 ),
-                for: SpeakerLabel.sensor(participantID: participantID)
+                toParticipant: participantID
             )
-            named += 1
         }
         if named > 0 {
             Log.processing.info("sensor handles named=\(named, privacy: .public)")
@@ -2509,7 +2512,10 @@ public actor ProcessingPipeline {
                 meetingID: meetingID, clusterID: key
             )
         }
-        let resolved = try await identity(named: name, existing: existing)
+        let resolved = try await identity(
+            named: name, existing: existing,
+            account: try await sensorAccount(store: found.store, metadata: found.metadata, key: key)
+        )
 
         var speakers = try found.store.readSpeakerMap()
         speakers.assign(name, to: key, identityID: resolved)
@@ -3205,11 +3211,67 @@ public actor ProcessingPipeline {
         return identity.id
     }
 
-    private func identity(named name: String, existing: IdentityID?) async throws -> IdentityID? {
+    /// The person a typed name refers to, creating one only where nobody
+    /// already answers to it.
+    ///
+    /// - Parameter account: the platform account this cluster belongs to, where
+    ///   the meeting client named one. Consulted before the name is, because an
+    ///   account already bound to somebody names that person whatever string is
+    ///   being typed over them.
+    ///
+    ///   Without it the lookup is display-name equality and nothing else, and
+    ///   that is how a second record for one human gets made: on 1 September
+    ///   2026 a cluster reading Slack's roster string "Chris Latimer" was named
+    ///   with that string, the search for a person of that name missed "Chris
+    ///   L", and identity 24 was created beside identity 2, which holds the
+    ///   voice profile and the Slack handle for the same man.
+    /// The platform account behind one speaker key, where the platform's
+    /// identifier outlives the meeting.
+    ///
+    /// Nil for Meet, whose `spaces/{space}/devices/{n}` names a join rather than
+    /// a person, so binding it would only mislead a later meeting.
+    private func sensorAccount(
+        store: MeetingStore, metadata: MeetingMetadata, key: String
+    ) async throws -> IdentityHandle? {
+        guard let sensors = sensorRecord(store: store, metadata: metadata),
+              let provider = SensorAttribution.handleProvider(source: sensors.source)
+        else { return nil }
+        var participantID = SpeakerLabel.sensorParticipantID(from: key)
+        if participantID == nil {
+            participantID = (try? store.readSpeakerMap())?.entries[key]?.participantID
+        }
+        guard let participantID else { return nil }
+        return IdentityHandle(provider: provider, handle: participantID)
+    }
+
+    private func identity(
+        named name: String, existing: IdentityID?, account: IdentityHandle? = nil
+    ) async throws -> IdentityID? {
         guard let service = backends.speakers else { return existing }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let store = await service.speakerStore
+        // Before the voice match, because the account is a statement about who
+        // this is where a voice match is a guess about it. After the name,
+        // because the person typing it is correcting something, and a correction
+        // is the one thing nothing else may overrule.
+        //
+        // The bound account only answers where the typed name does not name
+        // somebody else. A diarizer that runs two people together, or a sensor
+        // turn that sticks, gives a cluster somebody else's account; taking the
+        // account regardless returned the wrong person, enrolled this cluster's
+        // audio into their profile, and made the typed name an alias of them
+        // for good. `.human` outranks everything and is never overwritten.
+        if let account,
+           try await person(named: trimmed) == nil,
+           let bound = try await store.identity(handle: account.handle, provider: account.provider),
+           bound.resolvedName.isEmpty
+               || bound.resolvedName.caseInsensitiveCompare(trimmed) == .orderedSame
+               || bound.aliases.contains(where: {
+                   $0.caseInsensitiveCompare(trimmed) == .orderedSame
+               }) {
+            return bound.id
+        }
         if let existing {
             // Naming a recurring voice promotes it in place. Every historical
             // occurrence already points at this identifier, so nothing else
@@ -3235,12 +3297,24 @@ public actor ProcessingPipeline {
         return try await store.createPerson(name: trimmed, now: clock.now).id
     }
 
+    /// The person already answering to a name, by what they are called or by
+    /// anything they have been called before.
+    ///
+    /// Aliases are read here because they are written when an account resolves
+    /// to somebody under a different name. Without this the string typed on one
+    /// meeting finds nobody on the next one, and a second record for the same
+    /// human is made instead.
     private func person(named name: String) async throws -> IdentityID? {
         guard let service = backends.speakers else { return nil }
         let store = await service.speakerStore
         let people = try await store.identities(kind: .person)
-        return people.first {
+        if let exact = people.first(where: {
             $0.resolvedName.compare(name, options: .caseInsensitive) == .orderedSame
+        }) {
+            return exact.id
+        }
+        return people.first {
+            $0.aliases.contains { $0.compare(name, options: .caseInsensitive) == .orderedSame }
         }?.id
     }
 

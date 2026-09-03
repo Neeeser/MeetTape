@@ -303,6 +303,42 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         return refused.count
     }
 
+    /// Gives every key attributed to one platform account the person that
+    /// account belongs to, and returns how many keys took it.
+    ///
+    /// The people bank is the truth and a platform handle points at it. That
+    /// only holds if the pointer reaches every key the account holds. Measured
+    /// on a Slack huddle recorded on 3 September 2026 it reached one:
+    /// `sensor_U0619AZFDT6` carried the bank's "Chris L" and its identity,
+    /// while four cluster keys carrying the same account carried Slack's roster
+    /// string "Chris Latimer" and no identity at all. One person, two names,
+    /// one meeting.
+    ///
+    /// The keys left without an identity are the worse half. `refreshName`
+    /// follows the identity, so renaming that person never reached them, and
+    /// the picker could not offer the person the cluster already belonged to,
+    /// which is how a second record for the same human gets typed in.
+    ///
+    /// The name and the identity are written together, so the agreement
+    /// `linkIdentity` insists on holds by construction. `applySuggestion`
+    /// still decides each key, so a name a person chose is untouched.
+    @discardableResult
+    public mutating func applySuggestion(
+        _ assignment: SpeakerAssignment, toParticipant participantID: String
+    ) -> Int {
+        var keys = Set(
+            entries.filter { $0.value.participantID == participantID }.map(\.key)
+        )
+        keys.insert(SpeakerLabel.sensor(participantID: participantID))
+        var applied = 0
+        for key in keys.sorted() {
+            let before = entries[key]
+            applySuggestion(assignment, for: key)
+            if entries[key] != before { applied += 1 }
+        }
+        return applied
+    }
+
     /// Applies an automatic result. Anything a person set, and anything a
     /// higher-ranked stage set, is left alone.
     public mutating func applySuggestion(_ assignment: SpeakerAssignment, for key: String) {

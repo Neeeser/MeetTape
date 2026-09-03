@@ -54,15 +54,31 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         )
     }
 
-    /// The default input device, which is the device the engine's input node
-    /// is on: nothing here selects another, so the two coincide. They have to.
-    /// The coordinator records this after each build as the identity of the
-    /// engine it just built, and tells a device the user plugged in from the
-    /// same device renegotiating by comparing against it. Whatever first
-    /// honours a device preference on the input unit has to read that device
-    /// here as well, or the comparison names the wrong one.
+    /// The system default input device, which `build` opens the input unit on
+    /// explicitly. The coordinator records this after each build as the
+    /// identity of the engine it just built, and tells a device the user
+    /// plugged in from the same device renegotiating by comparing against it.
+    /// The two readings have to name one device, which is why the build sets
+    /// the unit's device from the same call rather than letting the node keep
+    /// the one it defaulted to.
     public func currentInputDeviceUID() -> String? {
         CoreAudioSystem.defaultInputDeviceUID()
+    }
+
+    /// The same device with the rate and channel count CoreAudio reports for
+    /// it, which is what the manifest records for each build.
+    public func currentInputDevice() -> MicrophoneDeviceDescription? {
+        guard let device = CoreAudioSystem.defaultInputDevice(),
+              let uid = CoreAudioSystem.defaultInputDeviceUID()
+        else { return nil }
+        return MicrophoneDeviceDescription(
+            uid: uid,
+            name: CoreAudioSystem.deviceName(device),
+            sampleRate: CoreAudioSystem.deviceSampleRate(device),
+            channelCount: CoreAudioSystem.deviceChannelCount(
+                device, scope: kAudioObjectPropertyScopeInput
+            )
+        )
     }
 
     public func teardown() {
@@ -109,6 +125,34 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     private func build() throws -> AudioFormatDescriptor {
         let engine = AVAudioEngine()
         let input = engine.inputNode
+
+        // Open the system default input device, resolved on every build.
+        //
+        // An input node left alone does not run on a microphone. It runs on
+        // macOS's per-process `CADefaultDeviceAggregate`, which wraps the
+        // default input together with whatever virtual drivers are installed.
+        // Measured on this Mac on 2026-09-03: the node was instantiated on
+        // `CADefaultDeviceAggregate-6807-0` while the default input device was
+        // `BuiltInMicrophoneDevice`, and setting the property below moved it.
+        //
+        // The coordinator compares `currentInputDeviceUID` against the device
+        // the engine is on to tell a device the user plugged in from the same
+        // device renegotiating. That comparison is about one device only if the
+        // engine is opened on the device that call names, which is what this
+        // does. The property is set before the format is read, so the read
+        // cannot instantiate the unit on a device nothing chose.
+        guard let deviceID = CoreAudioSystem.defaultInputDevice(), let unit = input.audioUnit else {
+            throw CaptureError.microphoneEngineStartFailed(status: -1)
+        }
+        var device = deviceID
+        let deviceStatus = AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &device, UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard deviceStatus == noErr else {
+            throw CaptureError.microphoneEngineStartFailed(status: deviceStatus)
+        }
+
         // Install against the node's own format. Passing a format the hardware is
         // not actually running at throws inside CoreAudio, so `preferred` informs
         // the choice but the node decides.

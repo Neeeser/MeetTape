@@ -29,6 +29,7 @@ public enum ManifestEvent: Sendable, Equatable {
     case sessionEnd(SessionEnd)
     case crashTailAdopted(CrashTailAdopted)
     case remoteBind(RemoteBind)
+    case micBind(MicBind)
 
     public struct SessionStart: Codable, Sendable, Equatable {
         public let meetingID: String
@@ -184,6 +185,32 @@ public enum ManifestEvent: Sendable, Equatable {
         }
     }
 
+    /// Which input device the microphone engine was opened on, recorded on
+    /// every build.
+    ///
+    /// The engine names the device it opens instead of taking whatever its
+    /// input node defaulted to, so the device is a choice and the recording
+    /// carries it. A track that reads 30 dB below the rest of a meeting then
+    /// names the device it came from and the channel count it was written at.
+    public struct MicBind: Codable, Sendable, Equatable {
+        public let deviceUID: String
+        public let deviceName: String
+        public let sampleRate: Double
+        public let channelCount: Int
+        public let reason: String
+
+        public init(
+            deviceUID: String, deviceName: String, sampleRate: Double, channelCount: Int,
+            reason: String
+        ) {
+            self.deviceUID = deviceUID
+            self.deviceName = deviceName
+            self.sampleRate = sampleRate
+            self.channelCount = channelCount
+            self.reason = reason
+        }
+    }
+
     public struct SourceHealth: Codable, Sendable, Equatable {
         public let track: CaptureTrack
         public let state: CaptureHealthState
@@ -259,6 +286,7 @@ public enum ManifestEvent: Sendable, Equatable {
         case .sessionEnd: "session_end"
         case .crashTailAdopted: "crash_tail_adopted"
         case .remoteBind: "remote_bind"
+        case .micBind: "mic_bind"
         }
     }
 }
@@ -289,6 +317,7 @@ extension ManifestLine: Codable {
         case .sessionEnd(let payload): try payload.encode(to: encoder)
         case .crashTailAdopted(let payload): try payload.encode(to: encoder)
         case .remoteBind(let payload): try payload.encode(to: encoder)
+        case .micBind(let payload): try payload.encode(to: encoder)
         }
     }
 
@@ -309,6 +338,7 @@ extension ManifestLine: Codable {
         case "session_end": event = .sessionEnd(try .init(from: decoder))
         case "crash_tail_adopted": event = .crashTailAdopted(try .init(from: decoder))
         case "remote_bind": event = .remoteBind(try .init(from: decoder))
+        case "mic_bind": event = .micBind(try .init(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .event, in: container, debugDescription: "unknown manifest event \(name)"

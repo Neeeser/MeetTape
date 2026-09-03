@@ -65,6 +65,17 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         state.withLock { $0.deviceUID }
     }
 
+    func currentInputDevice() -> MicrophoneDeviceDescription? {
+        state.withLock { state in
+            guard let uid = state.deviceUID else { return nil }
+            let format = state.installedFormat ?? state.steadyFormat
+            return MicrophoneDeviceDescription(
+                uid: uid, name: "Fake input",
+                sampleRate: format?.sampleRate ?? 0, channelCount: format?.channelCount ?? 0
+            )
+        }
+    }
+
     /// Queues one-shot device readings, consumed in order before the steady value.
     func queueFormatReadings(_ formats: [AudioFormatDescriptor?]) {
         state.withLock { $0.formatQueue.append(contentsOf: formats) }
@@ -216,11 +227,17 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         let binding: RemoteTapBinding
     }
 
+    struct MicBind: Sendable, Equatable {
+        let device: MicrophoneDeviceDescription
+        let reason: String
+    }
+
     private struct State {
         var formatChanges: [FormatChange] = []
         var restarts: [Restart] = []
         var healthChanges: [HealthChange] = []
         var remoteBinds: [RemoteBind] = []
+        var micBinds: [MicBind] = []
         var failures: [CaptureError] = []
     }
 
@@ -230,6 +247,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     var restarts: [Restart] { state.withLock { $0.restarts } }
     var healthChanges: [HealthChange] { state.withLock { $0.healthChanges } }
     var remoteBinds: [RemoteBind] { state.withLock { $0.remoteBinds } }
+    var micBinds: [MicBind] { state.withLock { $0.micBinds } }
     var failures: [CaptureError] { state.withLock { $0.failures } }
 
     func captureWillChangeFormat(
@@ -260,6 +278,10 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
                 binding: binding
             ))
         }
+    }
+
+    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason) {
+        state.withLock { $0.micBinds.append(MicBind(device: device, reason: reason.label)) }
     }
 
     func captureDidFail(track: CaptureTrack, error: CaptureError) {

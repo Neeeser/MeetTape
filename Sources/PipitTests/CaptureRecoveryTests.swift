@@ -993,6 +993,53 @@ enum CaptureRecoveryTests {
                 )
             },
 
+            test("every microphone build records the device it opened") { expect in
+                // The engine's input node runs on a per-process aggregate
+                // rather than on a microphone, so which device a track came
+                // from was never written down. A track that reads 30 dB below
+                // the rest of the meeting is answerable only against the device
+                // it was captured on.
+                let engine = FakeMicrophoneEngine()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = MicrophoneRecoveryCoordinator(
+                    controller: engine, clock: clock, delegate: delegate
+                )
+                engine.setSteadyFormat(AudioFormatDescriptor(sampleRate: 48_000, channelCount: 3))
+                engine.setDeviceUID("BuiltInMicrophoneDevice")
+                coordinator.start()
+
+                expect.equal(delegate.micBinds.count, 1)
+                expect.equal(delegate.micBinds.first?.reason, "session_start")
+                expect.equal(
+                    delegate.micBinds.first?.device,
+                    MicrophoneDeviceDescription(
+                        uid: "BuiltInMicrophoneDevice", name: "Fake input",
+                        sampleRate: 48_000, channelCount: 3
+                    )
+                )
+
+                // And again on the rebuild that follows a device swap, so the
+                // manifest carries the whole history rather than the first
+                // device of the meeting.
+                engine.setDeviceUID("BluetoothHeadsetDevice")
+                engine.setSteadyFormat(AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1))
+                coordinator.noteConfigurationChange()
+                clock.advance(0.5)
+                coordinator.tick()
+
+                expect.equal(delegate.micBinds.count, 2)
+                expect.equal(delegate.micBinds.last?.device.uid, "BluetoothHeadsetDevice")
+                expect.equal(delegate.micBinds.last?.device.channelCount, 1)
+
+                // A build that throws installed no engine, so it names no device.
+                engine.failNextBuild(with: .microphoneEngineStartFailed(status: -1))
+                coordinator.noteConfigurationChange()
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(delegate.micBinds.count, 2, "a failed build binds no device")
+            },
+
             test("audio restores trust in what the hardware says") { expect in
                 // The budget for clearing a backoff on a hardware signal is
                 // spent by signals that led nowhere. A working engine is what

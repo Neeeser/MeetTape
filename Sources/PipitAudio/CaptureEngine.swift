@@ -772,6 +772,18 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         }
     }
 
+    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason) {
+        let engine = target
+        queue.async {
+            engine?.recordManifest(
+                .micBind(.init(
+                    deviceUID: device.uid, deviceName: device.name, sampleRate: device.sampleRate,
+                    channelCount: device.channelCount, reason: reason.label
+                ))
+            )
+        }
+    }
+
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?) {
         let engine = target
         queue.async {

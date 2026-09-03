@@ -1,6 +1,25 @@
 import Foundation
 import Synchronization
 
+/// The input device an engine was built on, as CoreAudio describes it.
+///
+/// The UID is the identity; the name, rate and channel count are what a person
+/// reading the manifest afterwards needs to tell a one-channel built-in
+/// microphone from a nine-channel aggregate.
+public struct MicrophoneDeviceDescription: Sendable, Equatable {
+    public let uid: String
+    public let name: String
+    public let sampleRate: Double
+    public let channelCount: Int
+
+    public init(uid: String, name: String, sampleRate: Double, channelCount: Int) {
+        self.uid = uid
+        self.name = name
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+    }
+}
+
 /// The AVAudioEngine operations the recovery coordinator needs. Implemented for
 /// real in PipitAudio and by a fake in the regression tests, so the tests
 /// exercise the shipping algorithm rather than a copy of it.
@@ -15,6 +34,10 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     /// format is still one; a format is not an identity. Nil where the system
     /// cannot say, in which case nothing is inferred from it.
     func currentInputDeviceUID() -> String?
+    /// The same device, described in full, for the manifest. Nil where the
+    /// system cannot name it, which is the case the UID reader also returns nil
+    /// for.
+    func currentInputDevice() -> MicrophoneDeviceDescription?
     /// Removes the tap and stops the engine.
     func teardown()
     /// Builds a new engine, installs the tap and starts it, returning the format
@@ -39,6 +62,9 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     func captureDidBindRemote(
         targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
+    /// Which input device the microphone engine was opened on, reported after
+    /// every build that installed one.
+    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason)
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)
 }
@@ -522,6 +548,9 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             let installed = try controller.buildAndStart(preferred: format)
             // Read after the build, so it names the device the engine is on.
             let deviceUID = controller.currentInputDeviceUID()
+            if let device = controller.currentInputDevice() {
+                delegate.captureDidBindMicrophone(device: device, reason: reason)
+            }
             if installed != previous {
                 delegate.captureWillChangeFormat(
                     track: .mic, from: previous, to: installed, reason: reason.label

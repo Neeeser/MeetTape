@@ -55,6 +55,10 @@ enum ManifestTests {
                         streamCount: 2,
                         tapStreamIndex: 1
                     )),
+                    .micBind(.init(
+                        deviceUID: "BuiltInMicrophoneDevice", deviceName: "MacBook Pro Microphone",
+                        sampleRate: 48_000, channelCount: 3, reason: "session_start"
+                    )),
                     .sourceHealth(.init(track: .remote, state: .idleButBound, detail: nil)),
                     .preRollFlushed(.init(track: .mic, frameCount: 720_000, seconds: 15, earliestHostTime: 1.0)),
                     .marker(.init(label: "user note")),

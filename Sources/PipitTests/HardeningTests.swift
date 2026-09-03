@@ -20,6 +20,12 @@ enum HardeningTests {
 
         func currentInputFormat() -> AudioFormatDescriptor? { format }
         func currentInputDeviceUID() -> String? { "emitting" }
+        func currentInputDevice() -> MicrophoneDeviceDescription? {
+            MicrophoneDeviceDescription(
+                uid: "emitting", name: "Emitting input",
+                sampleRate: format.sampleRate, channelCount: format.channelCount
+            )
+        }
         func teardown() {}
         @discardableResult
         func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor { format }

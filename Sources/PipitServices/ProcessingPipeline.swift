@@ -1484,6 +1484,15 @@ public actor ProcessingPipeline {
         store: MeetingStore, metadata: MeetingMetadata,
         diarization: RawDiarization, into speakers: inout SpeakerMap
     ) {
+        // Before the guard below, because a name this build refuses has to go
+        // whether or not the record it came from still reads. Applying sensor
+        // names only ever adds, so a stale one stays until it is taken out.
+        let dropped = speakers.dropIconNamedSensorEntries()
+        if dropped > 0 {
+            Log.processing.info(
+                "sensor names refused dropped=\(dropped, privacy: .public)"
+            )
+        }
         guard let marked = sensorRecord(store: store, metadata: metadata) else { return }
         let people = SensorAttribution.speakerEntries(sensors: marked)
         for entry in people {

@@ -819,6 +819,25 @@ enum SensorAttributionTests {
                 )
             },
 
+            test("a one-word icon name is refused too") { expect in
+                // Not every ligature has an underscore. `devices` is in the
+                // extension's own list, so it is known to render inside these
+                // tiles, and the snake_case test alone lets it through: a
+                // recording made before the reader was fixed would keep a
+                // speaker called `devices` on every rebuild.
+                let raw = sensors(
+                    participants: [
+                        participant("U1", "devices"),
+                        participant("U2", "keep"),
+                        participant("U3", "Ada"),
+                    ],
+                    turns: [("U1", 0, 30), ("U2", 30, 60), ("U3", 60, 90)]
+                )
+                let entries = SensorAttribution.speakerEntries(sensors: raw)
+                expect.equal(entries.count, 1)
+                expect.equal(entries.first?.assignment.displayName, "Ada")
+            },
+
             test("a name that merely contains an underscore still names its voice") { expect in
                 // The test is the whole name, not a run inside it. Cutting on a
                 // pattern anywhere in the string is what once took

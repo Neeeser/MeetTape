@@ -50,7 +50,17 @@ public struct SensorParticipant: Codable, Sendable, Equatable, Identifiable {
         return trimmed
     }
 
+    /// The icon names that carry no underscore, so the shape test below cannot
+    /// see them. Taken from the ligatures the extension already lists, which is
+    /// the evidence they render inside these tiles, plus `keep`, the filled pin
+    /// that sits beside the `keep_outline` this was all found through.
+    ///
+    /// Matched whole and lower-case only, so a person called `Devices` keeps
+    /// their name.
+    static let iconWords: Set<String> = ["devices", "keep", "visibility", "mic"]
+
     static func isIconName(_ name: String) -> Bool {
+        if SensorParticipant.iconWords.contains(name) { return true }
         guard name.contains("_") else { return false }
         var previousWasSeparator = true
         for character in name.unicodeScalars {

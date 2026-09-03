@@ -2444,6 +2444,15 @@ public actor ProcessingPipeline {
         }
         let raw = try found.store.readRawTranscriptForAssembly()
         guard !raw.chunks.isEmpty else { return }
+        // Here as well as in `applySensorNames`, because this is the cheap
+        // button and the one a person reaches for. Re-analysing also sheds
+        // these, but it re-clusters the whole recording for minutes to do it,
+        // and a name read off the page needs neither the audio nor the
+        // diarizer to be taken back.
+        var speakers = try found.store.readSpeakerMap()
+        if speakers.dropIconNamedSensorEntries() > 0 {
+            try found.store.writeSpeakerMap(speakers)
+        }
         // The diarization has to come with the words. Without it a locally
         // processed meeting re-assembles with every speaker collapsed into one
         // cluster, and every name in the speaker map stops matching.

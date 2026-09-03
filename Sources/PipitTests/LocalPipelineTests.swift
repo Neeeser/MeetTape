@@ -788,6 +788,67 @@ enum LocalPipelineTests {
                 expect.isTrue(markdown.contains("Chris"), "the name the user typed still renders")
             },
 
+            test("rebuilding a transcript sheds a stored icon name") { expect in
+                // Re-analysing sheds these too, but it re-clusters the whole
+                // recording for minutes to do it. Rebuild is the cheap button
+                // next to it, and a name read off a web page needs neither the
+                // audio nor the diarizer to be taken back.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: StubLocalTranscriber(segments: [
+                        RawTranscriptSegment(
+                            start: 0, end: 5, text: "we ship friday", speaker: nil,
+                            words: [
+                                RawTranscriptWord(start: 0.0, end: 0.3, text: " we"),
+                                RawTranscriptWord(start: 0.4, end: 0.8, text: " ship"),
+                                RawTranscriptWord(start: 0.9, end: 1.4, text: " friday"),
+                            ]
+                        ),
+                    ]),
+                    diarizer: StubLocalDiarizer(
+                        intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                        chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 2)])
+                    ),
+                    speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                // What a build with the stale reader left on disk.
+                let before = try expect.unwrap(try meeting.store.readCanonicalTranscript())
+                let key = try expect.unwrap(
+                    before.utterances.first { $0.track == .remote }?.speakerKey
+                )
+                var map = try meeting.store.readSpeakerMap()
+                map.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: "keep_outline", origin: .sensor,
+                        provenance: SpeakerProvenance(source: .sensor)
+                    ),
+                    for: key
+                )
+                try meeting.store.writeSpeakerMap(map)
+                expect.equal(
+                    try meeting.store.readSpeakerMap().displayName(for: key), "keep_outline"
+                )
+
+                try await pipeline.rebuildTranscript(meetingID: meeting.metadata.id)
+
+                expect.isNil(try meeting.store.readSpeakerMap().displayName(for: key))
+                let markdown = try String(
+                    contentsOf: meeting.store.layout.transcriptMarkdown, encoding: .utf8
+                )
+                expect.isFalse(markdown.contains("keep_outline"))
+            },
+
             test("a local run leaves no voice vectors in the meeting folder") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

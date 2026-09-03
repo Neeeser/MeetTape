@@ -3251,15 +3251,25 @@ public actor ProcessingPipeline {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let store = await service.speakerStore
-        // Before everything, including `existing`: the account is a statement
-        // about who this is, and a voice match is a guess about it.
+        // Before the voice match, because the account is a statement about who
+        // this is where a voice match is a guess about it. After the name,
+        // because the person typing it is correcting something, and a correction
+        // is the one thing nothing else may overrule.
+        //
+        // The bound account only answers where the typed name does not name
+        // somebody else. A diarizer that runs two people together, or a sensor
+        // turn that sticks, gives a cluster somebody else's account; taking the
+        // account regardless returned the wrong person, enrolled this cluster's
+        // audio into their profile, and made the typed name an alias of them
+        // for good. `.human` outranks everything and is never overwritten.
         if let account,
-           let bound = try await store.identity(handle: account.handle, provider: account.provider) {
-            // The name they were given here is worth keeping as something to
-            // find them by, but it does not rename them.
-            if bound.resolvedName.caseInsensitiveCompare(trimmed) != .orderedSame {
-                try await store.addAlias(trimmed, to: bound.id)
-            }
+           try await person(named: trimmed) == nil,
+           let bound = try await store.identity(handle: account.handle, provider: account.provider),
+           bound.resolvedName.isEmpty
+               || bound.resolvedName.caseInsensitiveCompare(trimmed) == .orderedSame
+               || bound.aliases.contains(where: {
+                   $0.caseInsensitiveCompare(trimmed) == .orderedSame
+               }) {
             return bound.id
         }
         if let existing {

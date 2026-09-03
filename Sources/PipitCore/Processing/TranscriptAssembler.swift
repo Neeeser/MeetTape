@@ -31,6 +31,19 @@ public enum TextSimilarity {
         return Double(2 * matches) / Double(leftPairs.count + rightPairs.count)
     }
 
+    /// One token per word, so both sides of a comparison split the same way.
+    ///
+    /// `normalise` splits on every non-alphanumeric, so it turns one spoken word
+    /// into several: `don't` becomes `don` and `t`. Comparing a per-word list
+    /// against that flat list can never match a contraction, and a contraction
+    /// every few words is enough to keep every run below the length a match
+    /// needs.
+    public static func wordTokens(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isWhitespace)
+            .map { normalise(String($0)).joined() }
+            .filter { !$0.isEmpty }
+    }
+
     private static func bigrams(_ words: [String]) -> [String] {
         guard words.count >= 2 else { return words }
         return (0..<(words.count - 1)).map { "\(words[$0]) \(words[$0 + 1])" }
@@ -321,7 +334,15 @@ public struct TranscriptAssembler: Sendable {
         // segment is one pass over one stretch of speech, so its own first
         // named speaker is the answer, and a segment naming nobody stays
         // unattributed rather than borrowing from the segment before it.
-        var currentSpeaker: String? = clusters.compactMap { $0 }.first
+        var currentSpeaker: String? = words.indices.first { clusters[$0] != nil }
+            .flatMap { first in
+                // Only across a diarizer's onset lag, not across the segment.
+                // The measured lag is 3.74 s; taking the first named speaker
+                // anywhere put a name from the tail of a thirty-second stretch
+                // onto words spoken at its head.
+                words[first].start - words[0].start <= TranscriptAssembler.onsetLagSeconds
+                    ? clusters[first] : nil
+            }
         var currentWords: [RawTranscriptWord] = []
 
         func flush() {
@@ -720,12 +741,6 @@ public struct TranscriptAssembler: Sendable {
         for original in chunk.segments.sorted(by: { $0.start < $1.start }) {
             let whole = original.text.trimmingCharacters(in: .whitespaces)
             guard !whole.isEmpty else { continue }
-            if isEcho(
-                whole,
-                start: chunk.timelineOffset + original.start,
-                end: chunk.timelineOffset + original.end,
-                reference: echoReference
-            ) { continue }
             // Whole-segment judgements above, word-level below. A recogniser
             // segment runs to about thirty seconds and routinely holds both the
             // far end leaking through the speakers and the user's own answer to
@@ -739,6 +754,18 @@ public struct TranscriptAssembler: Sendable {
             let cut = trimmingEcho(
                 original, chunkOffset: chunk.timelineOffset, reference: echoReference
             )
+            // After the cut, not before it. Asking whether the whole stretch
+            // resembles the far end drops a stretch that is mostly leakage with
+            // the user's own answer inside it, answer and all. It is still the
+            // only thing that catches a stretch too short to cut, because a run
+            // has to be three words long before it counts as a match.
+            if cut.runs.count == 1, cut.runs[0].start == original.start,
+               cut.runs[0].end == original.end, isEcho(
+                   whole,
+                   start: chunk.timelineOffset + original.start,
+                   end: chunk.timelineOffset + original.end,
+                   reference: echoReference
+               ) { continue }
             for segment in cut.runs {
                 let text = segment.text.trimmingCharacters(in: .whitespaces)
                 guard !text.isEmpty else { continue }
@@ -800,6 +827,13 @@ public struct TranscriptAssembler: Sendable {
     /// tracks and matching on them alone cut real speech apart.
     private static let echoRunWords = 3
 
+    /// How late the diarizer's first interval may be and still be read as its
+    /// onset running behind the words rather than a different person speaking.
+    ///
+    /// Measured at 3.74 s on a Meet recording of 3 September 2026, where a turn
+    /// opened at 170.56 and its first interval began at 174.30.
+    private static let onsetLagSeconds = 5.0
+
     /// How close two runs of leakage have to be for what lies between them to be
     /// leakage as well.
     ///
@@ -850,12 +884,12 @@ public struct TranscriptAssembler: Sendable {
         for utterance in reference {
             if utterance.start > end + window { break }
             guard utterance.end > start - window else { continue }
-            let tokens = TextSimilarity.normalise(utterance.text)
+            let tokens = TextSimilarity.wordTokens(utterance.text)
             if !tokens.isEmpty { references.append(tokens) }
         }
         guard !references.isEmpty else { return ([segment], false) }
 
-        let tokens = words.map { TextSimilarity.normalise($0.text).joined() }
+        let tokens = words.map { TextSimilarity.wordTokens($0.text).joined() }
         var echoed = [Bool](repeating: false, count: words.count)
         for index in tokens.indices where !tokens[index].isEmpty {
             var longest = 0
@@ -878,10 +912,26 @@ public struct TranscriptAssembler: Sendable {
 
         // Close the recogniser's disagreements before measuring what survives.
         let marked = echoed.indices.filter { echoed[$0] }
-        for (left, right) in zip(marked, marked.dropFirst())
-        where words[right].start - words[left].end < TranscriptAssembler.echoBridgeSeconds {
+        for (left, right) in zip(marked, marked.dropFirst()) {
+            // The hole has to be short in time and hold too little to be a turn.
+            // Measuring time alone bridged over a six-word answer sitting
+            // between two leaked runs and deleted it.
+            guard words[right].start - words[left].end
+                < TranscriptAssembler.echoBridgeSeconds else { continue }
+            guard right - left - 1 < TranscriptAssembler.keptRunWords else { continue }
             for between in left..<right { echoed[between] = true }
         }
+
+        // Nothing matched, so there is nothing to cut and no run to measure.
+        // The length rule below only exists to throw away fragments stranded
+        // between two stretches of leakage, and applying it here deleted every
+        // local line under five words in any two-track meeting, which is the
+        // opposite of what this is for.
+        //
+        // Still compared, though. A far-end transcript was available and this
+        // segment was checked against it and found absent from it, which is
+        // exactly the evidence the echo clause is suppressed on.
+        guard echoed.contains(true) else { return ([segment], true) }
 
         var runs: [RawTranscriptSegment] = []
         var index = 0

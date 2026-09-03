@@ -1197,7 +1197,7 @@ enum CaptureRecoveryTests {
                 policy.noteBound(to: idle, at: now)
                 now += 1.0
                 _ = policy.evaluate(targets: idle, at: now)
-                policy.noteBufferArrived(at: now)
+                policy.noteBufferArrived(at: now, peak: 0.5)
 
                 // The application starts playing meeting audio and our callbacks die.
                 var decision = RemoteRecoveryPolicy.Decision.none
@@ -1218,7 +1218,7 @@ enum CaptureRecoveryTests {
                 var now = 100.0
                 policy.start()
                 policy.noteBound(to: [makeTarget(pid: 63_100, producing: true)], at: now)
-                policy.noteBufferArrived(at: now)
+                policy.noteBufferArrived(at: now, peak: 0.5)
 
                 // Firefox quits. Source absence, reported as degraded, polling continues.
                 now += 0.5
@@ -1233,7 +1233,7 @@ enum CaptureRecoveryTests {
                     return
                 }
                 policy.noteBound(to: replacement, at: now)
-                policy.noteBufferArrived(at: now)
+                policy.noteBufferArrived(at: now, peak: 0.5)
                 expect.equal(policy.health, .healthy)
                 expect.equal(policy.boundProcessIDs, [63_373])
             },
@@ -1285,7 +1285,7 @@ enum CaptureRecoveryTests {
                 let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
                 tap.setTargets([makeTarget(pid: 63_100, producing: true)])
                 coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
-                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
                 // On the poll rather than on the buffer. A buffer arriving says
                 // the aggregate device is running, which it does whether or not
                 // the tap has anything, so health is settled where the target's
@@ -1303,7 +1303,7 @@ enum CaptureRecoveryTests {
                 clock.advance(0.5)
                 coordinator.tick()
                 expect.equal(coordinator.boundProcessIDs, [63_373])
-                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
                 clock.advance(0.5)
                 coordinator.tick()
                 expect.equal(coordinator.health, .healthy)
@@ -1362,7 +1362,7 @@ enum CaptureRecoveryTests {
                 coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
 
                 for _ in 0..<20 {
-                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds)
+                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0)
                     clock.advance(0.5)
                     coordinator.tick()
                 }
@@ -1375,6 +1375,123 @@ enum CaptureRecoveryTests {
                     delegate.healthChanges.count <= 2,
                     "one settled state, not a transition per buffer"
                 )
+            },
+
+            test("a tap delivering silence under a producing target is rebound once") { expect in
+                // Three recordings on this machine hold 2 to 41 minutes of
+                // exactly-zero far-end audio while the manifest shows the bound
+                // Slack helper reporting output the whole time and health
+                // healthy. Arrival was the only thing anything read.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                deliverSilence(to: coordinator, clock: clock, seconds: 25)
+
+                expect.equal(tap.bindCount, 2, "one rebind, not one per poll")
+                expect.equal(
+                    delegate.restarts.map(\.reason), ["silent_while_producing"],
+                    "the rebind is recorded as what caused it"
+                )
+                expect.isFalse(
+                    coordinator.health.isLosingAudio,
+                    "a rebind is the first answer, not a verdict on the recording"
+                )
+                expect.equal(coordinator.warnings(), [], "nothing to tell the user about yet")
+            },
+
+            test("silence that survives the rebind is degraded and warned about") { expect in
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                deliverSilence(to: coordinator, clock: clock, seconds: 45)
+
+                expect.equal(coordinator.health, .degraded)
+                expect.equal(tap.bindCount, 2, "a rebind that changed nothing is not repeated")
+                guard case .remoteSilentWhileProducing(let seconds)? = coordinator.warnings().first else {
+                    expect.fail("expected a silence warning, got \(coordinator.warnings())")
+                    return
+                }
+                expect.isTrue(seconds >= 40, "the warning reports the whole run, got \(seconds)")
+                expect.equal(
+                    delegate.healthChanges.last?.state, .degraded,
+                    "the manifest carries the transition, not just the menu bar"
+                )
+            },
+
+            test("one non-zero buffer ends the silence and the warning with it") { expect in
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+                deliverSilence(to: coordinator, clock: clock, seconds: 45)
+                expect.equal(coordinator.health, .degraded)
+
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.02)
+                clock.advance(0.5)
+                coordinator.tick()
+
+                expect.equal(coordinator.warnings(), [])
+                expect.equal(coordinator.health, .healthy)
+                expect.equal(tap.bindCount, 2, "audio arriving is not a reason to rebind")
+            },
+
+            test("the silence warning waits for the poll that declares it") { expect in
+                // The degraded state and the warning are one decision. Deriving
+                // the warning from elapsed time instead let it appear on a poll
+                // that returned early, which is every poll between a rebind and
+                // the next buffer, and the user was told about a state nothing
+                // had entered.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let coordinator = RemoteTapCoordinator(
+                    controller: tap, clock: clock, delegate: RecordingCaptureDelegate()
+                )
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+                deliverSilence(to: coordinator, clock: clock, seconds: 25)
+
+                // The tap stops calling back at all, so every poll from here
+                // leaves through the callback checks.
+                for _ in 0..<60 {
+                    clock.advance(0.5)
+                    coordinator.tick()
+                    expect.isFalse(
+                        coordinator.warnings().contains {
+                            $0.dedupKey == "remote_silent_while_producing"
+                        },
+                        "warned without ever calling the tap degraded"
+                    )
+                }
+                expect.notEqual(coordinator.health, .degraded)
+            },
+
+            test("a target playing nothing is allowed to deliver silence forever") { expect in
+                // The aggregate device is clocked by its output sub-device, so
+                // it hands over digital zero at full rate whenever the tapped
+                // application is quiet. That is the normal state and it must
+                // never rebind or warn.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: false)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                deliverSilence(to: coordinator, clock: clock, seconds: 60)
+
+                expect.equal(coordinator.health, .idleButBound)
+                expect.equal(tap.bindCount, 1)
+                expect.equal(coordinator.warnings(), [])
             },
 
             test("a silent remote source never emits a warning") { expect in
@@ -1394,6 +1511,19 @@ enum CaptureRecoveryTests {
                 expect.equal(tap.bindCount, 1, "a silent app must not be rebound")
             },
         ])
+    }
+
+    /// Runs the tap at 10 buffers a second and the poll at its own 0.5 s, with
+    /// every buffer exactly zero. The recordings that lost their far side had
+    /// this shape. Buffers arrived on time and carried nothing.
+    private static func deliverSilence(
+        to coordinator: RemoteTapCoordinator, clock: ManualClock, seconds: Double
+    ) {
+        for step in 1...Int(seconds * 10) {
+            coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0)
+            clock.advance(0.1)
+            if step % 5 == 0 { coordinator.tick() }
+        }
     }
 
     static var all: [Suite] {

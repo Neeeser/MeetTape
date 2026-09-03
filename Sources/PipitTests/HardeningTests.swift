@@ -66,11 +66,15 @@ enum HardeningTests {
             return RemoteTapBinding(format: format, streamCount: 2, tapStreamIndex: 1)
         }
 
-        func emit(seconds: Double, hostTime: Double) {
+        /// `amplitude: 0` is the digital zero a tap reads when it is pointed at
+        /// the wrong stream of the aggregate device.
+        func emit(seconds: Double, hostTime: Double, amplitude: Float = 0.5) {
             lock.lock()
             let handler = sinkHandler
             lock.unlock()
-            let buffer = AudioTests.makeTone(seconds: seconds, sampleRate: format.sampleRate)
+            let buffer = AudioTests.makeTone(
+                seconds: seconds, sampleRate: format.sampleRate, amplitude: amplitude
+            )
             handler?(AudioBufferPacket(buffer: buffer, hostTime: hostTime))
         }
     }
@@ -91,6 +95,47 @@ enum HardeningTests {
             warnings.append(warning)
             lock.unlock()
         }
+    }
+
+    /// Records half a second of tap audio at one amplitude and returns what the
+    /// engine told its delegate.
+    ///
+    /// The thresholds are wall clock, because the engine polls on a real timer
+    /// rather than an injected one, so they are scaled down to keep the test
+    /// under a second.
+    private static func recordTapAudio(amplitude: Float) async throws -> SilentDelegate {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = MeetingLayout(root: root)
+        try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+        let tap = LockedBox<EmittingTap?>(nil)
+        let delegate = SilentDelegate()
+        let engine = CaptureEngine(
+            thresholds: CaptureThresholds(remoteSilenceTimeout: 0.1, pollInterval: 0.02),
+            segmentSeconds: 60,
+            makeMicrophone: { sink, _ in EmittingMicrophone(sink: sink) },
+            makeTap: { sink, _ in
+                let source = EmittingTap(sink: sink)
+                tap.withLock { $0 = source }
+                return source
+            },
+            delegate: delegate
+        )
+        await engine.arm(bundlePrefixes: ["com.example.app"], capturesRemote: true)
+        try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+        tap.withLock {
+            $0?.setTargets([makeTarget(pid: 42, bundle: "com.example.app", producing: true)])
+        }
+
+        // Real host times, because the poll measures the callback gap against
+        // the same mach clock the audio stack stamps buffers with.
+        for _ in 0..<25 {
+            tap.withLock { $0?.emit(seconds: 0.02, hostTime: HostTime.now, amplitude: amplitude) }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        _ = await engine.stop(reason: "test")
+        return delegate
     }
 
     static var captureSuite: Suite {
@@ -187,6 +232,32 @@ enum HardeningTests {
                 expect.isTrue(
                     delegate.warnings.contains { $0.dedupKey.contains("segment") },
                     "the user is told the recording could not be written: \(delegate.warnings)"
+                )
+            },
+
+            test("a tap handing over digital zero is reported to the user") { expect in
+                // The engine is the only thing that reads buffer content. A
+                // coordinator test can hand the policy any peak it likes, so
+                // this is where a peak read from the wrong pointers, or not read
+                // at all, shows up.
+                let delegate = try await recordTapAudio(amplitude: 0)
+
+                expect.isTrue(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "the user is told the far side may be missing: \(delegate.warnings)"
+                )
+                expect.isTrue(
+                    delegate.snapshots.contains { $0.remote.isLosingAudio },
+                    "a track of digital zero must not read as nominal in the menu bar"
+                )
+            },
+
+            test("audio the tap really carries raises nothing") { expect in
+                let delegate = try await recordTapAudio(amplitude: 0.5)
+
+                expect.isFalse(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "a tap carrying the meeting must not be called silent: \(delegate.warnings)"
                 )
             },
 

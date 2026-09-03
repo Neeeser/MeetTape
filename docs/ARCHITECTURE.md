@@ -70,8 +70,10 @@ Audio callbacks perform no file I/O.
 
 The microphone and process tap use different health policies. Missing microphone
 buffers indicate a failed input. A process tap may remain silent while its
-application produces no audio. Pipit rebuilds the tap only when the application
-reports output and callbacks stop arriving.
+application produces no audio. Pipit rebuilds the tap when the application
+reports output and callbacks stop arriving, and when the callbacks keep arriving
+carrying nothing but zero samples. Silence that survives that rebuild is
+reported to the user.
 
 Capture writes 30-second CAF segments and appends lifecycle records to
 `raw/manifest.jsonl`. Each segment records its own sample rate and frame count.

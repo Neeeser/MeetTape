@@ -38,6 +38,16 @@ public struct RemoteRecoveryPolicy: Sendable {
 
     private var lastBufferAt: Double?
     private var producingSince: Double?
+    /// When the run of exactly-zero buffers began. Only a buffer carrying a
+    /// non-zero sample ends it, so a rebind that changes nothing leaves it
+    /// running and the episode is measured end to end.
+    private var silentSince: Double?
+    /// When the tap was rebound because of that run.
+    private var silentRebindAt: Double?
+    /// Set by `evaluate` when it calls the tap degraded for that run. The
+    /// health state and the warning read this one flag, so a poll can never
+    /// warn the user about a run it has not yet called degraded.
+    private var silenceDeclared = false
 
     public init(thresholds: CaptureThresholds = .validated) {
         self.thresholds = thresholds
@@ -54,13 +64,25 @@ public struct RemoteRecoveryPolicy: Sendable {
         boundProcessIDs = []
         lastBufferAt = nil
         producingSince = nil
+        silentSince = nil
+        silentRebindAt = nil
+        silenceDeclared = false
     }
 
     /// Called once a tap has been created for `targets`.
     public mutating func noteBound(to targets: [RemoteAudioTarget], at now: Double) {
         isRunning = true
         bindCount += 1
-        boundProcessIDs = targets.map(\.processID).sorted()
+        let processIDs = targets.map(\.processID).sorted()
+        // Rebinding the same processes is the attempt to fix the silence run
+        // that is already under way, so it must not re-arm the wait for a
+        // second one. A different set of processes is a different source, and
+        // its silence is judged from its own bind.
+        if processIDs != boundProcessIDs {
+            silentRebindAt = nil
+            silenceDeclared = false
+        }
+        boundProcessIDs = processIDs
         lastBufferAt = nil
         // Restart the producing clock so the fault threshold is measured from this
         // bind, not from before it. Without this a target that keeps producing
@@ -73,9 +95,27 @@ public struct RemoteRecoveryPolicy: Sendable {
         health = .failed
     }
 
-    public mutating func noteBufferArrived(at now: Double) {
+    /// `peak` is the largest sample magnitude in the buffer, or nil when the
+    /// caller could not measure it. A buffer nobody read says nothing about
+    /// whether the tap carries audio, so it leaves the silence run alone.
+    public mutating func noteBufferArrived(at now: Double, peak: Float?) {
         lastBufferAt = now
         health = .healthy
+        guard let peak else { return }
+        if peak > 0 {
+            silentSince = nil
+            silentRebindAt = nil
+            silenceDeclared = false
+        } else if silentSince == nil {
+            silentSince = now
+        }
+    }
+
+    /// Seconds of unbroken silence, once `evaluate` has called the tap
+    /// degraded for it. Nil until then, which is the state the warning reports.
+    public func unrecoveredSilence(at now: Double) -> Double? {
+        guard silenceDeclared, let silentSince else { return nil }
+        return now - silentSince
     }
 
     public func gap(at now: Double) -> Double? {
@@ -133,6 +173,23 @@ public struct RemoteRecoveryPolicy: Sendable {
             // Producing only recently; not yet a fault.
             health = .recovering
             return .none
+        }
+
+        // Buffers are arriving and every one of them is digital zero while the
+        // target says it is playing. Rebinding is worth one try, because the
+        // tap may be reading the wrong stream of the aggregate. Silence that
+        // outlives the rebind is a recording losing its far side, and the user
+        // is the only one who can do anything about it.
+        if let silentSince, now - silentSince >= thresholds.remoteSilenceTimeout {
+            guard let silentRebindAt else {
+                self.silentRebindAt = now
+                return .bind(.silentWhileProducing)
+            }
+            if now - silentRebindAt >= thresholds.remoteSilenceTimeout {
+                silenceDeclared = true
+                health = .degraded
+                return .none
+            }
         }
         health = .healthy
         return .none

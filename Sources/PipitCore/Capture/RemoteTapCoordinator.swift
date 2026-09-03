@@ -106,9 +106,13 @@ public final class RemoteTapCoordinator: Sendable {
     /// buffer overwrote it milliseconds later, so a quiet stretch logged pairs
     /// of transitions 43 ms apart instead of one state. The tapped process's own
     /// output flag is the decidable signal, and now nothing outranks it.
-    public func noteBufferArrived(hostTime: Double) {
+    ///
+    /// `peak` is the largest sample magnitude in the buffer, or nil when the
+    /// caller could not measure it. Content is the one signal that separates a
+    /// tap carrying the meeting from a tap carrying digital zero at full rate.
+    public func noteBufferArrived(hostTime: Double, peak: Float?) {
         state.withLock { state in
-            state.policy.noteBufferArrived(at: hostTime)
+            state.policy.noteBufferArrived(at: hostTime, peak: peak)
             state.faultSince = nil
         }
     }
@@ -145,7 +149,7 @@ public final class RemoteTapCoordinator: Sendable {
         let decision = state.withLock { $0.policy.evaluate(targets: targets, at: now) }
         switch decision {
         case .none:
-            syncHealth()
+            syncHealth(at: now)
         case .bind(let reason):
             if case .producingWithoutCallbacks = reason {
                 state.withLock { state in
@@ -159,15 +163,26 @@ public final class RemoteTapCoordinator: Sendable {
     public func warnings(at now: Double? = nil) -> [CaptureWarning] {
         let instant = now ?? clock.monotonicSeconds
         return state.withLock { state in
-            guard let faultSince = state.faultSince else { return [] }
-            return [.remoteProducingWithoutCallbacks(seconds: instant - faultSince)]
+            var warnings: [CaptureWarning] = []
+            if let faultSince = state.faultSince {
+                warnings.append(.remoteProducingWithoutCallbacks(seconds: instant - faultSince))
+            }
+            if let silentFor = state.policy.unrecoveredSilence(at: instant) {
+                warnings.append(.remoteSilentWhileProducing(seconds: silentFor))
+            }
+            return warnings
         }
     }
 
-    private func syncHealth() {
-        let implied = state.withLock { $0.policy.health }
+    private func syncHealth(at now: Double) {
+        let (implied, silent) = state.withLock { state in
+            (state.policy.health, state.policy.unrecoveredSilence(at: now) != nil)
+        }
         guard implied != health else { return }
-        setHealth(implied, detail: nil)
+        let detail = implied == .degraded && silent
+            ? "tap delivers silence while target reports output"
+            : nil
+        setHealth(implied, detail: detail)
     }
 
     private func setHealth(_ new: CaptureHealthState, detail: String?) {

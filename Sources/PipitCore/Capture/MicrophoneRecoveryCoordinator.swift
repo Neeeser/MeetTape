@@ -582,6 +582,7 @@ public enum CaptureWarning: Sendable, Equatable {
     case microphoneUnrecovered(seconds: Double)
     case rebuildLoop(count: Int, windowSeconds: Double)
     case remoteProducingWithoutCallbacks(seconds: Double)
+    case remoteSilentWhileProducing(seconds: Double)
     case segmentWriteFailed(track: CaptureTrack)
     case permissionRevoked(track: CaptureTrack)
     case storageUnavailable(path: String)
@@ -593,6 +594,7 @@ public enum CaptureWarning: Sendable, Equatable {
         case .microphoneUnrecovered: "microphone_unrecovered"
         case .rebuildLoop: "rebuild_loop"
         case .remoteProducingWithoutCallbacks: "remote_without_callbacks"
+        case .remoteSilentWhileProducing: "remote_silent_while_producing"
         case .segmentWriteFailed(let track): "segment_write_failed_\(track.rawValue)"
         case .permissionRevoked(let track): "permission_revoked_\(track.rawValue)"
         case .storageUnavailable: "storage_unavailable"
@@ -607,6 +609,11 @@ public enum CaptureWarning: Sendable, Equatable {
             "The microphone keeps disconnecting. Audio may be incomplete."
         case .remoteProducingWithoutCallbacks:
             "The meeting application is playing audio that Pipit is not receiving. Reconnecting."
+        case .remoteSilentWhileProducing:
+            """
+            Pipit is receiving silence from the meeting app while it reports playing audio. \
+            The other side of this call may not be recorded.
+            """
         case .segmentWriteFailed:
             "Pipit could not write recorded audio to disk."
         case .permissionRevoked(let track):

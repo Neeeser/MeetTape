@@ -54,6 +54,10 @@ enum SpeechGateTests {
         )
     }
 
+    static func word(_ text: String, _ start: Double, _ end: Double) -> RawTranscriptWord {
+        RawTranscriptWord(start: start, end: end, text: text)
+    }
+
     static func chunk(_ segments: [(Double, Double, String)]) -> RawTranscriptChunk {
         RawTranscriptChunk(
             id: "mic_chunk_001", track: .mic, timelineOffset: 0, durationSeconds: 1149,
@@ -449,6 +453,98 @@ enum SpeechGateTests {
                     ["Hey, Brian, how's it going?", "I'll send a video in the slack later today"],
                     "only the two turns the user spoke"
                 )
+            },
+
+            test("bleed inside a turn is cut out and the turn is kept") { expect in
+                // Measured on a Meet recording on 3 September 2026, on
+                // speakers. The recogniser hands back the microphone in
+                // stretches of about thirty seconds, and one of them held seven
+                // seconds of the far end coming back out of the speakers
+                // followed by twenty-two seconds of the user answering.
+                //
+                // Judging the stretch whole keeps all of it, so the far end's
+                // words were rendered a second time under the user's name.
+                // Judging it whole the other way deletes the answer with the
+                // bleed: over that meeting, gating at segment size dropped 35
+                // of 54 stretches and 377 words the user really said.
+                let remote = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 6,
+                        text: "and to be clear you are building an entire model from scratch",
+                        speaker: nil,
+                        words: "and to be clear you are building an entire model from scratch"
+                            .split(separator: " ").enumerated().map {
+                                word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
+                            }
+                    )]
+                )
+                // The same words a beat later, then the user's own answer.
+                let bleed = "and to be clear you are building an entire model from scratch"
+                let spoken = "uh it is like a mix of both so i am not doing the pre training stage"
+                var words: [RawTranscriptWord] = []
+                for (index, token) in bleed.split(separator: " ").enumerated() {
+                    words.append(word(" \(token)", 0.7 + Double(index) * 0.5, 0.7 + Double(index) * 0.5 + 0.4))
+                }
+                for (index, token) in spoken.split(separator: " ").enumerated() {
+                    words.append(word(" \(token)", 8.0 + Double(index) * 0.5, 8.0 + Double(index) * 0.5 + 0.4))
+                }
+                let mic = RawTranscriptChunk(
+                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0.7, end: 16, text: "\(bleed) \(spoken)", speaker: nil, words: words
+                    )]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
+                    speech: nil, micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let local = transcript.utterances.filter { $0.track == .mic }
+                let text = local.map(\.text).joined(separator: " ")
+                expect.isTrue(
+                    text.contains("a mix of both"), "the user's own answer survives"
+                )
+                expect.isFalse(
+                    text.contains("entire model from scratch"),
+                    "the far end's words are not rendered a second time under the user's name"
+                )
+            },
+
+            test("a turn the far end never said is left whole") { expect in
+                // The cut only removes what the far end's own track already
+                // holds. A turn the user held on their own keeps every word,
+                // including the ordinary ones a loose match would catch.
+                let remote = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 3, text: "so what did you find", speaker: nil,
+                        words: "so what did you find".split(separator: " ").enumerated().map {
+                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
+                        }
+                    )]
+                )
+                let spoken = "the index rebuilt overnight and the numbers came back clean this morning"
+                let mic = RawTranscriptChunk(
+                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 4, end: 12, text: spoken, speaker: nil,
+                        words: spoken.split(separator: " ").enumerated().map {
+                            word(" \($0.element)", 4 + Double($0.offset) * 0.5, 4 + Double($0.offset) * 0.5 + 0.4)
+                        }
+                    )]
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
+                    speech: nil, micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let text = transcript.utterances.filter { $0.track == .mic }
+                    .map(\.text).joined(separator: " ")
+                expect.isTrue(text.contains("rebuilt overnight"))
+                expect.isTrue(text.contains("came back clean this morning"), "nothing is trimmed")
             },
 
             test("a meeting with no evidence assembles exactly as it did before") { expect in

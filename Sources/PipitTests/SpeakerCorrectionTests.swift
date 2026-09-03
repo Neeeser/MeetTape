@@ -437,6 +437,60 @@ enum SpeakerCorrectionTests {
                 )
             },
 
+            test("one account names one person on every key it holds") { expect in
+                // The people bank is the truth and a platform handle points at
+                // it. Measured on a Slack huddle recorded on 3 September 2026,
+                // the pointer reached exactly one key: `sensor_U0619AZFDT6`
+                // read "Chris L" from the bank while four cluster keys carrying
+                // the same account read Slack's roster string "Chris Latimer"
+                // with no identity at all. One person, two names, one meeting.
+                //
+                // The keys with no identity are the worse half. `refreshName`
+                // follows the identity, so renaming that person in People never
+                // reached them, and the picker could not offer the person the
+                // cluster already belonged to.
+                var map = SpeakerMap()
+                let roster = SpeakerAssignment(
+                    displayName: "Chris Latimer", origin: .sensor,
+                    participantID: "U0619AZFDT6",
+                    provenance: SpeakerProvenance(source: .sensor)
+                )
+                map.applySuggestion(roster, for: "remote-001_speaker_02")
+                map.applySuggestion(roster, for: "remote-002_speaker_03")
+                map.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: "Brian McNamara", origin: .sensor,
+                        participantID: "U0B17GB9VPA"
+                    ),
+                    for: "remote-001_speaker_01"
+                )
+                map.assign("Someone else", to: "remote-001_speaker_09", participantID: "U0619AZFDT6")
+
+                let bound = SpeakerAssignment(
+                    displayName: "Chris L", origin: .sensor,
+                    participantID: "U0619AZFDT6", identityID: IdentityID(2),
+                    provenance: SpeakerProvenance(
+                        source: .sensor, identityID: IdentityID(2), humanVerified: true
+                    )
+                )
+                map.applySuggestion(bound, toParticipant: "U0619AZFDT6")
+
+                expect.equal(map.displayName(for: "remote-001_speaker_02"), "Chris L")
+                expect.equal(map.displayName(for: "remote-002_speaker_03"), "Chris L")
+                expect.equal(
+                    map.entries["remote-002_speaker_03"]?.identityID, IdentityID(2),
+                    "and the key now knows who it belongs to, so a rename reaches it"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_01"), "Brian McNamara",
+                    "another account is untouched"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_09"), "Someone else",
+                    "and a name a person typed is still theirs"
+                )
+            },
+
             test("a stored icon ligature is dropped when the meeting is rebuilt") { expect in
                 // The map on disk still holds what the extension sent before it
                 // was fixed, and `sensors.raw.json` is immutable, so nothing

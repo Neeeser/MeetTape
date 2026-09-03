@@ -464,6 +464,44 @@ enum AudioTests {
                 expect.isTrue(selection.usedFallback, "the fallback is reported to the caller")
             },
 
+            test("a non-interleaved list is not reported as the fallback") { expect in
+                // One buffer per channel is what a non-interleaved source
+                // delivers, and the tap index counts streams, so it never
+                // addresses those buffers. Reporting the miss made a device
+                // where nothing is wrong log that the index was unusable on
+                // every bind.
+                let frames = 128
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var left = [Float](repeating: 0.3, count: frames)
+                var right = [Float](repeating: 0.6, count: frames)
+
+                let selection: TapStreamSelection = left.withUnsafeMutableBufferPointer { one in
+                    right.withUnsafeMutableBufferPointer { two in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 1,
+                            mDataByteSize: UInt32(frames * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(one.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 1,
+                            mDataByteSize: UInt32(frames * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(two.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 1
+                        )
+                    }
+                }
+                guard let buffer = selection.buffer else { return expect.fail("no buffer produced") }
+                expect.close(Double(buffer.floatChannelData![1][0]), 0.6, tolerance: 0.001)
+                expect.isFalse(
+                    selection.usedFallback,
+                    "an index that cannot address per-channel buffers is not a fallback"
+                )
+            },
+
             test("a single interleaved stream keeps its frame count") { expect in
                 let frames = 256
                 let channels = 2

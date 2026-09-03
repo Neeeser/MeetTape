@@ -211,6 +211,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         let processIDs: [Int32]
         let producing: [Bool]
         let count: Int
+        let binding: RemoteTapBinding
     }
 
     private struct State {
@@ -251,7 +252,8 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
                 reason: reason.label,
                 processIDs: targets.map(\.processID),
                 producing: targets.map(\.isRunningOutput),
-                count: bindCount
+                count: bindCount,
+                binding: binding
             ))
         }
     }

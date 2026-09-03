@@ -1328,6 +1328,14 @@ enum CaptureRecoveryTests {
                 expect.equal(delegate.remoteBinds.first?.reason, "session_start")
                 expect.equal(delegate.remoteBinds.first?.processIDs, [79_590])
                 expect.equal(delegate.remoteBinds.first?.producing, [true])
+                expect.equal(
+                    delegate.remoteBinds.first?.binding,
+                    RemoteTapBinding(
+                        format: AudioFormatDescriptor(sampleRate: 48_000, channelCount: 2),
+                        streamCount: 2, tapStreamIndex: 1
+                    ),
+                    "the binding the tap reported reaches the manifest, not a rebuilt one"
+                )
 
                 // And again when the process moves, so a recording carries the
                 // whole history rather than the first answer.

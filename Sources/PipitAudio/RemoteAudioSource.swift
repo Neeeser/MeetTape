@@ -141,8 +141,10 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
             throw CaptureError.aggregateDeviceCreationFailed(status: aggregateStatus)
         }
 
-        // The aggregate lists its sub-devices' input streams first and the tap's
-        // last, so the tap's buffer is at the final index.
+        // The tap's buffer is read from the final index, inferred from one Mac
+        // delivering [8ch, 2ch] for a stereo tap and not from anything Apple
+        // documents. `makeBuffer` matches on channel count when the index does
+        // not hold, and logs that it did.
         let streamCount = CoreAudioSystem.inputStreamCount(of: aggregateID)
         let tapStreamIndex: Int? = if let streamCount, streamCount >= 1 { streamCount - 1 } else { nil }
         Log.capture.info(

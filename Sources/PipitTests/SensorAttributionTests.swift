@@ -766,6 +766,32 @@ enum SensorAttributionTests {
                 expect.equal(entries.first?.assignment.origin, .sensor)
             },
 
+            test("a participant the client never named claims no words") { expect in
+                // `speakerEntries` already refuses to make a speaker out of a
+                // participant with no name, so words keyed to one render as
+                // `Participant` while the diarizer's own cluster for the same
+                // audio, which a voice profile can name, is thrown away. One
+                // rule for both: a turn claims words only where it can say
+                // whose they are.
+                //
+                // Measured after the icon-ligature refusal landed. Four Meet
+                // participants lost their scraped names, the diarizer had all
+                // four voices under profiles, and the transcript came out as
+                // named lines cut apart by nameless `Participant` fragments.
+                let raw = sensors(
+                    participants: [
+                        participant("U1", "Ada"),
+                        participant("U2", nil),
+                        participant("U3", "keep_outline"),
+                    ],
+                    turns: [("U1", 0, 30), ("U2", 30, 60), ("U3", 60, 90)]
+                )
+                let claimed = Set(
+                    SensorAttribution.wordIntervals(sensors: raw).map(\.clusterID)
+                )
+                expect.equal(claimed, [SpeakerLabel.sensor(participantID: "U1")])
+            },
+
             test("an icon ligature from the page is not a person's name") { expect in
                 // Measured on a real Meet recording on 3 September 2026. The
                 // extension read the pin control's icon ligature off the tile

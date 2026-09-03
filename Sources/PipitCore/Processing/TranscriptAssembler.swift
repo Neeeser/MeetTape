@@ -771,6 +771,22 @@ public struct TranscriptAssembler: Sendable {
     /// tracks and matching on them alone cut real speech apart.
     private static let echoRunWords = 3
 
+    /// How close two runs of leakage have to be for what lies between them to be
+    /// leakage as well.
+    ///
+    /// The two tracks are the same sound heard twice, so the recogniser
+    /// disagrees with itself across them: on the 3 September recording the far
+    /// end reads "from scratcher" where the microphone reads "from scratch
+    /// here". Matching on words alone leaves those disagreements standing in
+    /// the middle of a stretch that is otherwise all far end, and enough of
+    /// them in a row survive the length rule below.
+    ///
+    /// Leakage is continuous in time. A hole inside it is the recogniser
+    /// disagreeing, not the user speaking, and two seconds is longer than any
+    /// of those holes and shorter than the pause before a real answer. Over the
+    /// whole archive it changes one other meeting by ten words.
+    private static let echoBridgeSeconds = 2.0
+
     /// How much has to survive between two runs of leakage to be worth keeping.
     ///
     /// A handful of words stranded inside a stretch of the far end is the
@@ -827,6 +843,13 @@ public struct TranscriptAssembler: Sendable {
             if longest >= TranscriptAssembler.echoRunWords {
                 for offset in 0..<longest { echoed[index + offset] = true }
             }
+        }
+
+        // Close the recogniser's disagreements before measuring what survives.
+        let marked = echoed.indices.filter { echoed[$0] }
+        for (left, right) in zip(marked, marked.dropFirst())
+        where words[right].start - words[left].end < TranscriptAssembler.echoBridgeSeconds {
+            for between in left..<right { echoed[between] = true }
         }
 
         var kept: [RawTranscriptWord] = []

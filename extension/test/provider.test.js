@@ -335,6 +335,30 @@ test('a cut does not leave dangling punctuation', () => {
   assert.equal(meetTileName('Bob (Presenting)'), 'Bob');
 });
 
+test('an icon ligature on its own line is not a name', () => {
+  // Measured from a real Meet recording on 3 September 2026. Meet renders the
+  // tile's own controls above the name, so the first line was the pin icon's
+  // ligature and the name sat on the line below it. Four people came back as
+  // `keep_outline` and a fifth as `frame_person`, and because a speaker chip is
+  // keyed by the name, four different voices collapsed into one chip.
+  assert.equal(meetTileName('keep_outline\nChris Latimer'), 'Chris Latimer');
+  assert.equal(meetTileName('frame_person\nNicol\u00f2 Boschi'), 'Nicol\u00f2 Boschi');
+  assert.equal(meetTileName('keep_outline\nmic_off\nBob'), 'Bob');
+});
+
+test('a ligature this build has never seen is still not a name', () => {
+  // The list went stale once already: it knows `push_pin`, and Meet renamed the
+  // pin to `keep_outline` underneath it. A whole line that is one snake_case
+  // token is an icon either way, so a rename cannot put a new icon's name on a
+  // person before anybody notices.
+  assert.equal(meetTileName('some_future_icon\nBob'), 'Bob');
+});
+
+test('a tile that is nothing but its icon yields no name', () => {
+  assert.equal(meetTileName('keep_outline'), undefined);
+  assert.equal(meetTileName('keep_outline\nframe_person'), undefined);
+});
+
 test('a row that is chrome all the way down yields no name', () => {
   // Nothing is better than something wrong: an unnamed sensor key renders
   // through the fallback and waits for a person, and a wrong name does not.

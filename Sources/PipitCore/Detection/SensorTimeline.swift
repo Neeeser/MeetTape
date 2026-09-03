@@ -21,6 +21,63 @@ public struct SensorParticipant: Codable, Sendable, Equatable, Identifiable {
         self.displayName = displayName
         self.isSelf = isSelf
     }
+
+    /// The display name where it names a person, and nil where it is the
+    /// meeting client's own interface read off the page.
+    ///
+    /// A browser sensor scrapes the name out of the page, so it can come back
+    /// holding a control instead. Measured on a Meet recording on 3 September
+    /// 2026: the pin control renders as the icon-font ligature `keep_outline`
+    /// above the name, the extension read that line, and four separate people
+    /// arrived under it. A speaker chip is keyed by its name, so those four
+    /// voices merged into one chip named after an icon.
+    ///
+    /// The extension no longer sends these. This exists because the recording
+    /// that already holds them is immutable and read again on every rebuild,
+    /// and because the list of icon names over there goes stale every time
+    /// Google renames one, which is how `push_pin` became `keep_outline`.
+    ///
+    /// An icon name is one lowercase snake_case token and nothing else. The
+    /// whole name is tested, never a run inside it, so `DJ Snake_Eyes` is a
+    /// person. A real display name of `john_doe` is refused, and that is the
+    /// cheaper mistake: a refused name shows as `Speaker 3` and asks to be
+    /// corrected, and a wrong one gets enrolled against somebody's voice.
+    public var personName: String? {
+        let trimmed = (displayName ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard !SensorParticipant.isIconName(trimmed) else { return nil }
+        return trimmed
+    }
+
+    /// The icon names that carry no underscore, so the shape test below cannot
+    /// see them. Taken from the ligatures the extension already lists, which is
+    /// the evidence they render inside these tiles, plus `keep`, the filled pin
+    /// that sits beside the `keep_outline` this was all found through.
+    ///
+    /// Matched whole and lower-case only, so a person called `Devices` keeps
+    /// their name.
+    static let iconWords: Set<String> = ["devices", "keep", "visibility", "mic"]
+
+    static func isIconName(_ name: String) -> Bool {
+        if SensorParticipant.iconWords.contains(name) { return true }
+        guard name.contains("_") else { return false }
+        var previousWasSeparator = true
+        for character in name.unicodeScalars {
+            switch character {
+            case "a"..."z", "0"..."9":
+                previousWasSeparator = false
+            case "_":
+                // No leading, trailing or doubled underscore: those read as
+                // punctuation somebody typed, not as a token boundary.
+                if previousWasSeparator { return false }
+                previousWasSeparator = true
+            default:
+                return false
+            }
+        }
+        return !previousWasSeparator
+    }
 }
 
 /// One stretch where one person held the floor, on the meeting timeline.

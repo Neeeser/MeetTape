@@ -276,6 +276,33 @@ public struct SpeakerMap: Codable, Sendable, Equatable {
         return name
     }
 
+    /// Takes back the sensor names that the current rules refuse, and returns
+    /// how many went.
+    ///
+    /// A browser sensor scrapes names out of the meeting client's page, so a
+    /// build with a stale reader can write the client's own interface into the
+    /// map as somebody's name. Measured on a Meet recording from 3 September
+    /// 2026: the pin control's icon ligature arrived as the name for four
+    /// separate people, who then shared one speaker chip.
+    ///
+    /// Rebuilding does not fix that on its own. `sensors.raw.json` is immutable
+    /// evidence, so the refused name is still in it on every rebuild, and
+    /// applying sensor names only ever adds. The stale entry has to come out
+    /// here or it outlives the fix.
+    ///
+    /// Only what the sensor wrote and no person has confirmed. A name somebody
+    /// typed is theirs however odd it looks, and a confirmed one has a person
+    /// behind it.
+    public mutating func dropIconNamedSensorEntries() -> Int {
+        let refused = entries.filter { _, assignment in
+            assignment.origin == .sensor
+                && assignment.provenance?.humanVerified != true
+                && SensorParticipant.isIconName(assignment.displayName)
+        }
+        for key in refused.keys { entries.removeValue(forKey: key) }
+        return refused.count
+    }
+
     /// Applies an automatic result. Anything a person set, and anything a
     /// higher-ranked stage set, is left alone.
     public mutating func applySuggestion(_ assignment: SpeakerAssignment, for key: String) {

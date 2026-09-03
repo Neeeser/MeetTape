@@ -360,6 +360,49 @@ enum SpeakerCorrectionTests {
                 )
             },
 
+            test("a stored icon ligature is dropped when the meeting is rebuilt") { expect in
+                // The map on disk still holds what the extension sent before it
+                // was fixed, and `sensors.raw.json` is immutable, so nothing
+                // else takes these names back out: applying sensor names only
+                // ever adds. Rebuilding a Meet recording from 3 September 2026
+                // would otherwise keep showing four people as `keep_outline`.
+                var map = SpeakerMap()
+                map.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: "keep_outline", origin: .sensor,
+                        participantID: "spaces/x/devices/406",
+                        provenance: SpeakerProvenance(source: .sensor)
+                    ),
+                    for: "remote-001_speaker_01"
+                )
+                map.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: "frame_person", origin: .sensor,
+                        provenance: SpeakerProvenance(source: .sensor)
+                    ),
+                    for: SpeakerLabel.sensor(participantID: "spaces/x/devices/411")
+                )
+                map.applySuggestion(
+                    SpeakerAssignment(displayName: "Ada Lovelace", origin: .sensor),
+                    for: "remote-001_speaker_02"
+                )
+                map.assign("keep_outline", to: "remote-001_speaker_03")
+
+                expect.equal(map.dropIconNamedSensorEntries(), 2)
+                expect.isNil(map.displayName(for: "remote-001_speaker_01"))
+                expect.isNil(
+                    map.displayName(for: SpeakerLabel.sensor(participantID: "spaces/x/devices/411"))
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_02"), "Ada Lovelace",
+                    "a real name from the same source is untouched"
+                )
+                expect.equal(
+                    map.displayName(for: "remote-001_speaker_03"), "keep_outline",
+                    "a name a person typed is theirs, however odd it looks"
+                )
+            },
+
             test("renaming an identity updates its cached name everywhere in one meeting") { expect in
                 var map = SpeakerMap()
                 let identity = IdentityID(17)

@@ -142,32 +142,28 @@ const MEET_TILE_CHROME = [
 const MEET_TILE_LIGATURE = [
   'domain_disabled', 'more_vert', 'more_horiz', 'push_pin', 'present_to_all',
   'mic_off', 'mic_none', 'videocam_off', 'devices', 'volume_up',
-  'do_not_disturb_on', 'visibility_off',
+  'do_not_disturb_on', 'visibility_off', 'keep_outline', 'frame_person',
 ];
+// A line that is one snake_case token and nothing else. Every Material and
+// Google Symbols name has this shape, and a person's display name does not, so
+// a line like this is an icon whether or not the list above knows it yet.
+//
+// Whole lines only. The same test run across a line cuts real names apart:
+// `Chris Latimermore_vert` starts its lowercase run inside `Latimer`, which is
+// what the list above exists to avoid.
+//
+// The cost is a display name that really is a lowercase handle, `john_doe`,
+// read as an icon and dropped. That direction is the cheap one: a dropped name
+// renders as `Speaker 3` and asks to be corrected, and a wrong one gets
+// enrolled against somebody's voice.
+const MEET_ICON_LINE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
-/// The person's name out of a Meet participant row.
-///
-/// Grid tiles put the name on its own line, so the first line is the answer and
-/// always was. Panel rows do not: measured on a real call, one read
-/// `Chris LatimerMeeting hostdevicesYou can't remotely mute Chris Latimer's
-/// microphone` on a single line, and taking that line whole put the entire run
-/// into the roster, truncated mid-word at the 80-character cap. The roster is
-/// what names a voice, so that string became a speaker's name.
-///
-/// Both rows are read on purpose. A name can render in the panel a beat before
-/// the grid tile has one, and `rosterFromTiles` merges them, so dropping panel
-/// rows would lose names rather than fix them.
-///
-/// Undefined rather than a placeholder where nothing survives the cut. An
-/// unnamed sensor key renders through the fallback and waits for a person; a
-/// wrong one does not ask to be corrected.
-export function meetTileName(raw) {
-  // Trimmed before the split, not after. A tile whose text opens with a blank
-  // line would otherwise yield the empty first line and no name at all, and
-  // because only a name that survives is cached, that tile would be re-read
-  // with innerText on every tick forever.
-  const line = String(raw ?? '').trim().split('\n')[0];
-  if (!line.trim()) return undefined;
+/// The name out of one line of a Meet participant row, or undefined where the
+/// line is control text all the way through.
+function meetLineName(raw) {
+  const line = String(raw ?? '').trim();
+  if (!line) return undefined;
+  if (MEET_ICON_LINE.test(line)) return undefined;
   let cut = line.length;
   for (const marker of [...MEET_TILE_CHROME, ...MEET_TILE_LIGATURE]) {
     const at = line.indexOf(marker);
@@ -177,6 +173,40 @@ export function meetTileName(raw) {
   // survives: "Bob (Presenting)" would otherwise read "Bob (".
   const name = line.slice(0, cut).replace(/[\s(\[{,\-\u2013\u2014]+$/, '').trim();
   return name ? name.slice(0, 80) : undefined;
+}
+
+/// The person's name out of a Meet participant row.
+///
+/// Panel rows put the name and the controls on one line: measured on a real
+/// call, one read `Chris LatimerMeeting hostdevicesYou can't remotely mute
+/// Chris Latimer's microphone` on a single line, and taking that line whole put
+/// the entire run into the roster, truncated mid-word at the 80-character cap.
+/// The roster is what names a voice, so that string became a speaker's name.
+///
+/// Grid tiles put them on separate lines, and not always in that order. This
+/// used to read the first line and stop, on the assumption that a tile leads
+/// with its name. Measured on a real call on 3 September 2026, four tiles led
+/// with the pin control instead and read `keep_outline` on line one with the
+/// name below, and a fifth read `frame_person`. Every one of those four
+/// arrived under the same name, so four voices merged into one speaker.
+///
+/// So every line is read, and the first one carrying anything but control text
+/// wins. A line that survives nothing is skipped rather than ending the search,
+/// which is also how a leading blank line stops costing the tile its name.
+///
+/// Both row kinds are read on purpose. A name can render in the panel a beat
+/// before the grid tile has one, and `rosterFromTiles` merges them, so dropping
+/// panel rows would lose names rather than fix them.
+///
+/// Undefined rather than a placeholder where nothing survives the cut. An
+/// unnamed sensor key renders through the fallback and waits for a person; a
+/// wrong one does not ask to be corrected.
+export function meetTileName(raw) {
+  for (const line of String(raw ?? '').split('\n')) {
+    const name = meetLineName(line);
+    if (name) return name;
+  }
+  return undefined;
 }
 
 /// One entry per participant, from the several nodes Meet renders for each.

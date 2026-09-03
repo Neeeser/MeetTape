@@ -155,8 +155,26 @@ public enum SensorAttribution {
     /// cannot explain.
     public static func wordIntervals(sensors: RawSensors) -> [DiarizationInterval] {
         let selfIDs = Set(sensors.participants.filter(\.isSelf).map(\.id))
+        // Only a participant this build can name. `speakerEntries` already
+        // refuses to make a speaker out of one it cannot, so a turn kept here
+        // without a name produces words belonging to a speaker that does not
+        // exist: they render as `Participant`, and the diarizer's own cluster
+        // for the same audio, which a voice profile can still name, is dropped
+        // in favour of them. Measured after the icon-ligature refusal landed,
+        // that is a transcript of named lines cut apart by nameless fragments.
+        //
+        // Leaving those words to the diarizer loses the client's word on who
+        // held the floor, which is better evidence than acoustics. It is worth
+        // less than nothing while there is no name to put on it.
+        let named = Set(
+            sensors.participants.filter { $0.personName != nil }.map(\.id)
+        )
         return sensors.turns
-            .filter { !selfIDs.contains($0.participantID) && isFloorObservation($0) }
+            .filter {
+                !selfIDs.contains($0.participantID)
+                    && named.contains($0.participantID)
+                    && isFloorObservation($0)
+            }
             .compactMap { turn -> DiarizationInterval? in
                 // The tail belongs to the diarizer. A turn the concession eats
                 // whole vanishes with it, which is the point: it is shorter than
@@ -249,9 +267,7 @@ public enum SensorAttribution {
             SpeakerLabel.sensorParticipantID(from: $0.clusterID)
         })
         return kept.sorted().compactMap { id in
-            let name = (sensors.participant(id)?.displayName ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return nil }
+            guard let name = sensors.participant(id)?.personName else { return nil }
             return (
                 key: SpeakerLabel.sensor(participantID: id),
                 assignment: SpeakerAssignment(
@@ -345,7 +361,7 @@ public enum SensorAttribution {
             matches.append(Match(
                 clusterID: clusterID,
                 participantID: winner.key,
-                displayName: sensors.participant(winner.key)?.displayName,
+                displayName: sensors.participant(winner.key)?.personName,
                 coverage: min(1, winner.value / seconds)
             ))
         }

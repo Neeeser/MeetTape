@@ -772,13 +772,17 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         }
     }
 
-    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason) {
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, track: AudioFormatDescriptor, reason: RebuildReason
+    ) {
         let engine = target
         queue.async {
             engine?.recordManifest(
                 .micBind(.init(
-                    deviceUID: device.uid, deviceName: device.name, sampleRate: device.sampleRate,
-                    channelCount: device.channelCount, reason: reason.label
+                    deviceUID: device.uid, deviceName: device.name,
+                    deviceSampleRate: device.sampleRate, deviceChannelCount: device.channelCount,
+                    trackSampleRate: track.sampleRate, trackChannelCount: track.channelCount,
+                    reason: reason.label
                 ))
             )
         }

@@ -34,9 +34,9 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     /// format is still one; a format is not an identity. Nil where the system
     /// cannot say, in which case nothing is inferred from it.
     func currentInputDeviceUID() -> String?
-    /// The same device, described in full, for the manifest. Nil where the
-    /// system cannot name it, which is the case the UID reader also returns nil
-    /// for.
+    /// The same device, described in full, for the manifest. Nil on the same
+    /// condition as `currentInputDeviceUID`, which is the system not naming the
+    /// default input device.
     func currentInputDevice() -> MicrophoneDeviceDescription?
     /// Removes the tap and stops the engine.
     func teardown()
@@ -62,9 +62,12 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     func captureDidBindRemote(
         targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
-    /// Which input device the microphone engine was opened on, reported after
-    /// every build that installed one.
-    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason)
+    /// Which input device the microphone engine was opened on, and the format
+    /// the tap it installed is running at, reported after every build that
+    /// installed one. The two are separate readings and can disagree.
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, track: AudioFormatDescriptor, reason: RebuildReason
+    )
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)
 }
@@ -549,7 +552,11 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
             // Read after the build, so it names the device the engine is on.
             let deviceUID = controller.currentInputDeviceUID()
             if let device = controller.currentInputDevice() {
-                delegate.captureDidBindMicrophone(device: device, reason: reason)
+                // Both readings, because they answer different questions. The
+                // device is what this build chose; `installed` is what the node
+                // reported afterwards, which is what the segments are written
+                // at. They can disagree, and the manifest is where that shows.
+                delegate.captureDidBindMicrophone(device: device, track: installed, reason: reason)
             }
             if installed != previous {
                 delegate.captureWillChangeFormat(

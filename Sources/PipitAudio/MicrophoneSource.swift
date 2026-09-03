@@ -67,9 +67,14 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
 
     /// The same device with the rate and channel count CoreAudio reports for
     /// it, which is what the manifest records for each build.
+    ///
+    /// The UID comes from the device id this call resolved, not from a second
+    /// default-device lookup, so this and `currentInputDeviceUID` fail on the
+    /// same two property reads and a description never mixes one device's
+    /// identity with another's format.
     public func currentInputDevice() -> MicrophoneDeviceDescription? {
         guard let device = CoreAudioSystem.defaultInputDevice(),
-              let uid = CoreAudioSystem.defaultInputDeviceUID()
+              let uid = CoreAudioSystem.deviceUID(device)
         else { return nil }
         return MicrophoneDeviceDescription(
             uid: uid,
@@ -139,8 +144,22 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         // the engine is on to tell a device the user plugged in from the same
         // device renegotiating. That comparison is about one device only if the
         // engine is opened on the device that call names, which is what this
-        // does. The property is set before the format is read, so the read
-        // cannot instantiate the unit on a device nothing chose.
+        // does.
+        //
+        // The device is chosen here. The format is not. The unit is already
+        // instantiated by the time `input.audioUnit` hands it back, and setting
+        // the device moves only its hardware-side format. Measured 2026-09-03,
+        // pointing the unit at an 8-channel device took its input scope to 8
+        // channels. Its output scope stayed at the 1 channel it was
+        // instantiated with, and the output scope is what
+        // `outputFormat(forBus: 0)` reports. So the tap can install at a
+        // channel count the chosen device does not have, and the extra channels
+        // arrive as zeros. The energy scan in `TrackAudioReader` is what makes
+        // that survivable. It keeps the channel carrying the voice rather than
+        // the first one. The set still belongs before the read, because that is
+        // the only order in which the read could reflect the choice, and
+        // `mic_bind` records both formats so a manifest shows when they
+        // diverged.
         guard let deviceID = CoreAudioSystem.defaultInputDevice(), let unit = input.audioUnit else {
             throw CaptureError.microphoneEngineStartFailed(status: -1)
         }

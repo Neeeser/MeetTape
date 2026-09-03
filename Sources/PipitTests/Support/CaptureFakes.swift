@@ -229,6 +229,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
 
     struct MicBind: Sendable, Equatable {
         let device: MicrophoneDeviceDescription
+        let track: AudioFormatDescriptor
         let reason: String
     }
 
@@ -280,8 +281,12 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         }
     }
 
-    func captureDidBindMicrophone(device: MicrophoneDeviceDescription, reason: RebuildReason) {
-        state.withLock { $0.micBinds.append(MicBind(device: device, reason: reason.label)) }
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, track: AudioFormatDescriptor, reason: RebuildReason
+    ) {
+        state.withLock {
+            $0.micBinds.append(MicBind(device: device, track: track, reason: reason.label))
+        }
     }
 
     func captureDidFail(track: CaptureTrack, error: CaptureError) {

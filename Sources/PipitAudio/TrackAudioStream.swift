@@ -186,10 +186,18 @@ public final class TrackAudioReader {
     /// The channel holding the most energy over the first `seconds` of a file.
     ///
     /// Bounded because a track can run for hours and the answer does not change
-    /// within one segment group: the microphone was one device at one channel
+    /// within one segment group. The microphone was one device at one channel
     /// count for all of it. The file is rewound afterwards, so the read loop
     /// that follows starts at the first frame. An empty or unreadable file
     /// answers channel 0, and so does a tie.
+    ///
+    /// The limit that follows from the bound: only the group's first file is
+    /// measured, so a group that opens with `seconds` of silence answers 0 by
+    /// the tie rule and keeps channel 0 for the rest of the group, which is the
+    /// channel this exists to stop keeping. A meeting that starts with half a
+    /// minute of nothing on every channel reads back silent. Chasing later
+    /// segments would mean opening files the reader has not reached yet, and
+    /// the case is not worth that.
     private func dominantChannel(of file: AVAudioFile, seconds: Double) -> Int {
         let format = file.processingFormat
         let channels = Int(format.channelCount)

@@ -185,29 +185,54 @@ public enum ManifestEvent: Sendable, Equatable {
         }
     }
 
-    /// Which input device the microphone engine was opened on, recorded on
-    /// every build.
+    /// Which input device the microphone engine was opened on, and what the tap
+    /// it installed is running at, recorded on every build.
     ///
-    /// The engine names the device it opens instead of taking whatever its
-    /// input node defaulted to, so the device is a choice and the recording
-    /// carries it. A track that reads 30 dB below the rest of a meeting then
-    /// names the device it came from and the channel count it was written at.
+    /// Two formats, because they are two facts. `deviceSampleRate` and
+    /// `deviceChannelCount` are CoreAudio's answer for the device the build
+    /// chose. `trackSampleRate` and `trackChannelCount` are what the engine's
+    /// node reported afterwards, which is what the segments are written at.
+    ///
+    /// The pair diverging is itself the signal. Setting the input unit's device
+    /// changes its hardware-side format and leaves its client-side format at
+    /// whatever the node was instantiated on, so a build that names a
+    /// one-channel microphone and writes an eight-channel track says the client
+    /// format did not follow the device. Recording only the device's numbers
+    /// would put that contradiction in the manifest with nothing to explain it.
     public struct MicBind: Codable, Sendable, Equatable {
         public let deviceUID: String
         public let deviceName: String
-        public let sampleRate: Double
-        public let channelCount: Int
+        public let deviceSampleRate: Double
+        public let deviceChannelCount: Int
+        /// The format the tap installed at. Absent in manifests written before
+        /// the track's own format was recorded, so both decode as nil.
+        public let trackSampleRate: Double?
+        public let trackChannelCount: Int?
         public let reason: String
 
         public init(
-            deviceUID: String, deviceName: String, sampleRate: Double, channelCount: Int,
+            deviceUID: String, deviceName: String, deviceSampleRate: Double,
+            deviceChannelCount: Int, trackSampleRate: Double?, trackChannelCount: Int?,
             reason: String
         ) {
             self.deviceUID = deviceUID
             self.deviceName = deviceName
-            self.sampleRate = sampleRate
-            self.channelCount = channelCount
+            self.deviceSampleRate = deviceSampleRate
+            self.deviceChannelCount = deviceChannelCount
+            self.trackSampleRate = trackSampleRate
+            self.trackChannelCount = trackChannelCount
             self.reason = reason
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            deviceUID = try container.decode(String.self, forKey: .deviceUID)
+            deviceName = try container.decode(String.self, forKey: .deviceName)
+            deviceSampleRate = try container.decode(Double.self, forKey: .deviceSampleRate)
+            deviceChannelCount = try container.decode(Int.self, forKey: .deviceChannelCount)
+            trackSampleRate = try container.decodeIfPresent(Double.self, forKey: .trackSampleRate)
+            trackChannelCount = try container.decodeIfPresent(Int.self, forKey: .trackChannelCount)
+            reason = try container.decode(String.self, forKey: .reason)
         }
     }
 

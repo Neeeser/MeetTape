@@ -624,6 +624,52 @@ enum AudioTests {
                 }
             },
 
+            test("a group that opens with 30 s of silence keeps channel 0") { expect in
+                // The scan measures the group's first file only, and a file of
+                // digital silence is a tie, which answers channel 0. So a
+                // meeting whose first half minute is silent on every channel
+                // reads back silent even though a later segment has audio.
+                // Pinned rather than fixed: reaching past the first file means
+                // opening segments the reader has not got to yet.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let silence = makeDiscreteTone(
+                    seconds: 31, sampleRate: 16_000, channels: 3, amplitude: 0
+                )
+                let tone = makeDiscreteTone(
+                    seconds: 3, sampleRate: 16_000, channels: 3, amplitude: 0.5, toneChannel: 2
+                )
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: silence.format, segmentSeconds: 30
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(buffer: silence, hostTime: 0))
+                writer.enqueueSynchronously(AudioBufferPacket(buffer: tone, hostTime: 31))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.equal(timeline.segments(track: .mic).count, 2, "the group has two segments")
+
+                let stream = TrackAudioStream(
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                )
+                var peak: Float = 0
+                try stream.forEachBuffer { buffer, _ in
+                    guard let data = buffer.floatChannelData else { return true }
+                    for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(data[0][frame])) }
+                    return true
+                }
+                expect.equal(peak, 0, "channel 0 is kept, so the later tone is not read back")
+            },
+
             test("a chunk exports to an m4a small enough for the request limit") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

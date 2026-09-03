@@ -1007,6 +1007,13 @@ enum CaptureRecoveryTests {
                 )
                 engine.setSteadyFormat(AudioFormatDescriptor(sampleRate: 48_000, channelCount: 3))
                 engine.setDeviceUID("BuiltInMicrophoneDevice")
+                // The device and the tap are two readings and they can disagree:
+                // setting the input unit's device leaves the node's client-side
+                // format on whatever it was instantiated with. The build takes
+                // this queued reading, so the two differ here by construction.
+                engine.queueFormatReadings([
+                    AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1),
+                ])
                 coordinator.start()
 
                 expect.equal(delegate.micBinds.count, 1)
@@ -1017,6 +1024,11 @@ enum CaptureRecoveryTests {
                         uid: "BuiltInMicrophoneDevice", name: "Fake input",
                         sampleRate: 48_000, channelCount: 3
                     )
+                )
+                expect.equal(
+                    delegate.micBinds.first?.track,
+                    AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1),
+                    "the format the segments are written at, not the device's"
                 )
 
                 // And again on the rebuild that follows a device swap, so the

@@ -57,7 +57,8 @@ enum ManifestTests {
                     )),
                     .micBind(.init(
                         deviceUID: "BuiltInMicrophoneDevice", deviceName: "MacBook Pro Microphone",
-                        sampleRate: 48_000, channelCount: 3, reason: "session_start"
+                        deviceSampleRate: 48_000, deviceChannelCount: 1,
+                        trackSampleRate: 48_000, trackChannelCount: 3, reason: "session_start"
                     )),
                     .sourceHealth(.init(track: .remote, state: .idleButBound, detail: nil)),
                     .preRollFlushed(.init(track: .mic, frameCount: 720_000, seconds: 15, earliestHostTime: 1.0)),
@@ -105,6 +106,29 @@ enum ManifestTests {
                 expect.equal(bind.bindCount, 1)
                 expect.isTrue(bind.streamCount == nil, "an absent stream count decodes as nil")
                 expect.isTrue(bind.tapStreamIndex == nil, "an absent tap index decodes as nil")
+            },
+
+            test("a mic_bind written before the track's format still decodes") { expect in
+                let directory = try makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let url = directory.appendingPathComponent("manifest.jsonl")
+                // A line carrying only the device's format, as one written
+                // before the tap's own format was recorded beside it.
+                let line = """
+                {"ev":"mic_bind","host":100,"t":"2026-09-03T14:18:00.000Z",\
+                "deviceUID":"BuiltInMicrophoneDevice","deviceName":"MacBook Pro Microphone",\
+                "deviceSampleRate":48000,"deviceChannelCount":1,"reason":"session_start"}
+                """
+                try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
+
+                let result = try ManifestReader.read(contentsOf: url)
+                expect.equal(result.unrecognisedLines, 0)
+                guard case .micBind(let bind)? = result.lines.first?.event else {
+                    return expect.fail("the line did not decode as mic_bind")
+                }
+                expect.equal(bind.deviceChannelCount, 1)
+                expect.isTrue(bind.trackSampleRate == nil, "an absent track rate decodes as nil")
+                expect.isTrue(bind.trackChannelCount == nil, "an absent track count decodes as nil")
             },
 
             test("total duration sums per-segment rates, never a global divide") { expect in

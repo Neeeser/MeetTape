@@ -1415,6 +1415,7 @@ enum CaptureRecoveryTests {
 
                 expect.equal(coordinator.health, .degraded)
                 expect.equal(tap.bindCount, 2, "a rebind that changed nothing is not repeated")
+                expect.equal(coordinator.warnings().count, 1, "one condition, one warning")
                 guard case .remoteSilentWhileProducing(let seconds)? = coordinator.warnings().first else {
                     expect.fail("expected a silence warning, got \(coordinator.warnings())")
                     return
@@ -1473,6 +1474,80 @@ enum CaptureRecoveryTests {
                     )
                 }
                 expect.notEqual(coordinator.health, .degraded)
+            },
+
+            test("a silence run belongs to the process that was producing during it") { expect in
+                // The aggregate is clocked by its output sub-device, so it hands
+                // over digital zero at full rate through every quiet stretch. A
+                // run that keeps counting across the moment output starts tore
+                // the tap down on the first poll of the call, and a rebuild
+                // costs 200 to 900 ms of exactly the audio it was saving.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: false)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+                deliverSilence(to: coordinator, clock: clock, seconds: 25)
+
+                // The call's audio starts.
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                deliverSilence(to: coordinator, clock: clock, seconds: 15)
+                expect.equal(delegate.restarts, [], "the quiet stretch is not charged against the call")
+                expect.equal(tap.bindCount, 1)
+
+                // The window still runs, measured from when output started.
+                deliverSilence(to: coordinator, clock: clock, seconds: 10)
+                expect.equal(delegate.restarts.map(\.reason), ["silent_while_producing"])
+
+                // The application relaunches under a new PID. Its silence is
+                // judged from its own bind, not from the process it replaced.
+                tap.setTargets([makeTarget(pid: 81_002, producing: true)])
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(delegate.restarts.map(\.reason), ["silent_while_producing", "target_changed"])
+
+                deliverSilence(to: coordinator, clock: clock, seconds: 15)
+                expect.equal(
+                    delegate.restarts.map(\.reason), ["silent_while_producing", "target_changed"],
+                    "the replacement inherited the process it replaced's silence clock"
+                )
+            },
+
+            test("a degraded state from another cause is not blamed on silence") { expect in
+                // The detail goes into the manifest beside the state. A run that
+                // outlives the output it was measured against labels the next
+                // degraded transition, whatever actually caused it.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 79_590, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+                deliverSilence(to: coordinator, clock: clock, seconds: 45)
+                expect.equal(coordinator.health, .degraded)
+                expect.equal(
+                    delegate.healthChanges.last?.detail, "tap delivers silence while target reports output",
+                    "the transition the silence did cause carries its reason"
+                )
+
+                // The application stops playing, so nothing is claiming output
+                // that the tap is failing to carry.
+                tap.setTargets([makeTarget(pid: 79_590, producing: false)])
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.health, .idleButBound)
+                expect.equal(coordinator.warnings(), [])
+
+                // Then it quits, which is source absence.
+                tap.setTargets([])
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(coordinator.health, .degraded)
+                expect.isNil(
+                    delegate.healthChanges.last?.detail,
+                    "an application quitting is not the tap delivering silence"
+                )
             },
 
             test("a target playing nothing is allowed to deliver silence forever") { expect in

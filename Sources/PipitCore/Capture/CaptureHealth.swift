@@ -80,10 +80,15 @@ public struct CaptureThresholds: Sendable, Equatable {
     public var remoteCallbackTimeout: Double
     /// How long every buffer may be exactly zero while a target reports output
     /// before the tap is rebound, and again before the tap is called degraded.
-    /// Three recordings on this machine hold 2 to 41 minutes of digital zero
-    /// from a bound Slack helper that reported `isRunningOutput: true` the whole
-    /// time. Twenty seconds is longer than any pause a person leaves in a call
-    /// and short enough that a rebind still saves most of the meeting.
+    ///
+    /// Chosen rather than measured, unlike the constants above. Across the 29
+    /// recordings on this machine the readings are bimodal. The working taps
+    /// carry signal continuously, and the three broken ones read zero for their
+    /// whole length, 2, 31 and 41 minutes. Nothing measured sits near twenty
+    /// seconds. The case the value is guessing at is a solo stretch where the
+    /// application really does render digital zero while reporting output, and
+    /// twenty seconds is how long such a stretch runs before the tap is
+    /// rebound.
     public var remoteSilenceTimeout: Double
     /// Health poll interval.
     public var pollInterval: Double

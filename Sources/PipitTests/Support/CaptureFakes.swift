@@ -204,6 +204,8 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     struct HealthChange: Sendable, Equatable {
         let track: CaptureTrack
         let state: CaptureHealthState
+        /// The reason written beside the state in the manifest.
+        let detail: String?
     }
 
     struct RemoteBind: Sendable, Equatable {
@@ -241,7 +243,9 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     }
 
     func captureHealthChanged(track: CaptureTrack, state newState: CaptureHealthState, detail: String?) {
-        state.withLock { $0.healthChanges.append(HealthChange(track: track, state: newState)) }
+        state.withLock {
+            $0.healthChanges.append(HealthChange(track: track, state: newState, detail: detail))
+        }
     }
 
     func captureDidBindRemote(

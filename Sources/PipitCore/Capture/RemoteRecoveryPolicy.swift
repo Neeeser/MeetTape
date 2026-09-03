@@ -38,9 +38,10 @@ public struct RemoteRecoveryPolicy: Sendable {
 
     private var lastBufferAt: Double?
     private var producingSince: Double?
-    /// When the run of exactly-zero buffers began. Only a buffer carrying a
-    /// non-zero sample ends it, so a rebind that changes nothing leaves it
-    /// running and the episode is measured end to end.
+    /// When the run of exactly-zero buffers began. A rebind that changes
+    /// nothing leaves it running, so the episode is measured end to end. It
+    /// only means anything while a target reports output, and `clearSilenceRun`
+    /// says what ends it.
     private var silentSince: Double?
     /// When the tap was rebound because of that run.
     private var silentRebindAt: Double?
@@ -64,6 +65,18 @@ public struct RemoteRecoveryPolicy: Sendable {
         boundProcessIDs = []
         lastBufferAt = nil
         producingSince = nil
+        clearSilenceRun()
+    }
+
+    /// Ends the run of zero buffers and everything decided from it.
+    ///
+    /// The run is evidence only against a target that says it is playing. The
+    /// aggregate device is clocked by its output sub-device, so it hands over
+    /// digital zero at full rate through every quiet stretch, and a run carried
+    /// out of one of those into the moment output starts rebinds on the first
+    /// poll of the call. A run carried past the process it was measured against
+    /// does the same to that process's replacement.
+    private mutating func clearSilenceRun() {
         silentSince = nil
         silentRebindAt = nil
         silenceDeclared = false
@@ -78,10 +91,7 @@ public struct RemoteRecoveryPolicy: Sendable {
         // that is already under way, so it must not re-arm the wait for a
         // second one. A different set of processes is a different source, and
         // its silence is judged from its own bind.
-        if processIDs != boundProcessIDs {
-            silentRebindAt = nil
-            silenceDeclared = false
-        }
+        if processIDs != boundProcessIDs { clearSilenceRun() }
         boundProcessIDs = processIDs
         lastBufferAt = nil
         // Restart the producing clock so the fault threshold is measured from this
@@ -103,9 +113,7 @@ public struct RemoteRecoveryPolicy: Sendable {
         health = .healthy
         guard let peak else { return }
         if peak > 0 {
-            silentSince = nil
-            silentRebindAt = nil
-            silenceDeclared = false
+            clearSilenceRun()
         } else if silentSince == nil {
             silentSince = now
         }
@@ -141,6 +149,7 @@ public struct RemoteRecoveryPolicy: Sendable {
             // failure, and polling continues so a relaunch rebinds immediately.
             health = .degraded
             producingSince = nil
+            clearSilenceRun()
             return .none
         }
 
@@ -151,6 +160,7 @@ public struct RemoteRecoveryPolicy: Sendable {
         guard anyProducing else {
             health = .idleButBound
             producingSince = nil
+            clearSilenceRun()
             return .none
         }
 

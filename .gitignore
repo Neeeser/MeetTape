@@ -2,6 +2,7 @@
 /plans/
 /probes/
 /.claude/specs/
+/docs/superpowers/
 
 # Secrets
 .env

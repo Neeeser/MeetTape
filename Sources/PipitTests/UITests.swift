@@ -661,13 +661,41 @@ enum UITests {
                 var object = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: store.url)
                 ) as! [String: Any]
-                object.removeValue(forKey: "preferBuiltInMicrophone")
+                object.removeValue(forKey: "firefoxSensorHasConnected")
                 try JSONSerialization.data(withJSONObject: object).write(to: store.url)
 
                 let reloaded = store.load()
                 expect.equal(reloaded.localUserName, "Andrew", "existing values must survive")
                 expect.isTrue(reloaded.hasCompletedOnboarding, "onboarding must not reappear")
-                expect.isFalse(reloaded.preferBuiltInMicrophone, "the missing field takes its default")
+                expect.isFalse(reloaded.firefoxSensorHasConnected, "the missing field takes its default")
+            },
+
+            test("a settings file from a build that had the built-in microphone toggle still loads") { expect in
+                // The toggle was stored, decoded and drawn in Settings, and no
+                // code in the audio path ever read it. The engine opens the
+                // system default input device instead. Every settings file
+                // written before the removal carries the key, on either value,
+                // and a file that stopped loading would reset everything the
+                // user had chosen.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let store = SettingsStore(directory: root)
+
+                var settings = AppSettings()
+                settings.localUserName = "Andrew"
+                settings.hasCompletedOnboarding = true
+                try store.save(settings)
+                for stale in [true, false] {
+                    var object = try JSONSerialization.jsonObject(
+                        with: Data(contentsOf: store.url)
+                    ) as! [String: Any]
+                    object["preferBuiltInMicrophone"] = stale
+                    try JSONSerialization.data(withJSONObject: object).write(to: store.url)
+
+                    let reloaded = store.load()
+                    expect.equal(reloaded.localUserName, "Andrew", "the key is ignored, not fatal")
+                    expect.isTrue(reloaded.hasCompletedOnboarding)
+                }
             },
 
             test("a settings file from a build that had the echo-cancellation toggle still loads") { expect in

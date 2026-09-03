@@ -25,9 +25,12 @@ enum AudioTests {
 
     /// A buffer in the shape a multi-channel built-in microphone delivers: more
     /// than two channels, discrete, with no surround layout to mix down from.
+    ///
+    /// `toneChannel` puts the tone on one channel and leaves the rest at zero,
+    /// which is the shape that made channel 0 the wrong channel to keep.
     static func makeDiscreteTone(
         seconds: Double, sampleRate: Double, channels: UInt32,
-        frequency: Double = 440, amplitude: Float = 0.5
+        frequency: Double = 440, amplitude: Float = 0.5, toneChannel: Int? = nil
     ) -> AVAudioPCMBuffer {
         var description = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -49,7 +52,9 @@ enum AudioTests {
         let data = buffer.floatChannelData!
         for frame in 0..<Int(frames) {
             let value = amplitude * Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
-            for channel in 0..<Int(channels) { data[channel][frame] = value }
+            for channel in 0..<Int(channels) {
+                data[channel][frame] = toneChannel == nil || toneChannel == channel ? value : 0
+            }
         }
         return buffer
     }
@@ -561,6 +566,62 @@ enum AudioTests {
                 }
                 expect.close(Double(frames) / 16_000, 2.0, tolerance: 0.15, "the whole track reads back")
                 expect.isTrue(peak > 0.2, "the audio read back silent: peak \(peak)")
+            },
+
+            test("the loudest channel is the one read back, not channel 0") { expect in
+                // The raw built-in microphone presents three channels and the
+                // voice is not always on the first. On 2026-09-02 and
+                // 2026-09-03 channel 0 of a three-channel track came out around
+                // -47.8 dBFS at p99 against the usual -17 to -18 dBFS, about
+                // 30 dB down, and that meeting transcribed badly end to end.
+                for (channels, toneChannel) in [(UInt32(3), 2), (UInt32(9), 4)] {
+                    let root = try ManifestTests.makeTemporaryDirectory()
+                    defer { try? FileManager.default.removeItem(at: root) }
+                    let layout = MeetingLayout(root: root)
+                    try FileManager.default.createDirectory(
+                        at: layout.segments, withIntermediateDirectories: true
+                    )
+                    let manifest = try ManifestWriter(url: layout.manifest)
+                    // -6 dBFS on one channel, digital silence on the rest.
+                    let tone = makeDiscreteTone(
+                        seconds: 3, sampleRate: 48_000, channels: channels,
+                        amplitude: 0.5, toneChannel: toneChannel
+                    )
+                    let writer = SegmentWriter(
+                        track: .mic, layout: layout, manifest: manifest,
+                        format: tone.format, segmentSeconds: 60
+                    )
+                    writer.enqueueSynchronously(AudioBufferPacket(buffer: tone, hostTime: 0))
+                    writer.finish(reason: "test")
+                    manifest.close()
+
+                    let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                    expect.equal(
+                        timeline.segments(track: .mic).first?.format.channelCount, Int(channels)
+                    )
+
+                    let stream = TrackAudioStream(
+                        segments: timeline.segments(track: .mic),
+                        segmentsDirectory: layout.segments,
+                        targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                    )
+                    var sumOfSquares: Double = 0
+                    var frames = 0
+                    try stream.forEachBuffer { buffer, _ in
+                        guard let data = buffer.floatChannelData else { return true }
+                        for frame in 0..<Int(buffer.frameLength) {
+                            sumOfSquares += Double(data[0][frame] * data[0][frame])
+                        }
+                        frames += Int(buffer.frameLength)
+                        return true
+                    }
+                    let rms = frames > 0 ? (sumOfSquares / Double(frames)).squareRoot() : 0
+                    let dBFS = 20 * log10(max(rms, 1e-9))
+                    expect.isTrue(
+                        dBFS > -12,
+                        "channel \(toneChannel) of \(channels) read back at \(Int(dBFS)) dBFS"
+                    )
+                }
             },
 
             test("a chunk exports to an m4a small enough for the request limit") { expect in

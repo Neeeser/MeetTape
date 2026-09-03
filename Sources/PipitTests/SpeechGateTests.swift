@@ -585,6 +585,65 @@ enum SpeechGateTests {
                 expect.isFalse(text.contains("per node"), "and the far end is not in it twice")
             },
 
+            test("words the far end never said are not deleted as its echo") { expect in
+                // Measured on the Slack huddle of 3 September 2026. Two runs of
+                // the user's own speech survived the cut, 18 words and 45, and
+                // the echo clause then read 1.47 dB and 5.08 dB over them and
+                // deleted both. The user asked a question, the far end answered
+                // it, and only the answer is in the transcript.
+                //
+                // The clause is measuring energy, and on speakers the far end
+                // is playing underneath the user the whole time, so it reads
+                // their own voice as leakage. Its own documentation gives this
+                // as the cost: a voice has to sit about 12 dB above the leak to
+                // survive it.
+                //
+                // The cut already answered that question better. Leakage is the
+                // far end's words arriving twice, so a run the far end's own
+                // transcript does not contain is not leakage, whatever is
+                // playing underneath it. The level clauses still apply.
+                let far = "so what I would do is run three nodes behind the api"
+                let spoken = "yeah but i mean its not like its impossible they said they had tested it"
+                let remote = RawTranscriptChunk(
+                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 0, end: 6, text: far, speaker: nil,
+                        words: far.split(separator: " ").enumerated().map {
+                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
+                        }
+                    )]
+                )
+                let mic = RawTranscriptChunk(
+                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
+                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    segments: [RawTranscriptSegment(
+                        start: 8, end: 15, text: spoken, speaker: nil,
+                        words: spoken.split(separator: " ").enumerated().map {
+                            word(" \($0.element)", 8 + Double($0.offset) * 0.4, 8 + Double($0.offset) * 0.4 + 0.3)
+                        }
+                    )]
+                )
+                // The far end is playing under the user the whole time, so the
+                // filter accounts for a good part of their microphone.
+                let windows = Int(40 / windowSeconds)
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: windowSeconds, speechWindowSeconds: speechWindowSeconds,
+                    micLevels: [Int8](repeating: -24, count: windows),
+                    remoteLevels: [Int8](repeating: -26, count: windows),
+                    micSpeech: [Int8](repeating: 99, count: Int(40 / speechWindowSeconds)),
+                    micEchoReturnLoss: [Int16](repeating: 51, count: windows), detector: "silero"
+                )
+                let transcript = TranscriptAssembler().assemble(
+                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
+                    speech: evidence, micTrackIsLocalUser: true,
+                    generatedAt: Date(timeIntervalSince1970: 0)
+                )
+                let text = transcript.utterances.filter { $0.track == .mic }
+                    .map(\.text).joined(separator: " ")
+                expect.isTrue(text.contains("not like its impossible"), "the question is in the transcript")
+            },
+
             test("a turn the far end never said is left whole") { expect in
                 // The cut only removes what the far end's own track already
                 // holds. A turn the user held on their own keeps every word,

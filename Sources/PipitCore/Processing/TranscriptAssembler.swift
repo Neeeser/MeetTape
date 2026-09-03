@@ -736,18 +736,40 @@ public struct TranscriptAssembler: Sendable {
             // that leakage: on a Slack huddle recorded on 3 September 2026 it
             // read 9.9 dB against a 0.4 dB threshold and deleted all 3957 words
             // the user said, leaving them absent from their own meeting.
-            for segment in trimmingEcho(
+            let cut = trimmingEcho(
                 original, chunkOffset: chunk.timelineOffset, reference: echoReference
-            ) {
+            )
+            for segment in cut.runs {
                 let text = segment.text.trimmingCharacters(in: .whitespaces)
                 guard !text.isEmpty else { continue }
                 // Measured over what is left, not over what arrived. A run the cut
                 // reduced to the user's own words is judged on those.
                 let start = chunk.timelineOffset + segment.start
                 let end = chunk.timelineOffset + segment.end
-                if let reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable),
-                   LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
-                    continue
+                if var reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable) {
+                    // The cut has already asked, and answered better, the
+                    // question the echo clause asks. Leakage is the far end's
+                    // words arriving a second time, so a run its own transcript
+                    // does not contain is not leakage, whatever is playing
+                    // underneath it.
+                    //
+                    // The clause measures energy, and on speakers the far end
+                    // plays under the user continuously, so it reads their own
+                    // voice as leakage: on the Slack huddle of 3 September 2026
+                    // it deleted 18 words and then 45 more, at 1.47 dB and
+                    // 5.08 dB against a 0.4 dB threshold. The user asked a
+                    // question, the far end answered it, and only the answer
+                    // reached the transcript. Its own documentation gives this
+                    // as the cost, a voice needing about 12 dB over the leak.
+                    //
+                    // Only where the far end's words were actually available to
+                    // compare against. The level clauses are untouched either
+                    // way, so a run that is loud far end and quiet user still
+                    // goes.
+                    if cut.comparedWithFarEnd { reading.echoReturnLossDB = nil }
+                    if LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
+                        continue
+                    }
                 }
                 if var group = current,
                    group.speaker == segment.speaker,
@@ -815,8 +837,10 @@ public struct TranscriptAssembler: Sendable {
     /// whole-segment rules above decided.
     private func trimmingEcho(
         _ segment: RawTranscriptSegment, chunkOffset: Double, reference: [Utterance]
-    ) -> [RawTranscriptSegment] {
-        guard !reference.isEmpty, let words = segment.words, !words.isEmpty else { return [segment] }
+    ) -> (runs: [RawTranscriptSegment], comparedWithFarEnd: Bool) {
+        guard !reference.isEmpty, let words = segment.words, !words.isEmpty else {
+            return ([segment], false)
+        }
         let window = configuration.duplicateSearchSeconds
         let start = chunkOffset + segment.start
         let end = chunkOffset + segment.end
@@ -829,7 +853,7 @@ public struct TranscriptAssembler: Sendable {
             let tokens = TextSimilarity.normalise(utterance.text)
             if !tokens.isEmpty { references.append(tokens) }
         }
-        guard !references.isEmpty else { return [segment] }
+        guard !references.isEmpty else { return ([segment], false) }
 
         let tokens = words.map { TextSimilarity.normalise($0.text).joined() }
         var echoed = [Bool](repeating: false, count: words.count)
@@ -882,7 +906,7 @@ public struct TranscriptAssembler: Sendable {
                 speaker: segment.speaker, words: slice
             ))
         }
-        return cutAnything ? runs : [segment]
+        return (cutAnything ? runs : [segment], true)
     }
 
     /// A local-track segment that repeats what a diarized track already says

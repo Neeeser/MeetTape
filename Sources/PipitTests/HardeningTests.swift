@@ -73,13 +73,19 @@ enum HardeningTests {
         }
 
         /// `amplitude: 0` is the digital zero a tap reads when it is pointed at
-        /// the wrong stream of the aggregate device.
-        func emit(seconds: Double, hostTime: Double, amplitude: Float = 0.5) {
+        /// the wrong stream of the aggregate device. `toneChannel` leaves every
+        /// other channel at zero, which is a far end sitting on one side of the
+        /// tap's stereo mixdown.
+        func emit(
+            seconds: Double, hostTime: Double, amplitude: Float = 0.5, toneChannel: Int? = nil
+        ) {
             lock.lock()
             let handler = sinkHandler
             lock.unlock()
             let buffer = AudioTests.makeTone(
-                seconds: seconds, sampleRate: format.sampleRate, amplitude: amplitude
+                seconds: seconds, sampleRate: format.sampleRate,
+                channels: AVAudioChannelCount(format.channelCount),
+                amplitude: amplitude, toneChannel: toneChannel
             )
             handler?(AudioBufferPacket(buffer: buffer, hostTime: hostTime))
         }
@@ -109,7 +115,13 @@ enum HardeningTests {
     /// The thresholds are wall clock, because the engine polls on a real timer
     /// rather than an injected one, so they are scaled down to keep the test
     /// under a second.
-    private static func recordTapAudio(amplitude: Float) async throws -> SilentDelegate {
+    ///
+    /// `channels` and `toneChannel` shape the buffer the peak is read from. A
+    /// real tap is always stereo and deinterleaved, so two channels with the
+    /// tone on one of them is the production shape.
+    private static func recordTapAudio(
+        amplitude: Float, channels: Int = 1, toneChannel: Int? = nil
+    ) async throws -> SilentDelegate {
         let root = try ManifestTests.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let layout = MeetingLayout(root: root)
@@ -128,6 +140,9 @@ enum HardeningTests {
             },
             delegate: delegate
         )
+        tap.withLock {
+            $0?.format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: channels)
+        }
         await engine.arm(bundlePrefixes: ["com.example.app"], capturesRemote: true)
         try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
         tap.withLock {
@@ -137,7 +152,12 @@ enum HardeningTests {
         // Real host times, because the poll measures the callback gap against
         // the same mach clock the audio stack stamps buffers with.
         for _ in 0..<25 {
-            tap.withLock { $0?.emit(seconds: 0.02, hostTime: HostTime.now, amplitude: amplitude) }
+            tap.withLock {
+                $0?.emit(
+                    seconds: 0.02, hostTime: HostTime.now, amplitude: amplitude,
+                    toneChannel: toneChannel
+                )
+            }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         _ = await engine.stop(reason: "test")
@@ -264,6 +284,25 @@ enum HardeningTests {
                 expect.isFalse(
                     delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
                     "a tap carrying the meeting must not be called silent: \(delegate.warnings)"
+                )
+            },
+
+            test("a far end on one channel of a stereo tap raises nothing") { expect in
+                // The production shape. A tap's format is always
+                // `standardFormatWithSampleRate:channels:2`, so every real
+                // remote buffer is deinterleaved with two channel pointers, and
+                // a peak read from the first pointer alone calls a far end that
+                // sits on the second one digital zero. That reads as silence
+                // for as long as the far end stays there, rebinding the tap and
+                // warning the user through a meeting that is being recorded
+                // correctly.
+                let delegate = try await recordTapAudio(
+                    amplitude: 0.5, channels: 2, toneChannel: 1
+                )
+
+                expect.isFalse(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "audio on the second channel is still audio: \(delegate.warnings)"
                 )
             },
 

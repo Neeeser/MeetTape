@@ -93,9 +93,11 @@ These paths still need direct observation:
 - A full Google Meet join, refresh, leave, and reconnect through the sensor
 - Sleep, wake, screen lock, and Bluetooth device changes during capture
 - Other applications' playback level is unchanged from the moment recording starts
-- On a multichannel input device, the mono downmix keeps the channel carrying the
-  most energy over the first 30 seconds. A device whose microphone is not its
-  loudest channel would record the wrong one
+- On an input device with more than two channels, the mono downmix keeps the
+  channel carrying the most energy over the first 30 seconds. The scan runs only
+  above two channels, so a mono or stereo device is mixed down the way it always
+  was. A device whose microphone is not its loudest channel would record the
+  wrong one
 - A signed and notarized build installed on a clean Mac
 - Installation and removal through the published Homebrew cask
 - Calendar matching against a real calendar

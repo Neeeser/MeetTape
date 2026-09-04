@@ -162,7 +162,7 @@ public final class WindowManager {
         let landing = kind.flatMap { kind in SetupStepID.allCases.first { $0.permission == kind } }
         if let window = setupWindow, let model = setupModel {
             if let landing { model.jump(to: landing) }
-            Self.place(window, onScreenUnderMouse: true)
+            Self.place(window)
             present(window)
             window.orderFrontRegardless()
             return
@@ -197,7 +197,7 @@ public final class WindowManager {
         // system prompts still sit above it.
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.collectionBehavior.insert(.fullScreenAuxiliary)
-        Self.place(window, onScreenUnderMouse: true)
+        Self.place(window)
         model.onNeedsFocus = { [weak self] in self?.raiseSetup() }
         setupWindow = window
         setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
@@ -233,7 +233,7 @@ public final class WindowManager {
     /// a menu bar item, or is looking at a call, is where the pointer is:
     /// both Setup and the permission panel were measured opening on a Sidecar
     /// display while the person looked at the built-in one.
-    static func place(_ window: NSWindow, onScreenUnderMouse: Bool) {
+    static func place(_ window: NSWindow) {
         let pointer = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? NSScreen.main
         guard let frame = screen?.visibleFrame else {
@@ -383,7 +383,7 @@ public final class WindowManager {
         // Already up for this problem: the reaction to a second press is the
         // panel coming forward, not a new one appearing over the old.
         if permissionNoticeID == notice.id, let window = permissionWindow {
-            Self.place(window, onScreenUnderMouse: true)
+            Self.place(window)
             present(window, activating: true, holdsDockPresence: false)
             window.orderFrontRegardless()
             return
@@ -423,7 +423,7 @@ public final class WindowManager {
         permissionWindow = window
         permissionNoticeModel = model
         permissionNoticeID = notice.id
-        Self.place(window, onScreenUnderMouse: true)
+        Self.place(window)
         present(window, activating: true, holdsDockPresence: false)
         window.orderFrontRegardless()
     }

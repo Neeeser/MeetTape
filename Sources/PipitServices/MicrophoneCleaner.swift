@@ -17,26 +17,11 @@ import PipitCore
 /// recording itself is never written to, and the cleaned file only ever appears
 /// after the canceller has affirmatively said its output is worth using.
 public struct MicrophoneCleaner: Sendable {
-    /// Median enhancement, over the windows where the far end was playing,
-    /// below which the cleaned track is thrown away.
-    ///
-    /// Provisional. PR 4's measurement command settles it against real
-    /// recordings. 6 dB is a starting point between the 2.84 dB a canceller
-    /// with no echo path to lock onto reports and the 96.8 dB it reports with
-    /// one, both measured on tones in `AudioTests`.
-    public static let bypassBelowDB = 6.0
-
-    /// A window whose far-end level clears this had the far end playing in it.
-    static let farEndActiveDBFS = -60.0
-    /// Windows of far-end activity the decision needs before it is made at all.
-    ///
-    /// Ten seconds. The canceller reports nothing for its first 2.5 s of
-    /// far-end activity, which is ten of these windows, and those windows read
-    /// zero. Forty windows is what keeps that start-up from being a quarter of
-    /// the sample, and counting in far-end-active windows rather than in
-    /// seconds of file is what makes the bound hold for a meeting whose far end
-    /// stayed quiet for the first minute.
-    static let minimumActiveWindows = 40
+    /// The decision is `EchoCancellationPass.judge`, which measures what the
+    /// pass did to the user's own windows rather than what the canceller
+    /// reported. See the constants there.
+    static let farEndActiveDBFS = EchoCancellationPass.farEndActiveDBFS
+    static let minimumActiveWindows = EchoCancellationPass.minimumActiveWindows
 
     /// Cleaned samples held back before a write, so the encoder is handed
     /// seconds at a time rather than 10 ms blocks.
@@ -109,29 +94,18 @@ public struct MicrophoneCleaner: Sendable {
         let pass = try subtract(
             microphone: microphone, reference: reference, timeline: timeline, to: partial
         )
-        let active = pass.windows.filter { $0.farEndDBFS > Self.farEndActiveDBFS }
-        let median = EchoCancellationPass.median(of: active.map(\.echoRemovedDB))
-
-        // Too little far end played for the canceller to have been judged on
-        // anything. The same answer as a meeting with no far-end track, which
-        // is that this microphone is used as it was recorded.
-        guard active.count >= Self.minimumActiveWindows else {
+        let judgement = EchoCancellationPass.judge(windows: pass.windows)
+        let median = judgement.reportedMedianDB
+        let active = judgement.activeWindows
+        guard judgement.outcome == .cleaned else {
+            // Too little far end played to be judged on, or the pass took the
+            // user's own speech down with the echo. Either way this microphone
+            // is read as it was recorded.
             try? FileManager.default.removeItem(at: partial)
             try discardCleanedTrack(store: store, metadata: &metadata)
-            log(outcome: .skippedNoReference, median: median, active: active.count, frames: pass.frames)
-            return .skippedNoReference
-        }
-        // The filter never locked on to an echo path, which is a call taken on
-        // headphones. A low reading says nothing about how close the output is
-        // to the recording. It comes from the linear filter, and the suppressor
-        // that runs after it takes tens of decibels out of a microphone holding
-        // only the user. A filter that did not lock on is a filter whose output
-        // there is no reason to trust, so the output is thrown away.
-        guard median >= Self.bypassBelowDB else {
-            try? FileManager.default.removeItem(at: partial)
-            try discardCleanedTrack(store: store, metadata: &metadata)
-            log(outcome: .bypassedNoEchoPath, median: median, active: active.count, frames: pass.frames)
-            return .bypassedNoEchoPath
+            log(outcome: judgement.outcome, median: median, active: active, frames: pass.frames)
+            Log.processing.info("microphone cleaning reason: \(judgement.reason, privacy: .public)")
+            return judgement.outcome
         }
 
         // Cleared before anything on disk moves. A crash between here and the
@@ -177,11 +151,11 @@ public struct MicrophoneCleaner: Sendable {
                     firstFrameHostTime: timeline.firstFrameHostTime(track: .mic)
                 ),
                 echoRemovedMedianDB: median,
-                farEndActiveWindows: active.count,
+                farEndActiveWindows: active,
                 producedAt: clock.now
             )
         }
-        log(outcome: .cleaned, median: median, active: active.count, frames: written.frameCount)
+        log(outcome: .cleaned, median: median, active: active, frames: written.frameCount)
         return .cleaned
     }
 

@@ -400,7 +400,15 @@ enum LocalPipelineTests {
                 // their own meeting.
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
-                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 60)
+                // The far end's track is digital zero, as the tap wrote it, so
+                // the cleaner has no reference and the evidence reads no far
+                // end.
+                let frames = Int(60 * MicrophoneCleanerTests.rate)
+                let meeting = try MicrophoneCleanerTests.makeMeeting(
+                    root: root,
+                    mic: MicrophoneCleanerTests.tone(count: frames, frequency: 700, amplitude: 0.3),
+                    remote: [Float](repeating: 0, count: frames)
+                )
                 let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
                 defer { try? FileManager.default.removeItem(at: storeRoot) }
                 let me = try await store.createPerson(name: "Andrew", isLocalUser: true)

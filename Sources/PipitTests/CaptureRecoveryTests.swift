@@ -1373,8 +1373,8 @@ enum CaptureRecoveryTests {
                 expect.equal(delegate.remoteStreams.first?.reading, reading)
                 expect.equal(delegate.remoteStreams.first?.bindCount, 1)
 
-                // A poll every second all meeting must not write the same line
-                // every second.
+                // A poll twice a second all meeting must not write the same
+                // line on every poll.
                 for _ in 0..<5 {
                     coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
                     clock.advance(0.5)

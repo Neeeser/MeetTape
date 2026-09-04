@@ -86,8 +86,11 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
         targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
     /// What the tap's first callback of that bind delivered, raised once per
-    /// bind on the first poll after a callback arrives. A bind that never
-    /// delivers raises nothing, which is itself the answer.
+    /// bind on the first poll after a callback arrives. A bind that raises
+    /// nothing usually delivered nothing. A wake rebind, a format-change
+    /// rebind and `stop()` each tear the source down without running the
+    /// report, so a reading that arrived within the last 0.5 s is dropped
+    /// instead of raised.
     func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int)
     /// Which input device the microphone engine was opened on, and what the
     /// build made of it, reported after every build that installed an engine.

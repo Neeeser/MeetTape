@@ -197,7 +197,11 @@ public enum ManifestEvent: Sendable, Equatable {
     /// meeting folder.
     ///
     /// One line per bind, written on the first poll after a callback arrives. A
-    /// bind with no line delivered no audio at all.
+    /// bind with no line usually delivered no audio at all. Three tear-downs
+    /// can also drop a reading before its poll runs. A wake rebind leaves the
+    /// tick before the report, `rebindAfterFormatChange` binds without polling
+    /// at all, and `stop()` tears the source down with no final report. Each
+    /// one needs the tear-down to land within 0.5 s of the first callback.
     public struct RemoteStream: Codable, Sendable, Equatable {
         public struct Stream: Codable, Sendable, Equatable {
             public let channelCount: Int

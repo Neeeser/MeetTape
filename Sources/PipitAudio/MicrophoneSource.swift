@@ -54,13 +54,19 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         )
     }
 
-    /// The system default input device, which `build` opens the input unit on
-    /// explicitly. The coordinator records this after each build as the
-    /// identity of the engine it just built, and tells a device the user
-    /// plugged in from the same device renegotiating by comparing against it.
-    /// The two readings have to name one device, which is why the build sets
-    /// the unit's device from the same call rather than letting the node keep
-    /// the one it defaulted to.
+    /// The system default input device, which `build` tries to open the input
+    /// unit on. The coordinator records this after each build as the identity
+    /// of the engine it just built, and tells a device the user plugged in
+    /// from the same device renegotiating by comparing against it. That
+    /// comparison is about one device only if both readings name one device,
+    /// which is why the build points the unit at what this same call resolves
+    /// rather than letting the node keep the one it defaulted to.
+    ///
+    /// The set usually holds. It fails where AVAudioEngine has already
+    /// initialised the input unit, and the build then keeps whatever device
+    /// the unit already held, so this call can name a device the recording is
+    /// not from. `mic_bind.deviceSelectionStatus` is where a manifest says
+    /// that happened.
     public func currentInputDeviceUID() -> String? {
         CoreAudioSystem.defaultInputDeviceUID()
     }
@@ -143,8 +149,11 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         // The coordinator compares `currentInputDeviceUID` against the device
         // the engine is on to tell a device the user plugged in from the same
         // device renegotiating. That comparison is about one device only if the
-        // engine is opened on the device that call names, which is what this
-        // does.
+        // engine is opened on the device that call names, which is what the set
+        // below asks for. It usually holds. When the set returns an error the
+        // engine runs on whatever device the unit already had, the two readings
+        // can name different devices, and `deviceSelectionStatus` in `mic_bind`
+        // is what tells them apart.
         //
         // The device is chosen here. The format is not. The unit is already
         // instantiated by the time `input.audioUnit` hands it back, and setting

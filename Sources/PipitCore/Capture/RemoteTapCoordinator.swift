@@ -80,7 +80,7 @@ public final class RemoteTapCoordinator: Sendable {
         var consecutiveBindFailures = 0
         var nextBindAllowedAt: Double = 0
         /// The bind whose first callback has already been reported, so a poll
-        /// every second does not write the same line all meeting.
+        /// twice a second does not write the same line all meeting.
         var reportedCallbackBind: Int?
     }
 

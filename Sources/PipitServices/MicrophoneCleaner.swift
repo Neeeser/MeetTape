@@ -66,6 +66,24 @@ public struct MicrophoneCleaner: Sendable {
     public func clean(
         store: MeetingStore, metadata: inout MeetingMetadata, timeline: RecordingTimeline
     ) throws -> CleaningOutcome {
+        do {
+            return try attempt(store: store, metadata: &metadata, timeline: timeline)
+        } catch {
+            // A throw is one more answer that is not `.cleaned`, and it leaves
+            // this meeting where every other one of them does. The caller
+            // records `.failed` and never runs the cleaner on this meeting
+            // again, so a record an earlier run left would otherwise keep every
+            // reader on that run's file permanently.
+            try? discardCleanedTrack(store: store, metadata: &metadata)
+            throw error
+        }
+    }
+
+    /// The pass itself. Every exit but a throw is already an outcome that has
+    /// dealt with the record. `clean` deals with the throw.
+    private func attempt(
+        store: MeetingStore, metadata: inout MeetingMetadata, timeline: RecordingTimeline
+    ) throws -> CleaningOutcome {
         // One track holding everyone, which is every import and every in-person
         // session. There is no separate far end, and the only thing there is to
         // subtract from this microphone is the microphone.
@@ -135,7 +153,9 @@ public struct MicrophoneCleaner: Sendable {
         // no fallback, so the sample count handed to the encoder is not good
         // enough. An encode that stopped short or a container that will not
         // open throws here, and the meeting keeps the microphone it recorded.
-        let written = try verify(partial, against: pass.frames)
+        let written = try verify(
+            partial, cleaned: pass.frames, against: microphone.seconds
+        )
 
         // An interrupted run leaves a file with no record behind it.
         // `discardCleanedTrack` above removed one the metadata named.
@@ -177,11 +197,35 @@ public struct MicrophoneCleaner: Sendable {
     /// The frame count and the duration recorded for a cleaned track come from
     /// here rather than from the samples handed to the encoder, so the
     /// synthetic segment a reader is given can never claim more audio than the
-    /// file holds. This throws on a file that will not open, and on one whose
-    /// duration disagrees with the pass that wrote it. The recording is intact
-    /// either way, so a later attempt can build the track again.
-    private func verify(_ url: URL, against frames: Int64) throws -> AudioFileInfo {
+    /// file holds. This throws on a pass that never read the whole microphone,
+    /// on a file that will not open, and on one whose duration disagrees with
+    /// the pass that wrote it. The recording is intact either way, so a later
+    /// attempt can build the track again.
+    ///
+    /// `recorded` is the duration the manifest holds rather than anything this
+    /// run measured, and both checks are made against it because the pass
+    /// cannot bound itself. `TrackAudioReader` skips a segment it cannot open
+    /// and only logs a notice, so a run that reads ten seconds of a
+    /// sixty-minute microphone writes ten seconds, agrees with its own read
+    /// exactly, and would be promoted as the track every reader takes.
+    private func verify(
+        _ url: URL, cleaned frames: Int64, against recorded: Double
+    ) throws -> AudioFileInfo {
         let expected = Double(frames) / Self.readFormat.sampleRate
+        // Floored for codec padding on short files, capped so a long meeting
+        // cannot lose most of a minute and still verify. The same formula
+        // compaction uses, on the quantity compaction uses it on, which is the
+        // duration the manifest recorded.
+        let tolerance = max(0.5, min(recorded * 0.01, 2.0))
+        guard abs(expected - recorded) <= tolerance else {
+            try? FileManager.default.removeItem(at: url)
+            throw ProcessingError.localProcessingFailed(
+                reason: "the cleaned microphone covers "
+                    + "\(String(format: "%.1f", expected))s of "
+                    + "\(String(format: "%.1f", recorded))s recorded",
+                retryable: true
+            )
+        }
         let info: AudioFileInfo
         do {
             info = try AudioFileInspector().inspect(url: url)
@@ -191,10 +235,6 @@ public struct MicrophoneCleaner: Sendable {
                 reason: "the cleaned microphone would not decode", retryable: true
             )
         }
-        // Floored for codec padding on short files, capped so a long meeting
-        // cannot lose most of a minute and still verify. The same bound
-        // compaction holds its archives to.
-        let tolerance = max(0.5, min(expected * 0.01, 2.0))
         guard info.frameCount > 0, abs(info.seconds - expected) <= tolerance else {
             try? FileManager.default.removeItem(at: url)
             throw ProcessingError.localProcessingFailed(
@@ -227,10 +267,17 @@ public struct MicrophoneCleaner: Sendable {
     /// One quarter-second of the pass: how loud the far end was, and what the
     /// canceller said it had removed by the end of it.
     ///
-    /// The pair travels together because neither reads on its own. Both the
-    /// 39.9 dB of damage measured on a pure tone with no echo path and the
-    /// 2.1 dB measured on real recordings come out of the same code, differing
-    /// only in how much of the time the far end was loud.
+    /// The pair travels together because neither reads on its own.
+    /// `farEndDBFS` decides whether the window is one the canceller can be
+    /// judged on, and `echoRemovedDB` is what it reported removing over that
+    /// window.
+    ///
+    /// What it reported is not what it did, and keeping the two apart is the
+    /// whole of the bypass rule. On the tone with no echo path in `AudioTests`
+    /// the canceller reports 2.84 dB removed while taking 39.9 dB out of a
+    /// microphone that holds only the user. The low reported figure is what
+    /// says the filter never locked on, and that is the reason to throw its
+    /// output away.
     private struct Window {
         let farEndDBFS: Double
         let echoRemovedDB: Double

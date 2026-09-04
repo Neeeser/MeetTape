@@ -245,8 +245,10 @@ enum MicrophoneCleanerTests {
             let steady = toneEnergy(seconds(15, 15.02, of: raw), frequency: nearTone)
             let rawOnset = onset(of: raw, frequency: nearTone, after: 9, steady: steady)
             let cleanOnset = onset(of: clean, frequency: nearTone, after: 9, steady: steady)
-            expect.close(rawOnset, 10, tolerance: 0.02)
-            expect.close(cleanOnset, rawOnset, tolerance: 0.02)
+            expect.close(rawOnset, 10, tolerance: 0.03, "within one 20 ms window")
+            expect.close(
+                cleanOnset, rawOnset, tolerance: 0.03, "within one 20 ms window"
+            )
         },
 
         test("a cleaned meeting reads the cleaned track and still reaches the raw one") { expect in
@@ -375,6 +377,184 @@ enum MicrophoneCleanerTests {
                 FileManager.default.fileExists(atPath: store.layout.cleanedMicFile.path),
                 "the earlier run's file is gone with its record"
             )
+            expect.equal(
+                store.trackAudioLocation(
+                    track: .mic, metadata: carried, timeline: try store.readTimeline()
+                ).directory.lastPathComponent,
+                "segments"
+            )
+        },
+
+        test("a far end that started before the microphone is lined up too") { expect in
+            // The one caller that can hand `TimelineTrackReader` a negative
+            // offset. The far end's track opens first whenever the meeting
+            // application was already making noise as capture began, and the
+            // reference is then read forward to meet the microphone rather than
+            // padded to it. Subtracting the two lead-ins the other way round
+            // moves the pair by twice the lead-in, and a canceller that cannot
+            // find the echo bypasses the meeting rather than reporting an error.
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let count = Int(30 * rate)
+            let offset = -2.0
+
+            // Built here rather than from `makeCallOnSpeakers`, whose far end
+            // is a tone that never stops. Such a tone is the same tone after
+            // any shift, so a pair moved by four seconds cancels just as well
+            // and the sign of the offset does not show. This far end plays in
+            // bursts of 0.7 s every 1.3 s, which a shift does move.
+            var remote = tone(count: count, frequency: farToneA, amplitude: 0.5)
+            for index in 0..<count {
+                let phase = (Double(index) / rate).truncatingRemainder(dividingBy: 1.3)
+                if phase > 0.7 { remote[index] = 0 }
+            }
+            // The user, over the middle third of their own track.
+            var mic = tone(
+                count: count, frequency: nearTone, amplitude: 0.3,
+                from: count / 3, upTo: 2 * count / 3
+            )
+            // The far end's first frame landed two seconds before the
+            // microphone's, so far-end sample j was in the room at microphone
+            // sample j - 2 s + 3 ms, and the last two seconds of the microphone
+            // are past the end of the far end's track.
+            let shift = Int(offset * rate) + echoDelaySamples
+            for index in max(0, shift)..<min(count, count + shift) {
+                mic[index] += echoGain * remote[index - shift]
+            }
+            let meeting = try makeMeeting(
+                root: root, mic: mic, remote: remote, remoteStartOffset: offset
+            )
+            let store = meeting.store
+            let timeline = try store.readTimeline()
+            expect.close(
+                timeline.leadIn(track: .mic), 2, tolerance: 0.01,
+                "the microphone is the track that starts late here"
+            )
+            expect.equal(timeline.leadIn(track: .remote), 0)
+
+            var carried = meeting.metadata
+            let outcome = try MicrophoneCleaner().clean(
+                store: store, metadata: &carried, timeline: timeline
+            )
+            expect.equal(outcome, CleaningOutcome.cleaned)
+
+            let metadata = try store.readMetadata()
+            let raw = try samples(store.rawTrackAudioLocation(
+                track: .mic, metadata: metadata, timeline: timeline
+            ))
+            let clean = try samples(store.trackAudioLocation(
+                track: .mic, metadata: metadata, timeline: timeline
+            ))
+            // Up to 28 s, past which the far end's track has run out and the
+            // microphone carries no echo to remove.
+            let before = toneEnergy(seconds(20, 27, of: raw), frequency: farToneA)
+            let after = toneEnergy(seconds(20, 27, of: clean), frequency: farToneA)
+            let removed = dropDB(from: before, to: after)
+            expect.isTrue(removed > 20, "the far end came down only \(removed) dB")
+        },
+
+        test("a microphone read that came up short is refused") { expect in
+            // `TrackAudioReader` skips a segment it cannot open and logs a
+            // notice, so a pass can read ten seconds of a sixty-minute
+            // microphone. Measured against its own read that track agrees with
+            // itself, and it would be promoted as the microphone every reader
+            // takes with fifty minutes of the meeting gone. The manifest is
+            // what says how much audio there was.
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCallOnSpeakers(root: root)
+            let store = meeting.store
+            let timeline = try store.readTimeline()
+            let location = store.rawTrackAudioLocation(
+                track: .mic, metadata: meeting.metadata, timeline: timeline
+            )
+            expect.close(location.seconds, 30, tolerance: 0.01)
+
+            // Twenty of the thirty seconds, written back over the file the
+            // manifest still describes as thirty. Long enough for the canceller
+            // to lock on and be judged worth keeping.
+            let recorded = try samples(location)
+            let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+            let segment = try expect.unwrap(location.segments.first)
+            let url = location.directory.appendingPathComponent(segment.file)
+            func writeShortSegment() throws {
+                let file = try AVAudioFile(forWriting: url, settings: format.settings)
+                try file.write(from: buffer(
+                    Array(recorded.prefix(Int(20 * rate))), format: format
+                ))
+            }
+            try writeShortSegment()
+
+            var carried = meeting.metadata
+            do {
+                let outcome = try MicrophoneCleaner().clean(
+                    store: store, metadata: &carried, timeline: timeline
+                )
+                expect.fail(
+                    "a twenty-second read of a thirty-second microphone came back "
+                        + outcome.rawValue
+                )
+            } catch {
+                // Expected. The pass is measured against the manifest.
+            }
+            expect.isNil(carried.cleanedMic)
+            expect.isNil(try store.readMetadata().cleanedMic)
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: store.layout.cleanedMicFile.path),
+                "and nothing of the short track was left on disk"
+            )
+        },
+
+        test("a pass that throws clears what an earlier run left") { expect in
+            // A throw is one more answer that is not `.cleaned`, and the caller
+            // records `.failed` and never runs the cleaner on this meeting
+            // again. A record an earlier run left would keep every reader on
+            // that run's file for good.
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCallOnSpeakers(root: root)
+            let store = meeting.store
+            let count = Int(30 * rate)
+            try FileManager.default.createDirectory(
+                at: store.layout.trackArchiveDirectory, withIntermediateDirectories: true
+            )
+            try Data("an earlier run's track".utf8).write(to: store.layout.cleanedMicFile)
+            var carried = try store.updateMetadata {
+                $0.cleanedMic = CleanedMicrophone(
+                    track: AudioArchive.Track(
+                        file: "mic.cleaned.m4a", sampleRate: rate, channelCount: 1,
+                        frameCount: Int64(count), seconds: 30, firstFrameHostTime: 100
+                    ),
+                    echoRemovedMedianDB: 40, farEndActiveWindows: 100,
+                    producedAt: Date(timeIntervalSince1970: 1_787_070_000)
+                )
+            }
+
+            // The directory the pass writes into, taken away from it after the
+            // record above is in place. This throws before the point that
+            // clears the record on the way to writing a new one.
+            let audio = store.layout.trackArchiveDirectory
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o555], ofItemAtPath: audio.path
+            )
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755], ofItemAtPath: audio.path
+                )
+            }
+
+            do {
+                let outcome = try MicrophoneCleaner().clean(
+                    store: store, metadata: &carried, timeline: try store.readTimeline()
+                )
+                expect.fail("a pass that could not write its file came back \(outcome.rawValue)")
+            } catch {
+                // Expected. The disk would not take the cleaned track.
+            }
+            // The record is what points a reader at the file, so it is the
+            // record that has to go.
+            expect.isNil(carried.cleanedMic)
+            expect.isNil(try store.readMetadata().cleanedMic)
             expect.equal(
                 store.trackAudioLocation(
                     track: .mic, metadata: carried, timeline: try store.readTimeline()

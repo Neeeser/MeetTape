@@ -152,6 +152,19 @@ never cleaned, and the user keeps the transcript they would have had before the
 cleaner existed. Retrying instead would repeat a full decode and encode of the
 whole meeting on every resumed run of a machine that cannot write the file.
 
+One decision covers the whole meeting. The median is taken over every window
+where the far end was playing, and the cleaned file is kept or thrown away
+entire. A call that starts on speakers and moves to headphones half way through
+keeps the cleaned track across the headphone stretch, and the canceller takes
+about 40 dB out of a microphone holding only the user, measured on a tone with
+no echo path. Plugging in headphones mid-call is ordinary. Deciding per window
+rather than per meeting is not built.
+
+A cleaned meeting keeps a third audio file. `mic.cleaned.m4a` sits beside the
+two archived tracks at the same 48 kbps mono, so a cleaned meeting costs about
+50% more archived audio than one left as recorded. Settings reports the total
+under Storage, which walks the meeting folders and counts every file in them.
+
 Local processing uses Apple SpeechAnalyzer on supported macOS versions or
 Parakeet through FluidAudio. Speaker separation runs locally unless the selected
 cloud model returns words and speakers together. Voice matching stays local for

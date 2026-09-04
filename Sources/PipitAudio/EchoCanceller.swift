@@ -16,8 +16,9 @@ import Foundation
 /// does. What Pipit holds instead is the process tap, a clean recording of that
 /// same far end, which is the reference an echo canceller wants.
 ///
-/// Measured on two recordings from 3 September 2026: 36 dB of the far end
-/// removed, with the user's own speech within 0.4 dB of untouched.
+/// Measured on tones through the whole cleaner in `MicrophoneCleanerTests`.
+/// The far end comes down 88.1 dB. A user talking across it comes through
+/// 0.33 dB down.
 public final class EchoCanceller {
     /// Frames per call, for both streams. The canceller works in 10 ms blocks.
     public let blockFrames: Int

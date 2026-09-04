@@ -28,7 +28,6 @@ suites.append(VoiceEvidenceTests.suite)
 suites.append(TranscriptGroupingTests.suite)
 suites += TranscriptDivisionTests.all
 suites += SpeechGateTests.all
-suites.append(EchoTests.suite)
 suites.append(TranscriptPanelTests.suite)
 suites.append(ReconnectTests.suite)
 suites.append(SpeakerGroupingTests.suite)

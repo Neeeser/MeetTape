@@ -158,6 +158,17 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         return iconIsBadged(for: status) ? badged(copy) : copy
     }
 
+    /// The red bird with its mark at a given height, for the permission panel
+    /// to say who is talking.
+    public static func attentionImage(height: CGFloat) -> NSImage? {
+        let asset = NSImage(named: NSImage.Name("pipit-idle"))
+            ?? NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: nil)
+        guard let copy = asset?.copy() as? NSImage else { return nil }
+        copy.size = NSSize(width: height, height: height)
+        copy.isTemplate = true
+        return flagged(copy)
+    }
+
     /// The whole icon in red, with a red exclamation mark beside it.
     ///
     /// Beside, not over: a mark stamped into the corner cut a hole through the

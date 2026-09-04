@@ -584,9 +584,16 @@ struct PermissionNoticeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 34))
-                    .foregroundStyle(.red)
+                // The same red bird as the menu bar, so the panel reads as
+                // Pipit's at a glance and not as a system alert.
+                if let bird = MenuBarController.attentionImage(height: 40) {
+                    Image(nsImage: bird)
+                        .accessibilityLabel("Pipit needs attention")
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.red)
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     Text(notice.title).font(.headline)
                     Text(notice.body).font(.callout).foregroundStyle(.secondary)

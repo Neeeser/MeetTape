@@ -196,7 +196,8 @@ enum LocalPipelineTests {
         prepareAligner: (@Sendable () async throws -> Void)? = nil,
         singleSpeakerEmbedding: (@Sendable (URL) async throws -> SingleSpeakerSample?)? = nil,
         settings: AppSettings,
-        scratchRoot: URL
+        scratchRoot: URL,
+        onProgress: @escaping @Sendable (ProcessingPipeline.Progress) -> Void = { _ in }
     ) -> ProcessingPipeline {
         ProcessingPipeline(
             repository: repository,
@@ -212,8 +213,39 @@ enum LocalPipelineTests {
             scratch: ProcessingScratch(root: scratchRoot),
             clock: ManualClock(),
             settingsProvider: { settings },
+            onProgress: onProgress,
             wait: { _ in }
         )
+    }
+
+    /// Lets a test wait for one progress line and then act while the pipeline
+    /// is still inside the stage that reported it.
+    final class ProgressGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var opened = false
+        private var waiting: CheckedContinuation<Void, Never>?
+
+        func open() {
+            lock.lock()
+            let resumed = waiting
+            waiting = nil
+            opened = true
+            lock.unlock()
+            resumed?.resume()
+        }
+
+        func wait() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if opened {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                waiting = continuation
+                lock.unlock()
+            }
+        }
     }
 
     static var suite: Suite {
@@ -3155,6 +3187,68 @@ enum LocalPipelineTests {
                 let raw = try meeting.store.readRawTranscript()
                 expect.isTrue(raw.chunks.contains { $0.id == "mic_full" })
                 expect.isTrue(raw.chunks.contains { $0.id == "remote_full" })
+            },
+
+            test("the panel is answered while the microphone is being cleaned") { expect in
+                // Cleaning decodes both tracks, runs the canceller over every
+                // 10 ms block and encodes the whole microphone. On a one-hour
+                // meeting that is minutes, and run on this actor's executor it
+                // is minutes in which Move to Trash, a speaker rename and a
+                // line correction all wait. The probe is `forget`, which is
+                // what Move to Trash calls, asked about a meeting the pipeline
+                // holds nothing for so it cannot disturb the run.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try MicrophoneCleanerTests.makeCallOnSpeakers(root: root)
+                let cleanedFile = meeting.store.layout.cleanedMicFile
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 0.3, text: " we")]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 57, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let started = ProgressGate()
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch"),
+                    onProgress: { progress in
+                        if progress.detail == "Removing the far end from the microphone" {
+                            started.open()
+                        }
+                    }
+                )
+                let run = Task { await pipeline.process(meetingID: meeting.metadata.id) }
+                await started.wait()
+                // Reported from the actor immediately before the pass begins,
+                // so this call is enqueued while the pass is running and comes
+                // back only once the actor is free to take it. The cleaned file
+                // is renamed into place at the very end of the pass, which is
+                // what dates the answer.
+                _ = await pipeline.forget(meetingID: "held-by-nobody", movedAt: Date())
+                let answeredDuringThePass = !FileManager.default.fileExists(
+                    atPath: cleanedFile.path
+                )
+                await run.value
+
+                expect.isTrue(
+                    answeredDuringThePass,
+                    "the actor answered only after the cleaned track was already written"
+                )
+                expect.equal(
+                    try meeting.store.readMetadata().cleaningOutcome, CleaningOutcome.cleaned,
+                    "and the pass this raced ran to the end"
+                )
             },
         ])
     }

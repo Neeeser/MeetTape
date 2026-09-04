@@ -283,7 +283,7 @@ public actor ProcessingPipeline {
                 case .audioSafe:
                     metadata.processing.advance(to: .transcribing, at: clock.now)
                 case .transcribing:
-                    cleanMicrophone(store: store, metadata: &metadata)
+                    await cleanMicrophone(store: store, metadata: &metadata)
                     try await runTranscription(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .diarizing, at: clock.now)
                 case .diarizing:
@@ -704,7 +704,7 @@ public actor ProcessingPipeline {
     /// This never fails the meeting. A throw is recorded and the microphone is
     /// read as it was captured, which is what every meeting recorded before the
     /// cleaner existed already does.
-    private func cleanMicrophone(store: MeetingStore, metadata: inout MeetingMetadata) {
+    private func cleanMicrophone(store: MeetingStore, metadata: inout MeetingMetadata) async {
         // The outcome is the record that the question was answered, and it is
         // written whatever the answer, so it alone decides whether this runs.
         // `cleanedMic` is deliberately not asked as well. It is set only by a
@@ -714,16 +714,37 @@ public actor ProcessingPipeline {
         // subtracts from the recording rather than from its own output, and it
         // clears the earlier record before anything on disk moves.
         guard metadata.cleaningOutcome == nil else { return }
+        // The stage is named for transcription and this runs before any of it,
+        // so without a line here the panel shows "Transcribing" and no motion
+        // for the minutes a long meeting takes to decode, cancel and encode.
+        report(metadata, chunks: nil, detail: "Removing the far end from the microphone")
+        // Detached for the reason the transcode is. `clean` decodes both
+        // tracks, cancels every 10 ms block and encodes the whole microphone
+        // with nothing to suspend on, which is minutes of CPU for a long
+        // meeting. On this actor's executor those are minutes in which Move to
+        // Trash, a speaker rename and a line correction all wait. Every input
+        // is Sendable, and the meeting's own copy comes back with the outcome.
+        let cleaner = MicrophoneCleaner(clock: clock)
+        let snapshot = metadata
         let outcome: CleaningOutcome
         do {
-            outcome = try MicrophoneCleaner(clock: clock).clean(
-                store: store, metadata: &metadata, timeline: try store.readTimeline()
-            )
+            let pass = try await Task.detached(priority: .utility) {
+                var carried = snapshot
+                let outcome = try cleaner.clean(
+                    store: store, metadata: &carried, timeline: try store.readTimeline()
+                )
+                return (outcome, carried)
+            }.value
+            outcome = pass.0
+            metadata = pass.1
         } catch {
             Log.processing.error(
                 "microphone cleaning failed: \(logSafeDescription(error), privacy: .public)"
             )
             outcome = .failed
+            // The copy the pass was carrying goes with the throw, and the write
+            // below re-reads the meeting from disk anyway, where `clean` has
+            // already cleared any record of a cleaned track.
         }
         // Two derived artefacts survive a run that stopped part-way, and
         // neither records which microphone it was made from. Both are dealt

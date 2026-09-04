@@ -126,6 +126,80 @@ enum CompactionTests {
             )
         },
 
+        test("compaction archives the recording, not the cleaned microphone") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            // The one line in the branch that stands between a user and losing
+            // their own recording. `writeArchives` transcodes what it is given
+            // and `deleteReplacedAudio` then removes the segments for good, so
+            // reading through `trackAudioLocation` here would put cleaned audio
+            // in `mic.m4a` and delete the only copy of the raw microphone.
+            let meeting = try MicrophoneCleanerTests.makeCallOnSpeakers(root: root)
+            let store = meeting.store
+            var metadata = meeting.metadata
+            expect.equal(
+                try MicrophoneCleaner().clean(
+                    store: store, metadata: &metadata, timeline: try store.readTimeline()
+                ),
+                CleaningOutcome.cleaned
+            )
+
+            let timeline = try store.readTimeline()
+            let far = MicrophoneCleanerTests.farToneA
+            func farEndEnergy(_ location: TrackAudioLocation) throws -> Double {
+                let samples = try MicrophoneCleanerTests.samples(location)
+                return MicrophoneCleanerTests.toneEnergy(
+                    MicrophoneCleanerTests.seconds(20, 30, of: samples), frequency: far
+                )
+            }
+            let recorded = try farEndEnergy(
+                store.rawTrackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
+            )
+            let cleanedAway = try farEndEnergy(
+                store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
+            )
+
+            metadata = try store.updateMetadata {
+                $0.processing = ProcessingStatus(state: .complete, updatedAt: $0.startedAt)
+            }
+            expect.equal(try AudioCompactor().compact(store: store), AudioCompactor.Outcome.compacted)
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: store.layout.segments.path),
+                "the segments are gone, so the archive is the only copy of the recording"
+            )
+
+            // What is in `mic.m4a` now decides whether the recording survived.
+            let archived = try store.readMetadata()
+            expect.isTrue(archived.audioArchive?.mic != nil, "the microphone was archived")
+            let inArchive = try farEndEnergy(
+                store.rawTrackAudioLocation(track: .mic, metadata: archived, timeline: timeline)
+            )
+            let keptDB = 10 * log10((inArchive + 1e-12) / (cleanedAway + 1e-12))
+            expect.isTrue(
+                keptDB > 20,
+                "mic.m4a holds the far end only \(keptDB) dB above the cleaned track, so it was "
+                    + "written from the cleaned microphone"
+            )
+            let lostDB = 10 * log10((recorded + 1e-12) / (inArchive + 1e-12))
+            expect.isTrue(abs(lostDB) < 3, "the archived far end is \(lostDB) dB off the recording")
+
+            // And the cleaned track outlives the segments it was made from.
+            expect.isTrue(
+                FileManager.default.fileExists(atPath: store.layout.cleanedMicFile.path),
+                "compaction left the cleaned track alone"
+            )
+            expect.equal(
+                store.trackAudioLocation(track: .mic, metadata: archived, timeline: timeline)
+                    .segments.first?.file,
+                "mic.cleaned.m4a"
+            )
+            expect.equal(
+                store.rawTrackAudioLocation(track: .mic, metadata: archived, timeline: timeline)
+                    .segments.first?.file,
+                "mic.m4a"
+            )
+        },
+
         test("an interrupted deletion resumes once the archive is recorded") { expect in
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }

@@ -72,9 +72,11 @@ public struct AudioCompactor: Sendable {
                 removeEmptySegmentsDirectory(store: store)
                 return .nothingToDo
             }
-            // Mixed while the metadata still points at the segments: the
-            // listening copy is built from the 48 kHz PCM, not from the 16 kHz
-            // archives that are about to replace it.
+            // Mixed while the metadata still points at the segments, so the
+            // far end comes from the 48 kHz PCM rather than from the 16 kHz
+            // archive about to replace it. The microphone side comes from the
+            // cleaned track where there is one. That track is 16 kHz already,
+            // and taking it keeps the far end out of the mix twice over.
             ensureMixdown(store: store, metadata: metadata, timeline: timeline)
             metadata = try store.updateMetadata { $0.audioArchive = archive }
         }
@@ -152,7 +154,10 @@ public struct AudioCompactor: Sendable {
         let inspector = AudioFileInspector()
 
         for track in CaptureTrack.allCases {
-            let location = store.trackAudioLocation(
+            // The recording, not the cleaned microphone. What this archives is
+            // the source the manifest describes and the duration it verifies
+            // against, and the cleaned file is derived from it.
+            let location = store.rawTrackAudioLocation(
                 track: track, metadata: metadata, timeline: timeline
             )
             guard !location.isEmpty else { continue }

@@ -93,6 +93,15 @@ These paths still need direct observation:
 - A full Google Meet join, refresh, leave, and reconnect through the sensor
 - Sleep, wake, screen lock, and Bluetooth device changes during capture
 - Other applications' playback level is unchanged from the moment recording starts
+- A call taken on speakers: `raw/audio/mic.cleaned.m4a` holds the local user and
+  not the far end, `raw/audio/mic.m4a` still holds both, and the transcript
+  carries the far end's words on the remote track only. The same call taken on
+  headphones writes no cleaned file at all
+- The local user's voice profile is enrolled from the cleaned microphone rather
+  than from the recording, and it is matched in every other meeting against
+  embeddings taken from raw tracks. The cost of that domain shift is unmeasured.
+  The nearest figure there is comes from enrolling on call audio and testing on
+  room audio, which cost 0.01 to 0.03 of similarity
 - On an input device with more than two channels, the mono downmix keeps the
   channel carrying the most energy over the first 30 seconds. The scan runs only
   above two channels, so a mono or stereo device is mixed down the way it always

@@ -283,6 +283,7 @@ public actor ProcessingPipeline {
                 case .audioSafe:
                     metadata.processing.advance(to: .transcribing, at: clock.now)
                 case .transcribing:
+                    await cleanMicrophone(store: store, metadata: &metadata)
                     try await runTranscription(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .diarizing, at: clock.now)
                 case .diarizing:
@@ -687,6 +688,98 @@ public actor ProcessingPipeline {
         _ metadata: MeetingMetadata, evidence: SpeechEvidence?
     ) -> CaptureTrack {
         micHoldsLocalUserAlone(metadata, evidence: evidence) ? .remote : .mic
+    }
+
+    /// Takes the far end out of the microphone before anything reads it.
+    ///
+    /// A call on speakers puts the far end back into the microphone through the
+    /// air. On the Slack huddle this was measured on, the far end was 81% of
+    /// the words the microphone carried.
+    ///
+    /// Every stage from here on takes its audio through `trackAudioLocation`,
+    /// and the cleaner switches that over. Transcription, the speech evidence,
+    /// diarization, voice enrolment and the mixdown all read the cleaned track
+    /// without knowing it exists.
+    ///
+    /// This never fails the meeting. A throw is recorded and the microphone is
+    /// read as it was captured, which is what every meeting recorded before the
+    /// cleaner existed already does.
+    private func cleanMicrophone(store: MeetingStore, metadata: inout MeetingMetadata) async {
+        // The outcome is the record that the question was answered, and it is
+        // written whatever the answer, so it alone decides whether this runs.
+        // `cleanedMic` is deliberately not asked as well. It is set only by a
+        // run that reached `.cleaned`, and a crash between the file landing and
+        // the outcome being written would leave a meeting reading a cleaned
+        // track that nothing on disk accounts for. Re-entry is safe. `clean`
+        // subtracts from the recording rather than from its own output, and it
+        // clears the earlier record before anything on disk moves.
+        guard metadata.cleaningOutcome == nil else { return }
+        // The stage is named for transcription and this runs before any of it,
+        // so without a line here the panel shows "Transcribing" and no motion
+        // for the minutes a long meeting takes to decode, cancel and encode.
+        report(metadata, chunks: nil, detail: "Removing the far end from the microphone")
+        // Detached for the reason the transcode is. `clean` decodes both
+        // tracks, cancels every 10 ms block and encodes the whole microphone
+        // with nothing to suspend on, which is minutes of CPU for a long
+        // meeting. On this actor's executor those are minutes in which Move to
+        // Trash, a speaker rename and a line correction all wait. Every input
+        // is Sendable, and the meeting's own copy comes back with the outcome.
+        let cleaner = MicrophoneCleaner(clock: clock)
+        let snapshot = metadata
+        let outcome: CleaningOutcome
+        do {
+            let pass = try await Task.detached(priority: .utility) {
+                var carried = snapshot
+                let outcome = try cleaner.clean(
+                    store: store, metadata: &carried, timeline: try store.readTimeline()
+                )
+                return (outcome, carried)
+            }.value
+            outcome = pass.0
+            metadata = pass.1
+        } catch {
+            Log.processing.error(
+                "microphone cleaning failed: \(logSafeDescription(error), privacy: .public)"
+            )
+            outcome = .failed
+            // The copy the pass was carrying goes with the throw, and the write
+            // below re-reads the meeting from disk anyway, where `clean` has
+            // already cleared any record of a cleaned track.
+        }
+        // Two derived artefacts survive a run that stopped part-way, and
+        // neither records which microphone it was made from. Both are dealt
+        // with here, before anything reads them.
+        //
+        // The decoded working copies in Caches are keyed by meeting and track
+        // alone and are handed back without being read, so one an earlier run
+        // exported would be transcribed in place of the track this run wrote.
+        // Discarded whatever the outcome, because the stale copy can be of
+        // either microphone. A run that cleaned and then stopped leaves a
+        // cleaned export behind for a run that goes on to decide against
+        // cleaning. One re-export closes both directions.
+        scratch.discard(meetingID: metadata.id)
+        // The speech evidence goes only when the microphone actually changed.
+        // `measureSpeech` returns early whenever `speech.json` is there, so
+        // evidence measured on the recording would be read against words
+        // transcribed from the cleaned track, and a high echo reading on a
+        // window of genuine double talk is what drops a line the user spoke.
+        // Kept on every other outcome, because rebuilding it costs a decode of
+        // both tracks and a detector pass, and on a machine whose detector has
+        // since been removed the rebuilt file carries no speech series at all.
+        if outcome == .cleaned {
+            try? FileManager.default.removeItem(at: store.layout.speechEvidence)
+        }
+        // Written through the store rather than into the copy above. `clean`
+        // replaces that copy with what it read back from disk, so a field set
+        // beforehand is dropped, and `persist` carries only the fields this
+        // pipeline owns, which do not include this one.
+        do {
+            metadata = try store.updateMetadata { $0.cleaningOutcome = outcome }
+        } catch {
+            Log.processing.notice(
+                "cleaning outcome not recorded: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
     }
 
     /// Transcribes every track that needs words.
@@ -2099,6 +2192,20 @@ public actor ProcessingPipeline {
         guard try await service.wantsLocalUserSample(identityID: identityID) else { return }
 
         let timeline = try store.readTimeline()
+        // The cleaned microphone on a meeting that was cleaned, which is a
+        // change to what this profile is built from. The excerpt used to be the
+        // recording, and on a call taken on speakers the recording can be 81%
+        // far end. Folding that into a permanent centroid is a failure this
+        // project has already had, and taking the far end out is the larger
+        // correction of the two available here.
+        //
+        // The smaller risk is left standing and is unmeasured. This profile is
+        // matched in every other meeting against embeddings taken from raw
+        // tracks, so enrolment now happens in one domain and matching in
+        // another. The nearest figure there is comes from the comment above:
+        // enrolling on call audio and testing on room audio cost 0.01 to 0.03
+        // of similarity, well inside the margin over the highest impostor
+        // score. `docs/VERIFICATION.md` names this as unverified.
         let location = store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
         // The far end has to be on its own track for "the microphone track is

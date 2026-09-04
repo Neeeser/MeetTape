@@ -78,6 +78,46 @@ enum AudioTests {
         return buffer
     }
 
+    /// A tone in a flat run of samples, which is the shape the echo canceller
+    /// takes. `from` leaves everything before it silent.
+    static func makeToneSamples(
+        count: Int, sampleRate: Double, frequency: Double, amplitude: Float, from: Int = 0
+    ) -> [Float] {
+        var samples = [Float](repeating: 0, count: count)
+        for index in from..<count {
+            let phase = 2 * Double.pi * frequency * Double(index) / sampleRate
+            samples[index] = amplitude * Float(sin(phase))
+        }
+        return samples
+    }
+
+    /// Energy summed across the whole band.
+    ///
+    /// Use this where the microphone holds no copy of the far end. There is
+    /// nothing to subtract, so the difference between input and output is
+    /// what the canceller took out of the user.
+    static func energy(_ samples: [Float]) -> Double {
+        samples.reduce(0.0) { $0 + Double($1) * Double($1) }
+    }
+
+    /// Energy at one frequency, by the Goertzel recurrence.
+    ///
+    /// One narrow band rather than the whole spectrum. Where the microphone
+    /// does hold a copy of the far end, broadband energy after cancellation is
+    /// mostly residue from subtracting it, so it says nothing about whether
+    /// the user's own voice came through.
+    static func toneEnergy(_ samples: [Float], frequency: Double, sampleRate: Double) -> Double {
+        let coefficient = 2 * cos(2 * Double.pi * frequency / sampleRate)
+        var previous = 0.0
+        var older = 0.0
+        for sample in samples {
+            let current = Double(sample) + coefficient * previous - older
+            older = previous
+            previous = current
+        }
+        return previous * previous + older * older - coefficient * previous * older
+    }
+
     static var suite: Suite {
         Suite("Audio", [
             test("takes read minutes apart are judged as one reading") { expect in
@@ -190,6 +230,169 @@ enum AudioTests {
                     let info = try AudioFileInspector().inspect(url: url)
                     expect.equal(info.frameCount, segment.frameCount ?? -1, "manifest disagrees with \(segment.file)")
                 }
+            },
+
+            test("a microphone holding nothing but the far end loses more than 20 dB") { expect in
+                // A call taken on speakers. The far end left the speakers,
+                // crossed the room and arrived back at the capsule a few
+                // milliseconds later and quieter. Nothing downstream can unmix
+                // that, because the mixing happened in the air.
+                //
+                // The reference is the recording of the far end, which is what
+                // Apple's own unit never had here: it subtracts what its host
+                // plays, and Pipit plays nothing.
+                let canceller = try expect.unwrap(EchoCanceller(sampleRate: 16_000))
+                let block = canceller.blockFrames
+                let blocks = 400
+                let delay = 48  // 3 ms across the desk
+                var far = [Float](repeating: 0, count: block * blocks)
+                for index in far.indices {
+                    let phase: Double = 2.0 * Double.pi * 440.0 * Double(index) / 16_000.0
+                    far[index] = Float(0.5 * sin(phase))
+                }
+                // The user says nothing at all, so everything in the microphone
+                // is the far end coming back.
+                var heard = [Float](repeating: 0, count: far.count)
+                for index in delay..<heard.count { heard[index] = far[index - delay] * 0.35 }
+
+                var before: Double = 0
+                var after: Double = 0
+                for index in 0..<blocks {
+                    let range = (index * block)..<((index + 1) * block)
+                    var microphone = Array(heard[range])
+                    let reference = Array(far[range])
+                    expect.isTrue(canceller.process(microphone: &microphone, reference: reference))
+                    // The filter needs to hear the room before it can subtract
+                    // it, so the score is the second half.
+                    guard index >= blocks / 2 else { continue }
+                    for sample in heard[range] { before += Double(sample) * Double(sample) }
+                    for sample in microphone { after += Double(sample) * Double(sample) }
+                }
+                let removedDB = 10 * log10((before + 1e-12) / (after + 1e-12))
+                expect.isTrue(
+                    removedDB > 20,
+                    "the far end should be gone, removed \(Int(removedDB)) dB"
+                )
+            },
+
+            test("a rate the library cannot take is refused at the door") { expect in
+                // The library reports an unsupported format on every block
+                // below 8 kHz, so a canceller built at such a rate would take
+                // audio and fail on all of it. Task 3 hands it rates read from
+                // recorded files.
+                expect.isNil(EchoCanceller(sampleRate: 4_000))
+                expect.isNil(EchoCanceller(sampleRate: 0))
+                // 8 kHz is the lowest rate the library supports, so it is the
+                // rate a one-off in the guard would refuse.
+                expect.isTrue(EchoCanceller(sampleRate: 8_000) != nil)
+                expect.isTrue(EchoCanceller(sampleRate: 16_000) != nil)
+            },
+
+            test("the user's own voice survives while the far end is cancelled") { expect in
+                // The user speaks over the far end. Every earlier attempt at
+                // this problem cut whole words out of the user, so the number
+                // held here is how much of the user's own voice is still there
+                // once the far end has been subtracted.
+                let canceller = try expect.unwrap(EchoCanceller(sampleRate: 16_000))
+                let block = canceller.blockFrames
+                // The canceller spends its first 2.5 s in a starting state
+                // where it reports nothing, so 8 s of audio leaves it time to
+                // settle and then time to be measured.
+                let blocks = 800
+                let rate = 16_000.0
+                let total = block * blocks
+                let delay = 48  // 3 ms across the desk
+                let far = makeToneSamples(
+                    count: total, sampleRate: rate, frequency: 440, amplitude: 0.5
+                )
+                // The user starts talking halfway through, which leaves the
+                // first half for the canceller to learn the room and the second
+                // to show it subtracts the far end and nothing else.
+                let near = makeToneSamples(
+                    count: total, sampleRate: rate, frequency: 1300, amplitude: 0.3,
+                    from: total / 2
+                )
+                var heard = near
+                for index in delay..<total { heard[index] += far[index - delay] * 0.35 }
+
+                var cleaned = [Float](repeating: 0, count: total)
+                for index in 0..<blocks {
+                    let range = (index * block)..<((index + 1) * block)
+                    var microphone = Array(heard[range])
+                    expect.isTrue(
+                        canceller.process(microphone: &microphone, reference: Array(far[range]))
+                    )
+                    cleaned.replaceSubrange(range, with: microphone)
+                }
+
+                let talking = (total / 2)..<total
+                let kept = toneEnergy(Array(cleaned[talking]), frequency: 1300, sampleRate: rate)
+                let spoken = toneEnergy(Array(near[talking]), frequency: 1300, sampleRate: rate)
+                let lossDB = 10 * log10((spoken + 1e-12) / (kept + 1e-12))
+                expect.isTrue(
+                    lossDB < 3,
+                    "the user lost \(lossDB) dB of their own voice"
+                )
+                expect.isTrue(
+                    canceller.echoRemovedDB > 10,
+                    "an echo path is present and the canceller reports removing "
+                        + "\(canceller.echoRemovedDB) dB"
+                )
+            },
+
+            test("a reference with no echo path is reported as nothing removed") { expect in
+                // A meeting taken on headphones. The far end never reaches the
+                // microphone, so there is nothing to subtract.
+                //
+                // Bypassing this case is not optional, and both numbers below
+                // are what the bypass rests on. With no echo to lock onto, the
+                // canceller estimates the residual from render power and an
+                // assumed path gain, knowing nothing about whether the
+                // microphone holds any of it, and tears the user's own voice
+                // apart.
+                //
+                // The low reading below is not a measure of that damage. It
+                // comes from the linear filter, and the suppressor that does
+                // the damage runs after it. A low reading says the filter never
+                // locked on to an echo path, and that is the reason to discard
+                // the output.
+                let canceller = try expect.unwrap(EchoCanceller(sampleRate: 16_000))
+                let block = canceller.blockFrames
+                let blocks = 800
+                let rate = 16_000.0
+                let total = block * blocks
+                let far = makeToneSamples(
+                    count: total, sampleRate: rate, frequency: 440, amplitude: 0.5
+                )
+                let heard = makeToneSamples(
+                    count: total, sampleRate: rate, frequency: 700, amplitude: 0.3
+                )
+
+                var cleaned = [Float](repeating: 0, count: total)
+                for index in 0..<blocks {
+                    let range = (index * block)..<((index + 1) * block)
+                    var microphone = Array(heard[range])
+                    expect.isTrue(
+                        canceller.process(microphone: &microphone, reference: Array(far[range]))
+                    )
+                    cleaned.replaceSubrange(range, with: microphone)
+                }
+
+                let second = (total / 2)..<total
+                let damageDB = 10 * log10(
+                    (energy(Array(heard[second])) + 1e-12)
+                        / (energy(Array(cleaned[second])) + 1e-12)
+                )
+                expect.isTrue(
+                    damageDB > 20,
+                    "a microphone with no echo in it came through only \(damageDB) dB down, "
+                        + "so the canceller is gentler on clean audio than the bypass assumes"
+                )
+                expect.isTrue(
+                    canceller.echoRemovedDB < 3,
+                    "no echo path is present and the canceller reports removing "
+                        + "\(canceller.echoRemovedDB) dB"
+                )
             },
 
             test("audio lost to an engine rebuild is written as silence") { expect in

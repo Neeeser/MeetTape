@@ -174,6 +174,64 @@ public struct RecordingRun: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// The microphone track with the far end subtracted out of it, and the
+/// measurement that says the subtraction was worth keeping.
+///
+/// Its presence is what makes every reader take the cleaned file instead of the
+/// raw one, so it is written only after the cleaner has decided the output is
+/// good. A meeting whose canceller found no echo path records the outcome and
+/// no track here, and every reader stays on the raw microphone.
+public struct CleanedMicrophone: Codable, Sendable, Equatable {
+    /// The file, in the same coordinates a compacted track carries, so a reader
+    /// gets the same shape whichever representation it is handed.
+    public var track: AudioArchive.Track
+    /// Median decibels the canceller reported removing, over the quarter-second
+    /// windows where the far end was actually playing.
+    ///
+    /// The figure comes from the canceller's linear filter, so it says whether
+    /// the filter locked on to an echo path. It is not a measure of what the
+    /// suppressor after it did to the audio.
+    public var echoRemovedMedianDB: Double
+    /// How many of those windows there were. The median above cannot be read
+    /// without it. A high figure over a handful of windows says the far end
+    /// barely played, and says nothing about the room.
+    public var farEndActiveWindows: Int
+    public var producedAt: Date
+
+    public init(
+        track: AudioArchive.Track, echoRemovedMedianDB: Double, farEndActiveWindows: Int,
+        producedAt: Date
+    ) {
+        self.track = track
+        self.echoRemovedMedianDB = echoRemovedMedianDB
+        self.farEndActiveWindows = farEndActiveWindows
+        self.producedAt = producedAt
+    }
+}
+
+/// What the microphone cleaner did with one meeting.
+///
+/// Recorded whatever the answer, because the cleaner runs once and this is what
+/// says it already ran. Only `cleaned` leaves a file behind.
+public enum CleaningOutcome: String, Codable, Sendable, Equatable {
+    /// The far end was subtracted and the result is on disk.
+    case cleaned
+    /// No far end was recorded to subtract, or too little of it played for the
+    /// canceller to be judged on.
+    case skippedNoReference
+    /// The canceller's filter never locked on to an echo path, which is a call
+    /// taken on headphones. Cancelling anyway takes tens of decibels out of a
+    /// microphone that holds only the user.
+    case bypassedNoEchoPath
+    /// One track holding everyone, which is every import and every in-person
+    /// session. There is no separate far end and nothing to subtract.
+    case skippedOneTrack
+    /// The pass did not finish. What went wrong is on this Mac rather than in
+    /// the recording, so the meeting is read on the microphone as it was
+    /// captured and nothing about it is lost.
+    case failed
+}
+
 /// `metadata.json`. Mutable by design: titles, notes, participants, calendar
 /// linkage and speaker names all change after the fact. The recording itself never
 /// does.
@@ -236,6 +294,13 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
     /// Set once the PCM segments have been transcoded to verified archive files
     /// and deleted. Nil while the segments are still the source representation.
     public var audioArchive: AudioArchive?
+    /// Set once the microphone has been cleaned and the result was worth
+    /// keeping. Nil on every meeting the cleaner bypassed, skipped or has not
+    /// reached, and on every meeting recorded before the cleaner existed.
+    public var cleanedMic: CleanedMicrophone?
+    /// What the cleaner decided. Written whatever the answer, and what stops it
+    /// running a second time.
+    public var cleaningOutcome: CleaningOutcome?
     /// When the user took this meeting out of the list. Every file it holds
     /// stays where it is. Archiving changes which list a meeting is in and
     /// nothing else.
@@ -299,6 +364,8 @@ public struct MeetingMetadata: Codable, Sendable, Equatable, Identifiable {
         self.captureWarnings = []
         self.hadOtherAudibleTabs = false
         self.audioArchive = nil
+        self.cleanedMic = nil
+        self.cleaningOutcome = nil
         self.archivedAt = nil
         self.folderName = nil
         self.folderSuggestionDeclined = nil

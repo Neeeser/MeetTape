@@ -25,6 +25,10 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
     }
 
     private let state = LockedBox(State())
+    /// What the current bind's first IOProc callback delivered. Written once by
+    /// the callback and cleared by `teardown`, so it always describes the bind
+    /// that is running now.
+    private let firstCallbackBox = LockedBox<TapCallbackReading?>(nil)
     private let sink: AudioBufferSink
     /// Called when the tap's own format changes underneath us, which callback
     /// arrival cannot detect: buffers keep coming, labelled with the old format.
@@ -74,9 +78,16 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
         }
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID) }
         if tapID != 0 { AudioHardwareDestroyProcessTap(tapID) }
+        // After the IOProc is gone, so a callback already running cannot write
+        // this bind's reading back over the cleared box.
+        firstCallbackBox.withLock { $0 = nil }
     }
 
-    public func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+    public func firstCallback() -> TapCallbackReading? {
+        firstCallbackBox.withLock { $0 }
+    }
+
+    public func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
         teardown()
         guard !targets.isEmpty else {
             throw CaptureError.noMatchingAudioProcess(prefixes: [])
@@ -141,30 +152,67 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
             throw CaptureError.aggregateDeviceCreationFailed(status: aggregateStatus)
         }
 
+        // The tap's buffer is read from the final index, inferred from one Mac
+        // delivering [8ch, 2ch] for a stereo tap and not from anything Apple
+        // documents. `makeBuffer` matches on channel count when the index does
+        // not hold, and logs that it did.
+        let streamCount = CoreAudioSystem.inputStreamCount(of: aggregateID)
+        let tapStreamIndex: Int? = if let streamCount, streamCount >= 1 { streamCount - 1 } else { nil }
+        Log.capture.info(
+            "aggregate input streams: count=\(streamCount ?? -1, privacy: .public) tapIndex=\(tapStreamIndex ?? -1, privacy: .public)"
+        )
+
         let sink = self.sink
         var ioProcID: AudioDeviceIOProcID?
-        let described = LockedBox(false)
+        let readingBox = firstCallbackBox
+        let fellBack = LockedBox(false)
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil) {
             _, inputData, inputTime, _, _ in
-            // The shape of the first buffer list, once per bind. An aggregate
-            // device does not have to match the tap's format, and the difference
-            // decides how many frames each callback really carries.
-            let shouldDescribe = described.withLock { seen -> Bool in
-                if seen { return false }
-                seen = true
-                return true
-            }
-            if shouldDescribe {
+            let selection = makeBuffer(
+                from: inputData, format: format, tapStreamIndex: tapStreamIndex
+            )
+            // The shape of the first buffer list and whether the index held,
+            // once per bind. An aggregate device does not have to match the
+            // tap's format, and the difference decides how many frames each
+            // callback really carries. The poll reads this back and writes it
+            // into the manifest, because a log line is gone by the time anyone
+            // opens the meeting folder to ask why a track is silent.
+            let reading = readingBox.withLock { stored -> TapCallbackReading? in
+                guard stored == nil else { return nil }
                 let list = UnsafeMutableAudioBufferListPointer(
                     UnsafeMutablePointer(mutating: inputData)
                 )
-                let shape = list.map { "\($0.mNumberChannels)ch/\($0.mDataByteSize)B" }
+                let fresh = TapCallbackReading(
+                    streams: list.map {
+                        .init(
+                            channelCount: Int($0.mNumberChannels), byteCount: Int($0.mDataByteSize)
+                        )
+                    },
+                    usedFallback: selection.usedFallback
+                )
+                stored = fresh
+                return fresh
+            }
+            if let reading {
+                let shape = reading.streams.map { "\($0.channelCount)ch/\($0.byteCount)B" }
                     .joined(separator: " ")
                 Log.capture.info(
-                    "tap buffers: count=\(list.count, privacy: .public) [\(shape, privacy: .public)] format=\(format.sampleRate, privacy: .public)Hz x\(format.channelCount, privacy: .public)"
+                    "tap buffers: count=\(reading.streams.count, privacy: .public) [\(shape, privacy: .public)] format=\(format.sampleRate, privacy: .public)Hz x\(format.channelCount, privacy: .public)"
                 )
             }
-            guard let buffer = makeBuffer(from: inputData, format: format) else { return }
+            if selection.usedFallback {
+                let shouldWarn = fellBack.withLock { warned -> Bool in
+                    if warned { return false }
+                    warned = true
+                    return true
+                }
+                if shouldWarn {
+                    Log.capture.info(
+                        "tap stream index \(tapStreamIndex ?? -1, privacy: .public) unusable, matching on channel count instead"
+                    )
+                }
+            }
+            guard let buffer = selection.buffer else { return }
             sink(AudioBufferPacket(
                 buffer: buffer, hostTime: HostTime.seconds(inputTime.pointee.mHostTime)
             ))
@@ -203,8 +251,12 @@ public final class RemoteAudioSource: ProcessTapController, Sendable {
             state.formatListener = listener
         }
 
-        return AudioFormatDescriptor(
-            sampleRate: format.sampleRate, channelCount: Int(format.channelCount)
+        return RemoteTapBinding(
+            format: AudioFormatDescriptor(
+                sampleRate: format.sampleRate, channelCount: Int(format.channelCount)
+            ),
+            streamCount: streamCount,
+            tapStreamIndex: tapStreamIndex
         )
     }
 

@@ -7,9 +7,16 @@ import TestKit
 /// Real audio through the real writers and readers. These use AVFoundation but no
 /// audio hardware, so they run anywhere.
 enum AudioTests {
+    /// A deinterleaved tone, which is the shape a process tap delivers. Its
+    /// format is always `standardFormatWithSampleRate:channels:`, so every
+    /// channel has its own pointer.
+    ///
+    /// `toneChannel` puts the tone on one channel and leaves the others at
+    /// zero, which is what a far end talking on one side of a stereo mixdown
+    /// sounds like.
     static func makeTone(
         seconds: Double, sampleRate: Double, channels: AVAudioChannelCount = 1,
-        frequency: Double = 440, amplitude: Float = 0.5
+        frequency: Double = 440, amplitude: Float = 0.5, toneChannel: Int? = nil
     ) -> AVAudioPCMBuffer {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels)!
         let frames = AVAudioFrameCount(seconds * sampleRate)
@@ -18,16 +25,21 @@ enum AudioTests {
         let data = buffer.floatChannelData!
         for frame in 0..<Int(frames) {
             let value = amplitude * Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
-            for channel in 0..<Int(channels) { data[channel][frame] = value }
+            for channel in 0..<Int(channels) {
+                data[channel][frame] = toneChannel == nil || toneChannel == channel ? value : 0
+            }
         }
         return buffer
     }
 
     /// A buffer in the shape a multi-channel built-in microphone delivers: more
     /// than two channels, discrete, with no surround layout to mix down from.
+    ///
+    /// `toneChannel` puts the tone on one channel and leaves the rest at zero,
+    /// which is the shape that made channel 0 the wrong channel to keep.
     static func makeDiscreteTone(
         seconds: Double, sampleRate: Double, channels: UInt32,
-        frequency: Double = 440, amplitude: Float = 0.5
+        frequency: Double = 440, amplitude: Float = 0.5, toneChannel: Int? = nil
     ) -> AVAudioPCMBuffer {
         var description = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -49,7 +61,9 @@ enum AudioTests {
         let data = buffer.floatChannelData!
         for frame in 0..<Int(frames) {
             let value = amplitude * Float(sin(2 * Double.pi * frequency * Double(frame) / sampleRate))
-            for channel in 0..<Int(channels) { data[channel][frame] = value }
+            for channel in 0..<Int(channels) {
+                data[channel][frame] = toneChannel == nil || toneChannel == channel ? value : 0
+            }
         }
         return buffer
     }
@@ -367,7 +381,9 @@ enum AudioTests {
                             mDataByteSize: UInt32(frames * tapChannels * MemoryLayout<Float>.size),
                             mData: UnsafeMutableRawPointer(tap.baseAddress)
                         )
-                        return makeBuffer(from: storage.unsafePointer, format: format)
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: nil
+                        ).buffer
                     }
                 }
                 guard let buffer = result else { return expect.fail("no buffer produced") }
@@ -378,6 +394,125 @@ enum AudioTests {
                 expect.close(
                     Double(buffer.floatChannelData![0][0]), 0.25, tolerance: 0.001,
                     "the audio comes from the tap's stream, not the device's"
+                )
+            },
+
+            test("tap stream is selected by index, not by channel count") { expect in
+                // Jump Desktop Audio and a stereo USB interface both publish a
+                // two-channel input stream ahead of the tap. Matching on channel
+                // count reads that device's silence and the far side of the call
+                // is lost, so the tap is taken from the index the aggregate's
+                // input stream count gives.
+                let frames = 512
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var silent = [Float](repeating: 0, count: frames * 2)
+                var tone = [Float](repeating: 0, count: frames * 2)
+                for frame in 0..<frames {
+                    let sample = Float(sin(2 * Double.pi * 1_000 * Double(frame) / 48_000))
+                    tone[frame * 2] = sample
+                    tone[frame * 2 + 1] = sample
+                }
+
+                let result: AVAudioPCMBuffer? = silent.withUnsafeMutableBufferPointer { first in
+                    tone.withUnsafeMutableBufferPointer { second in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(first.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(second.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 1
+                        ).buffer
+                    }
+                }
+                guard let buffer = result else { return expect.fail("no buffer produced") }
+                let samples = buffer.floatChannelData![0]
+                var peak: Float = 0
+                for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(samples[frame])) }
+                expect.isTrue(
+                    peak > 0.5,
+                    "the tap's stream carries the tone, and the first stereo stream is silent"
+                )
+            },
+
+            test("an out-of-range tap index falls back to channel-count matching") { expect in
+                // A list that does not line up with the reported stream count
+                // still has to produce audio, so the old match stays as a
+                // fallback and the caller logs that it was used.
+                let frames = 256
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var first = [Float](repeating: 0.4, count: frames * 2)
+                var second = [Float](repeating: 0.9, count: frames * 2)
+
+                let selection: TapStreamSelection = first.withUnsafeMutableBufferPointer { one in
+                    second.withUnsafeMutableBufferPointer { two in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(one.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 2,
+                            mDataByteSize: UInt32(frames * 2 * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(two.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 7
+                        )
+                    }
+                }
+                guard let buffer = selection.buffer else { return expect.fail("no buffer produced") }
+                expect.close(
+                    Double(buffer.floatChannelData![0][0]), 0.4, tolerance: 0.001,
+                    "the first stream matching the tap's channel count is read"
+                )
+                expect.isTrue(selection.usedFallback, "the fallback is reported to the caller")
+            },
+
+            test("a non-interleaved list is not reported as the fallback") { expect in
+                // One buffer per channel is what a non-interleaved source
+                // delivers, and the tap index counts streams, so it never
+                // addresses those buffers. Reporting the miss made a device
+                // where nothing is wrong log that the index was unusable on
+                // every bind.
+                let frames = 128
+                let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+                var left = [Float](repeating: 0.3, count: frames)
+                var right = [Float](repeating: 0.6, count: frames)
+
+                let selection: TapStreamSelection = left.withUnsafeMutableBufferPointer { one in
+                    right.withUnsafeMutableBufferPointer { two in
+                        let storage = AudioBufferList.allocate(maximumBuffers: 2)
+                        defer { free(storage.unsafeMutablePointer) }
+                        storage[0] = AudioBuffer(
+                            mNumberChannels: 1,
+                            mDataByteSize: UInt32(frames * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(one.baseAddress)
+                        )
+                        storage[1] = AudioBuffer(
+                            mNumberChannels: 1,
+                            mDataByteSize: UInt32(frames * MemoryLayout<Float>.size),
+                            mData: UnsafeMutableRawPointer(two.baseAddress)
+                        )
+                        return makeBuffer(
+                            from: storage.unsafePointer, format: format, tapStreamIndex: 1
+                        )
+                    }
+                }
+                guard let buffer = selection.buffer else { return expect.fail("no buffer produced") }
+                expect.close(Double(buffer.floatChannelData![1][0]), 0.6, tolerance: 0.001)
+                expect.isFalse(
+                    selection.usedFallback,
+                    "an index that cannot address per-channel buffers is not a fallback"
                 )
             },
 
@@ -395,7 +530,9 @@ enum AudioTests {
                             mData: UnsafeMutableRawPointer(pointer.baseAddress)
                         )
                     )
-                    return withUnsafePointer(to: &list) { makeBuffer(from: $0, format: format) }
+                    return withUnsafePointer(to: &list) {
+                        makeBuffer(from: $0, format: format, tapStreamIndex: nil).buffer
+                    }
                 }
                 expect.equal(Int(result?.frameLength ?? 0), frames)
             },
@@ -438,6 +575,108 @@ enum AudioTests {
                 }
                 expect.close(Double(frames) / 16_000, 2.0, tolerance: 0.15, "the whole track reads back")
                 expect.isTrue(peak > 0.2, "the audio read back silent: peak \(peak)")
+            },
+
+            test("the loudest channel is the one read back, not channel 0") { expect in
+                // The raw built-in microphone presents three channels and the
+                // voice is not always on the first. On 2026-09-02 and
+                // 2026-09-03 channel 0 of a three-channel track came out around
+                // -47.8 dBFS at p99 against the usual -17 to -18 dBFS, about
+                // 30 dB down, and that meeting transcribed badly end to end.
+                for (channels, toneChannel) in [(UInt32(3), 2), (UInt32(9), 4)] {
+                    let root = try ManifestTests.makeTemporaryDirectory()
+                    defer { try? FileManager.default.removeItem(at: root) }
+                    let layout = MeetingLayout(root: root)
+                    try FileManager.default.createDirectory(
+                        at: layout.segments, withIntermediateDirectories: true
+                    )
+                    let manifest = try ManifestWriter(url: layout.manifest)
+                    // -6 dBFS on one channel, digital silence on the rest.
+                    let tone = makeDiscreteTone(
+                        seconds: 3, sampleRate: 48_000, channels: channels,
+                        amplitude: 0.5, toneChannel: toneChannel
+                    )
+                    let writer = SegmentWriter(
+                        track: .mic, layout: layout, manifest: manifest,
+                        format: tone.format, segmentSeconds: 60
+                    )
+                    writer.enqueueSynchronously(AudioBufferPacket(buffer: tone, hostTime: 0))
+                    writer.finish(reason: "test")
+                    manifest.close()
+
+                    let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                    expect.equal(
+                        timeline.segments(track: .mic).first?.format.channelCount, Int(channels)
+                    )
+
+                    let stream = TrackAudioStream(
+                        segments: timeline.segments(track: .mic),
+                        segmentsDirectory: layout.segments,
+                        targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                    )
+                    var sumOfSquares: Double = 0
+                    var frames = 0
+                    try stream.forEachBuffer { buffer, _ in
+                        guard let data = buffer.floatChannelData else { return true }
+                        for frame in 0..<Int(buffer.frameLength) {
+                            sumOfSquares += Double(data[0][frame] * data[0][frame])
+                        }
+                        frames += Int(buffer.frameLength)
+                        return true
+                    }
+                    let rms = frames > 0 ? (sumOfSquares / Double(frames)).squareRoot() : 0
+                    let dBFS = 20 * log10(max(rms, 1e-9))
+                    expect.isTrue(
+                        dBFS > -12,
+                        "channel \(toneChannel) of \(channels) read back at \(Int(dBFS)) dBFS"
+                    )
+                }
+            },
+
+            test("a group that opens with 30 s of silence keeps channel 0") { expect in
+                // The scan measures the group's first file only, and a file of
+                // digital silence is a tie, which answers channel 0. So a
+                // meeting whose first half minute is silent on every channel
+                // reads back silent even though a later segment has audio.
+                // Pinned rather than fixed: reaching past the first file means
+                // opening segments the reader has not got to yet.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(
+                    at: layout.segments, withIntermediateDirectories: true
+                )
+                let manifest = try ManifestWriter(url: layout.manifest)
+                let silence = makeDiscreteTone(
+                    seconds: 31, sampleRate: 16_000, channels: 3, amplitude: 0
+                )
+                let tone = makeDiscreteTone(
+                    seconds: 3, sampleRate: 16_000, channels: 3, amplitude: 0.5, toneChannel: 2
+                )
+                let writer = SegmentWriter(
+                    track: .mic, layout: layout, manifest: manifest,
+                    format: silence.format, segmentSeconds: 30
+                )
+                writer.enqueueSynchronously(AudioBufferPacket(buffer: silence, hostTime: 0))
+                writer.enqueueSynchronously(AudioBufferPacket(buffer: tone, hostTime: 31))
+                writer.finish(reason: "test")
+                manifest.close()
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.equal(timeline.segments(track: .mic).count, 2, "the group has two segments")
+
+                let stream = TrackAudioStream(
+                    segments: timeline.segments(track: .mic),
+                    segmentsDirectory: layout.segments,
+                    targetFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                )
+                var peak: Float = 0
+                try stream.forEachBuffer { buffer, _ in
+                    guard let data = buffer.floatChannelData else { return true }
+                    for frame in 0..<Int(buffer.frameLength) { peak = max(peak, abs(data[0][frame])) }
+                    return true
+                }
+                expect.equal(peak, 0, "channel 0 is kept, so the later tone is not read back")
             },
 
             test("a chunk exports to an m4a small enough for the request limit") { expect in

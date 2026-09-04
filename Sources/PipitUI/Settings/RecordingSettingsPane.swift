@@ -62,25 +62,6 @@ struct RecordingSettingsPane: View {
                     }
                 )
             }
-            Section("Microphone") {
-                Toggle(
-                    "Prefer the built-in microphone while Bluetooth headphones are connected",
-                    isOn: Binding(
-                        get: { runtime.settings.preferBuiltInMicrophone },
-                        set: { newValue in
-                            var settings = runtime.settings
-                            settings.preferBuiltInMicrophone = newValue
-                            runtime.update(settings: settings)
-                        }
-                    )
-                )
-                Text(
-                    "A Bluetooth headset switches its microphone to the hands-free profile at "
-                        + "16 kHz. The audio is recorded accurately at that rate, and it "
-                        + "transcribes less accurately than the built-in microphone at 48 kHz."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
     }

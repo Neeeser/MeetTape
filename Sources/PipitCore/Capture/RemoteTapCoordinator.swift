@@ -8,8 +8,61 @@ public protocol ProcessTapController: AnyObject, Sendable {
     /// helper processes and survives application restarts under a new PID.
     func resolveTargets(bundlePrefixes: [String]) -> [RemoteAudioTarget]
     func teardown()
-    /// Creates the tap and aggregate device, returning the tap's format.
-    func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor
+    /// Creates the tap and aggregate device, returning what was bound.
+    func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding
+    /// What the current bind's first IOProc callback delivered, or nil until
+    /// one has arrived. Read on the poll, because the bind returns before any
+    /// callback runs and the manifest is where the answer has to end up.
+    func firstCallback() -> TapCallbackReading?
+}
+
+/// What one successful bind produced.
+///
+/// The stream index is carried out of the audio layer so the manifest records
+/// which buffer of the aggregate was read as the meeting.
+public struct RemoteTapBinding: Sendable, Equatable {
+    public let format: AudioFormatDescriptor
+    /// Input streams the aggregate device publishes. Nil when CoreAudio would
+    /// not report it.
+    public let streamCount: Int?
+    /// Index of the tap's buffer in the IOProc's list, or nil when the count
+    /// was unavailable.
+    public let tapStreamIndex: Int?
+
+    public init(format: AudioFormatDescriptor, streamCount: Int?, tapStreamIndex: Int?) {
+        self.format = format
+        self.streamCount = streamCount
+        self.tapStreamIndex = tapStreamIndex
+    }
+}
+
+/// What the tap's first IOProc callback of one bind delivered.
+///
+/// `RemoteTapBinding` says which buffer the bind decided to read. This says
+/// what CoreAudio then handed over and whether that decision held, which is the
+/// pair a silent track is diagnosed from. Both used to go to the unified log
+/// only, and that is gone by the time anyone opens the meeting folder.
+public struct TapCallbackReading: Sendable, Equatable {
+    /// One entry per buffer in the IOProc's list, in the order it arrived.
+    public struct Stream: Sendable, Equatable {
+        public let channelCount: Int
+        public let byteCount: Int
+
+        public init(channelCount: Int, byteCount: Int) {
+            self.channelCount = channelCount
+            self.byteCount = byteCount
+        }
+    }
+
+    public let streams: [Stream]
+    /// True when the tap's index was unusable and a channel-count match was
+    /// read instead, which is the reading most likely to be the wrong buffer.
+    public let usedFallback: Bool
+
+    public init(streams: [Stream], usedFallback: Bool) {
+        self.streams = streams
+        self.usedFallback = usedFallback
+    }
 }
 
 /// Drives `RemoteRecoveryPolicy` against a real process tap.
@@ -26,6 +79,9 @@ public final class RemoteTapCoordinator: Sendable {
         /// mean tearing down and recreating a tap twice a second all meeting.
         var consecutiveBindFailures = 0
         var nextBindAllowedAt: Double = 0
+        /// The bind whose first callback has already been reported, so a poll
+        /// twice a second does not write the same line all meeting.
+        var reportedCallbackBind: Int?
     }
 
     private let state: Mutex<State>
@@ -86,9 +142,13 @@ public final class RemoteTapCoordinator: Sendable {
     /// buffer overwrote it milliseconds later, so a quiet stretch logged pairs
     /// of transitions 43 ms apart instead of one state. The tapped process's own
     /// output flag is the decidable signal, and now nothing outranks it.
-    public func noteBufferArrived(hostTime: Double) {
+    ///
+    /// `peak` is the largest sample magnitude in the buffer, or nil when the
+    /// caller could not measure it. Content is the one signal that separates a
+    /// tap carrying the meeting from a tap carrying digital zero at full rate.
+    public func noteBufferArrived(hostTime: Double, peak: Float?) {
         state.withLock { state in
-            state.policy.noteBufferArrived(at: hostTime)
+            state.policy.noteBufferArrived(at: hostTime, peak: peak)
             state.faultSince = nil
         }
     }
@@ -121,11 +181,12 @@ public final class RemoteTapCoordinator: Sendable {
 
         let (prefixes, running) = state.withLock { ($0.bundlePrefixes, $0.policy.isRunning) }
         guard running else { return }
+        reportFirstCallback()
         let targets = controller.resolveTargets(bundlePrefixes: prefixes)
         let decision = state.withLock { $0.policy.evaluate(targets: targets, at: now) }
         switch decision {
         case .none:
-            syncHealth()
+            syncHealth(at: now)
         case .bind(let reason):
             if case .producingWithoutCallbacks = reason {
                 state.withLock { state in
@@ -139,15 +200,44 @@ public final class RemoteTapCoordinator: Sendable {
     public func warnings(at now: Double? = nil) -> [CaptureWarning] {
         let instant = now ?? clock.monotonicSeconds
         return state.withLock { state in
-            guard let faultSince = state.faultSince else { return [] }
-            return [.remoteProducingWithoutCallbacks(seconds: instant - faultSince)]
+            var warnings: [CaptureWarning] = []
+            if let faultSince = state.faultSince {
+                warnings.append(.remoteProducingWithoutCallbacks(seconds: instant - faultSince))
+            }
+            if let silentFor = state.policy.unrecoveredSilence(at: instant) {
+                warnings.append(.remoteSilentWhileProducing(seconds: silentFor))
+            }
+            return warnings
         }
     }
 
-    private func syncHealth() {
-        let implied = state.withLock { $0.policy.health }
+    /// Writes down what the current bind's first callback delivered, once.
+    ///
+    /// The bind returns before any callback has run, so `remote_bind` cannot
+    /// carry this and it arrives a poll later instead. The source clears its
+    /// reading on teardown, so a rebind that never delivers reports nothing and
+    /// the last line stands for the bind it names.
+    private func reportFirstCallback() {
+        guard let reading = controller.firstCallback() else { return }
+        let unreported: Int? = state.withLock { state in
+            let count = state.policy.bindCount
+            guard state.reportedCallbackBind != count else { return nil }
+            state.reportedCallbackBind = count
+            return count
+        }
+        guard let bindCount = unreported else { return }
+        delegate.captureDidReadRemoteStream(reading: reading, bindCount: bindCount)
+    }
+
+    private func syncHealth(at now: Double) {
+        let (implied, silent) = state.withLock { state in
+            (state.policy.health, state.policy.unrecoveredSilence(at: now) != nil)
+        }
         guard implied != health else { return }
-        setHealth(implied, detail: nil)
+        let detail = implied == .degraded && silent
+            ? "tap delivers silence while target reports output"
+            : nil
+        setHealth(implied, detail: detail)
     }
 
     private func setHealth(_ new: CaptureHealthState, detail: String?) {
@@ -181,7 +271,8 @@ public final class RemoteTapCoordinator: Sendable {
         }
 
         do {
-            let format = try controller.bind(to: targets)
+            let binding = try controller.bind(to: targets)
+            let format = binding.format
             let previous = state.withLock { $0.activeFormat }
             if format != previous {
                 delegate.captureWillChangeFormat(track: .remote, from: previous, to: format, reason: reason.label)
@@ -196,7 +287,7 @@ public final class RemoteTapCoordinator: Sendable {
                 return state.policy.bindCount
             }
             delegate.captureDidBindRemote(
-                targets: targets, reason: reason, bindCount: count
+                targets: targets, reason: reason, bindCount: count, binding: binding
             )
             setHealth(.recovering, detail: reason.label)
         } catch {

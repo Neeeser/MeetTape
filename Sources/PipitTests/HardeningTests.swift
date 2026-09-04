@@ -15,14 +15,25 @@ enum HardeningTests {
         private let lock = NSLock()
         private var sinkHandler: AudioBufferSink?
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
+        /// Reported by every build, as `MicrophoneSource` reports a device the
+        /// input unit refused to open. A build that carries one still succeeds.
+        var deviceSelectionStatus: Int32?
 
         init(sink: @escaping AudioBufferSink) { self.sinkHandler = sink }
 
         func currentInputFormat() -> AudioFormatDescriptor? { format }
         func currentInputDeviceUID() -> String? { "emitting" }
+        func currentInputDevice() -> MicrophoneDeviceDescription? {
+            MicrophoneDeviceDescription(
+                uid: "emitting", name: "Emitting input",
+                sampleRate: format.sampleRate, channelCount: format.channelCount
+            )
+        }
         func teardown() {}
         @discardableResult
-        func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor { format }
+        func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild {
+            MicrophoneBuild(format: format, deviceSelectionStatus: deviceSelectionStatus)
+        }
         var isRunning: Bool { true }
 
         func emit(seconds: Double, hostTime: Double) {
@@ -38,6 +49,7 @@ enum HardeningTests {
         private let lock = NSLock()
         private var sinkHandler: AudioBufferSink?
         private var targets: [RemoteAudioTarget] = []
+        private var reading: TapCallbackReading?
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
         private(set) var bindCount = 0
 
@@ -59,18 +71,47 @@ enum HardeningTests {
 
         func teardown() {}
 
-        func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+        func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
             lock.lock()
             bindCount += 1
+            reading = nil
             lock.unlock()
-            return format
+            return RemoteTapBinding(format: format, streamCount: 2, tapStreamIndex: 1)
         }
 
-        func emit(seconds: Double, hostTime: Double) {
+        func firstCallback() -> TapCallbackReading? {
+            lock.lock()
+            defer { lock.unlock() }
+            return reading
+        }
+
+        /// `amplitude: 0` is the digital zero a tap reads when it is pointed at
+        /// the wrong stream of the aggregate device. `toneChannel` leaves every
+        /// other channel at zero, which is a far end sitting on one side of the
+        /// tap's stereo mixdown.
+        func emit(
+            seconds: Double, hostTime: Double, amplitude: Float = 0.5, toneChannel: Int? = nil
+        ) {
+            let buffer = AudioTests.makeTone(
+                seconds: seconds, sampleRate: format.sampleRate,
+                channels: AVAudioChannelCount(format.channelCount),
+                amplitude: amplitude, toneChannel: toneChannel
+            )
             lock.lock()
             let handler = sinkHandler
+            if reading == nil {
+                // One interleaved stream, which is the tap's own buffer in an
+                // aggregate device's list.
+                reading = TapCallbackReading(
+                    streams: [.init(
+                        channelCount: format.channelCount,
+                        byteCount: Int(buffer.frameLength) * format.channelCount
+                            * MemoryLayout<Float>.size
+                    )],
+                    usedFallback: false
+                )
+            }
             lock.unlock()
-            let buffer = AudioTests.makeTone(seconds: seconds, sampleRate: format.sampleRate)
             handler?(AudioBufferPacket(buffer: buffer, hostTime: hostTime))
         }
     }
@@ -93,8 +134,114 @@ enum HardeningTests {
         }
     }
 
+    /// Records half a second of tap audio at one amplitude and returns what the
+    /// engine told its delegate.
+    ///
+    /// The thresholds are wall clock, because the engine polls on a real timer
+    /// rather than an injected one, so they are scaled down to keep the test
+    /// under a second.
+    ///
+    /// `channels` and `toneChannel` shape the buffer the peak is read from. A
+    /// real tap is always stereo and deinterleaved, so two channels with the
+    /// tone on one of them is the production shape.
+    private static func recordTapAudio(
+        amplitude: Float, channels: Int = 1, toneChannel: Int? = nil
+    ) async throws -> (delegate: SilentDelegate, lines: [ManifestLine]) {
+        let root = try ManifestTests.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = MeetingLayout(root: root)
+        try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+        let tap = LockedBox<EmittingTap?>(nil)
+        let delegate = SilentDelegate()
+        let engine = CaptureEngine(
+            thresholds: CaptureThresholds(remoteSilenceTimeout: 0.1, pollInterval: 0.02),
+            segmentSeconds: 60,
+            makeMicrophone: { sink, _ in EmittingMicrophone(sink: sink) },
+            makeTap: { sink, _ in
+                let source = EmittingTap(sink: sink)
+                tap.withLock { $0 = source }
+                return source
+            },
+            delegate: delegate
+        )
+        tap.withLock {
+            $0?.format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: channels)
+        }
+        await engine.arm(bundlePrefixes: ["com.example.app"], capturesRemote: true)
+        try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+        tap.withLock {
+            $0?.setTargets([makeTarget(pid: 42, bundle: "com.example.app", producing: true)])
+        }
+
+        // Real host times, because the poll measures the callback gap against
+        // the same mach clock the audio stack stamps buffers with.
+        for _ in 0..<25 {
+            tap.withLock {
+                $0?.emit(
+                    seconds: 0.02, hostTime: HostTime.now, amplitude: amplitude,
+                    toneChannel: toneChannel
+                )
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        _ = await engine.stop(reason: "test")
+        return (delegate, try ManifestReader.read(contentsOf: layout.manifest).lines)
+    }
+
     static var captureSuite: Suite {
         Suite("CaptureEngineHardening", [
+            test("a microphone whose device could not be set still records") { expect in
+                // Pointing the input unit at the default input device can fail.
+                // `kAudioUnitErr_Initialized` is reachable wherever
+                // AVAudioEngine has already initialised the unit by the time it
+                // hands it over. Treating that as a build failure would leave
+                // the meeting with no microphone track at all, retried on
+                // backoff until it ended. The build keeps the device the unit
+                // holds, and the manifest carries the status so the record does
+                // not claim a device the audio is not from.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+                let microphone = LockedBox<EmittingMicrophone?>(nil)
+                let engine = CaptureEngine(
+                    segmentSeconds: 60,
+                    makeMicrophone: { sink, _ in
+                        let source = EmittingMicrophone(sink: sink)
+                        microphone.withLock { $0 = source }
+                        return source
+                    },
+                    makeTap: { sink, _ in EmittingTap(sink: sink) },
+                    delegate: SilentDelegate()
+                )
+                // 'init', which is `kAudioUnitErr_Initialized`.
+                microphone.withLock { $0?.deviceSelectionStatus = 1_768_843_636 }
+
+                await engine.arm(bundlePrefixes: [], capturesRemote: false)
+                try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+                microphone.withLock { $0?.emit(seconds: 1, hostTime: 100) }
+                _ = await engine.stop(reason: "test")
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.isTrue(
+                    timeline.duration(track: .mic) > 0.5,
+                    "a device that could not be set must not cost the meeting its microphone"
+                )
+
+                let lines = try ManifestReader.read(contentsOf: layout.manifest).lines
+                let binds = lines.compactMap { line -> ManifestEvent.MicBind? in
+                    guard case .micBind(let bind) = line.event else { return nil }
+                    return bind
+                }
+                expect.equal(binds.count, 1)
+                expect.equal(
+                    binds.first?.deviceSelectionStatus, 1_768_843_636,
+                    "the manifest says the device named here was not the one opened"
+                )
+            },
+
             test("remote audio that starts after commit is still written") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
@@ -187,6 +334,65 @@ enum HardeningTests {
                 expect.isTrue(
                     delegate.warnings.contains { $0.dedupKey.contains("segment") },
                     "the user is told the recording could not be written: \(delegate.warnings)"
+                )
+            },
+
+            test("a tap handing over digital zero is reported to the user") { expect in
+                // The engine is the only thing that reads buffer content. A
+                // coordinator test can hand the policy any peak it likes, so
+                // this is where a peak read from the wrong pointers, or not read
+                // at all, shows up.
+                let (delegate, lines) = try await recordTapAudio(amplitude: 0)
+
+                expect.isTrue(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "the user is told the far side may be missing: \(delegate.warnings)"
+                )
+                expect.isTrue(
+                    delegate.snapshots.contains { $0.remote.isLosingAudio },
+                    "a track of digital zero must not read as nominal in the menu bar"
+                )
+                // And the folder says what was read, not only that it was
+                // silent. `remote_bind` carries the index the bind chose; this
+                // is the line that says the choice held and what the aggregate
+                // handed over.
+                let streams = lines.compactMap { line -> ManifestEvent.RemoteStream? in
+                    guard case .remoteStream(let payload) = line.event else { return nil }
+                    return payload
+                }
+                expect.isTrue(
+                    streams.count >= 1,
+                    "the manifest records what the tap's first callback read"
+                )
+                expect.equal(streams.first?.streams.count, 1)
+                expect.equal(streams.first?.usedFallback, false)
+            },
+
+            test("audio the tap really carries raises nothing") { expect in
+                let (delegate, _) = try await recordTapAudio(amplitude: 0.5)
+
+                expect.isFalse(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "a tap carrying the meeting must not be called silent: \(delegate.warnings)"
+                )
+            },
+
+            test("a far end on one channel of a stereo tap raises nothing") { expect in
+                // The production shape. A tap's format is always
+                // `standardFormatWithSampleRate:channels:2`, so every real
+                // remote buffer is deinterleaved with two channel pointers, and
+                // a peak read from the first pointer alone calls a far end that
+                // sits on the second one digital zero. That reads as silence
+                // for as long as the far end stays there, rebinding the tap and
+                // warning the user through a meeting that is being recorded
+                // correctly.
+                let (delegate, _) = try await recordTapAudio(
+                    amplitude: 0.5, channels: 2, toneChannel: 1
+                )
+
+                expect.isFalse(
+                    delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
+                    "audio on the second channel is still audio: \(delegate.warnings)"
                 )
             },
 

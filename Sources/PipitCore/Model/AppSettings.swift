@@ -342,9 +342,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var alwaysRecordApplications: [String]
     public var neverRecordApplications: [String]
     public var hasCompletedOnboarding: Bool
-    /// Prefer the built-in microphone when a Bluetooth headset is used for output,
-    /// which avoids the hands-free profile dropping input to 16 kHz.
-    public var preferBuiltInMicrophone: Bool
     /// How long the call has to be gone before recording pauses. It covers a
     /// flap in the sensors, so a poll that misses one reading does not cut a
     /// meeting in two.
@@ -376,7 +373,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         alwaysRecordApplications: [String] = [],
         neverRecordApplications: [String] = [],
         hasCompletedOnboarding: Bool = false,
-        preferBuiltInMicrophone: Bool = false,
         meetingEndGraceSeconds: Double = SessionController.Configuration().endGraceSeconds,
         meetingReconnectWindowSeconds: Double = SessionController.Configuration()
             .reconnectWindowSeconds,
@@ -397,7 +393,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.alwaysRecordApplications = alwaysRecordApplications
         self.neverRecordApplications = neverRecordApplications
         self.hasCompletedOnboarding = hasCompletedOnboarding
-        self.preferBuiltInMicrophone = preferBuiltInMicrophone
         self.meetingEndGraceSeconds = meetingEndGraceSeconds
         self.meetingReconnectWindowSeconds = meetingReconnectWindowSeconds
         self.firefoxSensorHasConnected = firefoxSensorHasConnected
@@ -477,9 +472,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
         hasCompletedOnboarding =
             try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding)
             ?? defaults.hasCompletedOnboarding
-        preferBuiltInMicrophone =
-            try container.decodeIfPresent(Bool.self, forKey: .preferBuiltInMicrophone)
-            ?? defaults.preferBuiltInMicrophone
         // Every file on disk predates these keys, and was written under the
         // longer waits the new defaults replace. Nothing is migrated. An absent
         // key takes the new default, which is the point of shortening them.

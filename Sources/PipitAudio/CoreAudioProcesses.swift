@@ -109,19 +109,23 @@ public enum CoreAudioSystem {
         guard let device = uint32(
             AudioObjectID(kAudioObjectSystemObject), address(kAudioHardwarePropertyDefaultOutputDevice)
         ) else { return nil }
-        return string(device, address(kAudioDevicePropertyDeviceUID))
+        return deviceUID(device)
     }
 
     public static func defaultInputDevice() -> AudioDeviceID? {
         uint32(AudioObjectID(kAudioObjectSystemObject), address(kAudioHardwarePropertyDefaultInputDevice))
     }
 
-    /// The default input device's UID, which is the identity a device keeps
-    /// across rate and channel changes. Two devices with the same format are
-    /// still two devices; one device renegotiating is still one.
+    /// A device's UID, which is the identity it keeps across rate and channel
+    /// changes. Two devices with the same format are still two devices, and one
+    /// device renegotiating is still one.
+    public static func deviceUID(_ device: AudioDeviceID) -> String? {
+        string(device, address(kAudioDevicePropertyDeviceUID))
+    }
+
     public static func defaultInputDeviceUID() -> String? {
         guard let device = defaultInputDevice() else { return nil }
-        return string(device, address(kAudioDevicePropertyDeviceUID))
+        return deviceUID(device)
     }
 
     public static func deviceName(_ device: AudioDeviceID) -> String {
@@ -145,6 +149,18 @@ public enum CoreAudioSystem {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, raw) == noErr else { return 0 }
         let list = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
         return list.reduce(0) { $0 + Int($1.mNumberChannels) }
+    }
+
+    /// How many input streams a device publishes.
+    ///
+    /// An aggregate device lists its sub-devices' input streams first and the
+    /// process tap's last, so the count says where the tap's buffer sits in an
+    /// IOProc's `AudioBufferList`. Nil when the property read fails.
+    public static func inputStreamCount(of device: AudioObjectID) -> Int? {
+        var address = self.address(kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr else { return nil }
+        return Int(size) / MemoryLayout<AudioStreamID>.size
     }
 
     public static func fourCharCode(_ status: OSStatus) -> String {

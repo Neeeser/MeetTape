@@ -152,11 +152,26 @@ public final class TrackAudioReader {
             }
             converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
             // A file with more than two channels and no surround layout, which is
-            // what a three-channel built-in microphone produces, has no mixdown
-            // matrix, and the converter answers with silence. Taking the leading
-            // channels keeps the recording audible.
+            // what a raw built-in microphone produces, has no mixdown matrix, and
+            // the converter answers with silence. One channel is kept instead,
+            // and which one is decided by measuring them.
+            //
+            // Channel 0 was kept before this, and it does not always carry the
+            // voice. On 2026-09-02 and 2026-09-03 channel 0 of a three-channel
+            // microphone track read about 30 dB below the other channels,
+            // -47.8 dBFS at p99 against the usual -17 to -18 dBFS, and the
+            // meeting recorded that way transcribed badly from end to end.
             if sourceFormat.channelCount > 2 {
-                converter.channelMap = (0..<Int(targetFormat.channelCount)).map { NSNumber(value: $0) }
+                let chosen = dominantChannel(of: file, seconds: 30)
+                converter.channelMap = Array(
+                    repeating: NSNumber(value: chosen), count: Int(targetFormat.channelCount)
+                )
+                Log.processing.info(
+                    """
+                    mic channel \(chosen, privacy: .public) of \
+                    \(sourceFormat.channelCount, privacy: .public) chosen by energy
+                    """
+                )
             }
             self.converter = converter
             currentSourceFormat = sourceFormat
@@ -166,6 +181,52 @@ public final class TrackAudioReader {
         }
         isDrained = true
         return false
+    }
+
+    /// The channel holding the most energy over the first `seconds` of a file.
+    ///
+    /// Bounded because a track can run for hours and the answer does not change
+    /// within one segment group. The microphone was one device at one channel
+    /// count for all of it. The file is rewound afterwards, so the read loop
+    /// that follows starts at the first frame. An empty or unreadable file
+    /// answers channel 0, and so does a tie.
+    ///
+    /// The limit that follows from the bound: only the group's first file is
+    /// measured, so a group that opens with `seconds` of silence answers 0 by
+    /// the tie rule and keeps channel 0 for the rest of the group, which is the
+    /// channel this exists to stop keeping. A meeting that starts with half a
+    /// minute of nothing on every channel reads back silent. Chasing later
+    /// segments would mean opening files the reader has not reached yet, and
+    /// the case is not worth that.
+    private func dominantChannel(of file: AVAudioFile, seconds: Double) -> Int {
+        let format = file.processingFormat
+        let channels = Int(format.channelCount)
+        guard channels > 1, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_384)
+        else { return 0 }
+        defer { file.framePosition = 0 }
+
+        var energy = [Double](repeating: 0, count: channels)
+        var remaining = AVAudioFramePosition(seconds * format.sampleRate)
+        while remaining > 0, file.framePosition < file.length {
+            buffer.frameLength = 0
+            do {
+                try file.read(into: buffer)
+            } catch {
+                break
+            }
+            guard buffer.frameLength > 0, let data = buffer.floatChannelData else { break }
+            let frames = Int(min(AVAudioFramePosition(buffer.frameLength), remaining))
+            for channel in 0..<channels {
+                var sum: Double = 0
+                for frame in 0..<frames { sum += Double(data[channel][frame] * data[channel][frame]) }
+                energy[channel] += sum
+            }
+            remaining -= AVAudioFramePosition(buffer.frameLength)
+        }
+
+        var chosen = 0
+        for channel in 1..<channels where energy[channel] > energy[chosen] { chosen = channel }
+        return chosen
     }
 
     private func openSegment(at index: Int, matching format: AVAudioFormat) -> AVAudioFile? {

@@ -29,6 +29,8 @@ public enum ManifestEvent: Sendable, Equatable {
     case sessionEnd(SessionEnd)
     case crashTailAdopted(CrashTailAdopted)
     case remoteBind(RemoteBind)
+    case remoteStream(RemoteStream)
+    case micBind(MicBind)
 
     public struct SessionStart: Codable, Sendable, Equatable {
         public let meetingID: String
@@ -157,11 +159,136 @@ public enum ManifestEvent: Sendable, Equatable {
         public let reason: String
         public let targets: [Target]
         public let bindCount: Int
+        /// Input streams the aggregate device published, and the index the tap's
+        /// audio was read from. Both are absent in manifests written before the
+        /// tap was selected by index, so both decode as nil.
+        public let streamCount: Int?
+        public let tapStreamIndex: Int?
 
-        public init(reason: String, targets: [Target], bindCount: Int) {
+        public init(
+            reason: String, targets: [Target], bindCount: Int,
+            streamCount: Int?, tapStreamIndex: Int?
+        ) {
             self.reason = reason
             self.targets = targets
             self.bindCount = bindCount
+            self.streamCount = streamCount
+            self.tapStreamIndex = tapStreamIndex
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            reason = try container.decode(String.self, forKey: .reason)
+            targets = try container.decode([Target].self, forKey: .targets)
+            bindCount = try container.decode(Int.self, forKey: .bindCount)
+            streamCount = try container.decodeIfPresent(Int.self, forKey: .streamCount)
+            tapStreamIndex = try container.decodeIfPresent(Int.self, forKey: .tapStreamIndex)
+        }
+    }
+
+    /// What the tap's first callback of a bind actually delivered.
+    ///
+    /// `remote_bind` records the index the bind chose to read. This records the
+    /// reading, which is a different fact and the one that says whether the
+    /// choice held. A remote track of digital zero is answered by the two lines
+    /// together, from the aggregate's buffer list and from whether the index
+    /// was unusable so a channel-count match was read instead. Both used to
+    /// reach the unified log only, which is gone by the time anyone opens the
+    /// meeting folder.
+    ///
+    /// One line per bind, written on the first poll after a callback arrives. A
+    /// bind with no line usually delivered no audio at all. Three tear-downs
+    /// can also drop a reading before its poll runs. A wake rebind leaves the
+    /// tick before the report, `rebindAfterFormatChange` binds without polling
+    /// at all, and `stop()` tears the source down with no final report. Each
+    /// one needs the tear-down to land within 0.5 s of the first callback.
+    public struct RemoteStream: Codable, Sendable, Equatable {
+        public struct Stream: Codable, Sendable, Equatable {
+            public let channelCount: Int
+            public let byteCount: Int
+
+            public init(channelCount: Int, byteCount: Int) {
+                self.channelCount = channelCount
+                self.byteCount = byteCount
+            }
+        }
+
+        /// The bind this reading belongs to, matching `remote_bind.bindCount`.
+        public let bindCount: Int
+        public let streams: [Stream]
+        public let usedFallback: Bool
+
+        public init(bindCount: Int, streams: [Stream], usedFallback: Bool) {
+            self.bindCount = bindCount
+            self.streams = streams
+            self.usedFallback = usedFallback
+        }
+    }
+
+    /// Which input device the microphone engine was opened on, and what the tap
+    /// it installed is running at, recorded on every build.
+    ///
+    /// Two formats, because they are two facts. `deviceSampleRate` and
+    /// `deviceChannelCount` are CoreAudio's answer for the device the build
+    /// chose. `trackSampleRate` and `trackChannelCount` are what the engine's
+    /// node reported afterwards, which is what the segments are written at.
+    ///
+    /// The pair diverging is itself the signal. Setting the input unit's device
+    /// changes its hardware-side format and leaves its client-side format at
+    /// whatever the node was instantiated on, so a build that names a
+    /// one-channel microphone and writes an eight-channel track says the client
+    /// format did not follow the device. Recording only the device's numbers
+    /// would put that contradiction in the manifest with nothing to explain it.
+    ///
+    /// `deviceSelectionStatus` covers the third case, where the device was not
+    /// opened at all. The build keeps going on the device the unit already
+    /// held, so the track is real audio and `deviceUID` names the wrong
+    /// microphone.
+    public struct MicBind: Codable, Sendable, Equatable {
+        /// The device the build asked for, which is the system default input.
+        public let deviceUID: String
+        public let deviceName: String
+        public let deviceSampleRate: Double
+        public let deviceChannelCount: Int
+        /// The format the tap installed at, which is what the segments are
+        /// written in.
+        public let trackSampleRate: Double
+        public let trackChannelCount: Int
+        /// The OSStatus from pointing the input unit at that device, written
+        /// only when the set failed. Absent on every build that got the device
+        /// it asked for, which is the ordinary case. Present means the track
+        /// came from whatever device the unit already held, and `deviceUID`
+        /// names a device the recording is not from.
+        public let deviceSelectionStatus: Int32?
+        public let reason: String
+
+        public init(
+            deviceUID: String, deviceName: String, deviceSampleRate: Double,
+            deviceChannelCount: Int, trackSampleRate: Double, trackChannelCount: Int,
+            deviceSelectionStatus: Int32?, reason: String
+        ) {
+            self.deviceUID = deviceUID
+            self.deviceName = deviceName
+            self.deviceSampleRate = deviceSampleRate
+            self.deviceChannelCount = deviceChannelCount
+            self.trackSampleRate = trackSampleRate
+            self.trackChannelCount = trackChannelCount
+            self.deviceSelectionStatus = deviceSelectionStatus
+            self.reason = reason
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            deviceUID = try container.decode(String.self, forKey: .deviceUID)
+            deviceName = try container.decode(String.self, forKey: .deviceName)
+            deviceSampleRate = try container.decode(Double.self, forKey: .deviceSampleRate)
+            deviceChannelCount = try container.decode(Int.self, forKey: .deviceChannelCount)
+            trackSampleRate = try container.decode(Double.self, forKey: .trackSampleRate)
+            trackChannelCount = try container.decode(Int.self, forKey: .trackChannelCount)
+            deviceSelectionStatus = try container.decodeIfPresent(
+                Int32.self, forKey: .deviceSelectionStatus
+            )
+            reason = try container.decode(String.self, forKey: .reason)
         }
     }
 
@@ -240,6 +367,8 @@ public enum ManifestEvent: Sendable, Equatable {
         case .sessionEnd: "session_end"
         case .crashTailAdopted: "crash_tail_adopted"
         case .remoteBind: "remote_bind"
+        case .remoteStream: "remote_stream"
+        case .micBind: "mic_bind"
         }
     }
 }
@@ -270,6 +399,8 @@ extension ManifestLine: Codable {
         case .sessionEnd(let payload): try payload.encode(to: encoder)
         case .crashTailAdopted(let payload): try payload.encode(to: encoder)
         case .remoteBind(let payload): try payload.encode(to: encoder)
+        case .remoteStream(let payload): try payload.encode(to: encoder)
+        case .micBind(let payload): try payload.encode(to: encoder)
         }
     }
 
@@ -290,6 +421,8 @@ extension ManifestLine: Codable {
         case "session_end": event = .sessionEnd(try .init(from: decoder))
         case "crash_tail_adopted": event = .crashTailAdopted(try .init(from: decoder))
         case "remote_bind": event = .remoteBind(try .init(from: decoder))
+        case "remote_stream": event = .remoteStream(try .init(from: decoder))
+        case "mic_bind": event = .micBind(try .init(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .event, in: container, debugDescription: "unknown manifest event \(name)"

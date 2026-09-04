@@ -1,6 +1,44 @@
 import Foundation
 import Synchronization
 
+/// The input device an engine was built on, as CoreAudio describes it.
+///
+/// The UID is the identity; the name, rate and channel count are what a person
+/// reading the manifest afterwards needs to tell a one-channel built-in
+/// microphone from a nine-channel aggregate.
+public struct MicrophoneDeviceDescription: Sendable, Equatable {
+    public let uid: String
+    public let name: String
+    public let sampleRate: Double
+    public let channelCount: Int
+
+    public init(uid: String, name: String, sampleRate: Double, channelCount: Int) {
+        self.uid = uid
+        self.name = name
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+    }
+}
+
+/// What one microphone build produced.
+public struct MicrophoneBuild: Sendable, Equatable {
+    /// The format the installed tap runs at, which is what segments are written
+    /// in. The hardware has the last word, so this is not always the format the
+    /// coordinator asked for.
+    public let format: AudioFormatDescriptor
+    /// The OSStatus from pointing the input unit at the system default input
+    /// device, present only when that set failed. The build then runs on
+    /// whatever device the unit already held, which is a real track from a
+    /// device nothing here named. Carried out of the audio layer so the
+    /// manifest records it.
+    public let deviceSelectionStatus: Int32?
+
+    public init(format: AudioFormatDescriptor, deviceSelectionStatus: Int32?) {
+        self.format = format
+        self.deviceSelectionStatus = deviceSelectionStatus
+    }
+}
+
 /// The AVAudioEngine operations the recovery coordinator needs. Implemented for
 /// real in PipitAudio and by a fake in the regression tests, so the tests
 /// exercise the shipping algorithm rather than a copy of it.
@@ -15,17 +53,25 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     /// format is still one; a format is not an identity. Nil where the system
     /// cannot say, in which case nothing is inferred from it.
     func currentInputDeviceUID() -> String?
+    /// The same device, described in full, for the manifest. Nil on the same
+    /// condition as `currentInputDeviceUID`, which is the system not naming the
+    /// default input device.
+    func currentInputDevice() -> MicrophoneDeviceDescription?
     /// Removes the tap and stops the engine.
     func teardown()
-    /// Builds a new engine, installs the tap and starts it, returning the format
-    /// the tap is actually running at.
+    /// Builds a new engine, installs the tap and starts it, returning what the
+    /// build produced.
     ///
     /// The hardware has the last word: `preferred` is what the coordinator chose
     /// after rejecting an unusable reading, but the device may have settled on
-    /// something else by the time the engine is built, and the returned value is
-    /// what segments must be written in.
+    /// something else by the time the engine is built, and the returned format
+    /// is what segments must be written in.
+    ///
+    /// Throwing means no engine. A build that could not open the device it
+    /// wanted still returns, because a track from another device beats no track
+    /// at all, and says so through `deviceSelectionStatus`.
     @discardableResult
-    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild
 }
 
 public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
@@ -37,7 +83,21 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     /// target's output at that moment. Recorded so a track that came back
     /// silent can be told from a track nobody was playing into.
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
+    )
+    /// What the tap's first callback of that bind delivered, raised once per
+    /// bind on the first poll after a callback arrives. A bind that raises
+    /// nothing usually delivered nothing. A wake rebind, a format-change
+    /// rebind and `stop()` each tear the source down without running the
+    /// report, so a reading that arrived within the last 0.5 s is dropped
+    /// instead of raised.
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int)
+    /// Which input device the microphone engine was opened on, and what the
+    /// build made of it, reported after every build that installed an engine.
+    /// The device and the build's format are separate readings and can
+    /// disagree.
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
     )
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)
@@ -519,9 +579,19 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
 
         do {
-            let installed = try controller.buildAndStart(preferred: format)
+            let build = try controller.buildAndStart(preferred: format)
+            let installed = build.format
             // Read after the build, so it names the device the engine is on.
             let deviceUID = controller.currentInputDeviceUID()
+            if let device = controller.currentInputDevice() {
+                // Both readings, because they answer different questions. The
+                // device is what this build asked for; the build's format is
+                // what the node reported afterwards, which is what the segments
+                // are written at. They can disagree, and so can the device and
+                // the one the unit actually kept. The manifest is where all of
+                // that shows.
+                delegate.captureDidBindMicrophone(device: device, build: build, reason: reason)
+            }
             if installed != previous {
                 delegate.captureWillChangeFormat(
                     track: .mic, from: previous, to: installed, reason: reason.label
@@ -582,6 +652,7 @@ public enum CaptureWarning: Sendable, Equatable {
     case microphoneUnrecovered(seconds: Double)
     case rebuildLoop(count: Int, windowSeconds: Double)
     case remoteProducingWithoutCallbacks(seconds: Double)
+    case remoteSilentWhileProducing(seconds: Double)
     case segmentWriteFailed(track: CaptureTrack)
     case permissionRevoked(track: CaptureTrack)
     case storageUnavailable(path: String)
@@ -593,6 +664,7 @@ public enum CaptureWarning: Sendable, Equatable {
         case .microphoneUnrecovered: "microphone_unrecovered"
         case .rebuildLoop: "rebuild_loop"
         case .remoteProducingWithoutCallbacks: "remote_without_callbacks"
+        case .remoteSilentWhileProducing: "remote_silent_while_producing"
         case .segmentWriteFailed(let track): "segment_write_failed_\(track.rawValue)"
         case .permissionRevoked(let track): "permission_revoked_\(track.rawValue)"
         case .storageUnavailable: "storage_unavailable"
@@ -607,6 +679,11 @@ public enum CaptureWarning: Sendable, Equatable {
             "The microphone keeps disconnecting. Audio may be incomplete."
         case .remoteProducingWithoutCallbacks:
             "The meeting application is playing audio that Pipit is not receiving. Reconnecting."
+        case .remoteSilentWhileProducing:
+            """
+            Pipit is receiving silence from the meeting app while it reports playing audio. \
+            The other side of this call may not be recorded.
+            """
         case .segmentWriteFailed:
             "Pipit could not write recorded audio to disk."
         case .permissionRevoked(let track):

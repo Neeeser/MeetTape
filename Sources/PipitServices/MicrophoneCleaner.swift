@@ -137,8 +137,8 @@ public struct MicrophoneCleaner: Sendable {
         // open throws here, and the meeting keeps the microphone it recorded.
         let written = try verify(partial, against: pass.frames)
 
-        // A file with no record behind it, which is what an interrupted run
-        // leaves. `discardCleanedTrack` above removed one the metadata named.
+        // An interrupted run leaves a file with no record behind it.
+        // `discardCleanedTrack` above removed one the metadata named.
         try? FileManager.default.removeItem(at: store.layout.cleanedMicFile)
         do {
             try FileManager.default.moveItem(at: partial, to: store.layout.cleanedMicFile)
@@ -177,9 +177,9 @@ public struct MicrophoneCleaner: Sendable {
     /// The frame count and the duration recorded for a cleaned track come from
     /// here rather than from the samples handed to the encoder, so the
     /// synthetic segment a reader is given can never claim more audio than the
-    /// file holds. A file that will not open, or one whose duration disagrees
-    /// with the pass that wrote it, throws: the recording is intact, so a later
-    /// attempt can build the track again.
+    /// file holds. This throws on a file that will not open, and on one whose
+    /// duration disagrees with the pass that wrote it. The recording is intact
+    /// either way, so a later attempt can build the track again.
     private func verify(_ url: URL, against frames: Int64) throws -> AudioFileInfo {
         let expected = Double(frames) / Self.readFormat.sampleRate
         let info: AudioFileInfo

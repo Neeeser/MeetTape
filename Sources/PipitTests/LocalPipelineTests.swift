@@ -220,30 +220,25 @@ enum LocalPipelineTests {
 
     /// Lets a test wait for one progress line and then act while the pipeline
     /// is still inside the stage that reported it.
-    final class ProgressGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var opened = false
-        private var waiting: CheckedContinuation<Void, Never>?
+    final class ProgressGate: Sendable {
+        private let isOpen = Mutex(false)
 
-        func open() {
-            lock.lock()
-            let resumed = waiting
-            waiting = nil
-            opened = true
-            lock.unlock()
-            resumed?.resume()
-        }
+        func open() { isOpen.withLock { $0 = true } }
 
-        func wait() async {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                lock.lock()
-                if opened {
-                    lock.unlock()
-                    continuation.resume()
-                    return
-                }
-                waiting = continuation
-                lock.unlock()
+        /// Waits for `open` and reports whether it came within `seconds`.
+        ///
+        /// A progress line that was renamed or removed has to report as a
+        /// failure. An unbounded wait hangs the run instead and takes every
+        /// test behind it. The budget is measured on `SuspendingClock`, which
+        /// stops while the machine sleeps, so a machine that sleeps mid-run
+        /// spends none of it.
+        func opened(within seconds: Double) async -> Bool {
+            let clock = SuspendingClock()
+            let deadline = clock.now.advanced(by: .seconds(seconds))
+            while true {
+                if isOpen.withLock({ $0 }) { return true }
+                if clock.now >= deadline { return false }
+                try? await Task.sleep(nanoseconds: 2_000_000)
             }
         }
     }
@@ -3229,18 +3224,39 @@ enum LocalPipelineTests {
                     }
                 )
                 let run = Task { await pipeline.process(meetingID: meeting.metadata.id) }
-                await started.wait()
+                guard await started.opened(within: 120) else {
+                    await run.value
+                    expect.fail(
+                        "waited 120 s for the progress line \"Removing the far end "
+                            + "from the microphone\" and it never came"
+                    )
+                    return
+                }
+                // The cleaned file is renamed into place at the very end of the
+                // pass, which is what dates the answer. Its absence here says
+                // the pass is still running, so the call below is enqueued
+                // behind it. The pass takes about five seconds on this fixture.
+                // A machine that parks this task for longer finds the file
+                // already there and never gets to ask the question. That run is
+                // skipped below, because it holds no evidence about the actor.
+                let askedDuringThePass = !FileManager.default.fileExists(
+                    atPath: cleanedFile.path
+                )
                 // Reported from the actor immediately before the pass begins,
                 // so this call is enqueued while the pass is running and comes
-                // back only once the actor is free to take it. The cleaned file
-                // is renamed into place at the very end of the pass, which is
-                // what dates the answer.
+                // back only once the actor is free to take it.
                 _ = await pipeline.forget(meetingID: "held-by-nobody", movedAt: Date())
                 let answeredDuringThePass = !FileManager.default.fileExists(
                     atPath: cleanedFile.path
                 )
                 await run.value
 
+                guard askedDuringThePass else {
+                    throw TestSkip(
+                        "the cleaning pass had already finished by the time this test "
+                            + "was scheduled to ask, so the race never happened"
+                    )
+                }
                 expect.isTrue(
                     answeredDuringThePass,
                     "the actor answered only after the cleaned track was already written"

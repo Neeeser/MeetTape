@@ -391,8 +391,15 @@ enum MicrophoneCleanerTests {
             // application was already making noise as capture began, and the
             // reference is then read forward to meet the microphone rather than
             // padded to it. Subtracting the two lead-ins the other way round
-            // moves the pair by twice the lead-in, and a canceller that cannot
-            // find the echo bypasses the meeting rather than reporting an error.
+            // pads the reference instead of skipping into it. That moves the
+            // pair by four seconds and puts the echo in the microphone ahead of
+            // the far end that caused it. No filter can model that. The far end
+            // still plays in bursts, so the suppressor keeps gating with them.
+            // With the sign flipped, the pass cleared the 6 dB threshold and
+            // returned `.cleaned` after taking out 5.0 dB. A wrong sign is not
+            // self-announcing, and no outcome value separates it from a good
+            // run. That is why the check at the end of this test reads the
+            // far-end energy left in the cleaned track rather than the outcome.
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
             let count = Int(30 * rate)

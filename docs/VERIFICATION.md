@@ -114,6 +114,12 @@ The following paths have been exercised outside unit tests:
   show a blue check. Turn calendar and notifications on and confirm the row
   turns green. A required step never done shows a red X on every launch,
   including after an unsigned reinstall dropped the grant.
+- Documents prompt at launch: install an unsigned rebuild and launch it.
+  macOS asks for access to the Documents folder again, because the code
+  signature changed. Confirm the menu bar icon and Setup appear while that
+  prompt is still unanswered, and that the Meetings window fills in once
+  Allow is pressed. A build signed with the local identity is not asked
+  again.
 - Local signing identity: run `scripts/make-signing-identity.sh`, rebuild and
   reinstall twice, and confirm Microphone, Accessibility and Screen & System
   Audio Recording stay granted across the second install.

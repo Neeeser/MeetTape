@@ -1337,6 +1337,72 @@ enum CaptureRecoveryTests {
                 expect.equal(tap.bindCount, 1)
             },
 
+            test("what the tap's first callback read is written down once per bind") { expect in
+                // `remote_bind` says which buffer of the aggregate the bind
+                // chose. Whether that choice held was logged and nothing else,
+                // so a meeting whose far side is silent could not be diagnosed
+                // from its own folder.
+                let tap = FakeProcessTap()
+                let clock = ManualClock()
+                let delegate = RecordingCaptureDelegate()
+                let coordinator = RemoteTapCoordinator(controller: tap, clock: clock, delegate: delegate)
+                tap.setTargets([makeTarget(pid: 500, producing: true)])
+                coordinator.start(bundlePrefixes: ["org.mozilla.firefox"])
+
+                // The bind returns before any callback runs, so nothing is
+                // known yet.
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.isTrue(delegate.remoteStreams.isEmpty, "a bind with no callback reports nothing")
+
+                // The MacBook Pro shape, with the index unusable so the
+                // channel-count match read the buffer instead.
+                let reading = TapCallbackReading(
+                    streams: [
+                        .init(channelCount: 8, byteCount: 16_384),
+                        .init(channelCount: 2, byteCount: 4_096),
+                    ],
+                    usedFallback: true
+                )
+                tap.deliverFirstCallback(reading)
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
+                clock.advance(0.5)
+                coordinator.tick()
+
+                expect.equal(delegate.remoteStreams.count, 1)
+                expect.equal(delegate.remoteStreams.first?.reading, reading)
+                expect.equal(delegate.remoteStreams.first?.bindCount, 1)
+
+                // A poll every second all meeting must not write the same line
+                // every second.
+                for _ in 0..<5 {
+                    coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
+                    clock.advance(0.5)
+                    coordinator.tick()
+                }
+                expect.equal(delegate.remoteStreams.count, 1, "one line per bind, not one per poll")
+
+                // A rebind is a new reading. The source clears its own on
+                // teardown, so nothing is reported until a callback arrives on
+                // the new bind.
+                tap.setTargets([makeTarget(pid: 900, producing: true)])
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(tap.bindCount, 2)
+                expect.equal(delegate.remoteStreams.count, 1, "a rebind with no callback reports nothing")
+
+                let second = TapCallbackReading(
+                    streams: [.init(channelCount: 2, byteCount: 4_096)], usedFallback: false
+                )
+                tap.deliverFirstCallback(second)
+                coordinator.noteBufferArrived(hostTime: clock.monotonicSeconds, peak: 0.5)
+                clock.advance(0.5)
+                coordinator.tick()
+                expect.equal(delegate.remoteStreams.count, 2)
+                expect.equal(delegate.remoteStreams.last?.reading, second)
+                expect.equal(delegate.remoteStreams.last?.bindCount, 2)
+            },
+
             test("Firefox restart rebinds to the new process") { expect in
                 let tap = FakeProcessTap()
                 let clock = ManualClock()

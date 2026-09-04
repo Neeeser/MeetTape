@@ -29,6 +29,7 @@ public enum ManifestEvent: Sendable, Equatable {
     case sessionEnd(SessionEnd)
     case crashTailAdopted(CrashTailAdopted)
     case remoteBind(RemoteBind)
+    case remoteStream(RemoteStream)
     case micBind(MicBind)
 
     public struct SessionStart: Codable, Sendable, Equatable {
@@ -185,6 +186,41 @@ public enum ManifestEvent: Sendable, Equatable {
         }
     }
 
+    /// What the tap's first callback of a bind actually delivered.
+    ///
+    /// `remote_bind` records the index the bind chose to read. This records the
+    /// reading, which is a different fact and the one that says whether the
+    /// choice held. A remote track of digital zero is answered by the two lines
+    /// together: the aggregate's buffer list, and whether the index was
+    /// unusable so a channel-count match was read instead. Both used to reach
+    /// the unified log only, which is gone by the time anyone opens the meeting
+    /// folder.
+    ///
+    /// One line per bind, written on the first poll after a callback arrives. A
+    /// bind with no line delivered no audio at all.
+    public struct RemoteStream: Codable, Sendable, Equatable {
+        public struct Stream: Codable, Sendable, Equatable {
+            public let channelCount: Int
+            public let byteCount: Int
+
+            public init(channelCount: Int, byteCount: Int) {
+                self.channelCount = channelCount
+                self.byteCount = byteCount
+            }
+        }
+
+        /// The bind this reading belongs to, matching `remote_bind.bindCount`.
+        public let bindCount: Int
+        public let streams: [Stream]
+        public let usedFallback: Bool
+
+        public init(bindCount: Int, streams: [Stream], usedFallback: Bool) {
+            self.bindCount = bindCount
+            self.streams = streams
+            self.usedFallback = usedFallback
+        }
+    }
+
     /// Which input device the microphone engine was opened on, and what the tap
     /// it installed is running at, recorded on every build.
     ///
@@ -327,6 +363,7 @@ public enum ManifestEvent: Sendable, Equatable {
         case .sessionEnd: "session_end"
         case .crashTailAdopted: "crash_tail_adopted"
         case .remoteBind: "remote_bind"
+        case .remoteStream: "remote_stream"
         case .micBind: "mic_bind"
         }
     }
@@ -358,6 +395,7 @@ extension ManifestLine: Codable {
         case .sessionEnd(let payload): try payload.encode(to: encoder)
         case .crashTailAdopted(let payload): try payload.encode(to: encoder)
         case .remoteBind(let payload): try payload.encode(to: encoder)
+        case .remoteStream(let payload): try payload.encode(to: encoder)
         case .micBind(let payload): try payload.encode(to: encoder)
         }
     }
@@ -379,6 +417,7 @@ extension ManifestLine: Codable {
         case "session_end": event = .sessionEnd(try .init(from: decoder))
         case "crash_tail_adopted": event = .crashTailAdopted(try .init(from: decoder))
         case "remote_bind": event = .remoteBind(try .init(from: decoder))
+        case "remote_stream": event = .remoteStream(try .init(from: decoder))
         case "mic_bind": event = .micBind(try .init(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(

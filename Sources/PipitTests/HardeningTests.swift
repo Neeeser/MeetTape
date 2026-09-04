@@ -49,6 +49,7 @@ enum HardeningTests {
         private let lock = NSLock()
         private var sinkHandler: AudioBufferSink?
         private var targets: [RemoteAudioTarget] = []
+        private var reading: TapCallbackReading?
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
         private(set) var bindCount = 0
 
@@ -73,8 +74,15 @@ enum HardeningTests {
         func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
             lock.lock()
             bindCount += 1
+            reading = nil
             lock.unlock()
             return RemoteTapBinding(format: format, streamCount: 2, tapStreamIndex: 1)
+        }
+
+        func firstCallback() -> TapCallbackReading? {
+            lock.lock()
+            defer { lock.unlock() }
+            return reading
         }
 
         /// `amplitude: 0` is the digital zero a tap reads when it is pointed at
@@ -84,14 +92,26 @@ enum HardeningTests {
         func emit(
             seconds: Double, hostTime: Double, amplitude: Float = 0.5, toneChannel: Int? = nil
         ) {
-            lock.lock()
-            let handler = sinkHandler
-            lock.unlock()
             let buffer = AudioTests.makeTone(
                 seconds: seconds, sampleRate: format.sampleRate,
                 channels: AVAudioChannelCount(format.channelCount),
                 amplitude: amplitude, toneChannel: toneChannel
             )
+            lock.lock()
+            let handler = sinkHandler
+            if reading == nil {
+                // One interleaved stream, which is the tap's own buffer in an
+                // aggregate device's list.
+                reading = TapCallbackReading(
+                    streams: [.init(
+                        channelCount: format.channelCount,
+                        byteCount: Int(buffer.frameLength) * format.channelCount
+                            * MemoryLayout<Float>.size
+                    )],
+                    usedFallback: false
+                )
+            }
+            lock.unlock()
             handler?(AudioBufferPacket(buffer: buffer, hostTime: hostTime))
         }
     }
@@ -126,7 +146,7 @@ enum HardeningTests {
     /// tone on one of them is the production shape.
     private static func recordTapAudio(
         amplitude: Float, channels: Int = 1, toneChannel: Int? = nil
-    ) async throws -> SilentDelegate {
+    ) async throws -> (delegate: SilentDelegate, lines: [ManifestLine]) {
         let root = try ManifestTests.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let layout = MeetingLayout(root: root)
@@ -166,7 +186,7 @@ enum HardeningTests {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         _ = await engine.stop(reason: "test")
-        return delegate
+        return (delegate, try ManifestReader.read(contentsOf: layout.manifest).lines)
     }
 
     static var captureSuite: Suite {
@@ -322,7 +342,7 @@ enum HardeningTests {
                 // coordinator test can hand the policy any peak it likes, so
                 // this is where a peak read from the wrong pointers, or not read
                 // at all, shows up.
-                let delegate = try await recordTapAudio(amplitude: 0)
+                let (delegate, lines) = try await recordTapAudio(amplitude: 0)
 
                 expect.isTrue(
                     delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
@@ -332,10 +352,24 @@ enum HardeningTests {
                     delegate.snapshots.contains { $0.remote.isLosingAudio },
                     "a track of digital zero must not read as nominal in the menu bar"
                 )
+                // And the folder says what was read, not only that it was
+                // silent. `remote_bind` carries the index the bind chose; this
+                // is the line that says the choice held and what the aggregate
+                // handed over.
+                let streams = lines.compactMap { line -> ManifestEvent.RemoteStream? in
+                    guard case .remoteStream(let payload) = line.event else { return nil }
+                    return payload
+                }
+                expect.isTrue(
+                    streams.count >= 1,
+                    "the manifest records what the tap's first callback read"
+                )
+                expect.equal(streams.first?.streams.count, 1)
+                expect.equal(streams.first?.usedFallback, false)
             },
 
             test("audio the tap really carries raises nothing") { expect in
-                let delegate = try await recordTapAudio(amplitude: 0.5)
+                let (delegate, _) = try await recordTapAudio(amplitude: 0.5)
 
                 expect.isFalse(
                     delegate.warnings.contains { $0.dedupKey == "remote_silent_while_producing" },
@@ -352,7 +386,7 @@ enum HardeningTests {
                 // for as long as the far end stays there, rebinding the tap and
                 // warning the user through a meeting that is being recorded
                 // correctly.
-                let delegate = try await recordTapAudio(
+                let (delegate, _) = try await recordTapAudio(
                     amplitude: 0.5, channels: 2, toneChannel: 1
                 )
 

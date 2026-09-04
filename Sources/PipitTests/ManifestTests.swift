@@ -55,6 +55,14 @@ enum ManifestTests {
                         streamCount: 2,
                         tapStreamIndex: 1
                     )),
+                    .remoteStream(.init(
+                        bindCount: 1,
+                        streams: [
+                            .init(channelCount: 8, byteCount: 16_384),
+                            .init(channelCount: 2, byteCount: 4_096),
+                        ],
+                        usedFallback: true
+                    )),
                     .micBind(.init(
                         deviceUID: "BuiltInMicrophoneDevice", deviceName: "MacBook Pro Microphone",
                         deviceSampleRate: 48_000, deviceChannelCount: 1,

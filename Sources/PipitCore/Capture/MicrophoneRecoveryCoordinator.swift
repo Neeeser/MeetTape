@@ -84,6 +84,10 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     func captureDidBindRemote(
         targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
+    /// What the tap's first callback of that bind delivered, raised once per
+    /// bind on the first poll after a callback arrives. A bind that never
+    /// delivers raises nothing, which is itself the answer.
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int)
     /// Which input device the microphone engine was opened on, and what the
     /// build made of it, reported after every build that installed an engine.
     /// The device and the build's format are separate readings and can

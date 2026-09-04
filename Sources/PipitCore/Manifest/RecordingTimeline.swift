@@ -298,7 +298,7 @@ public enum ManifestReader {
             case .sessionEnd(let payload):
                 endedAt = line.wallClock
                 endReason = payload.reason
-            case .sourceHealth, .remoteBind, .micBind:
+            case .sourceHealth, .remoteBind, .remoteStream, .micBind:
                 // Provenance for reading the recording afterwards. None of them
                 // places audio on the timeline.
                 break

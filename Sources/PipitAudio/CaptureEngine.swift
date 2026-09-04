@@ -772,6 +772,22 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         }
     }
 
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int) {
+        let engine = target
+        let streams = reading.streams.map {
+            ManifestEvent.RemoteStream.Stream(
+                channelCount: $0.channelCount, byteCount: $0.byteCount
+            )
+        }
+        queue.async {
+            engine?.recordManifest(
+                .remoteStream(.init(
+                    bindCount: bindCount, streams: streams, usedFallback: reading.usedFallback
+                ))
+            )
+        }
+    }
+
     func captureDidBindMicrophone(
         device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
     ) {

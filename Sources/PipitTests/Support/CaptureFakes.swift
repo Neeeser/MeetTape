@@ -163,6 +163,10 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         var teardowns = 0
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 2)
         var failNextBind: CaptureError?
+        /// What the current bind's first callback delivered. Cleared by every
+        /// bind, as the real source clears it on teardown, so a rebind that
+        /// delivers nothing reports nothing.
+        var firstCallback: TapCallbackReading?
     }
 
     private let state = Mutex(State())
@@ -195,6 +199,11 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         state.withLock { $0.teardowns += 1 }
     }
 
+    /// The tap's first IOProc callback of the current bind arriving.
+    func deliverFirstCallback(_ reading: TapCallbackReading) {
+        state.withLock { $0.firstCallback = reading }
+    }
+
     func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
         let failure: CaptureError? = state.withLock { state in
             defer { state.failNextBind = nil }
@@ -203,8 +212,13 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         if let failure { throw failure }
         return state.withLock { state in
             state.binds.append(targets.map(\.processID).sorted())
+            state.firstCallback = nil
             return RemoteTapBinding(format: state.format, streamCount: 2, tapStreamIndex: 1)
         }
+    }
+
+    func firstCallback() -> TapCallbackReading? {
+        state.withLock { $0.firstCallback }
     }
 }
 
@@ -239,6 +253,11 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         let binding: RemoteTapBinding
     }
 
+    struct RemoteStream: Sendable, Equatable {
+        let reading: TapCallbackReading
+        let bindCount: Int
+    }
+
     struct MicBind: Sendable, Equatable {
         let device: MicrophoneDeviceDescription
         let build: MicrophoneBuild
@@ -250,6 +269,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         var restarts: [Restart] = []
         var healthChanges: [HealthChange] = []
         var remoteBinds: [RemoteBind] = []
+        var remoteStreams: [RemoteStream] = []
         var micBinds: [MicBind] = []
         var failures: [CaptureError] = []
     }
@@ -260,6 +280,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     var restarts: [Restart] { state.withLock { $0.restarts } }
     var healthChanges: [HealthChange] { state.withLock { $0.healthChanges } }
     var remoteBinds: [RemoteBind] { state.withLock { $0.remoteBinds } }
+    var remoteStreams: [RemoteStream] { state.withLock { $0.remoteStreams } }
     var micBinds: [MicBind] { state.withLock { $0.micBinds } }
     var failures: [CaptureError] { state.withLock { $0.failures } }
 
@@ -290,6 +311,12 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
                 count: bindCount,
                 binding: binding
             ))
+        }
+    }
+
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int) {
+        state.withLock {
+            $0.remoteStreams.append(RemoteStream(reading: reading, bindCount: bindCount))
         }
     }
 

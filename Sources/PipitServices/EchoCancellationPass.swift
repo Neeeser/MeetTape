@@ -13,7 +13,7 @@ import PipitCore
 /// other way round moves the pair by twice the offset and puts the echo in the
 /// microphone ahead of the far end that caused it. No filter can model that,
 /// and no outcome value reports it.
-struct EchoCancellationPass {
+public struct EchoCancellationPass {
     /// The rate both tracks are read at, which is the rate every model above
     /// reads them at too.
     static let readFormat = AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1)
@@ -38,11 +38,21 @@ struct EchoCancellationPass {
     /// out of a microphone that holds only the user. The low reported figure is
     /// what says the filter never locked on, and that is the reason to throw
     /// its output away.
-    struct Window {
-        let farEndDBFS: Double
-        let echoRemovedDB: Double
-        let microphoneBeforeDBFS: Double
-        let microphoneAfterDBFS: Double
+    public struct Window: Sendable, Equatable {
+        public let farEndDBFS: Double
+        public let echoRemovedDB: Double
+        public let microphoneBeforeDBFS: Double
+        public let microphoneAfterDBFS: Double
+
+        public init(
+            farEndDBFS: Double, echoRemovedDB: Double, microphoneBeforeDBFS: Double,
+            microphoneAfterDBFS: Double
+        ) {
+            self.farEndDBFS = farEndDBFS
+            self.echoRemovedDB = echoRemovedDB
+            self.microphoneBeforeDBFS = microphoneBeforeDBFS
+            self.microphoneAfterDBFS = microphoneAfterDBFS
+        }
     }
 
     struct Result {
@@ -191,6 +201,132 @@ struct EchoCancellationPass {
         guard rms > 0 else { return EmptyTranscriptPolicy.silenceFloorDBFS }
         return max(EmptyTranscriptPolicy.silenceFloorDBFS, 20 * log10(rms))
     }
+
+    /// What one pass decided, and the figures it decided on.
+    public struct Judgement: Equatable {
+        public let outcome: CleaningOutcome
+        public let reason: String
+        /// Median of the canceller's own reported enhancement over the
+        /// far-end-active windows. Informational: it reads near zero on real
+        /// recordings the pass demonstrably cleaned, so nothing is decided
+        /// on it.
+        public let reportedMedianDB: Double
+        public let activeWindows: Int
+        public let microphoneFloorDBFS: Double
+        /// Windows where the far end was quiet and the microphone held
+        /// something, which is the user alone. The only class in which a
+        /// level drop is a loss.
+        public let userWindows: Int
+        public let userHarmMedianDB: Double?
+        /// Share of those windows that lost more than `notableLossDB`.
+        public let userHarmShare: Double?
+    }
+
+    /// Windows of far-end activity the decision needs before it is made at all.
+    ///
+    /// Ten seconds. The canceller reports nothing for its first 2.5 s of
+    /// far-end activity, and counting in far-end-active windows rather than in
+    /// seconds of file is what makes the bound hold for a meeting whose far end
+    /// stayed quiet for the first minute.
+    public static let minimumActiveWindows = 40
+    /// A window whose far-end level clears this had the far end playing in it.
+    public static let farEndActiveDBFS = -60.0
+    /// Windows of the user alone the harm figures need before they mean
+    /// anything. Five seconds.
+    public static let minimumUserWindows = 20
+    /// How far above its own quietest twentieth a microphone has to be before a
+    /// window counts as holding something. Speech at a desk runs 20 to 40 dB
+    /// over the room it is in.
+    public static let microphoneActivationMarginDB = 10.0
+    /// The loss to the user's own windows above which the cleaned track is
+    /// thrown away: the median drop, and the share of windows that dropped by
+    /// more than `notableLossDB`.
+    ///
+    /// Measured over four recordings on speakers, two the canceller locked on
+    /// to and two it reported nothing on: the user-only median moved 0.0 to
+    /// 0.5 dB and 1% to 3% of windows lost more than 6 dB. The tone fixtures
+    /// gate two boundary windows of twenty-six, which is 8%. The
+    /// continuous-tone fixture in `AudioTests`, where the suppressor has an
+    /// unrelated reference and nothing else, takes 39.9 dB out of every
+    /// window. The limits sit between.
+    public static let harmMedianLimitDB = 2.0
+    public static let notableLossDB = 10.0
+    public static let harmShareLimit = 0.10
+
+    /// Decides whether the pass is worth keeping, from what it measured.
+    ///
+    /// The canceller's own enhancement figure used to decide this, against a
+    /// 6 dB threshold set from tones. On real recordings it read 0.2 to 1.8 dB
+    /// on calls the pass had cleaned by 4 to 18 dB in the windows where the far
+    /// end played over the user, so the rule refused the meetings it would
+    /// have helped. What the bypass exists to prevent is damage to the user's
+    /// own speech, and that is measured directly: over the windows where the
+    /// far end was quiet and the microphone held something, the level must not
+    /// have dropped.
+    public static func judge(windows: [Window]) -> Judgement {
+        let active = windows.filter { $0.farEndDBFS > farEndActiveDBFS }
+        let reported = median(of: active.map(\.echoRemovedDB))
+        let quiet = percentile(windows.map(\.microphoneBeforeDBFS), 0.05)
+        let floor = microphoneFloorDBFS(quietWindowDBFS: quiet)
+        let user = windows.filter {
+            $0.farEndDBFS <= farEndActiveDBFS && $0.microphoneBeforeDBFS > floor
+        }
+        let harm = user.map { $0.microphoneBeforeDBFS - $0.microphoneAfterDBFS }
+        let judgeable = user.count >= minimumUserWindows
+        let harmMedian = judgeable ? percentile(harm, 0.5) : nil
+        let harmShare = judgeable
+            ? Double(harm.filter { $0 > notableLossDB }.count) / Double(harm.count) : nil
+        func judgement(_ outcome: CleaningOutcome, _ reason: String) -> Judgement {
+            Judgement(
+                outcome: outcome, reason: reason, reportedMedianDB: reported,
+                activeWindows: active.count, microphoneFloorDBFS: floor,
+                userWindows: user.count, userHarmMedianDB: harmMedian, userHarmShare: harmShare
+            )
+        }
+        guard active.count >= minimumActiveWindows else {
+            return judgement(
+                .skippedNoReference,
+                "the far end was above \(fixed(farEndActiveDBFS)) dBFS in \(active.count) "
+                    + "windows, and the decision needs \(minimumActiveWindows)"
+            )
+        }
+        if let harmMedian, let harmShare,
+           harmMedian > harmMedianLimitDB || harmShare > harmShareLimit {
+            return judgement(
+                .bypassedNoEchoPath,
+                "the user's own windows lost \(fixed(harmMedian)) dB at the median, and "
+                    + "\(Int((harmShare * 100).rounded()))% of them more than "
+                    + "\(fixed(notableLossDB)) dB, over \(user.count) windows"
+            )
+        }
+        let held = harmMedian.map { "lost \(fixed($0)) dB at the median" }
+            ?? "held too few windows to judge"
+        return judgement(
+            .cleaned,
+            "the user's own windows \(held) over \(user.count) windows, and the far end "
+                + "played in \(active.count)"
+        )
+    }
+
+    /// The level the microphone clears to count as holding something: this
+    /// recording's own quietest twentieth plus `microphoneActivationMarginDB`,
+    /// and never below the far end's floor, because nothing under it is speech
+    /// either way.
+    public static func microphoneFloorDBFS(quietWindowDBFS: Double?) -> Double {
+        guard let quietWindowDBFS else { return farEndActiveDBFS }
+        return max(farEndActiveDBFS, quietWindowDBFS + microphoneActivationMarginDB)
+    }
+
+    /// The value at a fraction of the way up the sorted series, by nearest
+    /// rank, so every figure reported is a window that actually happened.
+    public static func percentile(_ values: [Double], _ fraction: Double) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let rank = Int((fraction * Double(sorted.count)).rounded(.up))
+        return sorted[min(sorted.count - 1, max(0, rank - 1))]
+    }
+
+    private static func fixed(_ value: Double) -> String { String(format: "%.1f", value) }
 
     static func median(of values: [Double]) -> Double {
         let sorted = values.sorted()

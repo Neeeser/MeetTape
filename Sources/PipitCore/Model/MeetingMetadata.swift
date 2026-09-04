@@ -219,9 +219,10 @@ public enum CleaningOutcome: String, Codable, Sendable, Equatable {
     /// No far end was recorded to subtract, or too little of it played for the
     /// canceller to be judged on.
     case skippedNoReference
-    /// The canceller's filter never locked on to an echo path, which is a call
-    /// taken on headphones. Cancelling anyway takes tens of decibels out of a
-    /// microphone that holds only the user.
+    /// The pass took the user's own speech down with the echo, measured over
+    /// the windows where the far end was quiet and the microphone held
+    /// something. A call with no echo path to lock on to is where that
+    /// happens. The recording is kept instead.
     case bypassedNoEchoPath
     /// One track holding everyone, which is every import and every in-person
     /// session. There is no separate far end and nothing to subtract.

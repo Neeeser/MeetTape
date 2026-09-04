@@ -148,16 +148,25 @@ public enum EchoMeasurement: Sendable, Equatable {
         /// A per-window drop above which a window is counted as having lost
         /// something a listener would notice.
         public let notableLossDB: Double
-        /// Median `echoRemovedDB` over the far-end-active windows, which is
-        /// the figure `MicrophoneCleaner` decides on. Nil where no window had
-        /// the far end above its floor. What the canceller reported removing
-        /// is not what it removed, and `classes` holds the second.
+        /// Median `echoRemovedDB` over the far-end-active windows, as the
+        /// canceller reported it. Informational: it read 0.2 to 1.8 dB on
+        /// calls the pass cleaned by 4 to 18 dB, so nothing is decided on it.
+        /// Nil where no window had the far end above its floor.
         public let reportedEnhancementMedianDB: Double?
         public let farEndActiveWindows: Int
         /// Share of all windows the far end was above its floor in.
         public let farEndDutyCycle: Double
-        public let bypassThresholdDB: Double
         public let minimumActiveWindows: Int
+        /// The user-only windows the decision was judged on, and what they
+        /// lost. Nil where fewer than `minimumUserWindows` existed.
+        public let userWindowsJudged: Int
+        public let userHarmMedianDB: Double?
+        /// Share of those windows that lost more than `harmNotableLossDB`.
+        public let userHarmShare: Double?
+        public let minimumUserWindows: Int
+        public let harmMedianLimitDB: Double
+        public let harmNotableLossDB: Double
+        public let harmShareLimit: Double
         /// What `MicrophoneCleaner` would decide about this meeting.
         ///
         /// Decided from the same windows against the same thresholds, up to
@@ -184,13 +193,9 @@ public enum EchoMeasurement: Sendable, Equatable {
     /// application rendered and carries no room in it at all.
     public static var farEndFloorDBFS: Double { MicrophoneCleaner.farEndActiveDBFS }
 
-    /// How far above its own quietest windows a microphone has to be before a
-    /// window counts as holding something.
-    ///
-    /// Ten decibels. Speech at a desk runs 20 to 40 dB over the room it is in,
-    /// so ten leaves room for a quiet passage while keeping the room itself
-    /// out.
-    public static let microphoneActivationMarginDB = 10.0
+    public static var microphoneActivationMarginDB: Double {
+        EchoCancellationPass.microphoneActivationMarginDB
+    }
 
     /// A per-window level drop large enough for a listener to hear.
     ///
@@ -216,8 +221,7 @@ public enum EchoMeasurement: Sendable, Equatable {
     /// the quietest-twentieth figure beside the floor, so which of the two
     /// decided it is visible in the table.
     public static func microphoneFloorDBFS(quietWindowDBFS: Double?) -> Double {
-        guard let quietWindowDBFS else { return farEndFloorDBFS }
-        return max(farEndFloorDBFS, quietWindowDBFS + microphoneActivationMarginDB)
+        EchoCancellationPass.microphoneFloorDBFS(quietWindowDBFS: quietWindowDBFS)
     }
 
     /// How far the far end has to move to line up with the microphone, as the
@@ -260,8 +264,9 @@ public enum EchoMeasurement: Sendable, Equatable {
 
         // The microphone's floor comes from the microphone, so it can only be
         // settled once the whole pass has been read.
-        let quiet = percentile(pass.windows.map(\.microphoneBeforeDBFS), 0.05)
-        let microphoneFloor = microphoneFloorDBFS(quietWindowDBFS: quiet)
+        let judgement = EchoCancellationPass.judge(windows: pass.windows)
+        let quiet = EchoCancellationPass.percentile(pass.windows.map(\.microphoneBeforeDBFS), 0.05)
+        let microphoneFloor = judgement.microphoneFloorDBFS
         let log = pass.windows.enumerated().map { index, window in
             WindowRecord(
                 startSeconds: Double(index) * EchoCancellationPass.windowSeconds,
@@ -276,9 +281,7 @@ public enum EchoMeasurement: Sendable, Equatable {
 
         let grouped = Dictionary(grouping: log, by: \.windowClass)
         let classes = WindowClass.allCases.map { summarize($0, grouped[$0] ?? []) }
-        let active = pass.windows.filter { $0.farEndDBFS > farEndFloorDBFS }
-        let median = EchoCancellationPass.median(of: active.map(\.echoRemovedDB))
-        let (decision, reason) = decide(activeWindows: active.count, median: median)
+        let active = judgement.activeWindows
 
         return .measured(Report(
             seconds: Double(pass.frames) / EchoCancellationPass.readFormat.sampleRate,
@@ -292,13 +295,19 @@ public enum EchoMeasurement: Sendable, Equatable {
             classes: classes,
             windowLog: log,
             notableLossDB: notableLossDB,
-            reportedEnhancementMedianDB: active.isEmpty ? nil : median,
-            farEndActiveWindows: active.count,
-            farEndDutyCycle: log.isEmpty ? 0 : Double(active.count) / Double(log.count),
-            bypassThresholdDB: MicrophoneCleaner.bypassBelowDB,
-            minimumActiveWindows: MicrophoneCleaner.minimumActiveWindows,
-            decision: decision,
-            decisionReason: reason
+            reportedEnhancementMedianDB: active == 0 ? nil : judgement.reportedMedianDB,
+            farEndActiveWindows: active,
+            farEndDutyCycle: log.isEmpty ? 0 : Double(active) / Double(log.count),
+            minimumActiveWindows: EchoCancellationPass.minimumActiveWindows,
+            userWindowsJudged: judgement.userWindows,
+            userHarmMedianDB: judgement.userHarmMedianDB,
+            userHarmShare: judgement.userHarmShare,
+            minimumUserWindows: EchoCancellationPass.minimumUserWindows,
+            harmMedianLimitDB: EchoCancellationPass.harmMedianLimitDB,
+            harmNotableLossDB: EchoCancellationPass.notableLossDB,
+            harmShareLimit: EchoCancellationPass.harmShareLimit,
+            decision: judgement.outcome,
+            decisionReason: judgement.reason
         ))
     }
 
@@ -329,22 +338,12 @@ public enum EchoMeasurement: Sendable, Equatable {
             microphoneBeforeDBFS: before,
             microphoneAfterDBFS: after,
             changeDB: before - after,
-            medianChangeDB: percentile(changes, 0.5),
-            p95ChangeDB: percentile(changes, 0.95),
+            medianChangeDB: EchoCancellationPass.percentile(changes, 0.5),
+            p95ChangeDB: EchoCancellationPass.percentile(changes, 0.95),
             worstChangeDB: changes.max(),
             largestGainDB: changes.min(),
             windowsOverLossThreshold: changes.filter { $0 > notableLossDB }.count
         )
-    }
-
-    /// The value at a fraction of the way up the sorted series, by nearest
-    /// rank, so every figure reported is a window that actually happened
-    /// rather than an interpolation between two that did.
-    private static func percentile(_ values: [Double], _ fraction: Double) -> Double? {
-        guard !values.isEmpty else { return nil }
-        let sorted = values.sorted()
-        let rank = Int((fraction * Double(sorted.count)).rounded(.up))
-        return sorted[min(sorted.count - 1, max(0, rank - 1))]
     }
 
     /// Mean power across windows, back in decibels.
@@ -357,33 +356,6 @@ public enum EchoMeasurement: Sendable, Equatable {
         let mean = levels.reduce(0.0) { $0 + pow(10, $1 / 10) } / Double(levels.count)
         guard mean > 0 else { return EmptyTranscriptPolicy.silenceFloorDBFS }
         return max(EmptyTranscriptPolicy.silenceFloorDBFS, 10 * log10(mean))
-    }
-
-    /// The cleaner's decision, made again from the same windows.
-    private static func decide(
-        activeWindows: Int, median: Double
-    ) -> (CleaningOutcome, String) {
-        let threshold = MicrophoneCleaner.bypassBelowDB
-        let minimum = MicrophoneCleaner.minimumActiveWindows
-        guard activeWindows >= minimum else {
-            return (
-                .skippedNoReference,
-                "the far end was above \(fixed(farEndFloorDBFS)) dBFS in \(activeWindows) "
-                    + "windows, and the decision needs \(minimum)"
-            )
-        }
-        guard median >= threshold else {
-            return (
-                .bypassedNoEchoPath,
-                "the canceller reported \(fixed(median)) dB removed against a "
-                    + "\(fixed(threshold)) dB threshold, so its filter never locked on"
-            )
-        }
-        return (
-            .cleaned,
-            "the canceller reported \(fixed(median)) dB removed over \(activeWindows) "
-                + "far-end-active windows, against a \(fixed(threshold)) dB threshold"
-        )
     }
 
     private static func fixed(_ value: Double) -> String {

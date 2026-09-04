@@ -139,12 +139,15 @@ recording is the reference WebRTC's echo canceller needs. The result is written
 to `raw/audio/mic.cleaned.m4a`, and every stage from transcription onward reads
 it in place of the recording, which is the segment chain before compaction and
 `mic.m4a` after it. The recording itself is never written to. The cleaned file
-is kept only when the canceller reports it removed a median of 6 dB or more over
-the windows where the far end was playing, which is what a call on speakers
-gives and a call on headphones does not. Five cases keep the microphone exactly
-as it was captured: a call on headphones, a meeting whose far-end track holds
-nothing, a meeting whose far end played for under ten seconds, an imported
-single-track recording, and a meeting whose cleaning pass failed.
+is kept unless the pass measurably took the user's own speech down: over the
+windows where the far end was quiet and the microphone held something, the
+level must not have dropped more than 2 dB at the median, and no more than one
+window in ten may have dropped by more than 10 dB. The canceller's own reported enhancement is recorded but decides
+nothing, because it read 0.2 to 1.8 dB on calls the pass had cleaned by 4 to
+18 dB. Four cases keep the microphone exactly as it was captured: a pass that
+damaged the user's own windows, a meeting whose far-end track holds nothing, a
+meeting whose far end played for under ten seconds or an imported single-track
+recording, and a meeting whose cleaning pass failed.
 
 The pass runs once per meeting and records what it decided, whatever it decided.
 A pass that failed is never retried. If the disk fills during it, that meeting is

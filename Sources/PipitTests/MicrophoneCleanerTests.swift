@@ -342,14 +342,15 @@ enum MicrophoneCleanerTests {
         test("a run that decides against cleaning clears what an earlier run left") { expect in
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
-            // A meeting that was cleaned once, taken again on headphones. The
-            // record and the file from the first run both have to go, or every
-            // reader stays on a cleaned track this run decided against.
+            // A meeting that was cleaned once, whose far end now reads as
+            // nothing. The record and the file from the first run both have
+            // to go, or every reader stays on a cleaned track this run decided
+            // against.
             let count = Int(15 * rate)
             let meeting = try makeMeeting(
                 root: root,
                 mic: tone(count: count, frequency: 700, amplitude: 0.3),
-                remote: tone(count: count, frequency: farToneA, amplitude: 0.5)
+                remote: [Float](repeating: 0, count: count)
             )
             let store = meeting.store
             try FileManager.default.createDirectory(
@@ -370,7 +371,7 @@ enum MicrophoneCleanerTests {
             let outcome = try MicrophoneCleaner().clean(
                 store: store, metadata: &carried, timeline: try store.readTimeline()
             )
-            expect.equal(outcome, CleaningOutcome.bypassedNoEchoPath)
+            expect.equal(outcome, CleaningOutcome.skippedNoReference)
             expect.isNil(carried.cleanedMic)
             expect.isNil(try store.readMetadata().cleanedMic)
             expect.isFalse(
@@ -598,40 +599,6 @@ enum MicrophoneCleanerTests {
                 "no cleaned track was written"
             )
             expect.isNil(try store.readMetadata().cleanedMic)
-        },
-
-        test("a call taken on headphones keeps the microphone it recorded") { expect in
-            let root = try ManifestTests.makeTemporaryDirectory()
-            defer { try? FileManager.default.removeItem(at: root) }
-            // The far end plays and the microphone holds only the user, which is
-            // every call taken on headphones. Cancelling anyway takes tens of
-            // decibels out of the user, so the only safe answer is the
-            // recording.
-            let count = Int(15 * rate)
-            let meeting = try makeMeeting(
-                root: root,
-                mic: tone(count: count, frequency: 700, amplitude: 0.3),
-                remote: tone(count: count, frequency: farToneA, amplitude: 0.5)
-            )
-            let store = meeting.store
-            let timeline = try store.readTimeline()
-
-            var carried = meeting.metadata
-            let outcome = try MicrophoneCleaner().clean(
-                store: store, metadata: &carried, timeline: timeline
-            )
-            expect.equal(outcome, CleaningOutcome.bypassedNoEchoPath)
-            expect.isFalse(
-                FileManager.default.fileExists(atPath: store.layout.cleanedMicFile.path),
-                "the cleaned track was deleted rather than kept"
-            )
-            let metadata = try store.readMetadata()
-            expect.isNil(metadata.cleanedMic)
-            expect.equal(
-                store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
-                    .directory.lastPathComponent,
-                "segments"
-            )
         },
 
         test("a recording holding everyone on one track has no far end to subtract") { expect in

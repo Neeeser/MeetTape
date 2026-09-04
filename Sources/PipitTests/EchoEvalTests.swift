@@ -172,13 +172,14 @@ enum EchoEvalTests {
 
             let median = try expect.unwrap(report.reportedEnhancementMedianDB)
             expect.close(median, 48.5, tolerance: 2)
-            expect.isTrue(
-                median >= report.bypassThresholdDB,
-                "the canceller reported \(median) dB against \(report.bypassThresholdDB) dB"
-            )
+            // The user alone was left alone, which is what the decision is
+            // made on.
+            let harm = try expect.unwrap(report.userHarmMedianDB)
+            expect.isTrue(harm < report.harmMedianLimitDB, "the user's own windows lost \(harm) dB")
+            expect.isTrue(report.userWindowsJudged >= report.minimumUserWindows)
         },
 
-        test("a call on headphones reports the bypass and what was taken anyway") { expect in
+        test("a call on headphones is kept cleaned when the user is left alone") { expect in
             let root = try ManifestTests.makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }
             let meeting = try makeBurstyCall(root: root, micHoldsEcho: false)
@@ -191,13 +192,15 @@ enum EchoEvalTests {
                 return
             }
 
-            expect.equal(report.decision, CleaningOutcome.bypassedNoEchoPath)
+            // The canceller reports almost nothing removed, because there was
+            // nothing to remove. That figure decides nothing: what does is
+            // that the user's own windows came through untouched, so the
+            // cleaned track is as good as the recording and is kept.
             let median = try expect.unwrap(report.reportedEnhancementMedianDB)
             expect.close(median, 0.2, tolerance: 0.5)
-            expect.isTrue(
-                median < report.bypassThresholdDB,
-                "a microphone with no echo in it reported \(median) dB removed"
-            )
+            expect.equal(report.decision, CleaningOutcome.cleaned)
+            let harm = try expect.unwrap(report.userHarmMedianDB)
+            expect.isTrue(abs(harm) < 0.5, "the user's own windows moved \(harm) dB")
 
             // With no echo returning, the far end plays over a microphone that
             // holds only room noise, and those windows are far-end-only. This
@@ -385,23 +388,61 @@ enum EchoEvalTests {
             )
 
             // And the filter has nothing to lock onto, which the reported
-            // enhancement says and the threshold acts on. Measured at 48.5 dB
-            // aligned against 0.2 dB reversed. On this fixture the threshold
-            // does catch the reversal. The fixture in `MicrophoneCleanerTests`
-            // where the far end started first is one where it does not, so
-            // neither result generalises.
+            // enhancement says: 48.5 dB aligned against 0.2 dB reversed. The
+            // decision no longer reads that figure, so a misaligned pair is
+            // caught by what the far end lost, not by the outcome value.
             let alignedMedian = try expect.unwrap(aligned.reportedEnhancementMedianDB)
             let reversedMedian = try expect.unwrap(reversed.reportedEnhancementMedianDB)
-            expect.isTrue(
-                alignedMedian >= aligned.bypassThresholdDB,
-                "the aligned pair reported \(alignedMedian) dB"
-            )
-            expect.isTrue(
-                reversedMedian < reversed.bypassThresholdDB,
-                "the reversed pair reported \(reversedMedian) dB"
-            )
+            expect.isTrue(alignedMedian > reversedMedian + 20, "\(alignedMedian) against \(reversedMedian)")
             expect.equal(aligned.decision, CleaningOutcome.cleaned)
-            expect.equal(reversed.decision, CleaningOutcome.bypassedNoEchoPath)
+            let alignedFar = try expect.unwrap(summary(aligned, .both).medianChangeDB)
+            let reversedFar = try expect.unwrap(summary(reversed, .both).medianChangeDB)
+            expect.isTrue(alignedFar > reversedFar + 20, "aligned removed \(alignedFar) dB, reversed \(reversedFar) dB")
+        },
+
+        test("the judgement keeps a pass that left the user alone and drops one that did not") { expect in
+            func window(far: Double, before: Double, after: Double) -> EchoCancellationPass.Window {
+                EchoCancellationPass.Window(
+                    farEndDBFS: far, echoRemovedDB: 0, microphoneBeforeDBFS: before,
+                    microphoneAfterDBFS: after
+                )
+            }
+            // Room tone, so the microphone has a floor to be judged against.
+            let room = (0..<30).map { _ in window(far: -90, before: -80, after: -80) }
+            // A call on speakers: the far end plays for most of it and the
+            // user's own windows lose nothing.
+            let speakers = (0..<60).map { _ in window(far: -25, before: -30, after: -55) }
+                + (0..<30).map { _ in window(far: -90, before: -30, after: -30.3) } + room
+            let kept = EchoCancellationPass.judge(windows: speakers)
+            expect.equal(kept.outcome, CleaningOutcome.cleaned)
+            expect.equal(kept.userWindows, 30)
+            expect.close(try expect.unwrap(kept.userHarmMedianDB), 0.3, tolerance: 0.01)
+
+            // The same call with the user's solo speech gutted.
+            let gutted = (0..<60).map { _ in window(far: -25, before: -30, after: -55) }
+                + (0..<30).map { _ in window(far: -90, before: -30, after: -45) } + room
+            let dropped = EchoCancellationPass.judge(windows: gutted)
+            expect.equal(dropped.outcome, CleaningOutcome.bypassedNoEchoPath)
+            expect.close(try expect.unwrap(dropped.userHarmMedianDB), 15, tolerance: 0.01)
+
+            // Enough gated windows is enough: the median holds and the share
+            // does not.
+            let tail = (0..<60).map { _ in window(far: -25, before: -30, after: -55) }
+                + (0..<26).map { _ in window(far: -90, before: -30, after: -30) }
+                + (0..<4).map { _ in window(far: -90, before: -30, after: -60) } + room
+            expect.equal(EchoCancellationPass.judge(windows: tail).outcome, CleaningOutcome.bypassedNoEchoPath)
+
+            // Too few user-only windows to judge harm on: kept.
+            let brief = (0..<60).map { _ in window(far: -25, before: -30, after: -55) }
+                + (0..<5).map { _ in window(far: -90, before: -30, after: -60) } + room
+            let unjudged = EchoCancellationPass.judge(windows: brief)
+            expect.equal(unjudged.outcome, CleaningOutcome.cleaned)
+            expect.isNil(unjudged.userHarmMedianDB)
+
+            // Too little far end to have been judged on at all.
+            let quiet = (0..<10).map { _ in window(far: -25, before: -30, after: -55) }
+                + (0..<60).map { _ in window(far: -90, before: -30, after: -30) } + room
+            expect.equal(EchoCancellationPass.judge(windows: quiet).outcome, CleaningOutcome.skippedNoReference)
         },
     ])
 }

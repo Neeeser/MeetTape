@@ -157,10 +157,19 @@ enum EchoCommand {
         print("")
         let median = report.reportedEnhancementMedianDB.map { "\(fixed($0)) dB" }
             ?? "no far-end-active window"
-        print("reported        \(median) median enhancement")
+        print("reported        \(median) median enhancement, which nothing is decided on")
+        if let harmMedian = report.userHarmMedianDB, let harmShare = report.userHarmShare {
+            print(String(
+                format: "user alone      lost %.1f dB at the median, %.0f%% of %d windows over %.0f dB",
+                harmMedian, harmShare * 100, report.userWindowsJudged, report.harmNotableLossDB
+            ))
+        } else {
+            print("user alone      \(report.userWindowsJudged) windows, under the \(report.minimumUserWindows) a judgement needs")
+        }
         print(String(
-            format: "threshold       %.1f dB over at least %d far-end-active windows",
-            report.bypassThresholdDB, report.minimumActiveWindows
+            format: "limits          %.1f dB median, %.0f%% over %.0f dB, judged on at least %d far-end-active windows",
+            report.harmMedianLimitDB, report.harmShareLimit * 100, report.harmNotableLossDB,
+            report.minimumActiveWindows
         ))
         print("decision        \(report.decision.rawValue)")
         print("                \(report.decisionReason)")

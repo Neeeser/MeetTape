@@ -36,7 +36,7 @@ enum EchoEvalTests {
     /// plays and nothing of it comes back to the capsule.
     static func makeBurstyCall(
         root: URL, micHoldsEcho: Bool = true, userSpeaks: Bool = true,
-        remoteStartOffset: Double = 2
+        remoteStartOffset: Double = 2, roomNoise: Float = noiseAmplitude
     ) throws -> (metadata: MeetingMetadata, store: MeetingStore, repository: MeetingRepository) {
         let count = Int(seconds * rate)
         var remote = MicrophoneCleanerTests.tone(
@@ -49,7 +49,7 @@ enum EchoEvalTests {
         }
 
         var mic = MicrophoneCleanerTests.tone(
-            count: count, frequency: noiseTone, amplitude: noiseAmplitude
+            count: count, frequency: noiseTone, amplitude: roomNoise
         )
         if userSpeaks {
             for (from, upTo) in [(12.0, 18.0), (21.0, 27.0)] {
@@ -109,51 +109,69 @@ enum EchoEvalTests {
 
             expect.equal(report.decision, CleaningOutcome.cleaned)
             expect.close(report.seconds, seconds, tolerance: 0.2)
-            expect.equal(
-                report.windows,
-                EchoMeasurement.WindowClass.allCases.reduce(0) { $0 + summary(report, $1).windows },
-                "every window is in exactly one class"
-            )
 
             // The far end plays for sixteen of the thirty-two seconds.
             expect.close(report.farEndDutyCycle, 0.5, tolerance: 0.05)
             expect.equal(
                 report.farEndActiveWindows,
                 summary(report, .farEndOnly).windows + summary(report, .both).windows,
-                "far-end-active is the two classes the far end is above the floor in"
+                "far-end-active is the two classes the far end is above its floor in"
             )
 
+            // This fixture's room tone sits under the far end's floor, so that
+            // floor is the one that decided the microphone's.
+            expect.close(try expect.unwrap(report.microphoneQuietWindowDBFS), -73.5, tolerance: 0.5)
+            expect.equal(report.microphoneFloorDBFS, report.farEndFloorDBFS)
+
             // A speaker call has no far-end-only windows. The echo keeps the
-            // microphone above the floor for every second the far end plays,
+            // microphone above its floor for every second the far end plays,
             // and levels alone cannot tell that echo from the user. This is
-            // the limit the retention figures are split around, and the number
-            // that would answer "how much of the far end left" on its own is
-            // therefore not available from this class.
+            // the limit the retention figures are split around.
             expect.equal(summary(report, .farEndOnly).windows, 0)
             expect.isNil(
                 summary(report, .farEndOnly).changeDB,
                 "a class with no windows reports no level rather than zero"
             )
+            expect.isNil(summary(report, .farEndOnly).worstChangeDB)
 
-            // The user alone, with the far end quiet. This is the number every
-            // earlier attempt got wrong.
+            // The user alone, with the far end quiet, is where a class-level
+            // power ratio is at its most misleading. Across the class the
+            // microphone came down 0.007 dB, which reads as untouched. Two of
+            // its twenty-six windows lost 36 dB, at the transition where the
+            // far end stops and the suppressor is still gating. That is the
+            // shape of the incident this work exists to stop repeating, and
+            // the ratio alone does not show it.
             let solo = summary(report, .userOnly)
-            expect.isTrue(solo.windows > 20, "only \(solo.windows) user-only windows")
-            let soloLost = try expect.unwrap(solo.changeDB)
-            expect.isTrue(soloLost < 3, "the user lost \(soloLost) dB speaking alone")
+            expect.equal(solo.windows, 26)
+            expect.close(try expect.unwrap(solo.changeDB), 0, tolerance: 0.5)
+            expect.close(try expect.unwrap(solo.worstChangeDB), 36.5, tolerance: 2)
+            expect.close(try expect.unwrap(solo.p95ChangeDB), 31.8, tolerance: 3)
+            expect.equal(solo.windowsOverLossThreshold, 2)
 
-            // Both at once. The class holds the double-talk stretch and the
-            // stretches where only the echo was in the microphone, so its
-            // figure is the two together rather than either one.
-            let together = summary(report, .both)
-            expect.isTrue(together.windows > 20, "only \(together.windows) double-talk windows")
-            let togetherChange = try expect.unwrap(together.changeDB)
-            expect.isTrue(
-                togetherChange > 0.5,
-                "the microphone came down only \(togetherChange) dB where both were above the floor"
+            // And the log is what lets a run be re-read later without being
+            // measured again, so the summary has to be recoverable from it.
+            let soloLog = report.windowLog.filter { $0.windowClass == .userOnly }
+            expect.equal(soloLog.count, solo.windows)
+            expect.equal(
+                soloLog.filter { $0.changeDB > report.notableLossDB }.count,
+                solo.windowsOverLossThreshold
             )
+            expect.equal(report.windowLog.count, report.windowCount)
+            expect.close(report.windowLog[1].startSeconds, report.windowSeconds, tolerance: 0.001)
+
+            // Both at once, where the same ratio understates in the other
+            // direction. The class reads 3.2 dB because six seconds of
+            // retained user tone carries most of the energy, while the median
+            // window gave up 55 dB of echo. The per-window figure is the one
+            // that answers how much of the far end left.
+            let together = summary(report, .both)
+            expect.equal(together.windows, 64)
+            expect.close(try expect.unwrap(together.changeDB), 3.2, tolerance: 0.5)
+            expect.close(try expect.unwrap(together.medianChangeDB), 54.7, tolerance: 3)
+            expect.equal(together.windowsOverLossThreshold, 40)
 
             let median = try expect.unwrap(report.reportedEnhancementMedianDB)
+            expect.close(median, 48.5, tolerance: 2)
             expect.isTrue(
                 median >= report.bypassThresholdDB,
                 "the canceller reported \(median) dB against \(report.bypassThresholdDB) dB"
@@ -175,6 +193,7 @@ enum EchoEvalTests {
 
             expect.equal(report.decision, CleaningOutcome.bypassedNoEchoPath)
             let median = try expect.unwrap(report.reportedEnhancementMedianDB)
+            expect.close(median, 0.2, tolerance: 0.5)
             expect.isTrue(
                 median < report.bypassThresholdDB,
                 "a microphone with no echo in it reported \(median) dB removed"
@@ -184,22 +203,83 @@ enum EchoEvalTests {
             // holds only room noise, and those windows are far-end-only. This
             // is the class a speaker call cannot populate.
             let farOnly = summary(report, .farEndOnly)
-            expect.isTrue(farOnly.windows > 20, "only \(farOnly.windows) far-end-only windows")
-            // And the microphone comes back louder than it went in. The
-            // canceller replaces what it suppressed with comfort noise, so
-            // room noise at -73 dBFS returns at about -44. Measured at
-            // -29.1 dB. A negative change is why `changeDB` is what the
-            // microphone level did rather than what was removed.
-            let taken = try expect.unwrap(farOnly.changeDB)
-            expect.isTrue(taken < -10, "the canceller left the noise floor at \(taken) dB")
+            expect.equal(farOnly.windows, 40)
 
-            // The user is untouched here. A filter that never locked on has
-            // nothing to subtract, and on this fixture the suppressor does not
-            // gate the user either. Measured at 0.006 dB both ways.
+            // Across the class the microphone comes back 29.1 dB louder than
+            // it went in, which reads as a noise floor lifted throughout. The
+            // per-window figures say otherwise: the median window moved 0.05 dB
+            // and one window came back 45 dB louder. The canceller replaces
+            // what it suppressed with comfort noise in a few windows, and the
+            // power ratio spreads that over all of them.
+            expect.close(try expect.unwrap(farOnly.changeDB), -29.1, tolerance: 2)
+            expect.close(try expect.unwrap(farOnly.medianChangeDB), -0.05, tolerance: 0.5)
+            expect.close(try expect.unwrap(farOnly.largestGainDB), -45.1, tolerance: 3)
+            expect.equal(farOnly.windowsOverLossThreshold, 0)
+
+            // The user is untouched here, by the ratio and window by window
+            // both. A filter that never locked on has nothing to subtract.
             for windowClass in [EchoMeasurement.WindowClass.userOnly, .both] {
-                let lost = try expect.unwrap(summary(report, windowClass).changeDB)
-                expect.isTrue(lost < 1, "\(windowClass) lost \(lost) dB")
+                let held = summary(report, windowClass)
+                expect.isTrue(
+                    abs(try expect.unwrap(held.changeDB)) < 0.5,
+                    "\(windowClass) moved \(String(describing: held.changeDB)) dB"
+                )
+                expect.isTrue(
+                    abs(try expect.unwrap(held.worstChangeDB)) < 0.5,
+                    "\(windowClass) worst window \(String(describing: held.worstChangeDB)) dB"
+                )
+                expect.equal(held.windowsOverLossThreshold, 0)
             }
+        },
+
+        test("a room louder than the far end's floor gets a floor of its own") { expect in
+            // A real capsule records the room. Where its tone sits above
+            // -60 dBFS, borrowing the far end's floor would call every window
+            // microphone-active: `farEndOnly` and `neither` would come back
+            // empty on every meeting, `userOnly` would stop meaning "the user
+            // spoke", and the comfort noise above would never appear in a
+            // table. Room tone here is -44.9 dBFS, which is that regime.
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeBurstyCall(root: root, micHoldsEcho: false, roomNoise: 0.008)
+            let measurement = try EchoMeasurement.measure(
+                store: meeting.store, metadata: meeting.metadata,
+                timeline: try meeting.store.readTimeline()
+            )
+            guard case .measured(let report) = measurement else {
+                expect.fail("a two-track call came back \(measurement)")
+                return
+            }
+
+            let quiet = try expect.unwrap(report.microphoneQuietWindowDBFS)
+            expect.close(quiet, -44.9, tolerance: 0.5)
+            expect.isTrue(
+                quiet > report.farEndFloorDBFS,
+                "this room tone at \(quiet) dBFS has to sit above the far end's floor"
+            )
+            expect.close(
+                report.microphoneFloorDBFS,
+                quiet + EchoMeasurement.microphoneActivationMarginDB, tolerance: 0.001
+            )
+
+            // The counterfactual, measured rather than argued: with the far
+            // end's floor every window would have been microphone-active.
+            expect.equal(
+                report.windowLog.filter { $0.microphoneBeforeDBFS > report.farEndFloorDBFS }.count,
+                report.windowCount,
+                "every window clears -60 dBFS in this room"
+            )
+            // With the derived floor the two quiet classes are populated.
+            expect.equal(summary(report, .farEndOnly).windows, 40)
+            expect.equal(summary(report, .neither).windows, 40)
+
+            // And what the canceller does to a microphone holding only room
+            // tone is then visible. The class ratio reads -0.9 dB, which is
+            // nothing, while thirty-seven of forty windows lost more than 6 dB.
+            let farOnly = summary(report, .farEndOnly)
+            expect.close(try expect.unwrap(farOnly.changeDB), -0.9, tolerance: 1)
+            expect.close(try expect.unwrap(farOnly.medianChangeDB), 14.3, tolerance: 2)
+            expect.equal(farOnly.windowsOverLossThreshold, 37)
         },
 
         test("a far end that holds nothing reports no reference, not zero removal") { expect in

@@ -14,7 +14,7 @@ import PipitSpeakers
 //   pipit-eval identity  --audio FILE [--audio FILE ...]
 //   pipit-eval voices
 //   pipit-eval gate      --meeting DIR
-//   pipit-eval echo      --meeting DIR [--json OUT] [--offset SECONDS]
+//   pipit-eval echo      --meeting DIR [--json OUT] [--offset SECONDS] [--full-id]
 //   pipit-eval bench     [--suite ami-core] [--engine parakeet ...] [--diarizer local]
 //
 // The audio never leaves the machine and nothing here writes to a meeting.
@@ -31,6 +31,9 @@ struct Arguments {
     /// Replaces the reference offset the manifest holds, for measuring a
     /// misaligned pair on purpose. `echo` only.
     var referenceOffset: Double?
+    /// Prints the meeting's full identifier, title slug and all, instead of
+    /// the content-free one. For a run whose output stays on this Mac.
+    var fullIdentifier = false
     var applicationSupport: URL
     var bench: BenchCommand.Options
 
@@ -41,6 +44,7 @@ struct Arguments {
             .appendingPathComponent("Library/Application Support/Pipit", isDirectory: true)
         var benchOptions = BenchCommand.Options(applicationSupport: support)
         var engines: [String] = []
+        var fullIdentifier = false
         var index = 1
         while index < raw.count {
             let flag = raw[index]
@@ -60,7 +64,15 @@ struct Arguments {
                 benchOptions.allowMissingBaseline = true
                 continue
             }
-            guard index < raw.count else { break }
+            if flag == "--full-id" {
+                fullIdentifier = true
+                continue
+            }
+            // Every flag left takes a value. A trailing one used to fall off
+            // the end and be dropped without a word, so `--offset` written last
+            // measured the pair the manifest lines up and would have been
+            // written down as a measurement of a misaligned one.
+            guard index < raw.count else { return nil }
             let value = raw[index]
             index += 1
             switch flag {
@@ -91,6 +103,7 @@ struct Arguments {
             }
         }
         applicationSupport = support
+        self.fullIdentifier = fullIdentifier
         // `bench` takes engines repeatably; the single-engine commands read the
         // last one, which is what `--engine` meant before.
         benchOptions.engines = engines
@@ -130,6 +143,7 @@ func usage() -> Never {
           pipit-eval voices
           pipit-eval gate     --meeting MEETING_FOLDER
           pipit-eval echo     --meeting MEETING_FOLDER [--json OUT] [--offset SECONDS]
+                                 [--full-id]
           pipit-eval reanalyze --meeting MEETING_FOLDER [--speakers N]
           pipit-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
@@ -357,7 +371,8 @@ case "gate":
 case "echo":
     guard let folder = arguments.meeting else { usage() }
     let code = EchoCommand.run(
-        meeting: folder, json: arguments.json, referenceOffset: arguments.referenceOffset
+        meeting: folder, json: arguments.json, referenceOffset: arguments.referenceOffset,
+        fullIdentifier: arguments.fullIdentifier
     )
     if code != 0 { exit(code) }
 

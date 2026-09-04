@@ -22,7 +22,9 @@ enum EchoCommand {
         let report: EchoMeasurement.Report?
     }
 
-    static func run(meeting: URL, json: URL?, referenceOffset: Double?) -> Int32 {
+    static func run(
+        meeting: URL, json: URL?, referenceOffset: Double?, fullIdentifier: Bool
+    ) -> Int32 {
         let store = MeetingStore(layout: MeetingLayout(root: meeting))
         let metadata: MeetingMetadata
         let timeline: RecordingTimeline
@@ -33,6 +35,7 @@ enum EchoCommand {
             note("cannot read \(meeting.path): \(error)")
             return 1
         }
+        let name = identifier(metadata, full: fullIdentifier)
 
         let measurement: EchoMeasurement
         do {
@@ -41,11 +44,11 @@ enum EchoCommand {
                 referenceOffset: referenceOffset
             )
         } catch {
-            note("cannot measure \(metadata.id): \(error)")
+            note("cannot measure \(name): \(error)")
             return 1
         }
 
-        print("meeting         \(metadata.id)")
+        print("meeting         \(name)")
         print("source          \(metadata.source.rawValue)")
         switch measurement {
         case .noReference(let reason):
@@ -59,13 +62,11 @@ enum EchoCommand {
             switch measurement {
             case .measured(let report):
                 document = Document(
-                    meeting: metadata.id, status: "measured", noReferenceReason: nil,
-                    report: report
+                    meeting: name, status: "measured", noReferenceReason: nil, report: report
                 )
             case .noReference(let reason):
                 document = Document(
-                    meeting: metadata.id, status: "no-reference", noReferenceReason: reason,
-                    report: nil
+                    meeting: name, status: "no-reference", noReferenceReason: reason, report: nil
                 )
             }
             let encoder = JSONEncoder()
@@ -80,6 +81,35 @@ enum EchoCommand {
             }
         }
         return 0
+    }
+
+    /// A name for this meeting that carries no meeting content.
+    ///
+    /// `metadata.id` ends in a slug of the meeting's title, up to 48
+    /// characters of it. What this command prints goes into a pull request
+    /// body and into files under `Benchmarks/`, both of them committed, and a
+    /// title is meeting content. What is left is the start time, the source,
+    /// and a digest of the full identifier, which tells two meetings of the
+    /// same minute apart and is the same digest on a later run.
+    ///
+    /// `--full-id` prints `metadata.id` instead, for a run whose output stays
+    /// on this Mac.
+    private static func identifier(_ metadata: MeetingMetadata, full: Bool) -> String {
+        guard !full else { return metadata.id }
+        let stamp = MeetingArchiveLayout.timestampSlug(metadata.startedAt)
+        return "\(stamp)-\(metadata.source.rawValue)-\(digest(metadata.id))"
+    }
+
+    /// FNV-1a. Swift's own `Hasher` is seeded per process, so it would name
+    /// the same meeting differently on every run and the identifiers in one
+    /// checked-in table would not match the next one's.
+    private static func digest(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        return String(format: "%016llx", hash)
     }
 
     /// A meeting with nothing to subtract. Said in words, with no table and no
@@ -102,21 +132,30 @@ enum EchoCommand {
         let source = report.referenceOffsetIsOverride ? "given by hand" : "from the manifest"
         print(String(
             format: "duration        %.1fs in %d windows of %.2fs",
-            report.seconds, report.windows, report.windowSeconds
+            report.seconds, report.windowCount, report.windowSeconds
         ))
         print("reference       far end moved \(offset)s onto the microphone's clock, \(source)")
         print(String(
             format: "far end         above %.1f dBFS in %d windows, %.1f%% of the meeting",
-            report.floorDBFS, report.farEndActiveWindows, report.farEndDutyCycle * 100
+            report.farEndFloorDBFS, report.farEndActiveWindows, report.farEndDutyCycle * 100
         ))
+        printMicrophoneFloor(report)
         print("")
-        print("  " + left("window class", 13) + right("windows", 8) + right("seconds", 10)
+        print("  " + left("window class", 13) + right("windows", 8) + right("seconds", 9)
             + right("mic before", 12) + right("mic after", 12) + right("change", 12))
         for summary in report.classes {
-            print(row(summary))
+            print(levelRow(summary))
         }
         print("")
-        let median = report.reportedEnhancementMedianDB.map { String(format: "%.1f dB", $0) }
+        print("per-window change, dB")
+        print("  " + left("window class", 13) + right("median", 9) + right("p95", 9)
+            + right("worst", 9) + right("gain", 9)
+            + right("windows over \(fixed(report.notableLossDB)) dB", 24))
+        for summary in report.classes {
+            print(distributionRow(summary))
+        }
+        print("")
+        let median = report.reportedEnhancementMedianDB.map { "\(fixed($0)) dB" }
             ?? "no far-end-active window"
         print("reported        \(median) median enhancement")
         print(String(
@@ -127,34 +166,72 @@ enum EchoCommand {
         print("                \(report.decisionReason)")
         print("")
         print("  change is before minus after, which is what the microphone level did")
-        print("  rather than what was removed. A window is classed from the two recorded")
+        print("  rather than what was removed. The class figure is a power ratio, so the")
+        print("  loudest windows decide it. The per-window columns are where a passage")
+        print("  gated to silence shows up. A window is classed from the two recorded")
         print("  levels alone, and those levels cannot tell the user from the far end's")
         print("  own echo in the microphone. The user only row is the one that says what")
         print("  the user kept.")
     }
 
-    private static func row(_ summary: EchoMeasurement.ClassSummary) -> String {
-        let label = switch summary.windowClass {
-        case .farEndOnly: "far end only"
-        case .userOnly: "user only"
-        case .both: "both"
-        case .neither: "neither"
+    /// Which of the two floors decided the microphone's, and the level the
+    /// recording's own quiet windows sit at. An operator reading a table where
+    /// every window landed in `userOnly` or `both` needs to see whether the
+    /// room tone was what put them there.
+    private static func printMicrophoneFloor(_ report: EchoMeasurement.Report) {
+        let floor = fixed(report.microphoneFloorDBFS)
+        guard let quiet = report.microphoneQuietWindowDBFS else {
+            print("microphone      above \(floor) dBFS, with no window to derive one from")
+            return
         }
-        let head = "  " + left(label, 13) + right("\(summary.windows)", 8)
+        if report.microphoneFloorDBFS > report.farEndFloorDBFS {
+            print("microphone      above \(floor) dBFS, from a quietest twentieth of "
+                + "\(fixed(quiet)) dBFS")
+        } else {
+            print("microphone      above \(floor) dBFS, the far end's floor. The quietest")
+            print("                twentieth of this recording sits under it, at "
+                + "\(fixed(quiet)) dBFS")
+        }
+    }
+
+    private static func levelRow(_ summary: EchoMeasurement.ClassSummary) -> String {
+        let head = "  " + left(label(summary.windowClass), 13) + right("\(summary.windows)", 8)
         // A class with no windows in it has no level to report. Printing zero
         // decibels for one would read as full scale, and printing a zero
         // change would read as a canceller that did nothing.
         guard let before = summary.microphoneBeforeDBFS,
               let after = summary.microphoneAfterDBFS,
               let change = summary.changeDB else {
-            return head + right("-", 10) + right("-", 12) + right("-", 12) + right("-", 12)
+            return head + right("-", 9) + right("-", 12) + right("-", 12) + right("-", 12)
         }
         return head
-            + right(String(format: "%.1fs", summary.seconds), 10)
-            + right(String(format: "%.1f dB", before), 12)
-            + right(String(format: "%.1f dB", after), 12)
-            + right(String(format: "%.1f dB", change), 12)
+            + right(String(format: "%.1fs", summary.seconds), 9)
+            + right("\(fixed(before)) dB", 12)
+            + right("\(fixed(after)) dB", 12)
+            + right("\(fixed(change)) dB", 12)
     }
+
+    private static func distributionRow(_ summary: EchoMeasurement.ClassSummary) -> String {
+        let head = "  " + left(label(summary.windowClass), 13)
+        guard let median = summary.medianChangeDB, let p95 = summary.p95ChangeDB,
+              let worst = summary.worstChangeDB, let gain = summary.largestGainDB else {
+            return head + right("-", 9) + right("-", 9) + right("-", 9) + right("-", 9)
+                + right("\(summary.windowsOverLossThreshold)", 24)
+        }
+        return head + right(fixed(median), 9) + right(fixed(p95), 9) + right(fixed(worst), 9)
+            + right(fixed(gain), 9) + right("\(summary.windowsOverLossThreshold)", 24)
+    }
+
+    private static func label(_ windowClass: EchoMeasurement.WindowClass) -> String {
+        switch windowClass {
+        case .farEndOnly: "far end only"
+        case .userOnly: "user only"
+        case .both: "both"
+        case .neither: "neither"
+        }
+    }
+
+    private static func fixed(_ value: Double) -> String { String(format: "%.1f", value) }
 
     private static func left(_ text: String, _ width: Int) -> String {
         text.count >= width ? text : text + String(repeating: " ", count: width - text.count)

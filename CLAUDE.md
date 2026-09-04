@@ -41,6 +41,13 @@ constructs `PipitRuntime`, `SetupModel`, or `LocalModelManager`.
 | `PipitServices` | Runtime wiring, meeting storage, and processing pipeline |
 | `PipitUI` | Menu bar, setup, settings, meetings window, and people |
 
+`PipitServices` also holds `EchoMeasurement`, which nothing in the application
+calls. It measures what `MicrophoneCleaner` does to a recording and is run from
+`pipit-eval echo`. It ships in the app binary rather than living in the tool
+because the test target cannot link an executable target, and because it shares
+`EchoCancellationPass` with the cleaner so that a measurement describes the pass
+that ships rather than a second copy of it.
+
 ## Project constraints
 
 - Treat source audio, manifests, raw model output, and imported originals as

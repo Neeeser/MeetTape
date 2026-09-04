@@ -1,8 +1,5 @@
 #include "include/pipit_aec3.h"
 
-#include <memory>
-#include <vector>
-
 #include "modules/audio_processing/include/audio_processing.h"
 #include "api/audio/audio_processing.h"
 #include "api/scoped_refptr.h"
@@ -54,9 +51,9 @@ int pipit_aec3_frame_size(const PipitAEC3 *aec) {
 
 int pipit_aec3_process_reverse(PipitAEC3 *aec, const float *reference, size_t frames) {
   if (!aec || !reference || frames != static_cast<size_t>(aec->frames)) return -1;
-  // Analysis rather than processing. The canceller only has to hear what was
-  // played, and this form takes no output buffer, so there is nowhere for the
-  // caller's reference to be written back into.
+  // This analyses the reference instead of processing it. The canceller only
+  // has to hear what was played, and this form takes no output buffer, so
+  // there is nowhere for the caller's reference to be written back into.
   const float *const input[] = {reference};
   return aec->apm->AnalyzeReverseStream(input, aec->config);
 }

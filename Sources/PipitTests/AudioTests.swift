@@ -91,15 +91,21 @@ enum AudioTests {
         return samples
     }
 
-    /// Energy at one frequency, by the Goertzel recurrence.
+    /// Energy summed across the whole band.
     ///
-    /// One narrow band rather than the whole spectrum. Broadband energy after
-    /// cancellation is mostly residue from subtracting the far end, so it says
-    /// nothing about whether the user's own voice came through.
+    /// Use this where the microphone holds no copy of the far end. There is
+    /// nothing to subtract, so the difference between input and output is
+    /// what the canceller took out of the user.
     static func energy(_ samples: [Float]) -> Double {
         samples.reduce(0.0) { $0 + Double($1) * Double($1) }
     }
 
+    /// Energy at one frequency, by the Goertzel recurrence.
+    ///
+    /// One narrow band rather than the whole spectrum. Where the microphone
+    /// does hold a copy of the far end, broadband energy after cancellation is
+    /// mostly residue from subtracting it, so it says nothing about whether
+    /// the user's own voice came through.
     static func toneEnergy(_ samples: [Float], frequency: Double, sampleRate: Double) -> Double {
         let coefficient = 2 * cos(2 * Double.pi * frequency / sampleRate)
         var previous = 0.0
@@ -276,6 +282,9 @@ enum AudioTests {
                 // recorded files.
                 expect.isNil(EchoCanceller(sampleRate: 4_000))
                 expect.isNil(EchoCanceller(sampleRate: 0))
+                // 8 kHz is the lowest rate the library supports, so it is the
+                // rate a one-off in the guard would refuse.
+                expect.isTrue(EchoCanceller(sampleRate: 8_000) != nil)
                 expect.isTrue(EchoCanceller(sampleRate: 16_000) != nil)
             },
 
@@ -340,7 +349,13 @@ enum AudioTests {
                 // canceller estimates the residual from render power and an
                 // assumed path gain, knowing nothing about whether the
                 // microphone holds any of it, and tears the user's own voice
-                // apart. What it reports is the only sign that it did.
+                // apart.
+                //
+                // The low reading below is not a measure of that damage. It
+                // comes from the linear filter, and the suppressor that does
+                // the damage runs after it. A low reading says the filter never
+                // locked on to an echo path, and that is the reason to discard
+                // the output.
                 let canceller = try expect.unwrap(EchoCanceller(sampleRate: 16_000))
                 let block = canceller.blockFrames
                 let blocks = 800

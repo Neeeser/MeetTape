@@ -21,6 +21,13 @@ The release repository needs these GitHub Actions secrets:
 The workflow falls back to ad-hoc signing when the certificate is absent. Do
 not publish an ad-hoc signed build. Gatekeeper will reject it on another Mac.
 
+For local builds, `scripts/make-signing-identity.sh` creates a self-signed
+"Pipit Development" certificate that `scripts/bundle-app.sh` picks up by name.
+macOS ties permission grants to the signature, so an ad-hoc build loses
+Microphone, Accessibility and Screen & System Audio Recording on every
+reinstall, and a recording made before they are granted again captures a
+silent far end. The local certificate keeps the grants across rebuilds.
+
 The AMO credentials come from
 <https://addons.mozilla.org/en-US/developers/addon/api/key/>. A release without
 them ships an app that has no signed add-on, and Firefox users then load a

@@ -65,11 +65,11 @@ public struct MeetingLayout: Sendable, Equatable {
 
     /// The microphone with the far end subtracted out of it.
     ///
-    /// Beside the raw track rather than in place of it: the recording is
-    /// immutable, and a cleaner that turned out to have taken the user's voice
-    /// with it must leave something to go back to. Compaction never reads or
-    /// deletes anything in this directory that the manifest does not name, so
-    /// the file outlives the segments it was made from.
+    /// This sits beside the raw track rather than in place of it. The
+    /// recording is immutable, and a cleaner that turned out to have taken the
+    /// user's voice with it must leave something to go back to. Compaction
+    /// never reads or deletes anything in this directory that the manifest
+    /// does not name, so the file outlives the segments it was made from.
     public var cleanedMicFile: URL {
         trackArchiveDirectory.appendingPathComponent(cleanedMicFileName)
     }

@@ -193,8 +193,8 @@ public struct CleanedMicrophone: Codable, Sendable, Equatable {
     /// suppressor after it did to the audio.
     public var echoRemovedMedianDB: Double
     /// How many of those windows there were. The median above cannot be read
-    /// without it: a high figure over a handful of windows is a meeting whose
-    /// far end barely played, not a room with a strong echo path.
+    /// without it. A high figure over a handful of windows says the far end
+    /// barely played, and says nothing about the room.
     public var farEndActiveWindows: Int
     public var producedAt: Date
 

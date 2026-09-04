@@ -6,7 +6,7 @@ import PipitCore
 /// Subtracts the recorded far end out of the recorded microphone, and writes
 /// the result beside the recording.
 ///
-/// A call taken on speakers puts the far end into the microphone: it leaves the
+/// A call taken on speakers puts the far end into the microphone. It leaves the
 /// speakers, crosses the room and arrives back at the capsule. On a Slack
 /// huddle of 3 September 2026, 81% of the words the microphone carried were the
 /// far end's. Pipit records that far end separately through a process tap, and
@@ -21,7 +21,7 @@ public struct MicrophoneCleaner: Sendable {
     /// below which the cleaned track is thrown away.
     ///
     /// Provisional. PR 4's measurement command settles it against real
-    /// recordings; 6 dB is a starting point between the 2.84 dB a canceller
+    /// recordings. 6 dB is a starting point between the 2.84 dB a canceller
     /// with no echo path to lock onto reports and the 96.8 dB it reports with
     /// one, both measured on tones in `AudioTests`.
     public static let bypassBelowDB = 6.0
@@ -58,22 +58,27 @@ public struct MicrophoneCleaner: Sendable {
 
     /// Cleans this meeting's microphone, or says why it did not.
     ///
-    /// Writes `metadata.cleanedMic` on the one outcome that produces a file.
-    /// The caller owns `metadata.cleaningOutcome`.
+    /// `metadata` comes back holding what was written, so a caller that keeps
+    /// reading its own copy afterwards reads the cleaned microphone rather than
+    /// the recording. Only `.cleaned` leaves a file and a `cleanedMic` record.
+    /// Every other outcome clears both, including a stale one an earlier run
+    /// left behind. The caller owns `metadata.cleaningOutcome`.
     public func clean(
-        store: MeetingStore, metadata: MeetingMetadata, timeline: RecordingTimeline
+        store: MeetingStore, metadata: inout MeetingMetadata, timeline: RecordingTimeline
     ) throws -> CleaningOutcome {
         // One track holding everyone, which is every import and every in-person
         // session. There is no separate far end, and the only thing there is to
         // subtract from this microphone is the microphone.
         guard metadata.source.micTrackIsLocalUser else {
+            try discardCleanedTrack(store: store, metadata: &metadata)
             log(outcome: .skippedOneTrack)
             return .skippedOneTrack
         }
 
-        // The recording, not whatever has been derived from it. A second run
-        // must subtract the far end from the microphone rather than from the
-        // output of the first run.
+        // Both read as recorded, never through `trackAudioLocation`. A second
+        // run has to subtract the far end from the microphone rather than from
+        // what the first run left, and cleaning an already cleaned track finds
+        // no echo path and throws the result away.
         let microphone = store.rawTrackAudioLocation(
             track: .mic, metadata: metadata, timeline: timeline
         )
@@ -81,6 +86,7 @@ public struct MicrophoneCleaner: Sendable {
             track: .remote, metadata: metadata, timeline: timeline
         )
         guard !microphone.isEmpty, !reference.isEmpty, try referenceHoldsAudio(reference) else {
+            try discardCleanedTrack(store: store, metadata: &metadata)
             log(outcome: .skippedNoReference)
             return .skippedNoReference
         }
@@ -96,25 +102,43 @@ public struct MicrophoneCleaner: Sendable {
         let median = median(of: active.map(\.echoRemovedDB))
 
         // Too little far end played for the canceller to have been judged on
-        // anything. The same answer as a meeting with no far-end track: this
-        // microphone is used as it was recorded.
+        // anything. The same answer as a meeting with no far-end track, which
+        // is that this microphone is used as it was recorded.
         guard active.count >= Self.minimumActiveWindows else {
             try? FileManager.default.removeItem(at: partial)
+            try discardCleanedTrack(store: store, metadata: &metadata)
             log(outcome: .skippedNoReference, median: median, active: active.count, frames: pass.frames)
             return .skippedNoReference
         }
         // The filter never locked on to an echo path, which is a call taken on
-        // headphones. This is not a reading that the output is close to the
-        // recording: it comes from the linear filter, and the suppressor that
-        // runs after it takes tens of decibels out of a microphone holding only
-        // the user. A filter that did not lock on is a filter whose output
+        // headphones. A low reading says nothing about how close the output is
+        // to the recording. It comes from the linear filter, and the suppressor
+        // that runs after it takes tens of decibels out of a microphone holding
+        // only the user. A filter that did not lock on is a filter whose output
         // there is no reason to trust, so the output is thrown away.
         guard median >= Self.bypassBelowDB else {
             try? FileManager.default.removeItem(at: partial)
+            try discardCleanedTrack(store: store, metadata: &metadata)
             log(outcome: .bypassedNoEchoPath, median: median, active: active.count, frames: pass.frames)
             return .bypassedNoEchoPath
         }
 
+        // Cleared before anything on disk moves. A crash between here and the
+        // write below leaves every reader on the recording, which is the safe
+        // end of this. Clearing later would leave the metadata naming a file
+        // that had already been deleted, and would leave a refused verification
+        // pointing readers at an older track this run never blessed.
+        try discardCleanedTrack(store: store, metadata: &metadata)
+
+        // The file itself is the authority, exactly as it is for a compaction
+        // archive. Every reader above is about to be pointed at this file with
+        // no fallback, so the sample count handed to the encoder is not good
+        // enough. An encode that stopped short or a container that will not
+        // open throws here, and the meeting keeps the microphone it recorded.
+        let written = try verify(partial, against: pass.frames)
+
+        // A file with no record behind it, which is what an interrupted run
+        // leaves. `discardCleanedTrack` above removed one the metadata named.
         try? FileManager.default.removeItem(at: store.layout.cleanedMicFile)
         do {
             try FileManager.default.moveItem(at: partial, to: store.layout.cleanedMicFile)
@@ -126,14 +150,14 @@ public struct MicrophoneCleaner: Sendable {
         }
         // Written last. Until this lands the file is one nothing reads, and
         // after it every reader takes the cleaned track.
-        _ = try store.updateMetadata {
+        metadata = try store.updateMetadata {
             $0.cleanedMic = CleanedMicrophone(
                 track: AudioArchive.Track(
                     file: store.layout.cleanedMicFileName,
-                    sampleRate: Self.readFormat.sampleRate,
-                    channelCount: Self.readFormat.channelCount,
-                    frameCount: pass.frames,
-                    seconds: Double(pass.frames) / Self.readFormat.sampleRate,
+                    sampleRate: written.sampleRate,
+                    channelCount: written.channelCount,
+                    frameCount: written.frameCount,
+                    seconds: written.seconds,
                     // The cleaned track starts on the microphone's own first
                     // frame, so it carries the microphone's host time and the
                     // mixdown aligns it exactly as it aligned the recording.
@@ -144,8 +168,58 @@ public struct MicrophoneCleaner: Sendable {
                 producedAt: clock.now
             )
         }
-        log(outcome: .cleaned, median: median, active: active.count, frames: pass.frames)
+        log(outcome: .cleaned, median: median, active: active.count, frames: written.frameCount)
         return .cleaned
+    }
+
+    /// Decodes what was just encoded and reports what is in it.
+    ///
+    /// The frame count and the duration recorded for a cleaned track come from
+    /// here rather than from the samples handed to the encoder, so the
+    /// synthetic segment a reader is given can never claim more audio than the
+    /// file holds. A file that will not open, or one whose duration disagrees
+    /// with the pass that wrote it, throws: the recording is intact, so a later
+    /// attempt can build the track again.
+    private func verify(_ url: URL, against frames: Int64) throws -> AudioFileInfo {
+        let expected = Double(frames) / Self.readFormat.sampleRate
+        let info: AudioFileInfo
+        do {
+            info = try AudioFileInspector().inspect(url: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw ProcessingError.localProcessingFailed(
+                reason: "the cleaned microphone would not decode", retryable: true
+            )
+        }
+        // Floored for codec padding on short files, capped so a long meeting
+        // cannot lose most of a minute and still verify. The same bound
+        // compaction holds its archives to.
+        let tolerance = max(0.5, min(expected * 0.01, 2.0))
+        guard info.frameCount > 0, abs(info.seconds - expected) <= tolerance else {
+            try? FileManager.default.removeItem(at: url)
+            throw ProcessingError.localProcessingFailed(
+                reason: "the cleaned microphone decoded to "
+                    + "\(String(format: "%.1f", info.seconds))s against "
+                    + "\(String(format: "%.1f", expected))s cleaned",
+                retryable: true
+            )
+        }
+        return info
+    }
+
+    /// Removes the record of a cleaned track and then the track itself.
+    ///
+    /// Every outcome but `.cleaned` means this meeting has no cleaned
+    /// microphone. A record an earlier run left would otherwise keep every
+    /// reader on a file this run decided against. The record goes first, so an
+    /// interruption between the two leaves a file nothing reads rather than a
+    /// name with no file behind it.
+    private func discardCleanedTrack(
+        store: MeetingStore, metadata: inout MeetingMetadata
+    ) throws {
+        guard metadata.cleanedMic != nil else { return }
+        metadata = try store.updateMetadata { $0.cleanedMic = nil }
+        try? FileManager.default.removeItem(at: store.layout.cleanedMicFile)
     }
 
     // MARK: - the pass over both tracks
@@ -348,7 +422,7 @@ public struct MicrophoneCleaner: Sendable {
         Log.processing.info(
             """
             microphone cleaning \(outcome.rawValue, privacy: .public): \
-            \(median, format: .fixed(precision: 1)) dB median over \
+            \(median, format: .fixed(precision: 1), privacy: .public) dB median over \
             \(active, privacy: .public) far-end windows, \
             \(frames, privacy: .public) frames
             """

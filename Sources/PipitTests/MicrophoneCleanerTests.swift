@@ -197,8 +197,9 @@ enum MicrophoneCleanerTests {
             let store = meeting.store
             let timeline = try store.readTimeline()
 
+            var carried = meeting.metadata
             let outcome = try MicrophoneCleaner().clean(
-                store: store, metadata: meeting.metadata, timeline: timeline
+                store: store, metadata: &carried, timeline: timeline
             )
             expect.equal(outcome, CleaningOutcome.cleaned)
             expect.isTrue(
@@ -262,8 +263,9 @@ enum MicrophoneCleanerTests {
             )
             expect.equal(before.directory.lastPathComponent, "segments")
 
+            var carried = meeting.metadata
             _ = try MicrophoneCleaner().clean(
-                store: store, metadata: meeting.metadata, timeline: timeline
+                store: store, metadata: &carried, timeline: timeline
             )
             let metadata = try store.readMetadata()
             let cleaned = store.trackAudioLocation(
@@ -286,12 +288,99 @@ enum MicrophoneCleanerTests {
                 raw.segments.first?.file.hasSuffix(".caf") == true,
                 "the recording is still where it was"
             )
-            // The far end is untouched either way: only the microphone is
-            // cleaned.
+            // Only the microphone is cleaned. The far end is untouched either
+            // way.
             let remote = store.trackAudioLocation(
                 track: .remote, metadata: metadata, timeline: timeline
             )
             expect.equal(remote.directory.lastPathComponent, "segments")
+
+            // And the caller's own copy resolves to it too. `trackAudioLocation`
+            // reads the metadata it is handed, so a caller left holding the copy
+            // it passed in would keep reading the recording for the rest of the
+            // run, with the cleaned file written and nothing using it.
+            expect.equal(
+                store.trackAudioLocation(track: .mic, metadata: carried, timeline: timeline)
+                    .segments.first?.file,
+                "mic.cleaned.m4a"
+            )
+        },
+
+        test("cleaning twice subtracts from the recording both times") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let meeting = try makeCallOnSpeakers(root: root)
+            let store = meeting.store
+            let timeline = try store.readTimeline()
+            let cleaner = MicrophoneCleaner()
+
+            var carried = meeting.metadata
+            expect.equal(
+                try cleaner.clean(store: store, metadata: &carried, timeline: timeline),
+                CleaningOutcome.cleaned
+            )
+            let first = try expect.unwrap(carried.cleanedMic)
+
+            // The second run reads the recording again. A run that took the
+            // first run's output as its input would find a microphone the far
+            // end has already been taken out of, report no echo path, and throw
+            // away a track that was good.
+            expect.equal(
+                try cleaner.clean(store: store, metadata: &carried, timeline: timeline),
+                CleaningOutcome.cleaned
+            )
+            let second = try expect.unwrap(carried.cleanedMic)
+            expect.close(
+                second.echoRemovedMedianDB, first.echoRemovedMedianDB, tolerance: 1,
+                "the second pass found the same echo path the first did"
+            )
+            expect.equal(second.track.frameCount, first.track.frameCount)
+        },
+
+        test("a run that decides against cleaning clears what an earlier run left") { expect in
+            let root = try ManifestTests.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            // A meeting that was cleaned once, taken again on headphones. The
+            // record and the file from the first run both have to go, or every
+            // reader stays on a cleaned track this run decided against.
+            let count = Int(15 * rate)
+            let meeting = try makeMeeting(
+                root: root,
+                mic: tone(count: count, frequency: 700, amplitude: 0.3),
+                remote: tone(count: count, frequency: farToneA, amplitude: 0.5)
+            )
+            let store = meeting.store
+            try FileManager.default.createDirectory(
+                at: store.layout.trackArchiveDirectory, withIntermediateDirectories: true
+            )
+            try Data("not audio".utf8).write(to: store.layout.cleanedMicFile)
+            var carried = try store.updateMetadata {
+                $0.cleanedMic = CleanedMicrophone(
+                    track: AudioArchive.Track(
+                        file: "mic.cleaned.m4a", sampleRate: rate, channelCount: 1,
+                        frameCount: Int64(count), seconds: 15, firstFrameHostTime: 100
+                    ),
+                    echoRemovedMedianDB: 40, farEndActiveWindows: 60,
+                    producedAt: Date(timeIntervalSince1970: 1_787_070_000)
+                )
+            }
+
+            let outcome = try MicrophoneCleaner().clean(
+                store: store, metadata: &carried, timeline: try store.readTimeline()
+            )
+            expect.equal(outcome, CleaningOutcome.bypassedNoEchoPath)
+            expect.isNil(carried.cleanedMic)
+            expect.isNil(try store.readMetadata().cleanedMic)
+            expect.isFalse(
+                FileManager.default.fileExists(atPath: store.layout.cleanedMicFile.path),
+                "the earlier run's file is gone with its record"
+            )
+            expect.equal(
+                store.trackAudioLocation(
+                    track: .mic, metadata: carried, timeline: try store.readTimeline()
+                ).directory.lastPathComponent,
+                "segments"
+            )
         },
 
         test("a meeting whose far end never played is left alone") { expect in
@@ -312,8 +401,9 @@ enum MicrophoneCleanerTests {
                 "the far end was recorded, it just holds nothing"
             )
 
+            var carried = meeting.metadata
             let outcome = try MicrophoneCleaner().clean(
-                store: store, metadata: meeting.metadata, timeline: timeline
+                store: store, metadata: &carried, timeline: timeline
             )
             expect.equal(outcome, CleaningOutcome.skippedNoReference)
             expect.isFalse(
@@ -339,8 +429,9 @@ enum MicrophoneCleanerTests {
             let store = meeting.store
             let timeline = try store.readTimeline()
 
+            var carried = meeting.metadata
             let outcome = try MicrophoneCleaner().clean(
-                store: store, metadata: meeting.metadata, timeline: timeline
+                store: store, metadata: &carried, timeline: timeline
             )
             expect.equal(outcome, CleaningOutcome.bypassedNoEchoPath)
             expect.isFalse(
@@ -365,8 +456,9 @@ enum MicrophoneCleanerTests {
                 mic: tone(count: count, frequency: nearTone, amplitude: 0.3), remote: nil
             )
             let store = meeting.store
+            var carried = meeting.metadata
             let outcome = try MicrophoneCleaner().clean(
-                store: store, metadata: meeting.metadata, timeline: try store.readTimeline()
+                store: store, metadata: &carried, timeline: try store.readTimeline()
             )
             expect.equal(outcome, CleaningOutcome.skippedOneTrack)
             expect.isFalse(

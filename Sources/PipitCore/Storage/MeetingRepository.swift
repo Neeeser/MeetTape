@@ -330,11 +330,6 @@ public struct MeetingStore: Sendable {
 
     // MARK: audio
 
-    /// Where one track's audio reads from.
-    ///
-    /// Decided by the metadata, never by listing the disk: after compaction the
-    /// archive file stands in for the segment chain, and a meeting that has not
-    /// been compacted reads its segments even if stray files exist elsewhere.
     /// Where a reader should take this track's audio from.
     ///
     /// For the microphone of a meeting that was cleaned, that is the cleaned
@@ -359,7 +354,11 @@ public struct MeetingStore: Sendable {
     }
 
     /// The recording as it was captured, whatever has been derived from it
-    /// since: the segment chain, or the archive that replaced it.
+    /// since. Either the segment chain or the archive that replaced it.
+    ///
+    /// Decided by the metadata, never by listing the disk. After compaction the
+    /// archive file stands in for the segment chain, and a meeting that has not
+    /// been compacted reads its segments even if stray files exist elsewhere.
     public func rawTrackAudioLocation(
         track: CaptureTrack, metadata: MeetingMetadata, timeline: RecordingTimeline
     ) -> TrackAudioLocation {

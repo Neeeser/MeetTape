@@ -9,7 +9,7 @@ import PipitCore
 /// between them is between the same moment on both. The offset is what puts
 /// them there. Where a track needs to start later than the timeline does, the
 /// seconds before it started recording are handed back as the silence they
-/// were; where it needs to start earlier, that much of it is read and thrown
+/// were. Where it needs to start earlier, that much of it is read and thrown
 /// away.
 final class TimelineTrackReader {
     private let reader: TrackAudioReader

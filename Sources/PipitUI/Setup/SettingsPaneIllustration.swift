@@ -30,8 +30,10 @@ struct SettingsPaneIllustration: View {
     }
 
     private var instruction: String {
+        // Dropping Pipit into the list switches it on in the same move, so
+        // the instruction stops at the drop.
         isDraggable
-            ? "Drag \(ApplicationIdentity.name) into the list, then switch it on"
+            ? "Drag \(ApplicationIdentity.name) into the list"
             : "Switch \(ApplicationIdentity.name) on"
     }
 

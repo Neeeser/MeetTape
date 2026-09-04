@@ -24,9 +24,13 @@ public final class EchoCanceller {
 
     private let handle: OpaquePointer
 
-    /// Nil where the library refuses the format. It takes 16, 32 and 48 kHz.
-    public init?(sampleRate: Int, channels: Int = 1) {
-        guard let handle = pipit_aec3_create(Int32(sampleRate), Int32(channels)) else {
+    /// Nil below 8 kHz, which is the lowest rate the library accepts. Pipit
+    /// hands it 16 kHz.
+    ///
+    /// Mono only. Pipit resamples both tracks to 16 kHz mono before they reach
+    /// here, and one channel is the whole of what the canceller sees.
+    public init?(sampleRate: Int) {
+        guard let handle = pipit_aec3_create(Int32(sampleRate)) else {
             return nil
         }
         self.handle = handle
@@ -35,12 +39,21 @@ public final class EchoCanceller {
 
     deinit { pipit_aec3_destroy(handle) }
 
-    /// How much of the microphone is being removed, in decibels.
+    /// How much of the microphone the canceller removed over the most recent
+    /// blocks, in decibels.
     ///
-    /// Near zero on headphones, where there is no path from the speakers to the
-    /// microphone and nothing to subtract. That is what says the canceller
-    /// should stand down rather than spend its guesses on clean audio.
-    public var echoReturnLossDB: Double { Double(pipit_aec3_echo_return_loss_db(handle)) }
+    /// This is the enhancement, what subtraction took out. It is not the loss
+    /// along the path from the speakers back to the microphone, which the
+    /// library reports separately and which says only what the room did to the
+    /// sound.
+    ///
+    /// Near zero on headphones, where there is no path from the speakers to
+    /// the microphone and nothing to subtract. Reading it is what says to throw
+    /// the cleaned track away. With a loud reference and no echo to lock onto,
+    /// the canceller works from render power and an assumed path gain and takes
+    /// tens of decibels out of a microphone that holds only the user. The
+    /// measured figure is asserted in `AudioTests`.
+    public var echoRemovedDB: Double { Double(pipit_aec3_echo_removed_db(handle)) }
 
     /// Cleans one block of microphone audio in place.
     ///

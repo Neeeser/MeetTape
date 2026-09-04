@@ -18,10 +18,13 @@ struct PipitAEC3 {
   webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
   webrtc::StreamConfig config;
   int frames = 0;
+  float echo_removed_db = 0;
 };
 
-PipitAEC3 *pipit_aec3_create(int sample_rate_hz, int channels) {
-  if (sample_rate_hz <= 0 || channels <= 0) return nullptr;
+PipitAEC3 *pipit_aec3_create(int sample_rate_hz) {
+  // Below 8 kHz the library reports an unsupported format on every block, so
+  // the rate is refused here instead of handing back a canceller that fails.
+  if (sample_rate_hz < 8000) return nullptr;
 
   webrtc::AudioProcessing::Config config;
   config.echo_canceller.enabled = true;
@@ -40,7 +43,7 @@ PipitAEC3 *pipit_aec3_create(int sample_rate_hz, int channels) {
 
   auto *aec = new PipitAEC3();
   aec->apm = apm;
-  aec->config = webrtc::StreamConfig(sample_rate_hz, channels);
+  aec->config = webrtc::StreamConfig(sample_rate_hz, 1);
   aec->frames = sample_rate_hz / (1000 / kBlockMilliseconds);
   return aec;
 }
@@ -51,23 +54,32 @@ int pipit_aec3_frame_size(const PipitAEC3 *aec) {
 
 int pipit_aec3_process_reverse(PipitAEC3 *aec, const float *reference, size_t frames) {
   if (!aec || !reference || frames != static_cast<size_t>(aec->frames)) return -1;
-  const float *const channels[] = {reference};
-  return aec->apm->ProcessReverseStream(channels, aec->config, aec->config,
-                                        const_cast<float *const *>(channels));
+  // Analysis rather than processing. The canceller only has to hear what was
+  // played, and this form takes no output buffer, so there is nowhere for the
+  // caller's reference to be written back into.
+  const float *const input[] = {reference};
+  return aec->apm->AnalyzeReverseStream(input, aec->config);
 }
 
 int pipit_aec3_process(PipitAEC3 *aec, float *microphone, size_t frames) {
   if (!aec || !microphone || frames != static_cast<size_t>(aec->frames)) return -1;
   float *const channels[] = {microphone};
-  return aec->apm->ProcessStream(channels, aec->config, aec->config, channels);
+  const int status =
+      aec->apm->ProcessStream(channels, aec->config, aec->config, channels);
+  if (status != 0) return status;
+  // The library hands statistics over a one-slot queue and drops what nobody
+  // took, so a caller reading every few seconds reads the block after its own
+  // last read. Take the figure on every block and hold the newest.
+  const auto metrics = aec->apm->GetStatistics();
+  aec->echo_removed_db =
+      metrics.echo_return_loss_enhancement.has_value()
+          ? static_cast<float>(*metrics.echo_return_loss_enhancement)
+          : 0.0f;
+  return status;
 }
 
-float pipit_aec3_echo_return_loss_db(const PipitAEC3 *aec) {
-  if (!aec) return 0;
-  auto metrics = aec->apm->GetStatistics();
-  return metrics.echo_return_loss.has_value()
-             ? static_cast<float>(*metrics.echo_return_loss)
-             : 0.0f;
+float pipit_aec3_echo_removed_db(const PipitAEC3 *aec) {
+  return aec ? aec->echo_removed_db : 0.0f;
 }
 
 void pipit_aec3_destroy(PipitAEC3 *aec) { delete aec; }

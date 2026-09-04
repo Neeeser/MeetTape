@@ -277,6 +277,12 @@ public final class MeetingReviewModel {
     public var participantDraft = ""
     /// What the people picker is open on, if it is open.
     public var naming: SpeakerNamingTarget?
+    /// Where the transcript is being walked: one speaker's turns, or a search.
+    /// Nil when the reader is on their own.
+    public var navigation: TranscriptNavigation?
+    /// Whether the search field is up. Separate from `navigation`, which is
+    /// nil until the field holds something to look for.
+    public var isSearching = false
     /// What is typed into the picker and which row the arrow keys are on. Held
     /// here rather than in the popover, which is rebuilt on every assignment.
     @ObservationIgnored public let picker = PeoplePickerModel()
@@ -324,6 +330,48 @@ public final class MeetingReviewModel {
 
     public var isSplitRecording: Bool { recordings.count > 1 }
 
+    // MARK: - walking the transcript
+
+    private var blocks: [CombinedLineBlock] { CombinedLineBlock.blocks(from: combinedLines) }
+
+    /// Takes the reader to this speaker's first turn, or steps to the next
+    /// one when already there.
+    public func jump(to row: MeetingSpeakerRow) {
+        isSearching = false
+        if var walk = navigation, walk.kind == .speaker(name: row.displayName, recordingID: row.recordingID) {
+            walk.next()
+            navigation = walk
+            return
+        }
+        navigation = .speaker(row.displayName, recordingID: row.recordingID, in: blocks)
+    }
+
+    /// Whether the chip's arrow is lit for this row.
+    public func isWalking(_ row: MeetingSpeakerRow) -> Bool {
+        navigation?.kind == .speaker(name: row.displayName, recordingID: row.recordingID)
+    }
+
+    public func beginSearch() {
+        isSearching = true
+        if navigation?.isSearch != true { navigation = nil }
+    }
+
+    public func search(_ query: String) {
+        navigation = query.trimmingCharacters(in: .whitespaces).isEmpty
+            ? nil : .find(query, in: blocks)
+    }
+
+    public func stepNavigation(forward: Bool) {
+        guard var walk = navigation else { return }
+        if forward { walk.next() } else { walk.previous() }
+        navigation = walk
+    }
+
+    public func endNavigation() {
+        navigation = nil
+        isSearching = false
+    }
+
     /// Reloads the files and then the parts that need the identity store.
     ///
     /// The pane opens as soon as the audio is safe, which is before there is a
@@ -349,6 +397,10 @@ public final class MeetingReviewModel {
         let found = (metadata: logical.primary.metadata, store: logical.primary.store)
         recordings = logical.recordings.map(\.metadata)
         combinedLines = logical.combinedTranscript()
+        // The same walk over the new lines, kept on the same place where it
+        // still exists. A correction renames a block, which is not a reason
+        // to lose one's place in the search.
+        navigation = navigation?.refreshed(in: CombinedLineBlock.blocks(from: combinedLines))
         correctedLines = Set(combinedLines.filter(\.isCorrected).map(\.id))
         metadata = found.metadata
         directory = found.store.layout.root

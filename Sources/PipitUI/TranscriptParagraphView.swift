@@ -45,6 +45,9 @@ struct TranscriptParagraph: NSViewRepresentable {
     var onAction: (TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void
     /// Chose "Someone else…", so the panel can open the picker.
     var onSomeoneElse: (TranscriptParagraphAction) -> Void
+    /// Search matches to tint, and the one the reader is on.
+    var highlights: [NSRange] = []
+    var currentHighlight: NSRange?
 
     func makeNSView(context: Context) -> TranscriptTextView {
         let view = TranscriptTextView()
@@ -74,6 +77,7 @@ struct TranscriptParagraph: NSViewRepresentable {
         view.people = people
         view.onAction = onAction
         view.onSomeoneElse = onSomeoneElse
+        view.setHighlights(highlights, current: currentHighlight)
     }
 
     func sizeThatFits(
@@ -94,6 +98,30 @@ public final class TranscriptTextView: NSTextView {
     var people: [SpeakerDirectoryEntry] = []
     var onAction: ((TranscriptParagraphAction, SpeakerDirectoryEntry?) -> Void)?
     var onSomeoneElse: ((TranscriptParagraphAction) -> Void)?
+
+    private var highlighted: [NSRange] = []
+    private var current: NSRange?
+
+    /// Tints search matches without touching the text. Temporary attributes
+    /// are drawn by the layout manager and never enter the string, so a copy
+    /// of the paragraph is still the paragraph.
+    func setHighlights(_ ranges: [NSRange], current: NSRange?) {
+        guard ranges != highlighted || current != self.current, let manager = layoutManager else { return }
+        let whole = NSRange(location: 0, length: (string as NSString).length)
+        manager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: whole)
+        manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: whole)
+        for range in ranges where NSMaxRange(range) <= whole.length {
+            manager.addTemporaryAttribute(
+                .backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.35), forCharacterRange: range
+            )
+        }
+        if let current, NSMaxRange(current) <= whole.length {
+            manager.addTemporaryAttribute(.backgroundColor, value: NSColor.systemOrange, forCharacterRange: current)
+            manager.addTemporaryAttribute(.foregroundColor, value: NSColor.black, forCharacterRange: current)
+        }
+        highlighted = ranges
+        self.current = current
+    }
 
     /// The height this paragraph needs at a given width. Laid out rather than
     /// estimated, because a turn can be one line or twenty.

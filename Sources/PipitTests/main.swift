@@ -26,6 +26,7 @@ suites += LocalConfigurationTests.all
 suites += SpeakerIdentityTests.all
 suites.append(VoiceEvidenceTests.suite)
 suites.append(TranscriptGroupingTests.suite)
+suites.append(TranscriptNavigationTests.suite)
 suites += TranscriptDivisionTests.all
 suites += SpeechGateTests.all
 suites.append(TranscriptPanelTests.suite)

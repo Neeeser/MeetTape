@@ -14,6 +14,7 @@ import PipitSpeakers
 //   pipit-eval identity  --audio FILE [--audio FILE ...]
 //   pipit-eval voices
 //   pipit-eval gate      --meeting DIR
+//   pipit-eval echo      --meeting DIR [--json OUT] [--offset SECONDS]
 //   pipit-eval bench     [--suite ami-core] [--engine parakeet ...] [--diarizer local]
 //
 // The audio never leaves the machine and nothing here writes to a meeting.
@@ -26,6 +27,10 @@ struct Arguments {
     var engine = "whisper"
     var transcript: URL?
     var meeting: URL?
+    var json: URL?
+    /// Replaces the reference offset the manifest holds, for measuring a
+    /// misaligned pair on purpose. `echo` only.
+    var referenceOffset: Double?
     var applicationSupport: URL
     var bench: BenchCommand.Options
 
@@ -65,6 +70,13 @@ struct Arguments {
             case "--engine": engine = value; engines.append(value)
             case "--transcript": transcript = URL(fileURLWithPath: value)
             case "--meeting": meeting = URL(fileURLWithPath: value)
+            case "--json": json = URL(fileURLWithPath: value)
+            // Refused rather than dropped. A dropped --offset would measure
+            // the pair as the manifest lines it up and be written down as a
+            // measurement of a misaligned one.
+            case "--offset":
+                guard let seconds = Double(value) else { return nil }
+                referenceOffset = seconds
             case "--support": support = URL(fileURLWithPath: value)
             case "--suite": benchOptions.suite = value
             case "--case": benchOptions.meetings.append(value)
@@ -117,6 +129,7 @@ func usage() -> Never {
           pipit-eval identity --audio FILE [--audio FILE ...]
           pipit-eval voices
           pipit-eval gate     --meeting MEETING_FOLDER
+          pipit-eval echo     --meeting MEETING_FOLDER [--json OUT] [--offset SECONDS]
           pipit-eval reanalyze --meeting MEETING_FOLDER [--speakers N]
           pipit-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
@@ -338,6 +351,13 @@ case "gate":
     guard let folder = arguments.meeting else { usage() }
     let code = await GateCommand.run(
         meeting: folder, applicationSupport: arguments.applicationSupport
+    )
+    if code != 0 { exit(code) }
+
+case "echo":
+    guard let folder = arguments.meeting else { usage() }
+    let code = EchoCommand.run(
+        meeting: folder, json: arguments.json, referenceOffset: arguments.referenceOffset
     )
     if code != 0 { exit(code) }
 

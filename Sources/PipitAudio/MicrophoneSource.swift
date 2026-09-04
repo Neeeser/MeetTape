@@ -98,7 +98,7 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
     }
 
     @discardableResult
-    public func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
+    public func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild {
         // Microphone access is checked here rather than assumed: a denied input
         // node starts cleanly and delivers buffers of zeroes, which would be
         // recorded and uploaded as a meeting of silence.
@@ -127,7 +127,7 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         return try build()
     }
 
-    private func build() throws -> AudioFormatDescriptor {
+    private func build() throws -> MicrophoneBuild {
         let engine = AVAudioEngine()
         let input = engine.inputNode
 
@@ -148,18 +148,27 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         //
         // The device is chosen here. The format is not. The unit is already
         // instantiated by the time `input.audioUnit` hands it back, and setting
-        // the device moves only its hardware-side format. Measured 2026-09-03,
-        // pointing the unit at an 8-channel device took its input scope to 8
-        // channels. Its output scope stayed at the 1 channel it was
-        // instantiated with, and the output scope is what
-        // `outputFormat(forBus: 0)` reports. So the tap can install at a
-        // channel count the chosen device does not have, and the extra channels
-        // arrive as zeros. The energy scan in `TrackAudioReader` is what makes
-        // that survivable. It keeps the channel carrying the voice rather than
-        // the first one. The set still belongs before the read, because that is
-        // the only order in which the read could reflect the choice, and
-        // `mic_bind` records both formats so a manifest shows when they
-        // diverged.
+        // the device moves only its hardware-side format. Two shapes follow,
+        // both measured on this Mac on 2026-09-03.
+        //
+        // The client format wider than the device: with the client format
+        // forced to 8 channels and the unit pointed at the 1-channel built-in
+        // microphone, buffers arrived with the microphone on channel 0 and the
+        // other seven at exactly zero. The energy scan in `TrackAudioReader`
+        // keeps the channel carrying the voice, so that shape survives.
+        //
+        // The client format narrower than the device: pointing the unit at an
+        // 8-channel device took its input scope to 8 channels while its output
+        // scope stayed at the 1 channel the node was instantiated with, and the
+        // output scope is what `outputFormat(forBus: 0)` reports. The track is
+        // written at that 1 channel, the scan does not run below 3, and which
+        // of the device's channels AUHAL folds into the single one was not
+        // measured. Nothing here improves on what the code did before the
+        // device was set at all.
+        //
+        // The set still belongs before the read, because that is the only order
+        // in which the read could reflect the choice, and `mic_bind` records
+        // both formats so a manifest shows when they diverged.
         guard let deviceID = CoreAudioSystem.defaultInputDevice(), let unit = input.audioUnit else {
             throw CaptureError.microphoneEngineStartFailed(status: -1)
         }
@@ -168,8 +177,18 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
             &device, UInt32(MemoryLayout<AudioDeviceID>.size)
         )
-        guard deviceStatus == noErr else {
-            throw CaptureError.microphoneEngineStartFailed(status: deviceStatus)
+        if deviceStatus != noErr {
+            // Not a reason to abandon the microphone. `kAudioUnitErr_Initialized`
+            // is reachable wherever AVAudioEngine has already initialised the
+            // input unit by the time it hands it over, and throwing here would
+            // leave the meeting with no microphone track at all, retried on
+            // backoff until it ended. Build on whatever device the unit holds,
+            // which is what this did before the set existed, and write the
+            // status into `mic_bind` so the record says the device was not
+            // honoured.
+            Log.capture.notice(
+                "input unit kept its own device: \(CoreAudioSystem.fourCharCode(deviceStatus), privacy: .public)"
+            )
         }
 
         // Install against the node's own format. Passing a format the hardware is
@@ -200,8 +219,11 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
             throw CaptureError.microphoneEngineStartFailed(status: Int32(truncatingIfNeeded: status))
         }
         state.withLock { $0.engine = engine }
-        return AudioFormatDescriptor(
-            sampleRate: tapFormat.sampleRate, channelCount: Int(tapFormat.channelCount)
+        return MicrophoneBuild(
+            format: AudioFormatDescriptor(
+                sampleRate: tapFormat.sampleRate, channelCount: Int(tapFormat.channelCount)
+            ),
+            deviceSelectionStatus: deviceStatus == noErr ? nil : deviceStatus
         )
     }
 

@@ -199,21 +199,33 @@ public enum ManifestEvent: Sendable, Equatable {
     /// one-channel microphone and writes an eight-channel track says the client
     /// format did not follow the device. Recording only the device's numbers
     /// would put that contradiction in the manifest with nothing to explain it.
+    ///
+    /// `deviceSelectionStatus` covers the third case, where the device was not
+    /// opened at all. The build keeps going on the device the unit already
+    /// held, so the track is real audio and `deviceUID` names the wrong
+    /// microphone.
     public struct MicBind: Codable, Sendable, Equatable {
+        /// The device the build asked for, which is the system default input.
         public let deviceUID: String
         public let deviceName: String
         public let deviceSampleRate: Double
         public let deviceChannelCount: Int
-        /// The format the tap installed at. Absent in manifests written before
-        /// the track's own format was recorded, so both decode as nil.
-        public let trackSampleRate: Double?
-        public let trackChannelCount: Int?
+        /// The format the tap installed at, which is what the segments are
+        /// written in.
+        public let trackSampleRate: Double
+        public let trackChannelCount: Int
+        /// The OSStatus from pointing the input unit at that device, written
+        /// only when the set failed. Absent on every build that got the device
+        /// it asked for, which is the ordinary case. Present means the track
+        /// came from whatever device the unit already held, and `deviceUID`
+        /// names a device the recording is not from.
+        public let deviceSelectionStatus: Int32?
         public let reason: String
 
         public init(
             deviceUID: String, deviceName: String, deviceSampleRate: Double,
-            deviceChannelCount: Int, trackSampleRate: Double?, trackChannelCount: Int?,
-            reason: String
+            deviceChannelCount: Int, trackSampleRate: Double, trackChannelCount: Int,
+            deviceSelectionStatus: Int32?, reason: String
         ) {
             self.deviceUID = deviceUID
             self.deviceName = deviceName
@@ -221,6 +233,7 @@ public enum ManifestEvent: Sendable, Equatable {
             self.deviceChannelCount = deviceChannelCount
             self.trackSampleRate = trackSampleRate
             self.trackChannelCount = trackChannelCount
+            self.deviceSelectionStatus = deviceSelectionStatus
             self.reason = reason
         }
 
@@ -230,8 +243,11 @@ public enum ManifestEvent: Sendable, Equatable {
             deviceName = try container.decode(String.self, forKey: .deviceName)
             deviceSampleRate = try container.decode(Double.self, forKey: .deviceSampleRate)
             deviceChannelCount = try container.decode(Int.self, forKey: .deviceChannelCount)
-            trackSampleRate = try container.decodeIfPresent(Double.self, forKey: .trackSampleRate)
-            trackChannelCount = try container.decodeIfPresent(Int.self, forKey: .trackChannelCount)
+            trackSampleRate = try container.decode(Double.self, forKey: .trackSampleRate)
+            trackChannelCount = try container.decode(Int.self, forKey: .trackChannelCount)
+            deviceSelectionStatus = try container.decodeIfPresent(
+                Int32.self, forKey: .deviceSelectionStatus
+            )
             reason = try container.decode(String.self, forKey: .reason)
         }
     }

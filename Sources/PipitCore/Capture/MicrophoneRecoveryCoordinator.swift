@@ -20,6 +20,24 @@ public struct MicrophoneDeviceDescription: Sendable, Equatable {
     }
 }
 
+/// What one microphone build produced.
+public struct MicrophoneBuild: Sendable, Equatable {
+    /// The format the installed tap runs at, which is what segments are written
+    /// in. The hardware has the last word, so this is not always the format the
+    /// coordinator asked for.
+    public let format: AudioFormatDescriptor
+    /// The OSStatus from pointing the input unit at the system default input
+    /// device, present only when that set failed. The build then runs on
+    /// whatever device the unit already held, which is a real track from a
+    /// device nothing here named. Carried out so the manifest says so.
+    public let deviceSelectionStatus: Int32?
+
+    public init(format: AudioFormatDescriptor, deviceSelectionStatus: Int32?) {
+        self.format = format
+        self.deviceSelectionStatus = deviceSelectionStatus
+    }
+}
+
 /// The AVAudioEngine operations the recovery coordinator needs. Implemented for
 /// real in PipitAudio and by a fake in the regression tests, so the tests
 /// exercise the shipping algorithm rather than a copy of it.
@@ -40,15 +58,19 @@ public protocol MicrophoneEngineController: AnyObject, Sendable {
     func currentInputDevice() -> MicrophoneDeviceDescription?
     /// Removes the tap and stops the engine.
     func teardown()
-    /// Builds a new engine, installs the tap and starts it, returning the format
-    /// the tap is actually running at.
+    /// Builds a new engine, installs the tap and starts it, returning what the
+    /// build produced.
     ///
     /// The hardware has the last word: `preferred` is what the coordinator chose
     /// after rejecting an unusable reading, but the device may have settled on
-    /// something else by the time the engine is built, and the returned value is
-    /// what segments must be written in.
+    /// something else by the time the engine is built, and the returned format
+    /// is what segments must be written in.
+    ///
+    /// Throwing means no engine. A build that could not open the device it
+    /// wanted still returns, because a track from another device beats no track
+    /// at all, and says so through `deviceSelectionStatus`.
     @discardableResult
-    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild
 }
 
 public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
@@ -62,11 +84,12 @@ public protocol CaptureCoordinatorDelegate: AnyObject, Sendable {
     func captureDidBindRemote(
         targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     )
-    /// Which input device the microphone engine was opened on, and the format
-    /// the tap it installed is running at, reported after every build that
-    /// installed one. The two are separate readings and can disagree.
+    /// Which input device the microphone engine was opened on, and what the
+    /// build made of it, reported after every build that installed an engine.
+    /// The device and the build's format are separate readings and can
+    /// disagree.
     func captureDidBindMicrophone(
-        device: MicrophoneDeviceDescription, track: AudioFormatDescriptor, reason: RebuildReason
+        device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
     )
     func captureHealthChanged(track: CaptureTrack, state: CaptureHealthState, detail: String?)
     func captureDidFail(track: CaptureTrack, error: CaptureError)
@@ -548,15 +571,18 @@ public final class MicrophoneRecoveryCoordinator: Sendable {
         }
 
         do {
-            let installed = try controller.buildAndStart(preferred: format)
+            let build = try controller.buildAndStart(preferred: format)
+            let installed = build.format
             // Read after the build, so it names the device the engine is on.
             let deviceUID = controller.currentInputDeviceUID()
             if let device = controller.currentInputDevice() {
                 // Both readings, because they answer different questions. The
-                // device is what this build chose; `installed` is what the node
-                // reported afterwards, which is what the segments are written
-                // at. They can disagree, and the manifest is where that shows.
-                delegate.captureDidBindMicrophone(device: device, track: installed, reason: reason)
+                // device is what this build asked for; the build's format is
+                // what the node reported afterwards, which is what the segments
+                // are written at. They can disagree, and so can the device and
+                // the one the unit actually kept. The manifest is where all of
+                // that shows.
+                delegate.captureDidBindMicrophone(device: device, build: build, reason: reason)
             }
             if installed != previous {
                 delegate.captureWillChangeFormat(

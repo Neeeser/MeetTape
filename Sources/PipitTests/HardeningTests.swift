@@ -15,6 +15,9 @@ enum HardeningTests {
         private let lock = NSLock()
         private var sinkHandler: AudioBufferSink?
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 1)
+        /// Reported by every build, as `MicrophoneSource` reports a device the
+        /// input unit refused to open. A build that carries one still succeeds.
+        var deviceSelectionStatus: Int32?
 
         init(sink: @escaping AudioBufferSink) { self.sinkHandler = sink }
 
@@ -28,7 +31,9 @@ enum HardeningTests {
         }
         func teardown() {}
         @discardableResult
-        func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor { format }
+        func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild {
+            MicrophoneBuild(format: format, deviceSelectionStatus: deviceSelectionStatus)
+        }
         var isRunning: Bool { true }
 
         func emit(seconds: Double, hostTime: Double) {
@@ -166,6 +171,57 @@ enum HardeningTests {
 
     static var captureSuite: Suite {
         Suite("CaptureEngineHardening", [
+            test("a microphone whose device could not be set still records") { expect in
+                // Pointing the input unit at the default input device can fail:
+                // `kAudioUnitErr_Initialized` is reachable wherever
+                // AVAudioEngine has already initialised the unit by the time it
+                // hands it over. Treating that as a build failure would leave
+                // the meeting with no microphone track at all, retried on
+                // backoff until it ended. The build keeps the device the unit
+                // holds, and the manifest carries the status so the record does
+                // not claim a device the audio is not from.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let layout = MeetingLayout(root: root)
+                try FileManager.default.createDirectory(at: layout.segments, withIntermediateDirectories: true)
+
+                let microphone = LockedBox<EmittingMicrophone?>(nil)
+                let engine = CaptureEngine(
+                    segmentSeconds: 60,
+                    makeMicrophone: { sink, _ in
+                        let source = EmittingMicrophone(sink: sink)
+                        microphone.withLock { $0 = source }
+                        return source
+                    },
+                    makeTap: { sink, _ in EmittingTap(sink: sink) },
+                    delegate: SilentDelegate()
+                )
+                // 'init', which is `kAudioUnitErr_Initialized`.
+                microphone.withLock { $0?.deviceSelectionStatus = 1_768_843_636 }
+
+                await engine.arm(bundlePrefixes: [], capturesRemote: false)
+                try await engine.commit(layout: layout, meetingID: "m", source: .googleMeet)
+                microphone.withLock { $0?.emit(seconds: 1, hostTime: 100) }
+                _ = await engine.stop(reason: "test")
+
+                let timeline = try ManifestReader.timeline(contentsOf: layout.manifest)
+                expect.isTrue(
+                    timeline.duration(track: .mic) > 0.5,
+                    "a device that could not be set must not cost the meeting its microphone"
+                )
+
+                let lines = try ManifestReader.read(contentsOf: layout.manifest).lines
+                let binds = lines.compactMap { line -> ManifestEvent.MicBind? in
+                    guard case .micBind(let bind) = line.event else { return nil }
+                    return bind
+                }
+                expect.equal(binds.count, 1)
+                expect.equal(
+                    binds.first?.deviceSelectionStatus, 1_768_843_636,
+                    "the manifest says the device named here was not the one opened"
+                )
+            },
+
             test("remote audio that starts after commit is still written") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

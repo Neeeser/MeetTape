@@ -1026,7 +1026,7 @@ enum CaptureRecoveryTests {
                     )
                 )
                 expect.equal(
-                    delegate.micBinds.first?.track,
+                    delegate.micBinds.first?.build.format,
                     AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1),
                     "the format the segments are written at, not the device's"
                 )

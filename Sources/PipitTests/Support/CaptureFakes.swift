@@ -21,6 +21,11 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var installedFormat: AudioFormatDescriptor?
         var failEveryBuild: CaptureError?
         var deviceUID: String? = "fake-input"
+        /// The OSStatus a build reports for a device it could not open. A
+        /// build that reports one still succeeds, which is the real shape:
+        /// `MicrophoneSource` keeps the engine it built on whatever device the
+        /// input unit already held.
+        var deviceSelectionStatus: Int32?
         /// Runs inside `buildAndStart`, before the build is decided. A driver
         /// that flushes a buffer while the device is being opened delivers it
         /// here, on the coordinator's own call stack, which is the only place
@@ -51,6 +56,11 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     /// renegotiating.
     func setDeviceUID(_ uid: String?) {
         state.withLock { $0.deviceUID = uid }
+    }
+
+    /// Makes every build report that it could not open the device it asked for.
+    func setDeviceSelectionStatus(_ status: Int32?) {
+        state.withLock { $0.deviceSelectionStatus = status }
     }
 
     func setDuringBuild(_ hook: (@Sendable () -> Void)?) {
@@ -123,7 +133,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     }
 
     @discardableResult
-    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild {
         state.withLock { $0.duringBuild }?()
         let failure: CaptureError? = state.withLock { state in
             if let always = state.failEveryBuild {
@@ -138,7 +148,9 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
             let installed = state.installedFormat ?? preferred
             state.builds.append(Build(format: installed))
             state.running = true
-            return installed
+            return MicrophoneBuild(
+                format: installed, deviceSelectionStatus: state.deviceSelectionStatus
+            )
         }
     }
 }
@@ -229,7 +241,7 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
 
     struct MicBind: Sendable, Equatable {
         let device: MicrophoneDeviceDescription
-        let track: AudioFormatDescriptor
+        let build: MicrophoneBuild
         let reason: String
     }
 
@@ -282,10 +294,10 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     }
 
     func captureDidBindMicrophone(
-        device: MicrophoneDeviceDescription, track: AudioFormatDescriptor, reason: RebuildReason
+        device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
     ) {
         state.withLock {
-            $0.micBinds.append(MicBind(device: device, track: track, reason: reason.label))
+            $0.micBinds.append(MicBind(device: device, build: build, reason: reason.label))
         }
     }
 

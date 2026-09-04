@@ -58,7 +58,8 @@ enum ManifestTests {
                     .micBind(.init(
                         deviceUID: "BuiltInMicrophoneDevice", deviceName: "MacBook Pro Microphone",
                         deviceSampleRate: 48_000, deviceChannelCount: 1,
-                        trackSampleRate: 48_000, trackChannelCount: 3, reason: "session_start"
+                        trackSampleRate: 48_000, trackChannelCount: 3,
+                        deviceSelectionStatus: 1_768_843_636, reason: "session_start"
                     )),
                     .sourceHealth(.init(track: .remote, state: .idleButBound, detail: nil)),
                     .preRollFlushed(.init(track: .mic, frameCount: 720_000, seconds: 15, earliestHostTime: 1.0)),
@@ -108,16 +109,18 @@ enum ManifestTests {
                 expect.isTrue(bind.tapStreamIndex == nil, "an absent tap index decodes as nil")
             },
 
-            test("a mic_bind written before the track's format still decodes") { expect in
+            test("a mic_bind from a build that opened its device still decodes") { expect in
                 let directory = try makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: directory) }
                 let url = directory.appendingPathComponent("manifest.jsonl")
-                // A line carrying only the device's format, as one written
-                // before the tap's own format was recorded beside it.
+                // The ordinary line. A build that got the device it asked for
+                // writes no selection status at all, so the key is absent on
+                // almost every mic_bind ever written.
                 let line = """
                 {"ev":"mic_bind","host":100,"t":"2026-09-03T14:18:00.000Z",\
                 "deviceUID":"BuiltInMicrophoneDevice","deviceName":"MacBook Pro Microphone",\
-                "deviceSampleRate":48000,"deviceChannelCount":1,"reason":"session_start"}
+                "deviceSampleRate":48000,"deviceChannelCount":1,\
+                "trackSampleRate":48000,"trackChannelCount":1,"reason":"session_start"}
                 """
                 try (line + "\n").write(to: url, atomically: true, encoding: .utf8)
 
@@ -127,8 +130,10 @@ enum ManifestTests {
                     return expect.fail("the line did not decode as mic_bind")
                 }
                 expect.equal(bind.deviceChannelCount, 1)
-                expect.isTrue(bind.trackSampleRate == nil, "an absent track rate decodes as nil")
-                expect.isTrue(bind.trackChannelCount == nil, "an absent track count decodes as nil")
+                expect.equal(bind.trackChannelCount, 1)
+                expect.isTrue(
+                    bind.deviceSelectionStatus == nil, "an absent selection status decodes as nil"
+                )
             },
 
             test("total duration sums per-segment rates, never a global divide") { expect in

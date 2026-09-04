@@ -21,6 +21,11 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         var installedFormat: AudioFormatDescriptor?
         var failEveryBuild: CaptureError?
         var deviceUID: String? = "fake-input"
+        /// The OSStatus a build reports for a device it could not open. A
+        /// build that reports one still succeeds, which is the real shape:
+        /// `MicrophoneSource` keeps the engine it built on whatever device the
+        /// input unit already held.
+        var deviceSelectionStatus: Int32?
         /// Runs inside `buildAndStart`, before the build is decided. A driver
         /// that flushes a buffer while the device is being opened delivers it
         /// here, on the coordinator's own call stack, which is the only place
@@ -53,6 +58,11 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
         state.withLock { $0.deviceUID = uid }
     }
 
+    /// Makes every build report that it could not open the device it asked for.
+    func setDeviceSelectionStatus(_ status: Int32?) {
+        state.withLock { $0.deviceSelectionStatus = status }
+    }
+
     func setDuringBuild(_ hook: (@Sendable () -> Void)?) {
         state.withLock { $0.duringBuild = hook }
     }
@@ -63,6 +73,17 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
 
     func currentInputDeviceUID() -> String? {
         state.withLock { $0.deviceUID }
+    }
+
+    func currentInputDevice() -> MicrophoneDeviceDescription? {
+        state.withLock { state in
+            guard let uid = state.deviceUID else { return nil }
+            let format = state.installedFormat ?? state.steadyFormat
+            return MicrophoneDeviceDescription(
+                uid: uid, name: "Fake input",
+                sampleRate: format?.sampleRate ?? 0, channelCount: format?.channelCount ?? 0
+            )
+        }
     }
 
     /// Queues one-shot device readings, consumed in order before the steady value.
@@ -112,7 +133,7 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
     }
 
     @discardableResult
-    func buildAndStart(preferred: AudioFormatDescriptor) throws -> AudioFormatDescriptor {
+    func buildAndStart(preferred: AudioFormatDescriptor) throws -> MicrophoneBuild {
         state.withLock { $0.duringBuild }?()
         let failure: CaptureError? = state.withLock { state in
             if let always = state.failEveryBuild {
@@ -127,7 +148,9 @@ final class FakeMicrophoneEngine: MicrophoneEngineController, Sendable {
             let installed = state.installedFormat ?? preferred
             state.builds.append(Build(format: installed))
             state.running = true
-            return installed
+            return MicrophoneBuild(
+                format: installed, deviceSelectionStatus: state.deviceSelectionStatus
+            )
         }
     }
 }
@@ -140,6 +163,10 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         var teardowns = 0
         var format = AudioFormatDescriptor(sampleRate: 48_000, channelCount: 2)
         var failNextBind: CaptureError?
+        /// What the current bind's first callback delivered. Cleared by every
+        /// bind, as the real source clears it on teardown, so a rebind that
+        /// delivers nothing reports nothing.
+        var firstCallback: TapCallbackReading?
     }
 
     private let state = Mutex(State())
@@ -172,7 +199,12 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         state.withLock { $0.teardowns += 1 }
     }
 
-    func bind(to targets: [RemoteAudioTarget]) throws -> AudioFormatDescriptor {
+    /// The tap's first IOProc callback of the current bind arriving.
+    func deliverFirstCallback(_ reading: TapCallbackReading) {
+        state.withLock { $0.firstCallback = reading }
+    }
+
+    func bind(to targets: [RemoteAudioTarget]) throws -> RemoteTapBinding {
         let failure: CaptureError? = state.withLock { state in
             defer { state.failNextBind = nil }
             return state.failNextBind
@@ -180,8 +212,13 @@ final class FakeProcessTap: ProcessTapController, Sendable {
         if let failure { throw failure }
         return state.withLock { state in
             state.binds.append(targets.map(\.processID).sorted())
-            return state.format
+            state.firstCallback = nil
+            return RemoteTapBinding(format: state.format, streamCount: 2, tapStreamIndex: 1)
         }
+    }
+
+    func firstCallback() -> TapCallbackReading? {
+        state.withLock { $0.firstCallback }
     }
 }
 
@@ -204,6 +241,8 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     struct HealthChange: Sendable, Equatable {
         let track: CaptureTrack
         let state: CaptureHealthState
+        /// The reason written beside the state in the manifest.
+        let detail: String?
     }
 
     struct RemoteBind: Sendable, Equatable {
@@ -211,6 +250,18 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         let processIDs: [Int32]
         let producing: [Bool]
         let count: Int
+        let binding: RemoteTapBinding
+    }
+
+    struct RemoteStream: Sendable, Equatable {
+        let reading: TapCallbackReading
+        let bindCount: Int
+    }
+
+    struct MicBind: Sendable, Equatable {
+        let device: MicrophoneDeviceDescription
+        let build: MicrophoneBuild
+        let reason: String
     }
 
     private struct State {
@@ -218,6 +269,8 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
         var restarts: [Restart] = []
         var healthChanges: [HealthChange] = []
         var remoteBinds: [RemoteBind] = []
+        var remoteStreams: [RemoteStream] = []
+        var micBinds: [MicBind] = []
         var failures: [CaptureError] = []
     }
 
@@ -227,6 +280,8 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     var restarts: [Restart] { state.withLock { $0.restarts } }
     var healthChanges: [HealthChange] { state.withLock { $0.healthChanges } }
     var remoteBinds: [RemoteBind] { state.withLock { $0.remoteBinds } }
+    var remoteStreams: [RemoteStream] { state.withLock { $0.remoteStreams } }
+    var micBinds: [MicBind] { state.withLock { $0.micBinds } }
     var failures: [CaptureError] { state.withLock { $0.failures } }
 
     func captureWillChangeFormat(
@@ -240,19 +295,36 @@ final class RecordingCaptureDelegate: CaptureCoordinatorDelegate, Sendable {
     }
 
     func captureHealthChanged(track: CaptureTrack, state newState: CaptureHealthState, detail: String?) {
-        state.withLock { $0.healthChanges.append(HealthChange(track: track, state: newState)) }
+        state.withLock {
+            $0.healthChanges.append(HealthChange(track: track, state: newState, detail: detail))
+        }
     }
 
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     ) {
         state.withLock {
             $0.remoteBinds.append(RemoteBind(
                 reason: reason.label,
                 processIDs: targets.map(\.processID),
                 producing: targets.map(\.isRunningOutput),
-                count: bindCount
+                count: bindCount,
+                binding: binding
             ))
+        }
+    }
+
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int) {
+        state.withLock {
+            $0.remoteStreams.append(RemoteStream(reading: reading, bindCount: bindCount))
+        }
+    }
+
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
+    ) {
+        state.withLock {
+            $0.micBinds.append(MicBind(device: device, build: build, reason: reason.label))
         }
     }
 

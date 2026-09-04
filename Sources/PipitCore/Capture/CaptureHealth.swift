@@ -42,6 +42,7 @@ public enum RebuildReason: Sendable, Equatable {
     case targetChanged
     case targetAppeared
     case producingWithoutCallbacks(gapSeconds: Double?)
+    case silentWhileProducing
 
     public var label: String {
         switch self {
@@ -56,6 +57,7 @@ public enum RebuildReason: Sendable, Equatable {
         case .producingWithoutCallbacks(let gap):
             gap.map { String(format: "producing_without_callbacks(gap:%.2fs)", $0) }
                 ?? "producing_without_callbacks(no_callbacks_yet)"
+        case .silentWhileProducing: "silent_while_producing"
         }
     }
 }
@@ -76,6 +78,18 @@ public struct CaptureThresholds: Sendable, Equatable {
     public var micCallbackTimeout: Double
     /// Remote tap fault threshold, applied only while a target is producing output.
     public var remoteCallbackTimeout: Double
+    /// How long every buffer may be exactly zero while a target reports output
+    /// before the tap is rebound, and again before the tap is called degraded.
+    ///
+    /// Chosen rather than measured, unlike the constants above. Across the 29
+    /// recordings on this machine the readings are bimodal. The working taps
+    /// carry signal continuously, and the three broken ones read zero for their
+    /// whole length, 2, 31 and 41 minutes. Nothing measured sits near twenty
+    /// seconds. The case the value is guessing at is a solo stretch where the
+    /// application really does render digital zero while reporting output, and
+    /// twenty seconds is how long such a stretch runs before the tap is
+    /// rebound.
+    public var remoteSilenceTimeout: Double
     /// Health poll interval.
     public var pollInterval: Double
     /// Settle delay after system wake before proactively rebuilding.
@@ -114,6 +128,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         rebuildGrace: Double = 1.5,
         micCallbackTimeout: Double = 2.0,
         remoteCallbackTimeout: Double = 5.0,
+        remoteSilenceTimeout: Double = 20,
         pollInterval: Double = 0.5,
         wakeSettleDelay: Double = 1.5,
         rebuildBackoffCeiling: Double = 30,
@@ -124,6 +139,7 @@ public struct CaptureThresholds: Sendable, Equatable {
         self.rebuildGrace = rebuildGrace
         self.micCallbackTimeout = micCallbackTimeout
         self.remoteCallbackTimeout = remoteCallbackTimeout
+        self.remoteSilenceTimeout = remoteSilenceTimeout
         self.pollInterval = pollInterval
         self.wakeSettleDelay = wakeSettleDelay
         self.rebuildBackoffCeiling = rebuildBackoffCeiling

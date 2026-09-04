@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import Foundation
 import PipitCore
@@ -489,7 +490,10 @@ public final class CaptureEngine: Sendable {
         let engine = WeakEngine(self)
         switch track {
         case .mic: micCoordinator.noteBufferArrived(hostTime: packet.hostTime)
-        case .remote: remoteCoordinator.noteBufferArrived(hostTime: packet.hostTime)
+        case .remote:
+            remoteCoordinator.noteBufferArrived(
+                hostTime: packet.hostTime, peak: peakMagnitude(of: packet.buffer)
+            )
         }
 
         enum Resolution {
@@ -550,6 +554,33 @@ public final class CaptureEngine: Sendable {
             writer = winner
         }
         writer?.enqueue(packet)
+    }
+
+    /// The largest sample magnitude in the buffer, across every channel.
+    ///
+    /// Runs on the CoreAudio IOProc thread. `vDSP_maxmgv` reads the samples
+    /// where they already lie, so nothing is allocated and nothing is copied.
+    ///
+    /// Nil for an empty buffer, and for samples that are not 32-bit float,
+    /// which no source here produces. Neither says anything about whether the
+    /// tap carries the meeting, and calling either one silence would warn about
+    /// the wrong thing.
+    private func peakMagnitude(of buffer: AVAudioPCMBuffer) -> Float? {
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return nil }
+        // A deinterleaved buffer publishes one pointer per channel, each with a
+        // stride of 1. An interleaved one publishes a single pointer holding
+        // every channel, with a stride of the channel count, and reading past
+        // that one pointer would run off the end of the allocation.
+        let stride = buffer.stride
+        let pointers = stride == 1 ? Int(buffer.format.channelCount) : 1
+        let samples = vDSP_Length(Int(buffer.frameLength) * stride)
+        var highest: Float = 0
+        for index in 0..<pointers {
+            var runPeak: Float = 0
+            vDSP_maxmgv(channels[index], 1, &runPeak, samples)
+            highest = max(highest, runPeak)
+        }
+        return highest
     }
 
     private func format(from descriptor: AudioFormatDescriptor?) -> AVAudioFormat? {
@@ -721,7 +752,7 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
     }
 
     func captureDidBindRemote(
-        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int
+        targets: [RemoteAudioTarget], reason: RebuildReason, bindCount: Int, binding: RemoteTapBinding
     ) {
         let engine = target
         let recorded = targets.map {
@@ -733,7 +764,44 @@ private final class CoordinatorRelay: CaptureCoordinatorDelegate, @unchecked Sen
         }
         queue.async {
             engine?.recordManifest(
-                .remoteBind(.init(reason: reason.label, targets: recorded, bindCount: bindCount))
+                .remoteBind(.init(
+                    reason: reason.label, targets: recorded, bindCount: bindCount,
+                    streamCount: binding.streamCount, tapStreamIndex: binding.tapStreamIndex
+                ))
+            )
+        }
+    }
+
+    func captureDidReadRemoteStream(reading: TapCallbackReading, bindCount: Int) {
+        let engine = target
+        let streams = reading.streams.map {
+            ManifestEvent.RemoteStream.Stream(
+                channelCount: $0.channelCount, byteCount: $0.byteCount
+            )
+        }
+        queue.async {
+            engine?.recordManifest(
+                .remoteStream(.init(
+                    bindCount: bindCount, streams: streams, usedFallback: reading.usedFallback
+                ))
+            )
+        }
+    }
+
+    func captureDidBindMicrophone(
+        device: MicrophoneDeviceDescription, build: MicrophoneBuild, reason: RebuildReason
+    ) {
+        let engine = target
+        queue.async {
+            engine?.recordManifest(
+                .micBind(.init(
+                    deviceUID: device.uid, deviceName: device.name,
+                    deviceSampleRate: device.sampleRate, deviceChannelCount: device.channelCount,
+                    trackSampleRate: build.format.sampleRate,
+                    trackChannelCount: build.format.channelCount,
+                    deviceSelectionStatus: build.deviceSelectionStatus,
+                    reason: reason.label
+                ))
             )
         }
     }

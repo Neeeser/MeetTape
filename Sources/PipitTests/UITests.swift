@@ -661,13 +661,13 @@ enum UITests {
                 var object = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: store.url)
                 ) as! [String: Any]
-                object.removeValue(forKey: "preferBuiltInMicrophone")
+                object.removeValue(forKey: "firefoxSensorHasConnected")
                 try JSONSerialization.data(withJSONObject: object).write(to: store.url)
 
                 let reloaded = store.load()
                 expect.equal(reloaded.localUserName, "Andrew", "existing values must survive")
                 expect.isTrue(reloaded.hasCompletedOnboarding, "onboarding must not reappear")
-                expect.isFalse(reloaded.preferBuiltInMicrophone, "the missing field takes its default")
+                expect.isFalse(reloaded.firefoxSensorHasConnected, "the missing field takes its default")
             },
 
             test("a settings file from a build that had the echo-cancellation toggle still loads") { expect in

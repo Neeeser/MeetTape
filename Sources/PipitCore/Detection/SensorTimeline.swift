@@ -341,12 +341,6 @@ public struct RawSensors: Codable, Sendable, Equatable {
                 guard let probability = reading.speechProbability,
                       probability >= LocalSpeechPolicy.speechProbability
                 else { continue }
-                if let echo = reading.echoReturnLossDB,
-                   echo >= LocalSpeechPolicy.echoReturnLossDB { continue }
-                // No far end to be quieter than means one track, and a
-                // one-track recording has no far-end mixdown to be excluded
-                // from in the first place.
-                if let difference = reading.medianDifferenceDB, difference < 0 { continue }
                 carrying += 1
             }
         }

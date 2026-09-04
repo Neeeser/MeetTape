@@ -12,6 +12,10 @@ import TestKit
 /// evening.". A second meeting's whole microphone track was 125 consecutive
 /// segments of " ♪". A third produced "Thank you." six times for a user who
 /// never spoke at all. All three were rendered as the user's own words.
+///
+/// The far end leaking through the speakers is not judged here. It is
+/// subtracted out of the microphone by the cleaner before transcription, so the
+/// levels a segment is read against are the user's own.
 enum SpeechGateTests {
     /// One span of the recording, described the way it was measured.
     struct Span {
@@ -70,168 +74,27 @@ enum SpeechGateTests {
 
     static var policySuite: Suite {
         Suite("SpeechGate/policy", [
-            test("the far end coming back through the speakers is not the user talking") { expect in
-                // 445.97 to 446.42 of the audited meeting: "We'll be right
-                // back." over a microphone reading -46.7 dBFS while the far
-                // end's own track reads -16.5. Thirty decibels of separation is
-                // one voice leaking into the other's microphone, not two people
-                // speaking.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "We'll be right back.",
-                        reading: SpeechReading(
-                            speechProbability: 0.211, loudestLocalDB: -46.7,
-                            loudestFarDB: -16.5, medianDifferenceDB: -31.4
-                        )
-                    ),
-                    .notSpoken
-                )
-            },
-
-            test("a voice the detector is sure of is still dropped when the far end is louder") { expect in
-                // 971.19 of the same meeting: "This is my brother," invented
-                // over the far end's leakage. The detector scores it 0.994,
-                // correctly: leakage is speech. Only the comparison between the
-                // two tracks says whose it is, which is why the detector cannot
-                // carry this alone.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "This is my brother,",
-                        reading: SpeechReading(
-                            speechProbability: 0.994, loudestLocalDB: -35.3,
-                            loudestFarDB: -20.6, medianDifferenceDB: -21.3
-                        )
-                    ),
-                    .notSpoken
-                )
-            },
-
             test("words over audio holding no voice are dropped whatever the levels say") { expect in
-                // 839.25: "to see if we can get this done." over audio the
-                // detector scores 0.002. No level comparison catches this one,
-                // which is why the detector is in the set.
+                // Two of the 37 fabrications sit on audio the detector scores at
+                // 0.000 and 0.002, and one of them is louder than anything the
+                // user said all meeting.
                 expect.equal(
                     LocalSpeechPolicy.decide(
                         text: "to see if we can get this done.",
-                        reading: SpeechReading(
-                            speechProbability: 0.002, loudestLocalDB: -38.3,
-                            loudestFarDB: -22.8, medianDifferenceDB: -33.1
-                        )
+                        reading: SpeechReading(speechProbability: 0.002, loudestLocalDB: -12)
                     ),
                     .notSpoken
                 )
             },
 
-            test("the user's own sentence survives the far end talking under it") { expect in
-                // 213.01 to 217.61: "I'll send a video in the slack later
-                // today", with the microphone 12 dB above the far end at its
-                // peak and 53 dB above it over most of the span.
+            test("a sentence the detector is sure of is the user's, whatever the far end read") { expect in
+                // On a cleaned microphone the far end is gone, so a loud far end
+                // under the user's words says nothing about whose they are.
                 expect.equal(
                     LocalSpeechPolicy.decide(
-                        text: "I'll send a video in the slack later today",
+                        text: "Yeah but I mean it's not like it's impossible",
                         reading: SpeechReading(
-                            speechProbability: 1.0, loudestLocalDB: -11.2,
-                            loudestFarDB: -23.2, medianDifferenceDB: 53.4
-                        )
-                    ),
-                    .spoken
-                )
-            },
-
-            test("a word quieter than the far end at its peak survives on the rest of the span") { expect in
-                // 769.22 of the huddle: the user's "No, you're good." while the
-                // far end is mid-sentence. The peak comparison alone reads -3
-                // and would drop it; over the span the microphone is 35 dB above
-                // the far end, which is what a person speaking into their own
-                // microphone looks like. Nothing of the far end is in it: the
-                // user was on headphones and the echo measure reads 0.00 dB.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "No, you're good.",
-                        reading: SpeechReading(
-                            speechProbability: 1.0, loudestLocalDB: -28,
-                            loudestFarDB: -25, medianDifferenceDB: 35,
-                            echoReturnLossDB: 0.0
-                        )
-                    ),
-                    .spoken
-                )
-            },
-
-            test("the far end's own answer is not the user's, whatever the span says") { expect in
-                // 26.70 of the audited meeting, which this suite used to hold up
-                // as the user speaking a quiet word. It is not. The user asked
-                // "how's it going?" and stopped at 26.20, the far end's own track
-                // holds "Good." at 26.51, and what the microphone caught at 26.70
-                // is that word out of the speakers: 10 dB under the far end at
-                // its peak, and a filter of the far end accounts for 2.3 dB of
-                // it. The median clause reads 29 dB and keeps it, which is
-                // exactly the hole this measurement fills.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "Good",
-                        reading: SpeechReading(
-                            speechProbability: 1.0, loudestLocalDB: -36,
-                            loudestFarDB: -26, medianDifferenceDB: 29,
-                            echoReturnLossDB: 2.28
-                        )
-                    ),
-                    .notSpoken
-                )
-            },
-
-            test("words the speakers played back into the microphone are not the user's") { expect in
-                // 1738.80 of the Capital One call: "we use three, yeah" while
-                // the far end said "we use S3... yeah". The user was muted for
-                // the whole meeting. Every level clause keeps it, because the
-                // leakage was recorded 3 dB above the far end's own quietly
-                // recorded track (with the voice unit's gain control in the
-                // path at the time), and the detector calls
-                // it speech because leakage is speech. Only subtracting the far
-                // end from the microphone tells them apart: a filter of the
-                // remote track accounts for 1.1 dB of this segment's energy.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "we use three, yeah",
-                        reading: SpeechReading(
-                            speechProbability: 1.0, loudestLocalDB: -28,
-                            loudestFarDB: -29, medianDifferenceDB: 5,
-                            echoReturnLossDB: 1.08
-                        )
-                    ),
-                    .notSpoken
-                )
-            },
-
-            test("a sentence the far end cannot account for survives the same measurement") { expect in
-                // The huddle where the user spoke throughout, on headphones.
-                // Nothing of the far end reaches the microphone, so the filter
-                // removes nothing and the clause cannot speak.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "Let me go ahead and say hi.",
-                        reading: SpeechReading(
-                            speechProbability: 0.99, loudestLocalDB: -18,
-                            loudestFarDB: -40, medianDifferenceDB: 22,
-                            echoReturnLossDB: 0.01
-                        )
-                    ),
-                    .spoken
-                )
-            },
-
-            test("a meeting nothing measured the echo of is judged as before") { expect in
-                // Every meeting recorded before this measurement existed, and
-                // every one-track recording. A reading of nil is not a reading
-                // of zero, and the clause has to stay silent rather than keep or
-                // drop on a measurement nobody made.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "I'll send a video in the slack later today",
-                        reading: SpeechReading(
-                            speechProbability: 1.0, loudestLocalDB: -11.2,
-                            loudestFarDB: -23.2, medianDifferenceDB: 53.4,
-                            echoReturnLossDB: nil
+                            speechProbability: 0.99, loudestLocalDB: -31, loudestFarDB: -18
                         )
                     ),
                     .spoken
@@ -249,18 +112,13 @@ enum SpeechGateTests {
                 expect.equal(
                     LocalSpeechPolicy.decide(
                         text: " ♪",
-                        reading: SpeechReading(
-                            speechProbability: 0.9, loudestLocalDB: -50, loudestFarDB: -80,
-                            medianDifferenceDB: 30
-                        )
+                        reading: SpeechReading(speechProbability: 0.9, loudestLocalDB: -50, loudestFarDB: -80)
                     ),
                     .notSpoken
                 )
             },
 
             test("one track keeps what the detector heard") { expect in
-                // Imported audio has no far end to be quieter than, so the
-                // comparison cannot run and the detector decides alone.
                 expect.equal(
                     LocalSpeechPolicy.decide(
                         text: "so I spent the morning on the migration",
@@ -277,30 +135,18 @@ enum SpeechGateTests {
                 )
             },
 
-            test("a machine with no detector still judges on the two tracks") { expect in
-                // The detector clause cannot speak either way where nothing
-                // ran, and skipping the segment instead would empty the local
-                // track of a meeting processed while the model was still
-                // downloading.
-                expect.equal(
-                    LocalSpeechPolicy.decide(
-                        text: "Yeah, we can definitely do today.",
-                        reading: SpeechReading(
-                            speechProbability: nil, loudestLocalDB: -12.3,
-                            loudestFarDB: -51.2, medianDifferenceDB: 55.4
-                        )
-                    ),
-                    .spoken
-                )
+            test("a machine with no detector keeps every segment") { expect in
+                // Nothing can say the words are invented, and dropping them
+                // instead would empty the local track of a meeting processed
+                // while the model was still downloading.
                 expect.equal(
                     LocalSpeechPolicy.decide(
                         text: "Good evening.",
                         reading: SpeechReading(
-                            speechProbability: nil, loudestLocalDB: -28.2,
-                            loudestFarDB: -14.6, medianDifferenceDB: -27.8
+                            speechProbability: nil, loudestLocalDB: -28.2, loudestFarDB: -14.6
                         )
                     ),
-                    .notSpoken
+                    .spoken
                 )
             },
         ])
@@ -326,79 +172,18 @@ enum SpeechGateTests {
                 expect.isTrue(evidence.reading(from: 30, to: 31) == nil)
             },
 
-            test("the echo reading is weighted by where the microphone's energy is") { expect in
-                // A segment's windows are not equally worth measuring. A loud
-                // second surrounded by near-silence is the loud second's
-                // measurement, so the quiet windows either side must not average
-                // it away: the transcription backend's segment boundaries are
-                // approximate and routinely take in a beat of the silence
-                // around a word.
-                let windows = Int(20 / 0.25)
-                var levels = [Int8](repeating: -70, count: windows)
-                var echo = [Int16](repeating: 0, count: windows)
-                for index in Int(10 / 0.25)..<Int(11 / 0.25) {
-                    levels[index] = -20
-                    echo[index] = 20
-                }
-                let evidence = SpeechEvidence(
-                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
-                    micLevels: levels, remoteLevels: [Int8](repeating: -30, count: windows),
-                    micSpeech: [Int8](repeating: 90, count: windows),
-                    micEchoReturnLoss: echo, detector: "silero"
-                )
-                let onIt = try expect.unwrap(evidence.reading(from: 10, to: 11))
-                expect.close(
-                    onIt.echoReturnLossDB ?? 0, 2.0, tolerance: 0.01,
-                    "the windows holding the words report their own measurement"
-                )
-                let around = try expect.unwrap(evidence.reading(from: 9.5, to: 11.5))
-                expect.close(
-                    around.echoReturnLossDB ?? 0, 2.0, tolerance: 0.05,
-                    "fifty decibels below, the neighbouring silence carries no weight"
-                )
-            },
-
-            test("evidence written before the echo pass still reads") { expect in
-                // Every meeting already on disk. The file has no echo series in
-                // it, and a decoder that rejected it would leave the meeting
-                // with no evidence at all, which is the gate keeping every
-                // fabrication the other clauses were already removing.
+            test("evidence written with the echo series still reads") { expect in
+                // Every meeting measured before the series was removed carries
+                // it. The file has to decode, and the series is left unread.
                 let json = """
-                {"version":1,"levelWindowSeconds":0.25,"speechWindowSeconds":0.256,\
-                "micLevels":[-20,-21],"remoteLevels":[-30,-31],"micSpeech":[90,91],\
-                "detector":"silero-vad-unified-256ms-v6.2.1"}
+                {"version":1,"levelWindowSeconds":0.25,"speechWindowSeconds":0.256,
+                 "micLevels":[-20,-21],"remoteLevels":[-30,-31],"micSpeech":[90,91],
+                 "micEchoReturnLoss":[4,5],"detector":"silero"}
                 """
-                let evidence = try JSONDecoder().decode(
-                    SpeechEvidence.self, from: Data(json.utf8)
-                )
-                expect.equal(evidence.micLevels, [-20, -21])
-                expect.equal(evidence.detector, "silero-vad-unified-256ms-v6.2.1")
-                expect.isTrue(evidence.micEchoReturnLoss.isEmpty, "nothing measured the echo")
-
-                // And what this build writes reads back whole.
-                let written = SpeechEvidence(
-                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
-                    micLevels: [-20, -21], remoteLevels: [-30, -31], micSpeech: [90, 91],
-                    micEchoReturnLoss: [4, 25], detector: "silero"
-                )
-                let roundTripped = try JSONDecoder().decode(
-                    SpeechEvidence.self, from: JSONEncoder().encode(written)
-                )
-                expect.equal(roundTripped, written)
-            },
-
-            test("a meeting measured before the echo pass existed reports no echo") { expect in
-                // The evidence already on disk has no echo series in it. An
-                // empty series is nothing measured, which the reading has to
-                // report as nil so the clause stays out of the decision.
-                let evidence = SpeechEvidence(
-                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
-                    micLevels: [Int8](repeating: -20, count: 40),
-                    remoteLevels: [Int8](repeating: -30, count: 40),
-                    micSpeech: [Int8](repeating: 90, count: 40), detector: "silero"
-                )
-                let reading = try expect.unwrap(evidence.reading(from: 1, to: 2))
-                expect.isTrue(reading.echoReturnLossDB == nil)
+                let decoded = try JSONDecoder().decode(SpeechEvidence.self, from: Data(json.utf8))
+                expect.equal(decoded.micLevels, [-20, -21])
+                expect.equal(decoded.remoteLevels, [-30, -31])
+                expect.equal(decoded.micSpeech, [90, 91])
             },
 
             test("a meeting with one track reports no far end") { expect in
@@ -409,7 +194,21 @@ enum SpeechGateTests {
                 )
                 let reading = try expect.unwrap(evidence.reading(from: 1, to: 2))
                 expect.isTrue(reading.loudestFarDB == nil)
-                expect.isTrue(reading.medianDifferenceDB == nil)
+            },
+
+            test("a far end recorded as silence is read as no far end at all") { expect in
+                // A tap that produced nothing writes a full-length track of the
+                // floor. That is not a reference, and reading it as one made
+                // every comparison against it trivially true.
+                let evidence = SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
+                    micLevels: [Int8](repeating: -20, count: 40),
+                    remoteLevels: [Int8](repeating: -120, count: 40),
+                    micSpeech: [Int8](repeating: 90, count: 40), detector: "silero"
+                )
+                expect.isFalse(evidence.farEndCarriesSignal)
+                let reading = try expect.unwrap(evidence.reading(from: 1, to: 2))
+                expect.isTrue(reading.loudestFarDB == nil)
             },
 
             test("digital silence reads as the floor rather than as minus infinity") { expect in
@@ -427,7 +226,9 @@ enum SpeechGateTests {
             test("the standup turn survives and the invented filler after it does not") { expect in
                 // The audited meeting, cut down: one real turn, then four of
                 // the 37 fabrications that followed it. Before this guard all
-                // five were rendered under the user's name.
+                // five were rendered under the user's name. The microphone is
+                // the cleaned one, so the fabricated spans sit over audio the
+                // detector does not call speech.
                 let raw = RawTranscript(chunks: [chunk([
                     (24.95, 27.25, "Hey, Brian, how's it going?"),
                     (213.01, 217.61, "I'll send a video in the slack later today"),
@@ -442,9 +243,9 @@ enum SpeechGateTests {
                         Span(start: 24.95, end: 27.25, mic: -15, far: -58, probability: 1.0),
                         Span(start: 213.01, end: 217.61, mic: -11, far: -23, probability: 1.0),
                         Span(start: 445.97, end: 446.42, mic: -47, far: -17, probability: 0.21),
-                        Span(start: 703.86, end: 704.20, mic: -49, far: -26, probability: 0.94),
+                        Span(start: 703.86, end: 704.20, mic: -49, far: -26, probability: 0.12),
                         Span(start: 839.25, end: 840.75, mic: -38, far: -23, probability: 0.00),
-                        Span(start: 971.19, end: 972.89, mic: -35, far: -21, probability: 0.99),
+                        Span(start: 971.19, end: 972.89, mic: -35, far: -21, probability: 0.30),
                     ]),
                     micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
                 )
@@ -455,346 +256,28 @@ enum SpeechGateTests {
                 )
             },
 
-            test("bleed inside a turn is cut out and the turn is kept") { expect in
-                // Measured on a Meet recording on 3 September 2026, on
-                // speakers. The recogniser hands back the microphone in
-                // stretches of about thirty seconds, and one of them held seven
-                // seconds of the far end coming back out of the speakers
-                // followed by twenty-two seconds of the user answering.
-                //
-                // Judging the stretch whole keeps all of it, so the far end's
-                // words were rendered a second time under the user's name.
-                // Judging it whole the other way deletes the answer with the
-                // bleed: over that meeting, gating at segment size dropped 35
-                // of 54 stretches and 377 words the user really said.
+            test("a turn the far end also holds is kept whole") { expect in
+                // The far end's own words used to be cut out of the local track
+                // by matching text. The cleaner removes the far end from the
+                // audio instead, so a local segment is judged on its own
+                // detector reading and never against what the far end said.
                 let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
+                    id: "remote_chunk_001", track: .remote, timelineOffset: 0,
+                    durationSeconds: 1000, model: "gpt-4o-transcribe-diarize",
+                    responseFormat: "diarized_json",
                     segments: [RawTranscriptSegment(
-                        start: 0, end: 6,
-                        text: "and to be clear you are building an entire model from scratch",
-                        speaker: nil,
-                        words: "and to be clear you are building an entire model from scratch"
-                            .split(separator: " ").enumerated().map {
-                                word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                            }
+                        start: 100, end: 104, text: "so what I would do is run three nodes", speaker: "A"
                     )]
                 )
-                // The same words a beat later, then the user's own answer.
-                let bleed = "and to be clear you are building an entire model from scratch"
-                let spoken = "uh it is like a mix of both so i am not doing the pre training stage"
-                var words: [RawTranscriptWord] = []
-                for (index, token) in bleed.split(separator: " ").enumerated() {
-                    words.append(word(" \(token)", 0.7 + Double(index) * 0.5, 0.7 + Double(index) * 0.5 + 0.4))
-                }
-                for (index, token) in spoken.split(separator: " ").enumerated() {
-                    words.append(word(" \(token)", 8.0 + Double(index) * 0.5, 8.0 + Double(index) * 0.5 + 0.4))
-                }
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0.7, end: 16, text: "\(bleed) \(spoken)", speaker: nil, words: words
-                    )]
-                )
+                let local = chunk([(101, 103, "so what I would do is run three nodes")])
                 let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: nil, micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
+                    raw: RawTranscript(chunks: [remote, local]), diarization: RawDiarization(),
+                    speech: evidence(seconds: 1000, spans: [
+                        Span(start: 101, end: 103, mic: -20, far: -18, probability: 0.97),
+                    ]),
+                    micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
                 )
-                let local = transcript.utterances.filter { $0.track == .mic }
-                let text = local.map(\.text).joined(separator: " ")
-                expect.isTrue(
-                    text.contains("a mix of both"), "the user's own answer survives"
-                )
-                expect.isFalse(
-                    text.contains("entire model from scratch"),
-                    "the far end's words are not rendered a second time under the user's name"
-                )
-            },
-
-            test("the user's own words survive a stretch the far end dominates") { expect in
-                // Measured on a Slack huddle recorded on 3 September 2026, on
-                // speakers. 81% of the microphone's words also appear on the
-                // far end's own track, and the echo clause reads 9.9 dB against
-                // a 0.4 dB threshold, so it fired on every one of the 49
-                // stretches the recogniser produced and deleted all 3957 words.
-                // The user is absent from their own meeting.
-                //
-                // The clause is right about the leakage and wrong about the
-                // size of the vote. One of those stretches held 73 windows
-                // below the threshold and 45 above.
-                let far = "so the pricing runs per node and we would need three of them"
-                let spoken = "well that is kind of what i was asking from the call they seemed to want"
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 6.5, text: far, speaker: nil,
-                        words: far.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                // The user speaks, the far end leaks in, then the user speaks
-                // again. Both of their runs are kept by the text cut, but the
-                // span from the first to the last of them still covers the
-                // leakage in the middle, so one reading over the whole thing
-                // still says echo and still deletes both.
-                let opening = "um okay one last quick question about the backups"
-                var words: [RawTranscriptWord] = []
-                for (index, token) in opening.split(separator: " ").enumerated() {
-                    words.append(word(" \(token)", Double(index) * 0.5, Double(index) * 0.5 + 0.4))
-                }
-                for (index, token) in far.split(separator: " ").enumerated() {
-                    words.append(word(" \(token)", 6.0 + Double(index) * 0.5, 6.0 + Double(index) * 0.5 + 0.4))
-                }
-                for (index, token) in spoken.split(separator: " ").enumerated() {
-                    words.append(word(" \(token)", 14.0 + Double(index) * 0.5, 14.0 + Double(index) * 0.5 + 0.4))
-                }
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 22, text: "\(opening) \(far) \(spoken)",
-                        speaker: nil, words: words
-                    )]
-                )
-                // The leakage reads as echo; the user's own words do not.
-                let windows = Int(40 / windowSeconds)
-                var loss = [Int16](repeating: 0, count: windows)
-                for index in Int(6.0 / windowSeconds)...Int(12.5 / windowSeconds) { loss[index] = 99 }
-                let evidence = SpeechEvidence(
-                    levelWindowSeconds: windowSeconds, speechWindowSeconds: speechWindowSeconds,
-                    micLevels: [Int8](repeating: -24, count: windows),
-                    remoteLevels: [Int8](repeating: -26, count: windows),
-                    micSpeech: [Int8](repeating: 99, count: Int(40 / speechWindowSeconds)),
-                    micEchoReturnLoss: loss, detector: "silero"
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: evidence, micTrackIsLocalUser: true,
-                    generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                let text = transcript.utterances.filter { $0.track == .mic }
-                    .map(\.text).joined(separator: " ")
-                expect.isTrue(
-                    text.contains("one last quick question"),
-                    "the user is in their own meeting"
-                )
-                expect.isTrue(text.contains("what i was asking"), "on both sides of the leak")
-                expect.isFalse(text.contains("per node"), "and the far end is not in it twice")
-            },
-
-            test("words the far end never said are not deleted as its echo") { expect in
-                // Measured on the Slack huddle of 3 September 2026. Two runs of
-                // the user's own speech survived the cut, 18 words and 45, and
-                // the echo clause then read 1.47 dB and 5.08 dB over them and
-                // deleted both. The user asked a question, the far end answered
-                // it, and only the answer is in the transcript.
-                //
-                // The clause is measuring energy, and on speakers the far end
-                // is playing underneath the user the whole time, so it reads
-                // their own voice as leakage. Its own documentation gives this
-                // as the cost: a voice has to sit about 12 dB above the leak to
-                // survive it.
-                //
-                // The cut already answered that question better. Leakage is the
-                // far end's words arriving twice, so a run the far end's own
-                // transcript does not contain is not leakage, whatever is
-                // playing underneath it. The level clauses still apply.
-                let far = "so what I would do is run three nodes behind the api"
-                let spoken = "yeah but i mean its not like its impossible they said they had tested it"
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 6, text: far, speaker: nil,
-                        words: far.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 8, end: 15, text: spoken, speaker: nil,
-                        words: spoken.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", 8 + Double($0.offset) * 0.4, 8 + Double($0.offset) * 0.4 + 0.3)
-                        }
-                    )]
-                )
-                // The far end is playing under the user the whole time, so the
-                // filter accounts for a good part of their microphone.
-                let windows = Int(40 / windowSeconds)
-                let evidence = SpeechEvidence(
-                    levelWindowSeconds: windowSeconds, speechWindowSeconds: speechWindowSeconds,
-                    micLevels: [Int8](repeating: -24, count: windows),
-                    remoteLevels: [Int8](repeating: -26, count: windows),
-                    micSpeech: [Int8](repeating: 99, count: Int(40 / speechWindowSeconds)),
-                    micEchoReturnLoss: [Int16](repeating: 51, count: windows), detector: "silero"
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: evidence, micTrackIsLocalUser: true,
-                    generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                let text = transcript.utterances.filter { $0.track == .mic }
-                    .map(\.text).joined(separator: " ")
-                expect.isTrue(text.contains("not like its impossible"), "the question is in the transcript")
-            },
-
-            test("a short backchannel the far end never said is kept") { expect in
-                // The length rule exists to throw away fragments stranded
-                // between two stretches of leakage. Applied to a segment where
-                // nothing matched at all, it deleted every local line under
-                // five words and two seconds in any two-track meeting, which is
-                // the opposite of what it is for. `LocalSpeechPolicy` keeps
-                // backchannels on purpose.
-                let far = "so what I would do is run three nodes behind the api"
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 6, text: far, speaker: nil,
-                        words: far.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 8, end: 9, text: "yeah exactly right", speaker: nil,
-                        words: [word(" yeah", 8.0, 8.3), word(" exactly", 8.4, 8.7),
-                                word(" right", 8.8, 9.0)]
-                    )]
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: nil, micTrackIsLocalUser: true,
-                    generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                expect.isTrue(
-                    transcript.utterances.contains { $0.track == .mic && $0.text.contains("yeah exactly right") }
-                )
-            },
-
-            test("a contraction cannot hide the far end's own words") { expect in
-                // The two sides were tokenised differently. `normalise` splits
-                // on every non-alphanumeric, so the far end's "don't" became
-                // "don" and "t" while the microphone's became "dont", and the
-                // two could never compare equal. A match needs three words in a
-                // row, so a contraction every few words kept every run too
-                // short to cut and let verbatim leakage through.
-                let far = "yeah I'm not sure that's going to work we'd need to check it's supported"
-                let heard = "yeah im not sure thats going to work wed need to check its supported"
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 7, text: far, speaker: nil,
-                        words: far.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0.7, end: 8, text: heard, speaker: nil,
-                        words: heard.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", 0.7 + Double($0.offset) * 0.5, 0.7 + Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: nil, micTrackIsLocalUser: true,
-                    generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                let local = transcript.utterances.filter { $0.track == .mic }
-                expect.isTrue(local.isEmpty, "the far end's own words are not rendered under the user's name")
-            },
-
-            test("an answer between two leaked runs is not bridged away") { expect in
-                // Bridging measured the time between two marked words without
-                // looking at what was in the hole, so a real answer sitting
-                // between two stretches of leakage was swallowed by them.
-                let far = "so we would run three nodes behind the api and then scale the workers out"
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 8, text: far, speaker: nil,
-                        words: far.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let lead = "so we would run three nodes behind the api"
-                let answer = "no we already have those licensed"
-                let tail = "and then scale the workers out"
-                var words: [RawTranscriptWord] = []
-                var at = 0.6
-                for token in lead.split(separator: " ") + answer.split(separator: " ")
-                    + tail.split(separator: " ") {
-                    words.append(word(" \(token)", at, at + 0.2)); at += 0.25
-                }
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0.6, end: at, text: "\(lead) \(answer) \(tail)",
-                        speaker: nil, words: words
-                    )]
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: nil, micTrackIsLocalUser: true,
-                    generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                let text = transcript.utterances.filter { $0.track == .mic }
-                    .map(\.text).joined(separator: " ")
-                expect.isTrue(text.contains("already have those licensed"), "the answer survives")
-                expect.isFalse(text.contains("three nodes behind"), "the leakage does not")
-            },
-
-            test("a turn the far end never said is left whole") { expect in
-                // The cut only removes what the far end's own track already
-                // holds. A turn the user held on their own keeps every word,
-                // including the ordinary ones a loose match would catch.
-                let remote = RawTranscriptChunk(
-                    id: "remote_full", track: .remote, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 0, end: 3, text: "so what did you find", speaker: nil,
-                        words: "so what did you find".split(separator: " ").enumerated().map {
-                            word(" \($0.element)", Double($0.offset) * 0.5, Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let spoken = "the index rebuilt overnight and the numbers came back clean this morning"
-                let mic = RawTranscriptChunk(
-                    id: "mic_full", track: .mic, timelineOffset: 0, durationSeconds: 40,
-                    model: "fluidaudio-parakeet-tdt-v3", responseFormat: "local_words",
-                    segments: [RawTranscriptSegment(
-                        start: 4, end: 12, text: spoken, speaker: nil,
-                        words: spoken.split(separator: " ").enumerated().map {
-                            word(" \($0.element)", 4 + Double($0.offset) * 0.5, 4 + Double($0.offset) * 0.5 + 0.4)
-                        }
-                    )]
-                )
-                let transcript = TranscriptAssembler().assemble(
-                    raw: RawTranscript(chunks: [remote, mic]), diarization: RawDiarization(),
-                    speech: nil, micTrackIsLocalUser: true, generatedAt: Date(timeIntervalSince1970: 0)
-                )
-                let text = transcript.utterances.filter { $0.track == .mic }
-                    .map(\.text).joined(separator: " ")
-                expect.isTrue(text.contains("rebuilt overnight"))
-                expect.isTrue(text.contains("came back clean this morning"), "nothing is trimmed")
+                expect.equal(transcript.utterances.filter { $0.track == .mic }.count, 1)
             },
 
             test("a meeting with no evidence assembles exactly as it did before") { expect in
@@ -814,8 +297,7 @@ enum SpeechGateTests {
                 // The guard exists because a fabrication on the microphone is
                 // shown as something the user said. The far end arrives on its
                 // own tap, which is silent when nobody speaks and carries no
-                // leakage of anybody else, and it has no second track to be
-                // compared against.
+                // leakage of anybody else.
                 let remote = RawTranscriptChunk(
                     id: "remote_chunk_001", track: .remote, timelineOffset: 0,
                     durationSeconds: 1000, model: "gpt-4o-transcribe-diarize",
@@ -879,39 +361,8 @@ enum SpeechGateTests {
                 expect.isTrue(evidence.detector == nil)
             },
 
-            test("the echo pass runs over a recorded pair and measures the whole track") { expect in
-                // The measurement reads both tracks in lockstep, a few minutes
-                // at a time, through code no unit test reaches. This runs it on
-                // audio decoded off disk. The two tracks hold different tones,
-                // and no filter of one sinusoid produces another at a different
-                // frequency, so the answer has to be that the far end accounts
-                // for nothing.
-                let root = try ManifestTests.makeTemporaryDirectory()
-                defer { try? FileManager.default.removeItem(at: root) }
-                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 12)
-                let evidence = try await SpeechEvidenceBuilder.build(
-                    store: meeting.store, metadata: meeting.metadata,
-                    timeline: try meeting.store.readTimeline(), detector: nil
-                )
-                expect.isTrue(!evidence.micEchoReturnLoss.isEmpty, "the pass produced a series")
-                // One reading per level window, give or take the part window the
-                // level pass keeps at the end and this one does not.
-                expect.isTrue(
-                    evidence.micLevels.count - evidence.micEchoReturnLoss.count <= 1,
-                    "\(evidence.micEchoReturnLoss.count) readings against \(evidence.micLevels.count) levels"
-                )
-                let loudest = Double(evidence.micEchoReturnLoss.max() ?? 0) / 10
-                expect.isTrue(
-                    loudest < LocalSpeechPolicy.echoReturnLossDB,
-                    "loudest reading \(loudest) dB, under what the gate drops at"
-                )
-            },
-
-            test("a recording with no far end is never measured for echo") { expect in
-                // An import and an in-person session have one track. There is
-                // nothing for the microphone to have leaked, and the clause has
-                // to stay out of the decision rather than measure the track
-                // against itself.
+            test("a recording with no far end carries no far-end series") { expect in
+                // An import and an in-person session have one track.
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }
                 let meeting = try PipelineTests.makeRecordedMeeting(root: root, source: .inPerson)
@@ -920,15 +371,13 @@ enum SpeechGateTests {
                     timeline: try meeting.store.readTimeline(), detector: nil
                 )
                 expect.isTrue(evidence.remoteLevels.isEmpty, "no far end was recorded")
-                expect.isTrue(evidence.micEchoReturnLoss.isEmpty, "so nothing measured the echo")
             },
 
-            test("a far end that stopped recording first leaves the rest to the detector") { expect in
+            test("a far end that stopped recording first reads as absent after it stopped") { expect in
                 // The process tap delivers nothing while the application is
                 // idle, so the far end's track can end while the microphone is
                 // still recording. There is no evidence about the far end after
-                // that, and inventing some would be the guard deciding on a
-                // measurement nobody made.
+                // that, and inventing some would be a measurement nobody made.
                 let evidence = SpeechEvidence(
                     levelWindowSeconds: 0.25, speechWindowSeconds: 0.256,
                     micLevels: [Int8](repeating: -20, count: 400),
@@ -936,19 +385,13 @@ enum SpeechGateTests {
                     micSpeech: [Int8](repeating: 95, count: 400), detector: "silero"
                 )
                 let during = try expect.unwrap(evidence.reading(from: 2, to: 3))
-                expect.isTrue(during.loudestFarDB != nil, "compared while both tracks ran")
-                expect.equal(
-                    LocalSpeechPolicy.decide(text: "so that is the plan", reading: during),
-                    .notSpoken,
-                    "quieter than the far end, so not the user"
-                )
-
+                expect.isTrue(during.loudestFarDB != nil, "measured while both tracks ran")
                 let after = try expect.unwrap(evidence.reading(from: 40, to: 41))
-                expect.isTrue(after.loudestFarDB == nil, "nothing to compare against")
+                expect.isTrue(after.loudestFarDB == nil, "nothing recorded to read")
                 expect.equal(
                     LocalSpeechPolicy.decide(text: "so that is the plan", reading: after),
                     .spoken,
-                    "the detector decides alone rather than the clause deciding silently"
+                    "the detector decides"
                 )
             },
 

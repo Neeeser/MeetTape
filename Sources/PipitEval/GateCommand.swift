@@ -7,9 +7,9 @@ import PipitServices
 /// segment on the local user's track.
 ///
 /// The developer tool for checking the numbers in `LocalSpeechPolicy` again on
-/// real audio. It reads a meeting, runs the detector and the level passes, and
-/// reports the three measures beside each segment with the verdict, so a
-/// threshold change can be looked at rather than argued about.
+/// real audio. It reads a meeting, runs the detector and the level pass, and
+/// reports the measures beside each segment with the verdict, so a threshold
+/// change can be looked at rather than argued about.
 ///
 /// Writes nothing. The evidence it builds is thrown away with the process.
 enum GateCommand {
@@ -50,9 +50,7 @@ enum GateCommand {
         print("level window    \(evidence.levelWindowSeconds)s over \(evidence.micLevels.count) samples")
         print("speech window   \(evidence.speechWindowSeconds)s over \(evidence.micSpeech.count) samples")
         print("")
-        print("echo windows    \(evidence.micEchoReturnLoss.count)")
-        print("")
-        print("    start      end   voice    mic    far  median    echo  verdict  text")
+        print("    start      end   voice    mic    far  verdict  text")
 
         var kept = 0
         var dropped = 0
@@ -67,9 +65,9 @@ enum GateCommand {
                 guard let reading = evidence.reading(from: start, to: end) else {
                     kept += 1
                     print(String(
-                        format: "%9.2f %8.2f  %6@ %6@ %6@  %6@  %6@  %-7@  %@",
+                        format: "%9.2f %8.2f  %6@ %6@ %6@  %-7@  %@",
                         start, end, "-" as NSString, "-" as NSString, "-" as NSString,
-                        "-" as NSString, "-" as NSString, "keep" as NSString,
+                        "keep" as NSString,
                         String(text.prefix(60))
                     ))
                     continue
@@ -77,10 +75,9 @@ enum GateCommand {
                 let decision = LocalSpeechPolicy.decide(text: text, reading: reading)
                 if decision == .spoken { kept += 1 } else { dropped += 1 }
                 print(String(
-                    format: "%9.2f %8.2f  %6.3f %6.1f %6.1f  %6.1f  %6.2f  %-7@  %@",
+                    format: "%9.2f %8.2f  %6.3f %6.1f %6.1f  %-7@  %@",
                     start, end, reading.speechProbability ?? -1, reading.loudestLocalDB,
-                    reading.loudestFarDB ?? 0, reading.medianDifferenceDB ?? 0,
-                    reading.echoReturnLossDB ?? -1,
+                    reading.loudestFarDB ?? 0,
                     decision == .spoken ? "keep" : "DROP" as NSString,
                     String(text.prefix(60))
                 ))

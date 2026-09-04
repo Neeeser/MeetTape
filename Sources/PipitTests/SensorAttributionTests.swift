@@ -26,7 +26,9 @@ enum SensorAttributionTests {
     /// nowhere else.
     ///
     /// Outside those spans the microphone is quiet and below the far end, which
-    /// is what the far end playing while the user listens looks like.
+    /// is what the far end playing while the user listens looks like. Over
+    /// `echoDuring` the far end plays and the cleaned microphone holds what the
+    /// canceller left of it, which the detector does not call speech.
     private static func speech(
         seconds: Double, talking: [(Double, Double)],
         echoDuring: [(Double, Double)] = [], window: Double = 0.25
@@ -35,7 +37,6 @@ enum SensorAttributionTests {
         var mic = [Int8](repeating: -80, count: count)
         var remote = [Int8](repeating: -30, count: count)
         var probability = [Int8](repeating: 0, count: count)
-        var echo = [Int16](repeating: 0, count: count)
         func windows(_ spans: [(Double, Double)]) -> [Int] {
             spans.flatMap { Array(Int($0.0 / window)..<min(count, Int($0.1 / window))) }
         }
@@ -44,19 +45,14 @@ enum SensorAttributionTests {
             remote[index] = -40
             probability[index] = 90
         }
-        // Leakage: the microphone hears speech and reads louder than the far
-        // end's own quietly recorded track, and only the echo measure separates
-        // it from the user actually talking.
         for index in windows(echoDuring) {
-            mic[index] = -20
-            remote[index] = -40
-            probability[index] = 90
-            echo[index] = 12
+            mic[index] = -58
+            remote[index] = -22
+            probability[index] = 8
         }
         return SpeechEvidence(
             levelWindowSeconds: window, speechWindowSeconds: window,
-            micLevels: mic, remoteLevels: remote,
-            micSpeech: probability, micEchoReturnLoss: echo
+            micLevels: mic, remoteLevels: remote, micSpeech: probability
         )
     }
 
@@ -987,14 +983,13 @@ enum SensorAttributionTests {
                 expect.isFalse(scoped.participants.first { $0.id == "d382" }?.isSelf == true)
             },
 
-            test("the far end leaking into the microphone is not the user") { expect in
-                // Without headphones the call comes back through the speakers,
-                // the microphone's gain lifts it to the far end's own level, and
-                // every level clause keeps it. Only subtracting a filtered copy
-                // of the far end separates whose sound it is from how loud it
-                // is, which is why LocalSpeechPolicy needed a fourth measure.
-                // Marking a remote participant self deletes their turns
-                // outright, so this has to fail closed.
+            test("the far end playing over a cleaned microphone is not the user") { expect in
+                // Without headphones the call comes back through the speakers.
+                // The cleaner subtracts it before anything here reads the
+                // microphone, so what is left under a far-end turn is not
+                // speech, and the detector says so. Marking a remote
+                // participant self deletes their turns outright, so this has
+                // to fail closed.
                 let raw = sensors(
                     participants: [participant("d406", "Grace"), participant("d409", "Ada")],
                     turns: [("d406", 0, 10), ("d409", 10, 20)]
@@ -1038,7 +1033,6 @@ enum SensorAttributionTests {
                 )
                 var oneTrack = speech(seconds: 120, talking: [(0, 120)])
                 oneTrack.remoteLevels = []
-                oneTrack.micEchoReturnLoss = []
                 expect.equal(raw.markingSelf(using: oneTrack).participants.filter(\.isSelf).count, 0)
             },
 
@@ -1068,7 +1062,6 @@ enum SensorAttributionTests {
                 )
                 var silent = speech(seconds: 180, talking: [(0, 180)])
                 silent.remoteLevels = silent.remoteLevels.map { _ in Int8(-120) }
-                silent.micEchoReturnLoss = silent.micEchoReturnLoss.map { _ in Int16(0) }
                 expect.equal(silent.remoteLevels.isEmpty, false)
                 expect.equal(silent.farEndCarriesSignal, false)
                 expect.equal(raw.markingSelf(using: silent).participants.filter(\.isSelf).count, 0)
@@ -1111,20 +1104,6 @@ enum SensorAttributionTests {
                     scoped.participants.first { $0.id == "U2" }?.isSelf == true,
                     "not judged on windows measured against silence"
                 )
-            },
-
-            test("the microphone being quieter than the far end is not the user") { expect in
-                // The clause that carries the most weight on real data, taking
-                // the worst non-self reading from 0.215 to 0.118. Isolated here:
-                // the detector fires throughout and the echo measure stays
-                // clear, so only the level comparison can reject these windows.
-                let raw = sensors(
-                    participants: [participant("U1", "Ada")], turns: [("U1", 0, 60)]
-                )
-                var quiet = speech(seconds: 60, talking: [(0, 60)])
-                quiet.micLevels = quiet.micLevels.map { _ in Int8(-50) }
-                quiet.remoteLevels = quiet.remoteLevels.map { _ in Int8(-20) }
-                expect.equal(raw.markingSelf(using: quiet).participants.filter(\.isSelf).count, 0)
             },
 
             test("a turn timed past the end of the world is not walked") { expect in

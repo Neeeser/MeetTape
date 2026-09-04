@@ -1,13 +1,11 @@
 import Foundation
 
-/// What the audio under one transcript segment holds, as the three measures
-/// that separate a person speaking into their own microphone from everything
-/// else a speech model writes words for.
+/// What the audio under one transcript segment holds.
 ///
 /// `speechProbability` is a voice activity detector's highest reading anywhere
 /// in the span. The two level figures are the loudest window on each track, in
-/// dBFS, and `medianDifferenceDB` is the middle of the per-window differences
-/// between them. A meeting with one track leaves the far end nil.
+/// dBFS. A meeting with one track leaves the far end nil, and so does a span
+/// the far end's track never reached.
 public struct SpeechReading: Sendable, Equatable {
     /// The detector's highest reading over the span, or nil where no detector
     /// ran.
@@ -16,24 +14,11 @@ public struct SpeechReading: Sendable, Equatable {
     public var loudestLocalDB: Double
     /// The loudest window on the other track over the same span.
     public var loudestFarDB: Double?
-    /// The middle of the per-window differences, local minus far.
-    public var medianDifferenceDB: Double?
-    /// How much of the microphone's energy over the span a filtered copy of the
-    /// far end accounts for, in decibels. Nil where nothing measured it.
-    public var echoReturnLossDB: Double?
 
-    public init(
-        speechProbability: Double?,
-        loudestLocalDB: Double,
-        loudestFarDB: Double? = nil,
-        medianDifferenceDB: Double? = nil,
-        echoReturnLossDB: Double? = nil
-    ) {
+    public init(speechProbability: Double?, loudestLocalDB: Double, loudestFarDB: Double? = nil) {
         self.speechProbability = speechProbability
         self.loudestLocalDB = loudestLocalDB
         self.loudestFarDB = loudestFarDB
-        self.medianDifferenceDB = medianDifferenceDB
-        self.echoReturnLossDB = echoReturnLossDB
     }
 }
 
@@ -51,46 +36,20 @@ public struct SpeechReading: Sendable, Equatable {
 /// reading " ♪". A third produced "Thank you." six times and "Terima kasih."
 /// once for a user who never spoke.
 ///
-/// Every existing guard is blind to it. `EmptyTranscriptPolicy` asks whether the
-/// response was empty and it was not. `DegenerateTranscriptPolicy` asks whether
-/// one phrase repeats and each fabrication is different text. The assembler's
-/// echo scan asks whether the far end already said it and the far end did not.
-/// Nothing compared a returned segment against the audio underneath it.
+/// Two measures decide. The text has to hold words at all, which is what a run
+/// of " ♪" fails. And a voice activity detector has to fire somewhere in the
+/// span, which is what fabrication over silence fails: two segments in the
+/// 29-minute meeting sit on audio Silero scores 0.000 and 0.002.
 ///
-/// Three measures decide, because each one is blind to what the others catch.
-/// The text has to hold words at all, which is what a run of " ♪" fails. A
-/// voice activity detector has to fire somewhere in the span, which is what
-/// fabrication over true silence fails: two segments in the 29-minute meeting
-/// sit on audio Silero scores 0.000 and 0.002. And the local user has to be
-/// louder than the far end, which is what leakage fails. Leakage is the case
-/// the detector cannot judge, because the far end coming back through the
-/// speakers into the microphone is speech and the detector correctly says so:
-/// on its own the detector removed 80 of those 181, worse than the level
-/// comparison alone.
-///
-/// Together, run with the shipping model over the same four meetings, the three
-/// remove 178 of the 181 invented segments and keep 39 of the 41 genuine ones.
-/// Both genuine losses are backchannels said while the far end was talking,
-/// "yeah" and "Yeah.", where the microphone really does hold more of the far
-/// end than of the user. That is the side to be wrong on: a fabricated sentence
-/// attributed to the user is worse than a missing "yeah".
-///
-/// A fourth measure was added after a meeting the three let through nearly
-/// whole. The user sat muted for 39 minutes with the call playing out of the
-/// laptop's speakers, and 19 of the 20 segments the gate kept were the far end
-/// coming back through the room: "we use three, yeah" against the far end's "we
-/// use S3... yeah", "Right. Do we have to tell the people who" against "have to
-/// sell the people who control the purse strings". Every level clause keeps
-/// these, because the microphone's own gain control lifts the leakage to the
-/// same level as the far end's quietly recorded track and sometimes above it,
-/// and the detector calls them speech because leakage is speech.
-///
-/// What separates them is not how loud the two tracks are but whose sound it is.
-/// The far end is captured from the application's output, before the speakers,
-/// so it is a clean reference for whatever returns through the room, and what
-/// returns is a linear filter of it. `EchoReturnLossProfile` fits that filter
-/// and subtracts it; what it removes is measured per window and stored beside
-/// the levels.
+/// The far end coming back through the speakers is not judged here any more.
+/// It used to be, by comparing the two tracks' levels and by measuring how much
+/// of the microphone a filtered copy of the far end accounted for, and both
+/// were guesses about whose voice the microphone held. Guessing wrong deleted
+/// the user: on a Slack huddle of 3 September 2026 every one of the 3957 words
+/// they said was dropped as leakage. The far end is now subtracted out of the
+/// microphone before transcription, by `MicrophoneCleaner`, so what reaches
+/// this policy holds the user and nothing else, and the detector's reading on
+/// it means what it says.
 public enum LocalSpeechPolicy {
     /// The detector reading a span needs to reach somewhere inside it.
     ///
@@ -100,46 +59,6 @@ public enum LocalSpeechPolicy {
     /// one more fabrication and costs one more genuine segment, so it stays at
     /// the conventional value.
     public static let speechProbability = 0.5
-
-    /// How far the microphone must sit above the far end through the middle of
-    /// the span, measured as the median of the per-window differences, for the
-    /// segment to survive on that alone.
-    ///
-    /// The two clauses catch different shapes. A short word spoken over the far
-    /// end wins on its loudest window; a turn during which the far end is quiet
-    /// most of the time wins on the median. Ten decibels is where the genuine
-    /// segments sit: 21 of 25 in the meeting that was audited read 22 dB or
-    /// more, and every fabrication reads at most 1 dB.
-    public static let sustainedMarginDB = 10.0
-
-    /// How much of a segment's microphone energy a filtered copy of the far end
-    /// has to account for before the segment is the speakers rather than the
-    /// user.
-    ///
-    /// The level clauses above compare how loud the two tracks are, which is the
-    /// wrong question when the microphone's gain control has already lifted the
-    /// leakage above the far end's own quietly recorded track. Subtracting the
-    /// far end asks whose sound it is instead of how loud it is.
-    ///
-    /// Measured over 257 microphone segments from five meetings on disk, 41 of
-    /// them leakage confirmed against what the far end said at the time: at 0.4
-    /// dB the clause removes 38 of the 41 and none of the 216 the user really
-    /// spoke. The genuine segments do not come close, the loudest reading 0.10
-    /// dB and every one the user actually said 0.01 dB or less, so the threshold
-    /// sits four times above the nearest thing it could take by mistake.
-    ///
-    /// What it costs is speech said over the far end while on speakers. Mixing
-    /// real utterances from a headphone meeting into the leaking call, at the
-    /// same level as the leakage, 31 of 36 read above this threshold and would
-    /// be dropped; the user's voice has to be about 12 dB above the leakage to
-    /// survive reliably. Two things keep that narrow. Leakage only exists while
-    /// the far end is talking, so a turn the user holds on their own reads 0.00
-    /// dB and is kept, measured over 24 utterances placed where the far end was
-    /// quiet. And a meeting on headphones has no path at all, which is why three
-    /// of the five meetings measured never trip the clause once. The exposure is
-    /// speaking at the same moment as the far end, on speakers, which is the
-    /// case the level clauses above already give up on.
-    public static let echoReturnLossDB = 0.4
 
     public enum Decision: Sendable, Equatable {
         /// Assemble the segment.
@@ -154,32 +73,13 @@ public enum LocalSpeechPolicy {
     ///   - reading: what the audio under the segment holds.
     public static func decide(text: String, reading: SpeechReading) -> Decision {
         guard holdsWords(text) else { return .notSpoken }
-        // No detector ran, so this clause cannot speak either way and the level
-        // comparison decides alone. Skipping the segment instead would delete a
-        // meeting's local track on a machine where the model is missing.
+        // No detector ran, so nothing can say the words are invented and the
+        // segment is kept. Dropping it instead would delete a meeting's local
+        // track on a machine where the model is missing.
         if let probability = reading.speechProbability, probability < speechProbability {
             return .notSpoken
         }
-        // Before any comparison of levels, because this is the case the levels
-        // get wrong. A segment the far end's own audio accounts for is the far
-        // end whatever the two tracks read on the meter.
-        if let echo = reading.echoReturnLossDB, echo >= echoReturnLossDB {
-            return .notSpoken
-        }
-        // One track, so there is no far end to be quieter than. A recording
-        // whose process tap produced nothing lands here, and so does the tail
-        // of a meeting whose tap stopped before the microphone did. Imported
-        // and in-person audio never reaches the gate at all: the microphone
-        // there holds everybody, so it is not the local user's track.
-        guard let far = reading.loudestFarDB, let median = reading.medianDifferenceDB else {
-            return .spoken
-        }
-        // At or above, not above. Two tracks reading the same level say nothing
-        // about which one the sound came from, and a guard that deletes words
-        // has to be the one carrying the doubt. Nothing measured landed on a
-        // tie: the closest genuine segment reads 0.2 dB under the far end and
-        // the closest fabricated one 1.3 dB over.
-        return reading.loudestLocalDB >= far || median > sustainedMarginDB ? .spoken : .notSpoken
+        return .spoken
     }
 
     /// Whether the text is words rather than a transcription model's notation.

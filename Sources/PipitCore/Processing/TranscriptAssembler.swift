@@ -143,14 +143,7 @@ public struct TranscriptAssembler: Sendable {
         // Sensor turns describe the far end alone: the local user's own track
         // never needs them, and an in-person recording never has them.
         let sensorIntervals = sensors.map { SensorAttribution.wordIntervals(sensors: $0) } ?? []
-        // The diarized tracks are assembled first so that the local track can be
-        // checked against them. A user without headphones plays the remote side
-        // through speakers, the microphone records it, and the transcription
-        // model writes the remote speakers' words onto the local track. The
-        // remote track is authoritative for those words, so a local segment that
-        // repeats them nearby in time is echo and is dropped.
         var utterances: [Utterance] = []
-        var echoReference: [Utterance] = []
         let orderedTracks = CaptureTrack.allCases.sorted { lhs, _ in
             !(lhs == .mic && micTrackIsLocalUser)
         }
@@ -161,8 +154,6 @@ public struct TranscriptAssembler: Sendable {
             let chunks = raw.chunks(track: track, purpose: .words)
             guard !chunks.isEmpty else { continue }
             let treatAsLocalUser = track == .mic && micTrackIsLocalUser
-            // Sorted so the echo scan can stop at the first utterance past its
-            // window instead of walking the whole meeting per segment.
             // A track whose segments already name a speaker keeps them: that
             // is the cloud diarizer's own output and re-deriving it from
             // intervals would change a working result for nothing. A track
@@ -201,14 +192,12 @@ public struct TranscriptAssembler: Sendable {
             let assembled = assembleTrack(
                 attributed,
                 treatAsLocalUser: treatAsLocalUser,
-                echoReference: treatAsLocalUser ? echoReference.sorted { $0.start < $1.start } : [],
                 // Only the local user's track. The far end arrives on its own
                 // tap, which is silent when nobody is speaking and carries no
                 // leakage of anybody else, and the harm this guards against is
                 // a sentence the user is shown as having said.
                 speech: treatAsLocalUser ? speech : nil
             )
-            if !treatAsLocalUser { echoReference.append(contentsOf: assembled) }
             utterances.append(contentsOf: assembled)
         }
         utterances.sort { lhs, rhs in
@@ -643,15 +632,11 @@ public struct TranscriptAssembler: Sendable {
     }
 
     private func assembleTrack(
-        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, echoReference: [Utterance],
-        speech: SpeechEvidence?
+        _ chunks: [RawTranscriptChunk], treatAsLocalUser: Bool, speech: SpeechEvidence?
     ) -> [Utterance] {
         var accepted: [Utterance] = []
         for chunk in deduplicateOverlaps(chunks) {
-            let candidates = utterances(
-                from: chunk, treatAsLocalUser: treatAsLocalUser, echoReference: echoReference,
-                speech: speech
-            )
+            let candidates = utterances(from: chunk, treatAsLocalUser: treatAsLocalUser, speech: speech)
             for candidate in candidates {
                 if isDuplicate(candidate, of: accepted) { continue }
                 guard let trimmed = trimmingSeamRepeat(candidate, after: accepted.last)
@@ -665,8 +650,7 @@ public struct TranscriptAssembler: Sendable {
     /// Groups consecutive same-speaker segments into readable turns and moves
     /// them onto the meeting timeline.
     private func utterances(
-        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, echoReference: [Utterance],
-        speech: SpeechEvidence?
+        from chunk: RawTranscriptChunk, treatAsLocalUser: Bool, speech: SpeechEvidence?
     ) -> [Utterance] {
         var result: [Utterance] = []
         var current: (
@@ -738,66 +722,17 @@ public struct TranscriptAssembler: Sendable {
         // Once per chunk rather than once per segment; it is a property of the
         // whole series.
         let farEndUsable = speech?.farEndCarriesSignal ?? false
-        for original in chunk.segments.sorted(by: { $0.start < $1.start }) {
-            let whole = original.text.trimmingCharacters(in: .whitespaces)
-            guard !whole.isEmpty else { continue }
-            // Whole-segment judgements above, word-level below. A recogniser
-            // segment runs to about thirty seconds and routinely holds both the
-            // far end leaking through the speakers and the user's own answer to
-            // it, so neither keeping nor dropping the whole thing is right.
-            // One run at a time, not one stretch at a time. The cut leaves the
-            // user's own words in runs with the far end's between them, and a
-            // single reading spanning the first run to the last still covers
-            // that leakage: on a Slack huddle recorded on 3 September 2026 it
-            // read 9.9 dB against a 0.4 dB threshold and deleted all 3957 words
-            // the user said, leaving them absent from their own meeting.
-            let cut = trimmingEcho(
-                original, chunkOffset: chunk.timelineOffset, reference: echoReference
-            )
-            // After the cut, not before it. Asking whether the whole stretch
-            // resembles the far end drops a stretch that is mostly leakage with
-            // the user's own answer inside it, answer and all. It is still the
-            // only thing that catches a stretch too short to cut, because a run
-            // has to be three words long before it counts as a match.
-            if cut.runs.count == 1, cut.runs[0].start == original.start,
-               cut.runs[0].end == original.end, isEcho(
-                   whole,
-                   start: chunk.timelineOffset + original.start,
-                   end: chunk.timelineOffset + original.end,
-                   reference: echoReference
-               ) { continue }
-            for segment in cut.runs {
-                let text = segment.text.trimmingCharacters(in: .whitespaces)
-                guard !text.isEmpty else { continue }
-                // Measured over what is left, not over what arrived. A run the cut
-                // reduced to the user's own words is judged on those.
-                let start = chunk.timelineOffset + segment.start
-                let end = chunk.timelineOffset + segment.end
-                if var reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable) {
-                    // The cut has already asked, and answered better, the
-                    // question the echo clause asks. Leakage is the far end's
-                    // words arriving a second time, so a run its own transcript
-                    // does not contain is not leakage, whatever is playing
-                    // underneath it.
-                    //
-                    // The clause measures energy, and on speakers the far end
-                    // plays under the user continuously, so it reads their own
-                    // voice as leakage: on the Slack huddle of 3 September 2026
-                    // it deleted 18 words and then 45 more, at 1.47 dB and
-                    // 5.08 dB against a 0.4 dB threshold. The user asked a
-                    // question, the far end answered it, and only the answer
-                    // reached the transcript. Its own documentation gives this
-                    // as the cost, a voice needing about 12 dB over the leak.
-                    //
-                    // Only where the far end's words were actually available to
-                    // compare against. The level clauses are untouched either
-                    // way, so a run that is loud far end and quiet user still
-                    // goes.
-                    if cut.comparedWithFarEnd { reading.echoReturnLossDB = nil }
-                    if LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
-                        continue
-                    }
-                }
+        for segment in chunk.segments.sorted(by: { $0.start < $1.start }) {
+            let text = segment.text.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { continue }
+            // Only the local user's track carries evidence, and a span the
+            // evidence does not cover is kept: nothing measured it.
+            let start = chunk.timelineOffset + segment.start
+            let end = chunk.timelineOffset + segment.end
+            if let reading = speech?.reading(from: start, to: end, farEndUsable: farEndUsable),
+               LocalSpeechPolicy.decide(text: text, reading: reading) == .notSpoken {
+                continue
+            }
                 if var group = current,
                    group.speaker == segment.speaker,
                    segment.start - group.end <= configuration.utteranceGapSeconds,
@@ -814,18 +749,10 @@ public struct TranscriptAssembler: Sendable {
                         segment.words ?? [], !(segment.words ?? []).isEmpty
                     )
             }
-            }
         }
         flush()
         return result
     }
-
-    /// How many words in a row have to match the far end before the run is its
-    /// leakage rather than a coincidence.
-    ///
-    /// Two is not enough. "you know" and "i think" recur all meeting on both
-    /// tracks and matching on them alone cut real speech apart.
-    private static let echoRunWords = 3
 
     /// How late the diarizer's first interval may be and still be read as its
     /// onset running behind the words rather than a different person speaking.
@@ -833,152 +760,6 @@ public struct TranscriptAssembler: Sendable {
     /// Measured at 3.74 s on a Meet recording of 3 September 2026, where a turn
     /// opened at 170.56 and its first interval began at 174.30.
     private static let onsetLagSeconds = 5.0
-
-    /// How close two runs of leakage have to be for what lies between them to be
-    /// leakage as well.
-    ///
-    /// The two tracks are the same sound heard twice, so the recogniser
-    /// disagrees with itself across them: on the 3 September recording the far
-    /// end reads "from scratcher" where the microphone reads "from scratch
-    /// here". Matching on words alone leaves those disagreements standing in
-    /// the middle of a stretch that is otherwise all far end, and enough of
-    /// them in a row survive the length rule below.
-    ///
-    /// Leakage is continuous in time. A hole inside it is the recogniser
-    /// disagreeing, not the user speaking, and two seconds is longer than any
-    /// of those holes and shorter than the pause before a real answer. Over the
-    /// whole archive it changes one other meeting by ten words.
-    private static let echoBridgeSeconds = 2.0
-
-    /// How much has to survive between two runs of leakage to be worth keeping.
-    ///
-    /// A handful of words stranded inside a stretch of the far end is the
-    /// recogniser's noise on leaked audio, not a turn. Either length settles it,
-    /// because a slow speaker says few words in a long time.
-    private static let keptRunWords = 5
-    private static let keptRunSeconds = 2.0
-
-    /// Cuts the far end's own words out of a local-track segment, and returns
-    /// nil when nothing the user said is left.
-    ///
-    /// The far end's track is the reference: the same sentence is in both,
-    /// because the microphone heard it come out of the speakers. Text, not
-    /// audio, so it needs no delay measurement, no level comparison and no
-    /// aligned tracks, and it repairs a meeting already on disk by reassembling
-    /// what the recogniser wrote rather than transcribing it again.
-    ///
-    /// A segment with no word timings cannot be cut and keeps whatever the
-    /// whole-segment rules above decided.
-    private func trimmingEcho(
-        _ segment: RawTranscriptSegment, chunkOffset: Double, reference: [Utterance]
-    ) -> (runs: [RawTranscriptSegment], comparedWithFarEnd: Bool) {
-        guard !reference.isEmpty, let words = segment.words, !words.isEmpty else {
-            return ([segment], false)
-        }
-        let window = configuration.duplicateSearchSeconds
-        let start = chunkOffset + segment.start
-        let end = chunkOffset + segment.end
-        // Every far-end word said near enough in time to be this segment's
-        // source, as one token run per utterance.
-        var references: [[String]] = []
-        for utterance in reference {
-            if utterance.start > end + window { break }
-            guard utterance.end > start - window else { continue }
-            let tokens = TextSimilarity.wordTokens(utterance.text)
-            if !tokens.isEmpty { references.append(tokens) }
-        }
-        guard !references.isEmpty else { return ([segment], false) }
-
-        let tokens = words.map { TextSimilarity.wordTokens($0.text).joined() }
-        var echoed = [Bool](repeating: false, count: words.count)
-        for index in tokens.indices where !tokens[index].isEmpty {
-            var longest = 0
-            for candidate in references {
-                for origin in candidate.indices {
-                    var length = 0
-                    while index + length < tokens.count,
-                          origin + length < candidate.count,
-                          !tokens[index + length].isEmpty,
-                          tokens[index + length] == candidate[origin + length] {
-                        length += 1
-                    }
-                    longest = max(longest, length)
-                }
-            }
-            if longest >= TranscriptAssembler.echoRunWords {
-                for offset in 0..<longest { echoed[index + offset] = true }
-            }
-        }
-
-        // Close the recogniser's disagreements before measuring what survives.
-        let marked = echoed.indices.filter { echoed[$0] }
-        for (left, right) in zip(marked, marked.dropFirst()) {
-            // The hole has to be short in time and hold too little to be a turn.
-            // Measuring time alone bridged over a six-word answer sitting
-            // between two leaked runs and deleted it.
-            guard words[right].start - words[left].end
-                < TranscriptAssembler.echoBridgeSeconds else { continue }
-            guard right - left - 1 < TranscriptAssembler.keptRunWords else { continue }
-            for between in left..<right { echoed[between] = true }
-        }
-
-        // Nothing matched, so there is nothing to cut and no run to measure.
-        // The length rule below only exists to throw away fragments stranded
-        // between two stretches of leakage, and applying it here deleted every
-        // local line under five words in any two-track meeting, which is the
-        // opposite of what this is for.
-        //
-        // Still compared, though. A far-end transcript was available and this
-        // segment was checked against it and found absent from it, which is
-        // exactly the evidence the echo clause is suppressed on.
-        guard echoed.contains(true) else { return ([segment], true) }
-
-        var runs: [RawTranscriptSegment] = []
-        var index = 0
-        var cutAnything = false
-        while index < words.count {
-            guard !echoed[index] else { index += 1; cutAnything = true; continue }
-            var run = index
-            while run < words.count, !echoed[run] { run += 1 }
-            let slice = Array(words[index..<run])
-            let seconds = (slice.last?.end ?? 0) - (slice.first?.start ?? 0)
-            defer { index = run }
-            guard slice.count >= TranscriptAssembler.keptRunWords
-                || seconds >= TranscriptAssembler.keptRunSeconds
-            else { cutAnything = true; continue }
-            let text = slice.map(\.text).joined().trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty, let first = slice.first, let last = slice.last else {
-                cutAnything = true
-                continue
-            }
-            runs.append(RawTranscriptSegment(
-                start: first.start, end: last.end, text: text,
-                speaker: segment.speaker, words: slice
-            ))
-        }
-        return (cutAnything ? runs : [segment], true)
-    }
-
-    /// A local-track segment that repeats what a diarized track already says
-    /// nearby in time. The window is generous because a transcription model's
-    /// timestamps drift by whole sentences on audio that carries speaker bleed.
-    private func isEcho(
-        _ text: String, start: Double, end: Double, reference: [Utterance]
-    ) -> Bool {
-        guard !reference.isEmpty else { return false }
-        let window = configuration.duplicateSearchSeconds
-        for utterance in reference {
-            if utterance.start > end + window { break }
-            guard utterance.end > start - window else { continue }
-            if TextSimilarity.score(utterance.text, text) >= configuration.duplicateSimilarity {
-                return true
-            }
-            if text.count >= 12, utterance.text.lowercased().contains(text.lowercased()) {
-                return true
-            }
-        }
-        return false
-    }
 
     /// Drops the opening words of a line that repeat the closing words of the
     /// line before it, and returns nil when nothing is left.

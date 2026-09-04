@@ -123,9 +123,9 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         // does not: measured 2026-08-25 with two standalone AVAudioEngine
         // binaries, one playing and one capturing with the unit on, AUVoiceIO
         // cancels only audio its own host renders, and this engine renders
-        // nothing. Speaker bleed is handled after the fact instead, by
-        // `EchoReturnLossProfile` and the clause in `LocalSpeechPolicy` that
-        // reads it. What the unit did do, for as long as the engine ran, was
+        // nothing. Speaker bleed is subtracted after the fact instead, by
+        // `MicrophoneCleaner` against the process tap's own recording of the far
+        // end. What the unit did do, for as long as the engine ran, was
         // duck every other application's output. Its ducking API has no off
         // setting, `.min` is a constant attenuation, and a person on a Slack
         // huddle heard the other side drop the moment recording began. This

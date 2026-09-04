@@ -331,7 +331,6 @@ enum LocalPipelineTests {
                     micLevels: [Int8](repeating: -20, count: 24),
                     remoteLevels: [Int8](repeating: -120, count: 24),
                     micSpeech: [Int8](repeating: 95, count: 24),
-                    micEchoReturnLoss: [Int16](repeating: 0, count: 24),
                     detector: "silero"
                 ))
 
@@ -405,7 +404,6 @@ enum LocalPipelineTests {
                     micLevels: [Int8](repeating: -20, count: 24),
                     remoteLevels: [Int8](repeating: -18, count: 24),
                     micSpeech: [Int8](repeating: 95, count: 24),
-                    micEchoReturnLoss: [Int16](repeating: 0, count: 24),
                     detector: "silero"
                 ))
                 let transcriber = StubLocalTranscriber(segments: [
@@ -966,12 +964,15 @@ enum LocalPipelineTests {
                 )
                 await pipeline.process(meetingID: meeting.metadata.id)
 
-                // The vector reached the local store.
+                // The vector reached the local store. The microphone track's
+                // own row is there too, carrying no vector: it is the local
+                // user by construction and nothing clusters it.
                 let occurrences = try await store.occurrences(meetingID: meeting.metadata.id)
-                expect.equal(occurrences.count, 1)
+                let clustered = occurrences.filter { $0.track == .remote }
+                expect.equal(clustered.count, 1)
                 expect.isTrue(
                     try await store.occurrenceEmbedding(
-                        meetingID: meeting.metadata.id, clusterID: occurrences[0].clusterID
+                        meetingID: meeting.metadata.id, clusterID: clustered[0].clusterID
                     ) != nil
                 )
 
@@ -3064,7 +3065,6 @@ enum LocalPipelineTests {
                     micLevels: [Int8](repeating: -20, count: windows),
                     remoteLevels: [Int8](repeating: -18, count: windows),
                     micSpeech: [Int8](repeating: 95, count: windows),
-                    micEchoReturnLoss: [Int16](repeating: 50, count: windows),
                     detector: "measured-on-the-recording"
                 ))
 

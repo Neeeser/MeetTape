@@ -1,5 +1,6 @@
 import AppKit
 import PipitCore
+import PipitIntegrations
 import PipitServices
 import SwiftUI
 
@@ -19,6 +20,9 @@ public final class WindowManager {
     private var meetingsWindow: NSWindow?
     private var meetingsModel: MeetingsWindowModel?
     private var provisionalWindow: NSWindow?
+    private var permissionWindow: NSWindow?
+    private var permissionNoticeModel: PermissionNoticeModel?
+    private var permissionNoticeID: String?
     private var provisionalPromptID: String?
     /// The windows currently on screen that Pipit has to stay reachable behind.
     private var openWindows: Set<ObjectIdentifier> = []
@@ -37,10 +41,8 @@ public final class WindowManager {
         // An open meetings window tracks processing on its own. When a
         // transcript lands, the row and the pane show it without a manual
         // refresh.
-        runtime.onPermissionRequired = { [weak self] _ in
-            // Setup lands on the first grant that is missing, so the kind is
-            // not needed to pick a step.
-            self?.showSetup()
+        runtime.onPermissionRequired = { [weak self] notice in
+            self?.showPermissionNotice(notice)
         }
         runtime.onProcessingUpdate = { [weak self] meetingID in
             guard let self, let model = self.meetingsModel else { return }
@@ -154,12 +156,19 @@ public final class WindowManager {
         showSetup()
     }
 
-    public func showSetup() {
-        if let window = setupWindow {
+    /// - Parameter kind: the grant Setup is being opened for, if one. The
+    ///   wizard lands on its step instead of the flow's own choice.
+    public func showSetup(landingOn kind: PermissionKind? = nil) {
+        let landing = kind.flatMap { kind in SetupStepID.allCases.first { $0.permission == kind } }
+        if let window = setupWindow, let model = setupModel {
+            if let landing { model.jump(to: landing) }
+            Self.place(window)
             present(window)
+            window.orderFrontRegardless()
             return
         }
         let model = SetupModel(runtime: runtime)
+        model.landing = landing
         setupModel = model
         let window = makeWindow(
             title: "Pipit Setup",
@@ -188,6 +197,7 @@ public final class WindowManager {
         // system prompts still sit above it.
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.collectionBehavior.insert(.fullScreenAuxiliary)
+        Self.place(window)
         model.onNeedsFocus = { [weak self] in self?.raiseSetup() }
         setupWindow = window
         setupPlacementToken = NSWorkspace.shared.notificationCenter.addObserver(
@@ -213,6 +223,28 @@ public final class WindowManager {
         guard let window = setupWindow else { return }
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// Centres a window on the screen the pointer is on.
+    ///
+    /// `center()` uses the screen with keyboard focus, which on a Mac with a
+    /// second display is wherever the last window was. The person who pressed
+    /// a menu bar item, or is looking at a call, is where the pointer is:
+    /// both Setup and the permission panel were measured opening on a Sidecar
+    /// display while the person looked at the built-in one.
+    static func place(_ window: NSWindow) {
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? NSScreen.main
+        guard let frame = screen?.visibleFrame else {
+            window.center()
+            return
+        }
+        if window.screen === screen, window.isVisible { return }
+        let size = window.frame.size
+        window.setFrameOrigin(
+            NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2 + frame.height * 0.06)
+        )
     }
 
     /// Moves the setup window off System Settings when it comes forward.
@@ -258,6 +290,9 @@ public final class WindowManager {
         setupWindow?.close()
         setupWindow = nil
         setupModel = nil
+        // The grant may have been given in System Settings with Setup
+        // closed. One read clears the red icon if it was.
+        Task { @MainActor [runtime] in await runtime.recheckPermissions() }
     }
 
     /// The meetings window: everything ever recorded, and one of them open.
@@ -336,6 +371,82 @@ public final class WindowManager {
         present(window, activating: false, holdsDockPresence: false)
     }
 
+    /// Says, in front of everything, that a recording was refused or is
+    /// missing its far end for want of a grant.
+    ///
+    /// Floating and on every space, ordered front without waiting for
+    /// activation: the person pressed Start Recording, or a call was
+    /// detected, and the reaction has to be where they are looking. Setup
+    /// itself stays at the normal level (see `showSetup`), so the macOS
+    /// permission prompts it triggers are never covered.
+    public func showPermissionNotice(_ notice: PermissionNotice) {
+        // Already up for this problem: the reaction to a second press is the
+        // panel coming forward, not a new one appearing over the old.
+        if permissionNoticeID == notice.id, let window = permissionWindow {
+            Self.place(window)
+            present(window, activating: true, holdsDockPresence: false)
+            window.orderFrontRegardless()
+            return
+        }
+        closePermissionNotice()
+        let model = PermissionNoticeModel(runtime: runtime, notice: notice)
+        let size = notice.single.map { $0.acceptsDroppedApplication }
+            == true ? NSSize(width: 520, height: 470) : NSSize(width: 460, height: 220)
+        let window = makeWindow(
+            title: notice.title,
+            size: size,
+            content: PermissionNoticeView(
+                model: model,
+                onOpenSetup: { [weak self] in
+                    self?.runtime.dismissPermissionNotice()
+                    self?.closePermissionNotice()
+                    self?.showSetup(landingOn: notice.missing.first)
+                },
+                onDismiss: { [weak self] in
+                    self?.runtime.dismissPermissionNotice()
+                    self?.closePermissionNotice()
+                },
+                onResolved: { [weak self] in self?.closePermissionNotice() }
+            )
+        )
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // The panel polls permissions while it is up, and every change of
+        // state made the hosting controller resize the window to the view's
+        // ideal height, which is unbounded: measured at 1825 points, with the
+        // buttons off the bottom of the screen. The size is fixed here and
+        // the host is told not to touch it.
+        if let host = window.contentViewController as? NSHostingController<AnyView> {
+            host.sizingOptions = []
+        }
+        window.setContentSize(size)
+        window.contentMinSize = size
+        window.contentMaxSize = size
+        model.onNeedsFocus = { [weak window] in
+            guard let window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+        permissionWindow = window
+        permissionNoticeModel = model
+        permissionNoticeID = notice.id
+        Self.place(window)
+        present(window, activating: true, holdsDockPresence: false)
+        window.orderFrontRegardless()
+    }
+
+    public func closePermissionNotice() {
+        permissionNoticeModel?.end()
+        permissionWindow?.close()
+        permissionWindow = nil
+        permissionNoticeModel = nil
+        permissionNoticeID = nil
+    }
+
     public func closeProvisionalPrompt() {
         provisionalWindow?.close()
         provisionalWindow = nil
@@ -410,6 +521,139 @@ public final class WindowManager {
 }
 
 /// The keep-or-discard question for an unrecognised call.
+/// The panel's live state: which grants are still missing, polled while it
+/// is up so a grant given in System Settings closes it on its own.
+@MainActor
+@Observable
+public final class PermissionNoticeModel {
+    public let notice: PermissionNotice
+    public var statuses: [PermissionStatus] = []
+    @ObservationIgnored public let runtime: PipitRuntime
+    @ObservationIgnored private let observer = PermissionObserver()
+    /// Called when a prompt has closed and focus went back to whatever was in
+    /// front of Pipit before it opened.
+    @ObservationIgnored public var onNeedsFocus: (() -> Void)?
+
+    public init(runtime: PipitRuntime, notice: PermissionNotice) {
+        self.runtime = runtime
+        self.notice = notice
+    }
+
+    public var isResolved: Bool { runtime.status.permissionNotice == nil }
+
+    public func status(for kind: PermissionKind) -> PermissionStatus {
+        statuses.first { $0.kind == kind } ?? PermissionStatus(kind: kind, state: .notDetermined)
+    }
+
+    public func begin() async {
+        statuses = await runtime.permissions.allStatuses()
+        runtime.permissionsDidChange(statuses)
+        observer.start { [weak self] statuses in
+            guard let self else { return }
+            self.statuses = statuses
+            self.runtime.permissionsDidChange(statuses)
+        }
+    }
+
+    public func end() {
+        observer.stop()
+    }
+
+    /// The same move as Setup's permission step: one call raises the prompt
+    /// for a prompt permission, and puts Pipit into the list then opens the
+    /// pane for a list permission.
+    public func request(_ kind: PermissionKind) async {
+        let status = await runtime.permissions.request(kind)
+        statuses = await runtime.permissions.allStatuses()
+        runtime.permissionsDidChange(statuses)
+        if !status.isUsable, !kind.isGrantedByPrompt {
+            runtime.permissions.openSettings(for: kind)
+        } else if !status.isUsable {
+            onNeedsFocus?()
+        }
+        Log.ui.info(
+            "panel requested \(kind.rawValue, privacy: .public): now \(status.state.rawValue, privacy: .public)"
+        )
+    }
+
+    public func actionLabel(for kind: PermissionKind) -> String {
+        if kind.isGrantedByPrompt, status(for: kind).state == .notDetermined {
+            return "Allow \(kind.title)"
+        }
+        return "Open System Settings"
+    }
+}
+
+struct PermissionNoticeView: View {
+    let model: PermissionNoticeModel
+    let onOpenSetup: () -> Void
+    let onDismiss: () -> Void
+    let onResolved: () -> Void
+
+    private var notice: PermissionNotice { model.notice }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                // The same red bird as the menu bar, so the panel reads as
+                // Pipit's at a glance and not as a system alert.
+                if let bird = MenuBarController.attentionImage(height: 40) {
+                    Image(nsImage: bird)
+                        .accessibilityLabel("Pipit needs attention")
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.red)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(notice.title).font(.headline)
+                    Text(notice.body).font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if notice.recordingContinues {
+                        Text("Recording continues while this is open.")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            if let kind = notice.single, kind.acceptsDroppedApplication {
+                SettingsPaneIllustration(kind: kind)
+                    .frame(maxWidth: 440)
+                if let advice = model.status(for: kind).advice,
+                    model.status(for: kind).state != .notDetermined
+                {
+                    Label(advice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer()
+            HStack {
+                if let kind = notice.single, kind.acceptsDroppedApplication { AppDragChip() }
+                Spacer()
+                Button(notice.recordingContinues ? "Keep Recording" : "Not Now") { onDismiss() }
+                    .keyboardShortcut(.cancelAction)
+                if let kind = notice.single {
+                    Button(model.actionLabel(for: kind)) { Task { await model.request(kind) } }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Open Setup") { onOpenSetup() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(20)
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .task { await model.begin() }
+        .onDisappear { model.end() }
+        .onChange(of: model.isResolved) { _, resolved in
+            if resolved { onResolved() }
+        }
+    }
+}
+
 struct ProvisionalPromptView: View {
     let prompt: ProvisionalPrompt
     let onKeep: () -> Void

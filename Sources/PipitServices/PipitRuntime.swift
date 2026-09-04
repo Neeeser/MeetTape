@@ -28,6 +28,10 @@ public struct RuntimeStatus: Sendable, Equatable {
     public var firefoxAddOnInProfile = false
     public var slackState: SlackHuddleDetector.State = .idle
     public var lastWarning: CaptureWarning?
+    /// A recording was refused or crippled for a missing grant, and the
+    /// grant has not been seen since. Drives the red menu bar icon and the
+    /// menu item that opens Setup.
+    public var permissionNotice: PermissionNotice?
 
     public init() {}
 
@@ -116,12 +120,15 @@ public final class PipitRuntime {
     /// window can reload its files without the user refreshing by hand.
     @ObservationIgnored public var onProcessingUpdate: ((String) -> Void)?
     /// A recording was asked for without a permission it needs. The window
-    /// layer opens Setup, which lands on the first grant that is missing.
-    @ObservationIgnored public var onPermissionRequired: ((PermissionKind) -> Void)?
-    /// When Setup was last opened for a missing grant. A detected call keeps
-    /// re-arming while the grant is missing, and that must not open the
-    /// window on every poll.
+    /// layer puts the notice in front of everything, with a button into
+    /// Setup.
+    @ObservationIgnored public var onPermissionRequired: ((PermissionNotice) -> Void)?
+    /// When the notice was last put on screen for a detected call. See
+    /// `PermissionPromptPolicy`.
     @ObservationIgnored private var permissionPromptedAt: Date?
+    /// A manual recording refused for a missing grant, to start once the
+    /// grant is given from the panel. Cleared when the panel is dismissed.
+    @ObservationIgnored private var pendingStart: MeetingSource?
 
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
@@ -340,13 +347,21 @@ public final class PipitRuntime {
             },
             onSleep: {}
         )
-        refreshRecentMeetings()
         // The recovery scan runs before detection, so a meeting that starts
         // during launch can never be scanned as an interrupted one and finalised
         // underneath itself. Resuming the processing of what it found runs
         // after, because that can take minutes and detection must be watching
         // before it does.
         Task { @MainActor in
+            // The first touch of the Documents folder. On a build macOS has
+            // not seen before, that raises the Documents consent prompt, and
+            // the call blocks until it is answered. Off the main thread, so
+            // the menu bar item and Setup appear while the prompt waits:
+            // measured, the whole application sat invisible for two minutes
+            // behind a prompt the person had not noticed.
+            let recent = await Task.detached { [repository] in repository.listMeetings(limit: 40) }.value
+            recentMeetings = recent
+            onStatusChange?()
             await recover()
             detectionEngine.start()
             await ensureLocalUserIdentity()
@@ -1026,9 +1041,20 @@ public final class PipitRuntime {
                 switch RecordingPreflight.decide(
                     capturesRemote: capturesRemote, microphone: microphone, systemAudio: systemAudio
                 ) {
-                case .refuse(let warning):
-                    Log.session.notice("preflight refused: \(warning.dedupKey, privacy: .public)")
-                    promptForPermission(.microphone, warning: warning)
+                case .refuse:
+                    // Every grant that is missing, so the panel can offer
+                    // the one or send the person through Setup for both.
+                    var missing: [PermissionKind] = [.microphone]
+                    if capturesRemote, systemAudio != .granted { missing.append(.screenRecording) }
+                    Log.session.notice(
+                        "preflight refused: \(missing.map(\.rawValue).joined(separator: ","), privacy: .public)"
+                    )
+                    if sessionController.snapshot.isManual {
+                        // Given the grant from the panel, the recording the
+                        // person asked for starts without a second press.
+                        pendingStart = sessionController.snapshot.source
+                    }
+                    raisePermissionNotice(missing: missing)
                     // The rest of the batch would commit a meeting for this
                     // session. Nothing is armed, so nothing is committed.
                     _ = sessionController.stop(
@@ -1037,9 +1063,14 @@ public final class PipitRuntime {
                     syncStatusFromSession()
                     return
                 case .proceed(let warnings):
-                    for warning in warnings {
-                        Log.session.notice("preflight: \(warning.dedupKey, privacy: .public)")
-                        promptForPermission(.screenRecording, warning: warning)
+                    var granted = [PermissionStatus(kind: .microphone, state: microphone)]
+                    if capturesRemote {
+                        granted.append(PermissionStatus(kind: .screenRecording, state: systemAudio))
+                    }
+                    permissionsDidChange(granted)
+                    if !warnings.isEmpty {
+                        Log.session.notice("preflight: system_audio_permission_missing")
+                        raisePermissionNotice(missing: [.screenRecording])
                     }
                 }
                 await captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
@@ -1069,18 +1100,54 @@ public final class PipitRuntime {
         }
     }
 
-    /// Raises the warning and opens Setup, once a minute at most.
+    /// Raises the warnings, turns the menu bar icon red, and puts the notice
+    /// on screen.
     ///
-    /// A detected call re-arms on every poll while a grant is missing, and
-    /// the person has to see the window once, not have it thrown at them
-    /// twice a second. The warning itself is deduplicated per session by
-    /// `captureDidWarn`, so the throttle here is only for the window.
-    private func promptForPermission(_ kind: PermissionKind, warning: CaptureWarning) {
-        captureDidWarn(warning)
+    /// The warnings are deduplicated per session by `captureDidWarn`.
+    /// Whether the window goes up is `PermissionPromptPolicy`: every time
+    /// for a manual start, once a minute for a detected call.
+    private func raisePermissionNotice(missing: [PermissionKind]) {
+        guard let notice = PermissionNotice(missing: missing) else { return }
+        for warning in notice.warnings { captureDidWarn(warning) }
+        status.permissionNotice = notice
+        onStatusChange?()
         let now = clock.now
-        if let last = permissionPromptedAt, now.timeIntervalSince(last) < 60 { return }
+        let isManual = sessionController.snapshot.isManual
+        guard PermissionPromptPolicy.shouldPrompt(
+            isManual: isManual, lastPromptedAt: permissionPromptedAt, now: now
+        ) else { return }
         permissionPromptedAt = now
-        onPermissionRequired?(kind)
+        onPermissionRequired?(notice)
+    }
+
+    /// Clears the red icon once the grants it is about are seen, and starts
+    /// the recording the person asked for if the panel is still up. Setup
+    /// and the panel call this with every poll while they are open, and
+    /// closing Setup asks once.
+    public func permissionsDidChange(_ statuses: [PermissionStatus]) {
+        guard let notice = status.permissionNotice, notice.isResolved(by: statuses) else { return }
+        status.permissionNotice = nil
+        permissionPromptedAt = nil
+        onStatusChange?()
+        guard let source = pendingStart else { return }
+        pendingStart = nil
+        Log.session.notice("starting the refused \(source.rawValue, privacy: .public) recording after the grant")
+        switch source {
+        case .inPerson: startInPersonRecording()
+        default: startManualRecording()
+        }
+    }
+
+    /// The person closed the panel without granting. The red icon stays;
+    /// the recording is not started behind their back when the grant comes
+    /// later.
+    public func dismissPermissionNotice() {
+        pendingStart = nil
+    }
+
+    public func recheckPermissions() async {
+        guard status.permissionNotice != nil else { return }
+        permissionsDidChange(await permissions.allStatuses())
     }
 
     @discardableResult

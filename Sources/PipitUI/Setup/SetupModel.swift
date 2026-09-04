@@ -26,7 +26,14 @@ public final class SetupModel {
     }
 
     public var current: SetupStepID = .welcome
-    public var statuses: [PermissionStatus] = []
+    /// Where the next `begin()` opens instead of the flow's own choice. Set
+    /// when Setup is opened for one grant, so the wizard lands on it.
+    public var landing: SetupStepID?
+    public var statuses: [PermissionStatus] = [] {
+        // The menu bar icon went red when a recording was refused. The grant
+        // is given here, so here is where the icon learns of it.
+        didSet { runtime.permissionsDidChange(statuses) }
+    }
     public var apiKey = ""
     public var keyState = KeyState.absent
     /// Set when the user accepts a key that could not be checked because the
@@ -110,7 +117,8 @@ public final class SetupModel {
         hostStatus = NativeMessagingInstaller().status()
         await runtime.refreshLocalModelState()
         statuses = await runtime.permissions.allStatuses()
-        current = SetupFlow.openingStep(for: snapshot)
+        current = landing ?? SetupFlow.openingStep(for: snapshot)
+        landing = nil
         observer.start { [weak self] statuses in
             self?.statuses = statuses
         }
@@ -124,7 +132,17 @@ public final class SetupModel {
 
     public func advance() {
         guard let next = SetupFlow.step(after: current) else { return }
+        markVisited(current)
         current = next
+    }
+
+    /// Continuing past a step is a choice the rail remembers across
+    /// launches: an optional step left off shows as skipped, not unseen.
+    private func markVisited(_ step: SetupStepID) {
+        var settings = runtime.settings
+        guard !settings.setupStepsVisited.contains(step.rawValue) else { return }
+        settings.setupStepsVisited.append(step.rawValue)
+        runtime.update(settings: settings)
     }
 
     public func retreat() {

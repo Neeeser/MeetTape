@@ -93,16 +93,31 @@ public struct SetupSnapshot: Sendable, Equatable {
     }
 }
 
+/// The mark beside a step in the rail.
+public enum SetupStepMark: Sendable, Equatable {
+    /// Required and done, or optional with everything on its page switched on.
+    case done
+    /// Optional, continued past with something on its page left off. A choice
+    /// the person made, kept so the rail does not keep asking.
+    case skipped
+    /// Required and not done. Setup cannot finish, and recording may not work.
+    case missing
+    /// Optional and never continued past.
+    case notVisited
+}
+
 /// One row of the wizard: which screen, and whether it is done.
 public struct SetupStep: Sendable, Equatable, Identifiable {
     public let id: SetupStepID
     public let isRequired: Bool
     public let isSatisfied: Bool
+    public let mark: SetupStepMark
 
-    public init(id: SetupStepID, isRequired: Bool, isSatisfied: Bool) {
+    public init(id: SetupStepID, isRequired: Bool, isSatisfied: Bool, mark: SetupStepMark) {
         self.id = id
         self.isRequired = isRequired
         self.isSatisfied = isSatisfied
+        self.mark = mark
     }
 }
 
@@ -111,8 +126,35 @@ public enum SetupFlow {
     public static func steps(for snapshot: SetupSnapshot) -> [SetupStep] {
         SetupStepID.allCases.map { id in
             SetupStep(
-                id: id, isRequired: id.isRequired, isSatisfied: isSatisfied(id, in: snapshot)
+                id: id, isRequired: id.isRequired, isSatisfied: isSatisfied(id, in: snapshot),
+                mark: mark(for: id, in: snapshot)
             )
+        }
+    }
+
+    /// A required step is done or missing, whatever the person has seen. An
+    /// optional step is done when everything on its page is on, skipped when
+    /// it was continued past with something off, and unmarked until then.
+    public static func mark(for id: SetupStepID, in snapshot: SetupSnapshot) -> SetupStepMark {
+        if id.isRequired { return isSatisfied(id, in: snapshot) ? .done : .missing }
+        let visited = snapshot.settings.setupStepsVisited.contains(id.rawValue)
+        switch id {
+        case .welcome:
+            // Finishing setup once means Welcome was seen, whether or not the
+            // build that finished it kept a record of visited steps.
+            return visited || snapshot.settings.hasCompletedOnboarding ? .done : .notVisited
+        case .optionalPermissions:
+            let both = snapshot.state(of: .calendar) == .granted
+                && snapshot.state(of: .notifications) == .granted
+            if both { return .done }
+            return visited ? .skipped : .notVisited
+        case .firefox:
+            if snapshot.nativeHostInstalled { return .done }
+            return visited ? .skipped : .notVisited
+        case .finish:
+            return snapshot.settings.hasCompletedOnboarding ? .done : .notVisited
+        case .backend, .models, .microphone, .screenRecording, .accessibility:
+            return isSatisfied(id, in: snapshot) ? .done : .missing
         }
     }
 
@@ -168,9 +210,10 @@ public enum SetupFlow {
 
     /// Where the wizard opens.
     ///
-    /// Someone who has finished setup before is sent straight at whatever broke,
-    /// since walking them from Welcome through choices they already made to reach
-    /// one revoked permission is nine screens of nothing.
+    /// Someone who has finished setup before is sent straight at the first
+    /// step that needs work, since walking them from Welcome through choices
+    /// they already made to reach one revoked permission is nine screens of
+    /// nothing.
     ///
     /// A first run opens at Finish when there is nothing left to do, which is
     /// what a reinstall onto a machine that kept its models and permissions looks
@@ -179,13 +222,14 @@ public enum SetupFlow {
     /// would hide the local-or-cloud decision entirely.
     public static func openingStep(for snapshot: SetupSnapshot) -> SetupStepID {
         if snapshot.settings.hasCompletedOnboarding {
-            let broken = SetupStepID.allCases.first { step in
-                guard let permission = step.permission, permission.isRequired else { return false }
-                return !isSatisfied(step, in: snapshot)
-            }
-            return broken ?? .finish
+            return firstMissingStep(in: snapshot) ?? .finish
         }
         return canFinish(snapshot) ? .finish : .welcome
+    }
+
+    /// The first required step that is not done, in rail order.
+    public static func firstMissingStep(in snapshot: SetupSnapshot) -> SetupStepID? {
+        SetupStepID.allCases.first { mark(for: $0, in: snapshot) == .missing }
     }
 
     /// The step after this one, or nil at the end.

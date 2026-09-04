@@ -89,15 +89,23 @@ public struct SetupWizardView: View {
         if step.id == .models, model.runtime.localModelState.isBusy {
             return "arrow.down.circle"
         }
-        if step.isSatisfied, step.isRequired { return "checkmark.circle.fill" }
-        if isCurrent { return "circle.inset.filled" }
-        return step.isRequired ? "circle" : "circle.dotted"
+        switch step.mark {
+        case .done, .skipped: return "checkmark.circle.fill"
+        case .missing: return "xmark.circle.fill"
+        case .notVisited: return isCurrent ? "circle.inset.filled" : "circle"
+        }
     }
 
+    /// Green is done, blue is a choice to leave an optional step alone, red is
+    /// a required step that is not done. A plain circle is not seen yet.
     private func colour(for step: SetupStep, isCurrent: Bool) -> Color {
         if step.id == .models, model.runtime.localModelState.isBusy { return .accentColor }
-        if step.isSatisfied, step.isRequired { return .green }
-        return isCurrent ? .accentColor : .secondary
+        switch step.mark {
+        case .done: return .green
+        case .skipped: return .blue
+        case .missing: return .red
+        case .notVisited: return isCurrent ? .accentColor : .secondary
+        }
     }
 
     private var downloadPercentage: String? {

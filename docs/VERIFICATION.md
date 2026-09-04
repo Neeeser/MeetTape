@@ -85,13 +85,41 @@ The following paths have been exercised outside unit tests:
 
 ## Remaining manual checks
 
-- Screen & System Audio Recording missing: remove Pipit from that list in
-  System Settings, start a call, and confirm the Setup window comes to the
-  front as capture is armed, a "Recording problem" notification arrives, the
-  meeting's header shows the warning after it ends, and `metadata.json`
-  carries `system_audio_permission_missing`.
-- Microphone missing: remove Pipit from the Microphone list, press record, and
-  confirm no meeting folder is created and the Setup window opens instead.
+- Screen & System Audio Recording missing, Microphone granted: remove Pipit
+  from that list in System Settings, start a call, and confirm the menu bar
+  icon turns red with a mark, a floating "Pipit can't record the other
+  people in this meeting" panel appears in front of the call on the screen
+  the pointer is on, the panel carries the System Settings picture with
+  Pipit draggable from it and an Open System Settings button, a "Recording
+  problem" notification arrives, the meeting's header shows the warning
+  after it ends, and `metadata.json` carries
+  `system_audio_permission_missing`. With the panel dismissed and the call
+  still running, it returns after a minute. Switching Pipit on in the pane
+  closes the panel and clears the red icon on its own.
+- Microphone missing only: remove Pipit from the Microphone list, press
+  Start In-Person Meeting twice within a minute, and confirm no meeting
+  folder is created, the "Pipit can't record this meeting" panel appears in
+  front both times with an Allow Microphone button, allowing it in the macOS
+  prompt starts the recording without a second press, and the icon is plain
+  again.
+- Both missing: press Start Recording and confirm the panel offers Open
+  Setup instead, and that Setup opens on the Microphone step with red marks
+  on Microphone and Screen recording.
+- Setup placement: with a second display attached, put the pointer on one
+  screen and open Setup from the menu; it appears centred on that screen, in
+  front. Close it, put another application in full screen, reopen Setup from
+  the menu, and confirm it comes up in front of the full-screen application.
+- Setup marks: continue past Calendar and alerts with both off and past
+  Firefox without installing the add-on, quit and relaunch, and confirm both
+  show a blue check. Turn calendar and notifications on and confirm the row
+  turns green. A required step never done shows a red X on every launch,
+  including after an unsigned reinstall dropped the grant.
+- Documents prompt at launch: install an unsigned rebuild and launch it.
+  macOS asks for access to the Documents folder again, because the code
+  signature changed. Confirm the menu bar icon and Setup appear while that
+  prompt is still unanswered, and that the Meetings window fills in once
+  Allow is pressed. A build signed with the local identity is not asked
+  again.
 - Local signing identity: run `scripts/make-signing-identity.sh`, rebuild and
   reinstall twice, and confirm Microphone, Accessibility and Screen & System
   Audio Recording stay granted across the second install.

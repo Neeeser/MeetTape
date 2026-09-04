@@ -342,6 +342,10 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var alwaysRecordApplications: [String]
     public var neverRecordApplications: [String]
     public var hasCompletedOnboarding: Bool
+    /// Steps of setup the user has continued past, by `SetupStepID` raw
+    /// value. An optional step continued past with its offer left off is a
+    /// choice, and the rail shows it as one rather than as a step never seen.
+    public var setupStepsVisited: [String]
     /// How long the call has to be gone before recording pauses. It covers a
     /// flap in the sensors, so a poll that misses one reading does not cut a
     /// meeting in two.
@@ -373,6 +377,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         alwaysRecordApplications: [String] = [],
         neverRecordApplications: [String] = [],
         hasCompletedOnboarding: Bool = false,
+        setupStepsVisited: [String] = [],
         meetingEndGraceSeconds: Double = SessionController.Configuration().endGraceSeconds,
         meetingReconnectWindowSeconds: Double = SessionController.Configuration()
             .reconnectWindowSeconds,
@@ -393,6 +398,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
         self.alwaysRecordApplications = alwaysRecordApplications
         self.neverRecordApplications = neverRecordApplications
         self.hasCompletedOnboarding = hasCompletedOnboarding
+        self.setupStepsVisited = setupStepsVisited
         self.meetingEndGraceSeconds = meetingEndGraceSeconds
         self.meetingReconnectWindowSeconds = meetingReconnectWindowSeconds
         self.firefoxSensorHasConnected = firefoxSensorHasConnected
@@ -472,6 +478,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
         hasCompletedOnboarding =
             try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding)
             ?? defaults.hasCompletedOnboarding
+        setupStepsVisited =
+            try container.decodeIfPresent([String].self, forKey: .setupStepsVisited)
+            ?? defaults.setupStepsVisited
         // Every file on disk predates these keys, and was written under the
         // longer waits the new defaults replace. Nothing is migrated. An absent
         // key takes the new default, which is the point of shortening them.

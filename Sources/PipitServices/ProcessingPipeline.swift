@@ -2060,6 +2060,18 @@ public actor ProcessingPipeline {
         )
 
         var speakers = try store.readSpeakerMap()
+        // A far end that never reached its own track puts the room on the
+        // microphone, and the microphone is then diarized like any other track.
+        // The roster cannot name the local user there: their own tile is the
+        // one marked self and is refused, and whichever other tile the meeting
+        // client lit while they spoke names their cluster instead. On the
+        // Google Meet of 4 September 2026 that put another participant's name
+        // on the cluster the recognizer had matched to the local user at
+        // 0.90. The recognizer's answer is the same fact the microphone track
+        // states by construction on a call whose far end was captured, so it
+        // is written at that rank and outranks the roster.
+        let micIsDiarized = !micHoldsLocalUserAlone(metadata, evidence: store.readSpeechEvidence())
+        let localUser = settings.processing.localUserIdentityID
         for result in resolved {
             guard let identity = result.identity, result.resolution.outcome.isAutomatic else { continue }
             let provenance = SpeakerProvenance(
@@ -2092,6 +2104,19 @@ public actor ProcessingPipeline {
                 identity.id, to: result.clusterID,
                 named: identity.isNamed ? identity.resolvedName : nil
             )
+            if micIsDiarized, result.track == .mic, let localUser, identity.id == localUser,
+               result.resolution.band == .high {
+                speakers.applySuggestion(
+                    SpeakerAssignment(
+                        displayName: settings.localUserName,
+                        origin: .deterministic,
+                        confidence: result.resolution.best?.score,
+                        identityID: identity.id,
+                        provenance: provenance
+                    ),
+                    for: result.clusterID
+                )
+            }
             if identity.isNamed,
                !metadata.participants.contains(where: { $0.displayName == identity.resolvedName }) {
                 metadata.participants.append(Participant(

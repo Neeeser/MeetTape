@@ -693,12 +693,13 @@ public actor ProcessingPipeline {
     /// Takes the far end out of the microphone before anything reads it.
     ///
     /// A call on speakers puts the far end back into the microphone through the
-    /// air, and on the Slack huddle this was measured on that was 81% of the
-    /// words the microphone carried. Every stage from here on takes its audio
-    /// through `trackAudioLocation`, which the cleaner switches over, so
-    /// transcription, the speech evidence measured just below, diarization,
-    /// voice enrolment and the mixdown all read the cleaned track without
-    /// knowing it exists.
+    /// air. On the Slack huddle this was measured on, the far end was 81% of
+    /// the words the microphone carried.
+    ///
+    /// Every stage from here on takes its audio through `trackAudioLocation`,
+    /// and the cleaner switches that over. Transcription, the speech evidence,
+    /// diarization, voice enrolment and the mixdown all read the cleaned track
+    /// without knowing it exists.
     ///
     /// This never fails the meeting. A throw is recorded and the microphone is
     /// read as it was captured, which is what every meeting recorded before the
@@ -724,11 +725,29 @@ public actor ProcessingPipeline {
             )
             outcome = .failed
         }
+        // Two derived artefacts survive a run that stopped part-way, and
+        // neither records which microphone it was made from. Both are dealt
+        // with here, before anything reads them.
+        //
         // The decoded working copies in Caches are keyed by meeting and track
-        // alone, carry no record of what they were exported from, and are handed
-        // back without being read. One an earlier run exported from the
-        // recording would be transcribed in place of the track just written.
-        if outcome == .cleaned { scratch.discard(meetingID: metadata.id) }
+        // alone and are handed back without being read, so one an earlier run
+        // exported would be transcribed in place of the track this run wrote.
+        // Discarded whatever the outcome, because the stale copy can be of
+        // either microphone. A run that cleaned and then stopped leaves a
+        // cleaned export behind for a run that goes on to decide against
+        // cleaning. One re-export closes both directions.
+        scratch.discard(meetingID: metadata.id)
+        // The speech evidence goes only when the microphone actually changed.
+        // `measureSpeech` returns early whenever `speech.json` is there, so
+        // evidence measured on the recording would be read against words
+        // transcribed from the cleaned track, and a high echo reading on a
+        // window of genuine double talk is what drops a line the user spoke.
+        // Kept on every other outcome, because rebuilding it costs a decode of
+        // both tracks and a detector pass, and on a machine whose detector has
+        // since been removed the rebuilt file carries no speech series at all.
+        if outcome == .cleaned {
+            try? FileManager.default.removeItem(at: store.layout.speechEvidence)
+        }
         // Written through the store rather than into the copy above. `clean`
         // replaces that copy with what it read back from disk, so a field set
         // beforehand is dropped, and `persist` carries only the fields this
@@ -2152,6 +2171,20 @@ public actor ProcessingPipeline {
         guard try await service.wantsLocalUserSample(identityID: identityID) else { return }
 
         let timeline = try store.readTimeline()
+        // The cleaned microphone on a meeting that was cleaned, which is a
+        // change to what this profile is built from. The excerpt used to be the
+        // recording, and on a call taken on speakers the recording can be 81%
+        // far end. Folding that into a permanent centroid is a failure this
+        // project has already had, and taking the far end out is the larger
+        // correction of the two available here.
+        //
+        // The smaller risk is left standing and is unmeasured. This profile is
+        // matched in every other meeting against embeddings taken from raw
+        // tracks, so enrolment now happens in one domain and matching in
+        // another. The nearest figure there is comes from the comment above:
+        // enrolling on call audio and testing on room audio cost 0.01 to 0.03
+        // of similarity, well inside the margin over the highest impostor
+        // score. `docs/VERIFICATION.md` names this as unverified.
         let location = store.trackAudioLocation(track: .mic, metadata: metadata, timeline: timeline)
         guard !location.isEmpty else { return }
         // The far end has to be on its own track for "the microphone track is

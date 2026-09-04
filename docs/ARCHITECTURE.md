@@ -132,17 +132,25 @@ finalizing -> audio_safe -> transcribing -> diarizing
 only after this state. Each later stage records its state and can resume after a
 failure.
 
-`transcribing` begins by subtracting the far end out of the microphone. A call
+`transcribing` begins by subtracting the far end from the microphone. A call
 taken on speakers puts the far end back into the microphone through the air.
 Pipit records that far end separately through the process tap, and that
 recording is the reference WebRTC's echo canceller needs. The result is written
 to `raw/audio/mic.cleaned.m4a`, and every stage from transcription onward reads
-it in place of `mic.m4a`. The recording itself is never written to. The cleaned
-file is kept only when the canceller reports it removed a median of 6 dB or more
-over the windows where the far end was playing, which is what a call on speakers
-gives and a call on headphones does not. A meeting on headphones, a meeting with
-no far-end track, an imported single-track recording, and a meeting whose
-cleaning pass failed are all read on the microphone as it was captured.
+it in place of the recording, which is the segment chain before compaction and
+`mic.m4a` after it. The recording itself is never written to. The cleaned file
+is kept only when the canceller reports it removed a median of 6 dB or more over
+the windows where the far end was playing, which is what a call on speakers
+gives and a call on headphones does not. Five cases keep the microphone exactly
+as it was captured: a call on headphones, a meeting whose far-end track holds
+nothing, a meeting whose far end played for under ten seconds, an imported
+single-track recording, and a meeting whose cleaning pass failed.
+
+The pass runs once per meeting and records what it decided, whatever it decided.
+A pass that failed is never retried. If the disk fills during it, that meeting is
+never cleaned, and the user keeps the transcript they would have had before the
+cleaner existed. Retrying instead would repeat a full decode and encode of the
+whole meeting on every resumed run of a machine that cannot write the file.
 
 Local processing uses Apple SpeechAnalyzer on supported macOS versions or
 Parakeet through FluidAudio. Speaker separation runs locally unless the selected

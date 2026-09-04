@@ -3014,6 +3014,88 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("speech evidence measured on the recording is re-measured once the mic is cleaned") { expect in
+                // `speech.json` is the other artefact cached per meeting with
+                // nothing in it saying which microphone it was measured on, and
+                // `measureSpeech` returns early whenever the file is there. An
+                // upgrade landing on a meeting stopped part-way through
+                // transcription carries evidence measured on the recording into
+                // a run that cleans the microphone. The echo readings in it are
+                // then applied to words transcribed from the cleaned track, and
+                // a high reading on a double-talk window is what drops a line
+                // the user really spoke.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try MicrophoneCleanerTests.makeCallOnSpeakers(root: root)
+
+                // A microphone loud in every window and carrying the far end in
+                // every window, which is what the recording measures and the
+                // cleaned track does not.
+                let windows = 120
+                try meeting.store.writeSpeechEvidence(SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.25,
+                    micLevels: [Int8](repeating: -20, count: windows),
+                    remoteLevels: [Int8](repeating: -18, count: windows),
+                    micSpeech: [Int8](repeating: 95, count: windows),
+                    micEchoReturnLoss: [Int16](repeating: 50, count: windows),
+                    detector: "measured-on-the-recording"
+                ))
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 0.3, text: " we")]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 54, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                expect.equal(
+                    try meeting.store.readMetadata().cleaningOutcome, CleaningOutcome.cleaned
+                )
+                let evidence = try expect.unwrap(meeting.store.readSpeechEvidence())
+                expect.notEqual(
+                    evidence.detector, "measured-on-the-recording",
+                    "the evidence the interrupted run left is not the evidence the words are read with"
+                )
+                // The levels themselves, not just the provenance string. The
+                // far end plays alone for the last third, so the recording
+                // holds its echo there and the cleaned track holds only what
+                // the canceller could not subtract. Compared against the
+                // recording's own level rather than a fixed number, because
+                // what is being asserted is which track was measured.
+                let recorded = try MicrophoneCleanerTests.samples(
+                    meeting.store.rawTrackAudioLocation(
+                        track: .mic, metadata: try meeting.store.readMetadata(),
+                        timeline: try meeting.store.readTimeline()
+                    )
+                )
+                let tail = MicrophoneCleanerTests.seconds(20, 30, of: recorded)
+                let squares = tail.reduce(0.0) { $0 + Double($1) * Double($1) }
+                let recordedDBFS = 20 * log10((squares / Double(max(tail.count, 1))).squareRoot())
+                let lastThird = evidence.micLevels.suffix(evidence.micLevels.count / 3)
+                let loudest = Double(lastThird.max() ?? 0)
+                expect.isTrue(
+                    !lastThird.isEmpty && loudest < recordedDBFS - 6,
+                    "the microphone reads \(loudest) dBFS where only the far end played, against "
+                        + "\(recordedDBFS) dBFS in the recording, so the levels were measured on "
+                        + "the recording"
+                )
+            },
+
             test("a meeting whose cleaner throws is still transcribed") { expect in
                 // Cleaning is an improvement on the recording, never a
                 // condition of reading it. A disk that will not take the

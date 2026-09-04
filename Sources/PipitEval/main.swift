@@ -14,6 +14,8 @@ import PipitSpeakers
 //   pipit-eval identity  --audio FILE [--audio FILE ...]
 //   pipit-eval voices
 //   pipit-eval gate      --meeting DIR
+//   pipit-eval echo      --meeting DIR [--json OUT] [--offset SECONDS] [--full-id]
+//   pipit-eval reprocess --meeting DIR [--recognize] [--backups DIR]
 //   pipit-eval bench     [--suite ami-core] [--engine parakeet ...] [--diarizer local]
 //
 // The audio never leaves the machine and nothing here writes to a meeting.
@@ -26,6 +28,17 @@ struct Arguments {
     var engine = "whisper"
     var transcript: URL?
     var meeting: URL?
+    var json: URL?
+    /// Replaces the reference offset the manifest holds, for measuring a
+    /// misaligned pair on purpose. `echo` only.
+    var referenceOffset: Double?
+    /// Prints the meeting's full identifier, title slug and all, instead of
+    /// the content-free one. For a run whose output stays on this Mac.
+    var fullIdentifier = false
+    /// `reprocess` only: read voice memory so known voices are named.
+    var recognize = false
+    /// `reprocess` only: where the derived files go before they are removed.
+    var backups: URL?
     var applicationSupport: URL
     var bench: BenchCommand.Options
 
@@ -36,6 +49,7 @@ struct Arguments {
             .appendingPathComponent("Library/Application Support/Pipit", isDirectory: true)
         var benchOptions = BenchCommand.Options(applicationSupport: support)
         var engines: [String] = []
+        var fullIdentifier = false
         var index = 1
         while index < raw.count {
             let flag = raw[index]
@@ -55,7 +69,19 @@ struct Arguments {
                 benchOptions.allowMissingBaseline = true
                 continue
             }
-            guard index < raw.count else { break }
+            if flag == "--full-id" {
+                fullIdentifier = true
+                continue
+            }
+            if flag == "--recognize" {
+                recognize = true
+                continue
+            }
+            // Every flag left takes a value. A trailing one used to fall off
+            // the end and be dropped without a word, so `--offset` written last
+            // measured the pair the manifest lines up and would have been
+            // written down as a measurement of a misaligned one.
+            guard index < raw.count else { return nil }
             let value = raw[index]
             index += 1
             switch flag {
@@ -65,6 +91,14 @@ struct Arguments {
             case "--engine": engine = value; engines.append(value)
             case "--transcript": transcript = URL(fileURLWithPath: value)
             case "--meeting": meeting = URL(fileURLWithPath: value)
+            case "--json": json = URL(fileURLWithPath: value)
+            case "--backups": backups = URL(fileURLWithPath: value)
+            // Refused rather than dropped. A dropped --offset would measure
+            // the pair as the manifest lines it up and be written down as a
+            // measurement of a misaligned one.
+            case "--offset":
+                guard let seconds = Double(value) else { return nil }
+                referenceOffset = seconds
             case "--support": support = URL(fileURLWithPath: value)
             case "--suite": benchOptions.suite = value
             case "--case": benchOptions.meetings.append(value)
@@ -79,6 +113,7 @@ struct Arguments {
             }
         }
         applicationSupport = support
+        self.fullIdentifier = fullIdentifier
         // `bench` takes engines repeatably; the single-engine commands read the
         // last one, which is what `--engine` meant before.
         benchOptions.engines = engines
@@ -117,7 +152,10 @@ func usage() -> Never {
           pipit-eval identity --audio FILE [--audio FILE ...]
           pipit-eval voices
           pipit-eval gate     --meeting MEETING_FOLDER
+          pipit-eval echo     --meeting MEETING_FOLDER [--json OUT] [--offset SECONDS]
+                                 [--full-id]
           pipit-eval reanalyze --meeting MEETING_FOLDER [--speakers N]
+          pipit-eval reprocess --meeting MEETING_FOLDER [--recognize] [--backups DIR]
           pipit-eval bench    [--suite NAME] [--case MEETING] [--truth FILE]
                                  [--engine parakeet|cohere|whisper|<cloud model>]...
                                  [--diarizer local|lseend|cloud] [--out FILE] [--baseline FILE]
@@ -338,6 +376,24 @@ case "gate":
     guard let folder = arguments.meeting else { usage() }
     let code = await GateCommand.run(
         meeting: folder, applicationSupport: arguments.applicationSupport
+    )
+    if code != 0 { exit(code) }
+
+case "echo":
+    guard let folder = arguments.meeting else { usage() }
+    let code = EchoCommand.run(
+        meeting: folder, json: arguments.json, referenceOffset: arguments.referenceOffset,
+        fullIdentifier: arguments.fullIdentifier
+    )
+    if code != 0 { exit(code) }
+
+case "reprocess":
+    guard let folder = arguments.meeting else { usage() }
+    let code = await ReprocessCommand.run(
+        meeting: folder, applicationSupport: arguments.applicationSupport,
+        backups: arguments.backups ?? arguments.applicationSupport
+            .appendingPathComponent("Backups", isDirectory: true),
+        recognize: arguments.recognize
     )
     if code != 0 { exit(code) }
 

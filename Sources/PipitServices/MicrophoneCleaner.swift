@@ -28,11 +28,6 @@ public struct MicrophoneCleaner: Sendable {
 
     /// A window whose far-end level clears this had the far end playing in it.
     static let farEndActiveDBFS = -60.0
-    /// A track that never clears this in any window recorded nothing at all.
-    static let referenceFloorDBFS = -80.0
-    /// Seconds one measurement window covers, matching the grid the speech
-    /// evidence is already sampled on.
-    static let windowSeconds = 0.25
     /// Windows of far-end activity the decision needs before it is made at all.
     ///
     /// Ten seconds. The canceller reports nothing for its first 2.5 s of
@@ -43,9 +38,6 @@ public struct MicrophoneCleaner: Sendable {
     /// stayed quiet for the first minute.
     static let minimumActiveWindows = 40
 
-    /// The rate both tracks are read at, which is the rate every model above
-    /// reads them at too.
-    static let readFormat = AudioFormatDescriptor(sampleRate: 16_000, channelCount: 1)
     /// Cleaned samples held back before a write, so the encoder is handed
     /// seconds at a time rather than 10 ms blocks.
     static let writeFrames = 16_000
@@ -103,7 +95,8 @@ public struct MicrophoneCleaner: Sendable {
         let reference = store.rawTrackAudioLocation(
             track: .remote, metadata: metadata, timeline: timeline
         )
-        guard !microphone.isEmpty, !reference.isEmpty, try referenceHoldsAudio(reference) else {
+        guard !microphone.isEmpty, !reference.isEmpty,
+              try EchoCancellationPass.referenceHoldsAudio(reference) else {
             try discardCleanedTrack(store: store, metadata: &metadata)
             log(outcome: .skippedNoReference)
             return .skippedNoReference
@@ -117,7 +110,7 @@ public struct MicrophoneCleaner: Sendable {
             microphone: microphone, reference: reference, timeline: timeline, to: partial
         )
         let active = pass.windows.filter { $0.farEndDBFS > Self.farEndActiveDBFS }
-        let median = median(of: active.map(\.echoRemovedDB))
+        let median = EchoCancellationPass.median(of: active.map(\.echoRemovedDB))
 
         // Too little far end played for the canceller to have been judged on
         // anything. The same answer as a meeting with no far-end track, which
@@ -211,7 +204,7 @@ public struct MicrophoneCleaner: Sendable {
     private func verify(
         _ url: URL, cleaned frames: Int64, against recorded: Double
     ) throws -> AudioFileInfo {
-        let expected = Double(frames) / Self.readFormat.sampleRate
+        let expected = Double(frames) / EchoCancellationPass.readFormat.sampleRate
         // Floored for codec padding on short files, capped so a long meeting
         // cannot lose most of a minute and still verify. The same formula
         // compaction uses, on the quantity compaction uses it on, which is the
@@ -264,68 +257,18 @@ public struct MicrophoneCleaner: Sendable {
 
     // MARK: - the pass over both tracks
 
-    /// One quarter-second of the pass: how loud the far end was, and what the
-    /// canceller said it had removed by the end of it.
+    /// Runs `EchoCancellationPass` over the pair and encodes what comes back.
     ///
-    /// The pair travels together because neither reads on its own.
-    /// `farEndDBFS` decides whether the window is one the canceller can be
-    /// judged on, and `echoRemovedDB` is what it reported removing over that
-    /// window.
-    ///
-    /// What it reported is not what it did, and keeping the two apart is the
-    /// whole of the bypass rule. On the tone with no echo path in `AudioTests`
-    /// the canceller reports 2.84 dB removed while taking 39.9 dB out of a
-    /// microphone that holds only the user. The low reported figure is what
-    /// says the filter never locked on, and that is the reason to throw its
-    /// output away.
-    private struct Window {
-        let farEndDBFS: Double
-        let echoRemovedDB: Double
-    }
-
-    private struct Pass {
-        var frames: Int64
-        var windows: [Window]
-    }
-
+    /// Everything about how the two tracks are lined up and measured is in the
+    /// pass. What is here is the encoder: samples held back until there are
+    /// seconds of them, and a file that is removed rather than left truncated
+    /// if anything throws.
     private func subtract(
         microphone: TrackAudioLocation, reference: TrackAudioLocation,
         timeline: RecordingTimeline, to destination: URL
-    ) throws -> Pass {
-        guard let canceller = EchoCanceller(sampleRate: Int(Self.readFormat.sampleRate)) else {
-            throw ProcessingError.localProcessingFailed(
-                reason: "the echo canceller refused \(Self.readFormat.sampleRate) Hz",
-                retryable: false
-            )
-        }
-        let block = canceller.blockFrames
-        let windowFrames = Int((Self.windowSeconds * Self.readFormat.sampleRate).rounded())
-        guard block > 0, windowFrames >= block else {
-            throw ProcessingError.localProcessingFailed(
-                reason: "the echo canceller reported a block of \(block) frames", retryable: false
-            )
-        }
-        let blocksPerWindow = windowFrames / block
-
-        // The microphone is read from its own first frame, so a position in the
-        // cleaned file is the same position in the recording and every
-        // timestamp downstream still lands where it did. The far end is moved
-        // onto that clock. `leadIn` says how long after the earliest track each
-        // one started, so their difference is how far the far end has to move
-        // to line up: a far end that started later is padded with the silence
-        // Pipit did not record, and one that started earlier has that much of
-        // it read and thrown away.
-        let referenceOffset = timeline.leadIn(track: .remote) - timeline.leadIn(track: .mic)
-        guard let microphoneReader = TimelineTrackReader(
-            location: microphone, format: Self.readFormat, offsetSeconds: 0
-        ), let referenceReader = TimelineTrackReader(
-            location: reference, format: Self.readFormat, offsetSeconds: referenceOffset
-        ) else {
-            throw ProcessingError.audioUnreadable(path: microphone.directory.lastPathComponent)
-        }
-
+    ) throws -> EchoCancellationPass.Result {
         guard let format = AVAudioFormat(
-            standardFormatWithSampleRate: Self.readFormat.sampleRate, channels: 1
+            standardFormatWithSampleRate: EchoCancellationPass.readFormat.sampleRate, channels: 1
         ) else {
             throw ProcessingError.audioUnreadable(path: destination.lastPathComponent)
         }
@@ -349,53 +292,12 @@ public struct MicrophoneCleaner: Sendable {
         // file the next stage would read as the whole meeting.
         defer { if file != nil { try? FileManager.default.removeItem(at: destination) } }
 
-        var pass = Pass(frames: 0, windows: [])
         var pending: [Float] = []
-        var blocksInWindow = 0
-        var farEndSquares = 0.0
-        var farEndCount = 0
-
-        while true {
-            var samples = try microphoneReader.next(count: block)
-            if samples.isEmpty { break }
-            // The canceller takes whole blocks. The tail of the recording is
-            // padded to one and trimmed back off before it is written.
-            let recorded = samples.count
-            if recorded < block {
-                samples += [Float](repeating: 0, count: block - recorded)
-            }
-            var played = try referenceReader.next(count: block)
-            // The far end's tap can stop before the microphone does, and what
-            // it did not record is silence.
-            if played.count < block {
-                played += [Float](repeating: 0, count: block - played.count)
-            }
-            guard canceller.process(microphone: &samples, reference: played) else {
-                throw ProcessingError.localProcessingFailed(
-                    reason: "the echo canceller refused a block of \(block) frames",
-                    retryable: false
-                )
-            }
-
-            // The only place the canceller's figure is read, and it is read on
-            // the far side of a call that returned true. A block that was never
-            // processed and a filter that has not locked on both reach Swift as
-            // 0.0, and this is what keeps the first out of the median.
-            farEndSquares += played.reduce(0.0) { $0 + Double($1) * Double($1) }
-            farEndCount += played.count
-            blocksInWindow += 1
-            if blocksInWindow == blocksPerWindow {
-                pass.windows.append(Window(
-                    farEndDBFS: decibels(squares: farEndSquares, count: farEndCount),
-                    echoRemovedDB: canceller.echoRemovedDB
-                ))
-                blocksInWindow = 0
-                farEndSquares = 0
-                farEndCount = 0
-            }
-
-            pending += samples.prefix(recorded)
-            pass.frames += Int64(recorded)
+        let pass = try EchoCancellationPass.run(
+            microphone: microphone, reference: reference,
+            referenceOffset: EchoCancellationPass.referenceOffset(timeline: timeline)
+        ) { cleaned in
+            pending += cleaned
             if pending.count >= Self.writeFrames {
                 try write(&pending, to: file, format: format)
             }
@@ -405,29 +307,6 @@ public struct MicrophoneCleaner: Sendable {
         // deallocation, and the caller renames this file.
         file = nil
         return pass
-    }
-
-    /// Whether the far end's track holds any audio at all.
-    ///
-    /// A track that never clears the floor in any window is one the tap opened
-    /// on and recorded nothing through. An early exit rather than a rule of its
-    /// own: a track this refuses has no window loud enough to count below
-    /// either, so the answer is the same. What it saves is cancelling and
-    /// encoding a two-hour meeting against silence before saying so.
-    private func referenceHoldsAudio(_ location: TrackAudioLocation) throws -> Bool {
-        guard let reader = TimelineTrackReader(
-            location: location, format: Self.readFormat, offsetSeconds: 0
-        ) else { return false }
-        let window = Int((Self.windowSeconds * Self.readFormat.sampleRate).rounded())
-        while true {
-            let samples = try reader.next(count: window)
-            if samples.isEmpty { return false }
-            let squares = samples.reduce(0.0) { $0 + Double($1) * Double($1) }
-            if decibels(squares: squares, count: samples.count) > Self.referenceFloorDBFS {
-                return true
-            }
-            if samples.count < window { return false }
-        }
     }
 
     private func write(_ samples: inout [Float], to file: AVAudioFile?, format: AVAudioFormat) throws {
@@ -444,22 +323,6 @@ public struct MicrophoneCleaner: Sendable {
         for index in samples.indices { data[0][index] = samples[index] }
         try file.write(from: buffer)
         samples.removeAll(keepingCapacity: true)
-    }
-
-    private func decibels(squares: Double, count: Int) -> Double {
-        guard count > 0 else { return EmptyTranscriptPolicy.silenceFloorDBFS }
-        let rms = (squares / Double(count)).squareRoot()
-        guard rms > 0 else { return EmptyTranscriptPolicy.silenceFloorDBFS }
-        return max(EmptyTranscriptPolicy.silenceFloorDBFS, 20 * log10(rms))
-    }
-
-    private func median(of values: [Double]) -> Double {
-        let sorted = values.sorted()
-        guard !sorted.isEmpty else { return 0 }
-        let middle = sorted.count / 2
-        return sorted.count.isMultiple(of: 2)
-            ? (sorted[middle - 1] + sorted[middle]) / 2
-            : sorted[middle]
     }
 
     /// Counts and decibels only. Nothing here describes what was said.

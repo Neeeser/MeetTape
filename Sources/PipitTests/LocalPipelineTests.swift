@@ -390,6 +390,91 @@ enum LocalPipelineTests {
                 )
             },
 
+            test("a call whose far end never arrived still names the local user by voice") { expect in
+                // The Google Meet of 4 September 2026: the tap wrote silence,
+                // the room reached the microphone, and the microphone was
+                // diarized. The recognizer matched one cluster to the local
+                // user at 0.90 and the roster named it after another
+                // participant, because the local user's own tile is refused
+                // and the client had lit somebody else's. They were not in
+                // their own meeting.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 60)
+                let (store, storeRoot) = try SpeakerIdentityTests.makeStore()
+                defer { try? FileManager.default.removeItem(at: storeRoot) }
+                let me = try await store.createPerson(name: "Andrew", isLocalUser: true)
+                // A second person in the bank, because a match is only high
+                // when it clears a margin over the runner-up, and a bank of one
+                // has no runner-up to clear.
+                let bob = try await store.createPerson(name: "Bob")
+                for (person, seed) in [(me, 41), (bob, 92)] {
+                    _ = try await store.enrol(VoiceEnrollmentCandidate(
+                        identityID: person.id,
+                        vector: SpeakerIdentityTests.vector(seed: seed),
+                        model: .fluidAudioOffline, speechSeconds: 60, qualityScore: 1,
+                        source: .humanConfirmedUtterances,
+                        evidence: VoiceEvidenceFixture.evidence(
+                            meeting: "m0", seconds: 60, source: .humanConfirmedUtterances,
+                            start: seed == 41 ? 0 : 600
+                        )
+                    ))
+                }
+
+                try meeting.store.writeSpeechEvidence(SpeechEvidence(
+                    levelWindowSeconds: 0.25, speechWindowSeconds: 0.25,
+                    micLevels: [Int8](repeating: -20, count: 240),
+                    remoteLevels: [Int8](repeating: -120, count: 240),
+                    micSpeech: [Int8](repeating: 95, count: 240),
+                    detector: "silero"
+                ))
+                // The roster lit Ada's tile for the whole stretch the local
+                // user was speaking, which is what naming the cluster after
+                // Ada looks like from the outside.
+                try meeting.store.writeRawSensors(RawSensors(
+                    source: "google-meet",
+                    participants: [
+                        SensorParticipant(id: "d1", displayName: "Ada"),
+                        SensorParticipant(id: "d2", displayName: "Andrew", isSelf: true),
+                    ],
+                    turns: [SensorTurn(start: 0, end: 50, participantID: "d1")]
+                ))
+
+                let words = (0..<50).map {
+                    RawTranscriptWord(start: Double($0), end: Double($0) + 0.5, text: " word")
+                }
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 50, text: words.map(\.text).joined(), speaker: nil,
+                        words: words
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 50, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 41, spans: [(0, 50)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                settings.processing.localUserIdentityID = me.id
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer,
+                    speakers: SpeakerRecognitionService(store: store),
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let speakers = try meeting.store.readSpeakerMap()
+                let mine = speakers.entries.filter { $0.key.hasPrefix("mic-") && $0.value.identityID == me.id }
+                expect.equal(mine.count, 1, "the cluster the recognizer matched carries the local user")
+                let entry = try expect.unwrap(mine.first?.value)
+                expect.equal(entry.displayName, settings.localUserName, "named as the local user, not as Ada")
+                expect.equal(entry.origin, SpeakerAssignmentOrigin.deterministic)
+            },
+
             test("a call whose far end arrived keeps diarizing the far end") { expect in
                 // The other side of the same decision, and the one that must
                 // not move. Taking the local user out of the diarization

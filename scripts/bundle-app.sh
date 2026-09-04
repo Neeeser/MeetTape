@@ -106,15 +106,33 @@ cat > "$REPO_ROOT/dist/Pipit.entitlements" <<'ENTITLEMENTS'
 </plist>
 ENTITLEMENTS
 
-IDENTITY="${PIPIT_SIGN_IDENTITY:--}"
-# A secure timestamp is mandatory for notarization; ad-hoc signing cannot have one.
-if [ "$IDENTITY" = "-" ]; then
-    TIMESTAMP=(--timestamp=none)
-    echo "==> signing ad-hoc"
-else
-    TIMESTAMP=(--timestamp)
-    echo "==> signing with a Developer ID identity"
+# The identity, in order: the one named in the environment, the local
+# development certificate `scripts/make-signing-identity.sh` creates, then
+# ad-hoc. TCC pins its grants to the signature's designated requirement, and an
+# ad-hoc signature has none that survives a rebuild, so every ad-hoc install
+# drops Microphone, Accessibility and Screen & System Audio Recording. A
+# certificate, even a self-signed one, keeps them.
+IDENTITY="${PIPIT_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ] && security find-identity -v -p codesigning 2>/dev/null | grep -q '"Pipit Development"'; then
+    IDENTITY="Pipit Development"
 fi
+IDENTITY="${IDENTITY:--}"
+# A secure timestamp is mandatory for notarization. Ad-hoc and self-signed
+# signatures cannot have one.
+case "$IDENTITY" in
+    -)
+        TIMESTAMP=(--timestamp=none)
+        echo "==> signing ad-hoc"
+        ;;
+    "Developer ID"*)
+        TIMESTAMP=(--timestamp)
+        echo "==> signing with a Developer ID identity"
+        ;;
+    *)
+        TIMESTAMP=(--timestamp=none)
+        echo "==> signing with the local identity \"$IDENTITY\""
+        ;;
+esac
 # A stable identifier is what lets the app recognise its own relay when the relay
 # connects to the sensor socket.
 codesign --force --sign "$IDENTITY" \

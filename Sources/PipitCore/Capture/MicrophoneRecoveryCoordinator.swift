@@ -655,6 +655,11 @@ public enum CaptureWarning: Sendable, Equatable {
     case remoteSilentWhileProducing(seconds: Double)
     case segmentWriteFailed(track: CaptureTrack)
     case permissionRevoked(track: CaptureTrack)
+    /// Recording started without the Screen & System Audio Recording grant.
+    /// The process tap then returns no error and delivers digital zero at
+    /// full rate, so the far end is lost for the whole meeting while every
+    /// other reading says the tap is healthy.
+    case systemAudioPermissionMissing
     case storageUnavailable(path: String)
 
     /// Identifies the condition, not the moment. Two reports of the same problem
@@ -667,9 +672,31 @@ public enum CaptureWarning: Sendable, Equatable {
         case .remoteSilentWhileProducing: "remote_silent_while_producing"
         case .segmentWriteFailed(let track): "segment_write_failed_\(track.rawValue)"
         case .permissionRevoked(let track): "permission_revoked_\(track.rawValue)"
+        case .systemAudioPermissionMissing: "system_audio_permission_missing"
         case .storageUnavailable: "storage_unavailable"
         }
     }
+
+    /// The message for a warning stored by its `dedupKey`, for a meeting
+    /// read back later. A key nothing here knows is shown as it was written,
+    /// which covers the lines older builds stored as free text.
+    public static func message(forKey key: String) -> String {
+        for warning in stored where warning.dedupKey == key { return warning.message }
+        if key.hasPrefix("permission_revoked_mic") { return CaptureWarning.permissionRevoked(track: .mic).message }
+        if key.hasPrefix("permission_revoked_remote") { return CaptureWarning.permissionRevoked(track: .remote).message }
+        if key.hasPrefix("segment_write_failed") { return CaptureWarning.segmentWriteFailed(track: .mic).message }
+        return key
+    }
+
+    /// One representative of each case whose key carries no payload.
+    private static let stored: [CaptureWarning] = [
+        .microphoneUnrecovered(seconds: 0),
+        .rebuildLoop(count: 0, windowSeconds: 0),
+        .remoteProducingWithoutCallbacks(seconds: 0),
+        .remoteSilentWhileProducing(seconds: 0),
+        .systemAudioPermissionMissing,
+        .storageUnavailable(path: ""),
+    ]
 
     public var message: String {
         switch self {
@@ -690,6 +717,12 @@ public enum CaptureWarning: Sendable, Equatable {
             track == .mic
                 ? "Microphone access was revoked while recording."
                 : "System audio access was revoked while recording."
+        case .systemAudioPermissionMissing:
+            """
+            Pipit does not have Screen & System Audio Recording permission, so the other \
+            side of this call is not being recorded. Grant it in System Settings, then \
+            record again.
+            """
         case .storageUnavailable:
             "Pipit has no writable location for recordings."
         }

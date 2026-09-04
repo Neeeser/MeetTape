@@ -153,6 +153,10 @@ public final class PipitRuntime {
     @ObservationIgnored private(set) var pipeline: ProcessingPipeline!
     @ObservationIgnored private var powerObserver: PowerEventObserver?
     @ObservationIgnored private var currentMeeting: (metadata: MeetingMetadata, store: MeetingStore)?
+    /// Every distinct warning raised since capture was last armed, written into
+    /// the meeting when it ends. `status.lastWarning` holds one for the menu
+    /// bar; this holds all of them for the folder.
+    @ObservationIgnored private var sessionWarnings: [CaptureWarning] = []
     /// Meetings trashed in this session. A meeting identifier carries the
     /// moment it started, so none of these is ever handed out again.
     @ObservationIgnored private var trashedMeetingIDs: Set<String> = []
@@ -468,6 +472,10 @@ public final class PipitRuntime {
     }
 
     func captureDidWarn(_ warning: CaptureWarning) {
+        // Keyed by case. The engine already raises each of its own once, and
+        // the preflight below goes through here as well.
+        guard !sessionWarnings.contains(where: { $0.dedupKey == warning.dedupKey }) else { return }
+        sessionWarnings.append(warning)
         status.lastWarning = warning
         if settings.showNotifications { notifications.captureProblem(warning) }
         onStatusChange?()
@@ -996,6 +1004,24 @@ public final class PipitRuntime {
         for action in actions {
             switch action {
             case .armCapture(let prefixes, let capturesRemote):
+                // A new session. What the last one raised belongs to it and
+                // was written into its meeting when it ended.
+                sessionWarnings = []
+                // Before the tap exists, because the tap cannot tell. Without
+                // the grant it delivers digital zero and reports healthy, and
+                // the meeting loses its far end with nothing said until the
+                // silence detector gives up on it forty seconds in.
+                if capturesRemote {
+                    let systemAudio = await permissions.status(for: .screenRecording).state
+                    for warning in RecordingPreflight.warnings(
+                        capturesRemote: capturesRemote, systemAudio: systemAudio
+                    ) {
+                        Log.session.notice(
+                            "preflight: \(warning.dedupKey, privacy: .public)"
+                        )
+                        captureDidWarn(warning)
+                    }
+                }
                 await captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
             case .retargetCapture(let prefixes):
                 await captureEngine.retarget(bundlePrefixes: prefixes)
@@ -1150,6 +1176,7 @@ public final class PipitRuntime {
     }
 
     private func discard(reason: String) async {
+        sessionWarnings = []
         await captureEngine.discardArmed()
         if let meeting = currentMeeting {
             _ = await captureEngine.stop(reason: reason)
@@ -1183,9 +1210,20 @@ public final class PipitRuntime {
                     run.endReason = reason
                     metadata.runs[metadata.runs.count - 1] = run
                 }
-                metadata.captureWarnings = snapshot.overall.isLosingAudio
-                    ? metadata.captureWarnings + ["capture ended in state \(snapshot.overall.rawValue)"]
-                    : metadata.captureWarnings
+                // Everything raised during the session, once each, so the
+                // folder says what went wrong long after the notification is
+                // gone. Until this the field was written from the terminal
+                // snapshot alone, which `stop()` reports idle, so it was empty
+                // on every recording ever made.
+                var warnings = metadata.captureWarnings
+                for warning in self.sessionWarnings where !warnings.contains(warning.dedupKey) {
+                    warnings.append(warning.dedupKey)
+                }
+                if snapshot.overall.isLosingAudio {
+                    warnings.append("capture ended in state \(snapshot.overall.rawValue)")
+                }
+                metadata.captureWarnings = warnings
+                self.sessionWarnings = []
                 metadata.processing.advance(to: .finalizing, at: self.clock.now)
                 metadata.processing.advance(to: .audioSafe, at: self.clock.now)
             }

@@ -85,6 +85,14 @@ The following paths have been exercised outside unit tests:
 
 ## Remaining manual checks
 
+- Screen & System Audio Recording missing: remove Pipit from that list in
+  System Settings, start a call, and confirm a "Recording problem" notification
+  arrives as capture is armed, the meeting's header shows the warning after it
+  ends, and `metadata.json` carries `system_audio_permission_missing`.
+- Local signing identity: run `scripts/make-signing-identity.sh`, rebuild and
+  reinstall twice, and confirm Microphone, Accessibility and Screen & System
+  Audio Recording stay granted across the second install.
+
 These paths still need direct observation:
 
 - A two-hour continuous capture

@@ -105,6 +105,21 @@ public struct MeetingDetailView: View {
             .foregroundStyle(.secondary)
             .padding(.top, 4)
 
+            if let warnings = detail.metadata?.captureWarnings, !warnings.isEmpty {
+                // What went wrong while this was recorded, kept with the
+                // meeting. A far end that was never captured is the usual one,
+                // and a transcript read without knowing that reads as a
+                // recogniser failure.
+                Label(
+                    CaptureWarning.message(forKey: warnings[0]),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .help(warnings.map(CaptureWarning.message(forKey:)).joined(separator: "\n"))
+                .padding(.top, 4)
+            }
+
             HStack(spacing: 8) {
                 folderMenu
                 Text(archivePath)

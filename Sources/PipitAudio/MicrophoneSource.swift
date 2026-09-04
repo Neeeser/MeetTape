@@ -151,20 +151,21 @@ public final class MicrophoneSource: MicrophoneEngineController, Sendable {
         // the device moves only its hardware-side format. Two shapes follow,
         // both measured on this Mac on 2026-09-03.
         //
-        // The client format wider than the device: with the client format
-        // forced to 8 channels and the unit pointed at the 1-channel built-in
-        // microphone, buffers arrived with the microphone on channel 0 and the
-        // other seven at exactly zero. The energy scan in `TrackAudioReader`
-        // keeps the channel carrying the voice, so that shape survives.
+        // One shape is a client format wider than the device. With the client
+        // format forced to 8 channels and the unit pointed at the 1-channel
+        // built-in microphone, buffers arrived with the microphone on channel 0
+        // and the other seven at exactly zero. The energy scan in
+        // `TrackAudioReader` keeps the channel carrying the voice, so that
+        // shape survives.
         //
-        // The client format narrower than the device: pointing the unit at an
-        // 8-channel device took its input scope to 8 channels while its output
-        // scope stayed at the 1 channel the node was instantiated with, and the
-        // output scope is what `outputFormat(forBus: 0)` reports. The track is
-        // written at that 1 channel, the scan does not run below 3, and which
-        // of the device's channels AUHAL folds into the single one was not
-        // measured. Nothing here improves on what the code did before the
-        // device was set at all.
+        // The other is a client format narrower than the device. Pointing the
+        // unit at an 8-channel device took its input scope to 8 channels while
+        // its output scope stayed at the 1 channel the node was instantiated
+        // with, and the output scope is what `outputFormat(forBus: 0)` reports.
+        // The track is written at that 1 channel. The scan runs only above two
+        // channels, so it does not run there, and which of the device's
+        // channels AUHAL folds into the single one was not measured. This
+        // branch does not improve on that shape.
         //
         // The set still belongs before the read, because that is the only order
         // in which the read could reflect the choice, and `mic_bind` records

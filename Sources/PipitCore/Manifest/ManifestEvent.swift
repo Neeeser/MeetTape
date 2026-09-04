@@ -191,10 +191,10 @@ public enum ManifestEvent: Sendable, Equatable {
     /// `remote_bind` records the index the bind chose to read. This records the
     /// reading, which is a different fact and the one that says whether the
     /// choice held. A remote track of digital zero is answered by the two lines
-    /// together: the aggregate's buffer list, and whether the index was
-    /// unusable so a channel-count match was read instead. Both used to reach
-    /// the unified log only, which is gone by the time anyone opens the meeting
-    /// folder.
+    /// together, from the aggregate's buffer list and from whether the index
+    /// was unusable so a channel-count match was read instead. Both used to
+    /// reach the unified log only, which is gone by the time anyone opens the
+    /// meeting folder.
     ///
     /// One line per bind, written on the first poll after a callback arrives. A
     /// bind with no line delivered no audio at all.

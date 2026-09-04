@@ -29,7 +29,8 @@ public struct MicrophoneBuild: Sendable, Equatable {
     /// The OSStatus from pointing the input unit at the system default input
     /// device, present only when that set failed. The build then runs on
     /// whatever device the unit already held, which is a real track from a
-    /// device nothing here named. Carried out so the manifest says so.
+    /// device nothing here named. Carried out of the audio layer so the
+    /// manifest records it.
     public let deviceSelectionStatus: Int32?
 
     public init(format: AudioFormatDescriptor, deviceSelectionStatus: Int32?) {

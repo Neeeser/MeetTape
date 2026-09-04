@@ -7,7 +7,7 @@ import TestKit
 /// Real audio through the real writers and readers. These use AVFoundation but no
 /// audio hardware, so they run anywhere.
 enum AudioTests {
-    /// A deinterleaved tone, which is the shape a process tap delivers: its
+    /// A deinterleaved tone, which is the shape a process tap delivers. Its
     /// format is always `standardFormatWithSampleRate:channels:`, so every
     /// channel has its own pointer.
     ///

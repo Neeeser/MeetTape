@@ -192,7 +192,7 @@ enum HardeningTests {
     static var captureSuite: Suite {
         Suite("CaptureEngineHardening", [
             test("a microphone whose device could not be set still records") { expect in
-                // Pointing the input unit at the default input device can fail:
+                // Pointing the input unit at the default input device can fail.
                 // `kAudioUnitErr_Initialized` is reachable wherever
                 // AVAudioEngine has already initialised the unit by the time it
                 // hands it over. Treating that as a build failure would leave

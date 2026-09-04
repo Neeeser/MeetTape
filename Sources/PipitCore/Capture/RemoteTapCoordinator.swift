@@ -219,13 +219,13 @@ public final class RemoteTapCoordinator: Sendable {
     /// the last line stands for the bind it names.
     private func reportFirstCallback() {
         guard let reading = controller.firstCallback() else { return }
-        let bindCount: Int? = state.withLock { state in
+        let unreported: Int? = state.withLock { state in
             let count = state.policy.bindCount
             guard state.reportedCallbackBind != count else { return nil }
             state.reportedCallbackBind = count
             return count
         }
-        guard let bindCount else { return }
+        guard let bindCount = unreported else { return }
         delegate.captureDidReadRemoteStream(reading: reading, bindCount: bindCount)
     }
 

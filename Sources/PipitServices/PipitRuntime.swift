@@ -347,13 +347,21 @@ public final class PipitRuntime {
             },
             onSleep: {}
         )
-        refreshRecentMeetings()
         // The recovery scan runs before detection, so a meeting that starts
         // during launch can never be scanned as an interrupted one and finalised
         // underneath itself. Resuming the processing of what it found runs
         // after, because that can take minutes and detection must be watching
         // before it does.
         Task { @MainActor in
+            // The first touch of the Documents folder. On a build macOS has
+            // not seen before, that raises the Documents consent prompt, and
+            // the call blocks until it is answered. Off the main thread, so
+            // the menu bar item and Setup appear while the prompt waits:
+            // measured, the whole application sat invisible for two minutes
+            // behind a prompt the person had not noticed.
+            let recent = await Task.detached { [repository] in repository.listMeetings(limit: 40) }.value
+            recentMeetings = recent
+            onStatusChange?()
             await recover()
             detectionEngine.start()
             await ensureLocalUserIdentity()

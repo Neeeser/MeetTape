@@ -13,6 +13,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private let runtime: PipitRuntime
     private let windows: WindowManager
     private let statusItem: NSStatusItem
+    /// What the button's image was last built from.
+    private var iconKey: String?
     /// Ticks the elapsed-time display. Held as a cancellable so teardown does not
     /// need a deinit, which cannot touch main-actor state.
     private var elapsedTimer: DispatchSourceTimer?
@@ -83,7 +85,14 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private func refreshButton() {
         guard let button = statusItem.button else { return }
         let status = runtime.status
-        button.image = Self.iconImage(for: status)
+        // The item is hosted by another process, which is handed a new image
+        // on every assignment. Assigned only when the icon changes, not on
+        // every tick of the recording clock.
+        let key = Self.iconKey(for: status)
+        if key != iconKey {
+            iconKey = key
+            button.image = Self.iconImage(for: status)
+        }
         button.contentTintColor = Self.iconTintColor(for: status)
         if status.isRecording {
             // The template image and duration both resolve against whichever
@@ -145,6 +154,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         return status.sensorNeedsAttention && !status.isCapturing
     }
 
+    /// Everything the image is decided from, so an unchanged icon is not rebuilt.
+    static func iconKey(for status: RuntimeStatus) -> String {
+        "\(iconAssetName(for: status))|red=\(iconIsRed(for: status))|badge=\(iconIsBadged(for: status))"
+    }
+
     private static func iconImage(for status: RuntimeStatus) -> NSImage? {
         let asset = NSImage(named: NSImage.Name(iconAssetName(for: status)))
         let image = asset ?? NSImage(
@@ -154,8 +168,32 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let copy = image?.copy() as? NSImage else { return nil }
         copy.size = NSSize(width: 18, height: 18)
         copy.isTemplate = true
-        if iconIsRed(for: status) { return flagged(copy) }
-        return iconIsBadged(for: status) ? badged(copy) : copy
+        if iconIsRed(for: status) { return rasterized(flagged(copy)) }
+        return iconIsBadged(for: status) ? rasterized(badged(copy)) : copy
+    }
+
+    /// A composed image as pixels.
+    ///
+    /// A drawing-handler image has no bitmap of its own. The status item is
+    /// hosted by Control Center on macOS 26, and it drew such images as an
+    /// empty slot. Rendered at 2x for a Retina menu bar.
+    private static func rasterized(_ image: NSImage) -> NSImage {
+        let size = image.size
+        let scale: CGFloat = 2
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return image }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        let bitmap = NSImage(size: size)
+        bitmap.addRepresentation(rep)
+        bitmap.isTemplate = image.isTemplate
+        return bitmap
     }
 
     /// The red bird with its mark at a given height, for the permission panel

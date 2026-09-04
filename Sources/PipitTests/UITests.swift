@@ -605,25 +605,32 @@ enum UITests {
                 }
             },
 
-            test("a missing grant turns the icon red with a mark until the grant is seen") { expect in
+            test("a missing grant turns the whole icon red until the grant is seen") { expect in
                 await MainActor.run {
                     var status = RuntimeStatus()
-                    expect.isFalse(MenuBarController.iconIsBadged(for: status))
+                    expect.isFalse(MenuBarController.iconIsRed(for: status))
 
-                    status.permissionNotice = PermissionNotice(warning: .microphonePermissionMissing)
-                    expect.equal(MenuBarController.iconTintColor(for: status), .systemRed)
-                    expect.isTrue(MenuBarController.iconIsBadged(for: status))
+                    status.permissionNotice = PermissionNotice(missing: [.microphone])
+                    expect.isTrue(MenuBarController.iconIsRed(for: status))
+                    expect.isNil(
+                        MenuBarController.iconTintColor(for: status),
+                        "the red is baked into the image, not tinted"
+                    )
+                    expect.isFalse(
+                        MenuBarController.iconIsBadged(for: status),
+                        "no hole is cut through the bird for the mark"
+                    )
 
-                    // Red outranks the reconnect orange, and the mark stays on
-                    // through a recording whose far end is missing.
-                    status.sessionState = .recording
-                    status.permissionNotice = PermissionNotice(warning: .systemAudioPermissionMissing)
-                    expect.equal(MenuBarController.iconTintColor(for: status), .systemRed)
-                    expect.isTrue(MenuBarController.iconIsBadged(for: status))
+                    // Red outranks the reconnect orange, and stays on through a
+                    // recording whose far end is missing.
+                    status.sessionState = .reconnecting
+                    status.permissionNotice = PermissionNotice(missing: [.screenRecording])
+                    expect.isTrue(MenuBarController.iconIsRed(for: status))
+                    expect.isNil(MenuBarController.iconTintColor(for: status))
 
                     status.permissionNotice = nil
-                    expect.isNil(MenuBarController.iconTintColor(for: status))
-                    expect.isFalse(MenuBarController.iconIsBadged(for: status))
+                    expect.isFalse(MenuBarController.iconIsRed(for: status))
+                    expect.equal(MenuBarController.iconTintColor(for: status), .systemOrange)
                 }
             },
 

@@ -186,6 +186,72 @@ enum SetupFlowTests {
                 expect.isFalse(SetupFlow.shouldOpenAtLaunch(snapshot))
             },
 
+            test("the rail marks required steps red until done and optional steps by what was chosen") { expect in
+                var snapshot = ready()
+                snapshot.permissions[.microphone] = .denied
+                var marks = Dictionary(
+                    uniqueKeysWithValues: SetupFlow.steps(for: snapshot).map { ($0.id, $0.mark) }
+                )
+                expect.equal(marks[.microphone], .missing, "required and not done is a red X")
+                expect.equal(marks[.screenRecording], .done)
+                expect.equal(marks[.backend], .done)
+                expect.equal(marks[.welcome], .notVisited, "a page never continued past has no mark")
+                expect.equal(marks[.optionalPermissions], .notVisited)
+                expect.equal(marks[.firefox], .notVisited)
+                expect.equal(marks[.finish], .notVisited)
+
+                // Continuing past an optional page with its offer left off is
+                // a choice, and the rail keeps it as one.
+                snapshot.settings.setupStepsVisited = [
+                    SetupStepID.welcome.rawValue, SetupStepID.optionalPermissions.rawValue,
+                    SetupStepID.firefox.rawValue,
+                ]
+                snapshot.permissions[.calendar] = .granted
+                marks = Dictionary(
+                    uniqueKeysWithValues: SetupFlow.steps(for: snapshot).map { ($0.id, $0.mark) }
+                )
+                expect.equal(marks[.welcome], .done, "welcome has nothing to switch on")
+                expect.equal(
+                    marks[.optionalPermissions], .skipped,
+                    "one of the two on is not everything on the page"
+                )
+                expect.equal(marks[.firefox], .skipped)
+
+                snapshot.permissions[.notifications] = .granted
+                snapshot.nativeHostInstalled = true
+                snapshot.settings.hasCompletedOnboarding = true
+                marks = Dictionary(
+                    uniqueKeysWithValues: SetupFlow.steps(for: snapshot).map { ($0.id, $0.mark) }
+                )
+                expect.equal(marks[.optionalPermissions], .done)
+                expect.equal(marks[.firefox], .done)
+                expect.equal(marks[.finish], .done)
+            },
+
+            test("a returning user opens on the first step that needs work, models included") { expect in
+                var finished = AppSettings()
+                finished.hasCompletedOnboarding = true
+                var snapshot = ready(settings: finished)
+                snapshot.installedUnits = []
+                expect.equal(SetupFlow.firstMissingStep(in: snapshot), .models)
+                expect.equal(SetupFlow.openingStep(for: snapshot), .models)
+
+                snapshot.permissions[.accessibility] = .grantedButNotEffective
+                snapshot.installedUnits = snapshot.requiredUnits
+                expect.equal(SetupFlow.openingStep(for: snapshot), .accessibility)
+            },
+
+            test("the steps a person continued past survive a settings round trip") { expect in
+                var settings = AppSettings()
+                settings.setupStepsVisited = ["welcome", "firefox"]
+                let data = try JSONEncoder().encode(settings)
+                let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+                expect.equal(decoded.setupStepsVisited, ["welcome", "firefox"])
+                // A file written before the key existed reads as nothing visited.
+                let bare = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+                expect.equal(bare.setupStepsVisited, [])
+            },
+
             test("setup that was never finished always opens") { expect in
                 var snapshot = ready()
                 expect.isFalse(snapshot.settings.hasCompletedOnboarding)

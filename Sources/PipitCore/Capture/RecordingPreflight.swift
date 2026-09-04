@@ -55,35 +55,28 @@ public enum RecordingPreflight {
 ///
 /// The warning is what gets stored with the meeting and shown in the menu.
 /// This is what goes on screen at the moment of refusal, in front of the
-/// call, with a button into Setup.
+/// call. One missing grant is given from the panel itself; more than one
+/// sends the person into Setup, which walks through them in order.
 public struct PermissionNotice: Equatable, Sendable, Identifiable {
-    public let warning: CaptureWarning
-    /// The grant that is missing, and the Setup step the button lands on.
-    public let kind: PermissionKind
+    /// The grants that are missing, in Setup order. Never empty.
+    public let missing: [PermissionKind]
+
+    public var id: String { missing.map(\.rawValue).joined(separator: "+") }
+
+    /// Nil when nothing is missing.
+    public init?(missing: [PermissionKind]) {
+        let ordered = PermissionKind.allCases.filter { missing.contains($0) }
+        guard !ordered.isEmpty else { return nil }
+        self.missing = ordered
+    }
+
+    /// The one grant to give from the panel, or nil when Setup takes over.
+    public var single: PermissionKind? { missing.count == 1 ? missing[0] : nil }
+
     /// Whether the microphone is still being recorded behind the notice.
     /// Without the Microphone grant nothing is; without the system audio
     /// grant the microphone runs and the far end is lost.
-    public let recordingContinues: Bool
-
-    public var id: String { warning.dedupKey }
-
-    /// Nil for a warning that is not about a permission.
-    public init?(warning: CaptureWarning) {
-        switch warning {
-        case .microphonePermissionMissing:
-            self.init(warning: warning, kind: .microphone, recordingContinues: false)
-        case .systemAudioPermissionMissing:
-            self.init(warning: warning, kind: .screenRecording, recordingContinues: true)
-        default:
-            return nil
-        }
-    }
-
-    private init(warning: CaptureWarning, kind: PermissionKind, recordingContinues: Bool) {
-        self.warning = warning
-        self.kind = kind
-        self.recordingContinues = recordingContinues
-    }
+    public var recordingContinues: Bool { !missing.contains(.microphone) }
 
     public var title: String {
         recordingContinues
@@ -92,20 +85,41 @@ public struct PermissionNotice: Equatable, Sendable, Identifiable {
     }
 
     public var body: String {
-        switch kind {
+        switch single {
         case .microphone:
-            "Pipit does not have the Microphone permission. Nothing was recorded. Grant it in Setup, then start the recording again."
-        default:
-            "Pipit does not have the Screen & System Audio Recording permission. Your microphone is being recorded. The other side of the call is not."
+            return "Pipit does not have the Microphone permission. Nothing was recorded. Allow it and the recording starts."
+        case .screenRecording:
+            return "Pipit does not have the Screen & System Audio Recording permission. Your microphone is being recorded. The other side of the call is not."
+        case .some(let kind):
+            return "Pipit does not have the \(kind.title) permission."
+        case .none:
+            let names = missing.map(\.paneTitle).joined(separator: " or ")
+            return recordingContinues
+                ? "Pipit does not have the \(names) permission. Setup walks through each one."
+                : "Pipit does not have the \(names) permission. Nothing was recorded. Setup walks through each one."
         }
     }
 
-    /// The menu item that stays until the grant exists.
-    public var menuTitle: String { "\(kind.title) permission missing…" }
+    /// The menu item that stays until the grants exist.
+    public var menuTitle: String {
+        if let single { return "\(single.title) permission missing…" }
+        return "Permissions missing…"
+    }
 
-    /// Whether the grant this notice is about is now usable.
+    /// The warnings recorded against the session for these grants.
+    public var warnings: [CaptureWarning] {
+        missing.compactMap { kind in
+            switch kind {
+            case .microphone: .microphonePermissionMissing
+            case .screenRecording: .systemAudioPermissionMissing
+            case .accessibility, .calendar, .notifications: nil
+            }
+        }
+    }
+
+    /// Whether every grant this notice is about is now usable.
     public func isResolved(by statuses: [PermissionStatus]) -> Bool {
-        statuses.contains { $0.kind == kind && $0.isUsable }
+        missing.allSatisfy { kind in statuses.contains { $0.kind == kind && $0.isUsable } }
     }
 }
 

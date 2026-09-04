@@ -84,7 +84,6 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let status = runtime.status
         button.image = Self.iconImage(for: status)
-        button.image?.isTemplate = true
         button.contentTintColor = Self.iconTintColor(for: status)
         if status.isRecording {
             // The template image and duration both resolve against whichever
@@ -126,14 +125,21 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     /// adaptive foreground colour. In particular, the recording icon stays
     /// light while the status item has its dark active background.
     public static func iconTintColor(for status: RuntimeStatus) -> NSColor? {
-        // A missing grant outranks everything: the icon is red until it is seen.
-        if status.permissionNotice != nil { return .systemRed }
+        // The red icon carries its own colour; a tint would be ignored anyway,
+        // since it is not a template.
+        if iconIsRed(for: status) { return nil }
         return status.isInReconnectWindow ? .systemOrange : nil
+    }
+
+    /// Whether the icon is the whole bird in red with a mark beside it. A
+    /// missing grant outranks everything until it is seen.
+    public static func iconIsRed(for status: RuntimeStatus) -> Bool {
+        status.permissionNotice != nil
     }
 
     /// Whether the exclamation mark is stamped into the icon's corner.
     public static func iconIsBadged(for status: RuntimeStatus) -> Bool {
-        if status.permissionNotice != nil { return true }
+        if iconIsRed(for: status) { return false }
         // A recording icon already carries the state that matters most. The
         // add-on warning waits until the icon is otherwise idle.
         return status.sensorNeedsAttention && !status.isCapturing
@@ -148,7 +154,44 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let copy = image?.copy() as? NSImage else { return nil }
         copy.size = NSSize(width: 18, height: 18)
         copy.isTemplate = true
+        if iconIsRed(for: status) { return flagged(copy) }
         return iconIsBadged(for: status) ? badged(copy) : copy
+    }
+
+    /// The whole icon in red, with a red exclamation mark beside it.
+    ///
+    /// Beside, not over: a mark stamped into the corner cut a hole through the
+    /// bird's body. The colour is baked in rather than tinted, because the
+    /// status bar button ignored `contentTintColor` on the template and drew
+    /// the bird in the ordinary menu bar colour.
+    private static func flagged(_ base: NSImage) -> NSImage {
+        let markWidth = base.size.height * 0.5
+        let gap: CGFloat = 1.5
+        let size = NSSize(width: base.size.width + gap + markWidth, height: base.size.height)
+        let mark = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: nil)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let bird = NSRect(x: rect.minX, y: rect.minY, width: base.size.width, height: base.size.height)
+            tinted(base, .systemRed).draw(in: bird)
+            if let mark {
+                let box = NSRect(x: bird.maxX + gap, y: rect.minY, width: markWidth, height: markWidth)
+                tinted(mark, .systemRed).draw(in: box)
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    /// A template image filled with one colour wherever it has ink.
+    private static func tinted(_ base: NSImage, _ color: NSColor) -> NSImage {
+        let image = NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     /// Stamps a warning mark into the corner of the menu bar icon.

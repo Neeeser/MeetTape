@@ -660,6 +660,10 @@ public enum CaptureWarning: Sendable, Equatable {
     /// full rate, so the far end is lost for the whole meeting while every
     /// other reading says the tap is healthy.
     case systemAudioPermissionMissing
+    /// Recording was asked for without the Microphone grant. The input engine
+    /// throws on every build, so nothing is recorded and the request is
+    /// refused rather than started.
+    case microphonePermissionMissing
     case storageUnavailable(path: String)
 
     /// Identifies the condition, not the moment. Two reports of the same problem
@@ -673,6 +677,7 @@ public enum CaptureWarning: Sendable, Equatable {
         case .segmentWriteFailed(let track): "segment_write_failed_\(track.rawValue)"
         case .permissionRevoked(let track): "permission_revoked_\(track.rawValue)"
         case .systemAudioPermissionMissing: "system_audio_permission_missing"
+        case .microphonePermissionMissing: "microphone_permission_missing"
         case .storageUnavailable: "storage_unavailable"
         }
     }
@@ -695,6 +700,7 @@ public enum CaptureWarning: Sendable, Equatable {
         .remoteProducingWithoutCallbacks(seconds: 0),
         .remoteSilentWhileProducing(seconds: 0),
         .systemAudioPermissionMissing,
+        .microphonePermissionMissing,
         .storageUnavailable(path: ""),
     ]
 
@@ -723,6 +729,8 @@ public enum CaptureWarning: Sendable, Equatable {
             side of this call is not being recorded. Grant it in System Settings, then \
             record again.
             """
+        case .microphonePermissionMissing:
+            "Pipit does not have Microphone permission, so it cannot record. Grant it in System Settings, then record again."
         case .storageUnavailable:
             "Pipit has no writable location for recordings."
         }

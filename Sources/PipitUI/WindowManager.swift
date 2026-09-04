@@ -37,6 +37,11 @@ public final class WindowManager {
         // An open meetings window tracks processing on its own. When a
         // transcript lands, the row and the pane show it without a manual
         // refresh.
+        runtime.onPermissionRequired = { [weak self] _ in
+            // Setup lands on the first grant that is missing, so the kind is
+            // not needed to pick a step.
+            self?.showSetup()
+        }
         runtime.onProcessingUpdate = { [weak self] meetingID in
             guard let self, let model = self.meetingsModel else { return }
             // Resolved through the conversation the identifier belongs to. A

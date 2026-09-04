@@ -24,6 +24,33 @@ enum CapturePreflightTests {
             expect.equal(RecordingPreflight.warnings(capturesRemote: false, systemAudio: .denied), [])
         },
 
+        test("no microphone grant refuses the recording, no system audio grant lets it run with a warning") { expect in
+            expect.equal(
+                RecordingPreflight.decide(capturesRemote: true, microphone: .denied, systemAudio: .granted),
+                RecordingPreflight.Decision.refuse(.microphonePermissionMissing)
+            )
+            expect.equal(
+                RecordingPreflight.decide(capturesRemote: false, microphone: .notDetermined, systemAudio: .denied),
+                RecordingPreflight.Decision.refuse(.microphonePermissionMissing)
+            )
+            expect.equal(
+                RecordingPreflight.decide(capturesRemote: true, microphone: .granted, systemAudio: .denied),
+                RecordingPreflight.Decision.proceed([.systemAudioPermissionMissing])
+            )
+            expect.equal(
+                RecordingPreflight.decide(capturesRemote: true, microphone: .granted, systemAudio: .granted),
+                RecordingPreflight.Decision.proceed([])
+            )
+            expect.equal(
+                RecordingPreflight.decide(capturesRemote: false, microphone: .granted, systemAudio: .denied),
+                RecordingPreflight.Decision.proceed([])
+            )
+            expect.equal(
+                CaptureWarning.message(forKey: "microphone_permission_missing"),
+                CaptureWarning.microphonePermissionMissing.message
+            )
+        },
+
         test("a warning stored by key reads back as its message") { expect in
             let key = CaptureWarning.systemAudioPermissionMissing.dedupKey
             expect.equal(

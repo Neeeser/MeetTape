@@ -140,7 +140,9 @@ public enum SetupFlow {
         let visited = snapshot.settings.setupStepsVisited.contains(id.rawValue)
         switch id {
         case .welcome:
-            return visited ? .done : .notVisited
+            // Finishing setup once means Welcome was seen, whether or not the
+            // build that finished it kept a record of visited steps.
+            return visited || snapshot.settings.hasCompletedOnboarding ? .done : .notVisited
         case .optionalPermissions:
             let both = snapshot.state(of: .calendar) == .granted
                 && snapshot.state(of: .notifications) == .granted

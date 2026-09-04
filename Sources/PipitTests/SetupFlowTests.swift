@@ -226,6 +226,13 @@ enum SetupFlowTests {
                 expect.equal(marks[.optionalPermissions], .done)
                 expect.equal(marks[.firefox], .done)
                 expect.equal(marks[.finish], .done)
+
+                // A setup finished by a build that kept no visited list still
+                // counts Welcome as seen.
+                var finished = ready()
+                finished.settings.hasCompletedOnboarding = true
+                expect.equal(SetupFlow.mark(for: .welcome, in: finished), .done)
+                expect.equal(SetupFlow.mark(for: .optionalPermissions, in: finished), .notVisited)
             },
 
             test("a returning user opens on the first step that needs work, models included") { expect in

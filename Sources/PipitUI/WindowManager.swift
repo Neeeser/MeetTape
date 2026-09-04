@@ -414,6 +414,17 @@ public final class WindowManager {
         window.titlebarAppearsTransparent = true
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // The panel polls permissions while it is up, and every change of
+        // state made the hosting controller resize the window to the view's
+        // ideal height, which is unbounded: measured at 1825 points, with the
+        // buttons off the bottom of the screen. The size is fixed here and
+        // the host is told not to touch it.
+        if let host = window.contentViewController as? NSHostingController<AnyView> {
+            host.sizingOptions = []
+        }
+        window.setContentSize(size)
+        window.contentMinSize = size
+        window.contentMaxSize = size
         model.onNeedsFocus = { [weak window] in
             guard let window else { return }
             NSApp.activate(ignoringOtherApps: true)

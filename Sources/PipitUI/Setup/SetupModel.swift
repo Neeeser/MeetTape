@@ -26,7 +26,11 @@ public final class SetupModel {
     }
 
     public var current: SetupStepID = .welcome
-    public var statuses: [PermissionStatus] = []
+    public var statuses: [PermissionStatus] = [] {
+        // The menu bar icon went red when a recording was refused. The grant
+        // is given here, so here is where the icon learns of it.
+        didSet { runtime.permissionsDidChange(statuses) }
+    }
     public var apiKey = ""
     public var keyState = KeyState.absent
     /// Set when the user accepts a key that could not be checked because the

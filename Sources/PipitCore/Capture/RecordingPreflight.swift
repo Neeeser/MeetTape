@@ -50,3 +50,77 @@ public enum RecordingPreflight {
         return [.systemAudioPermissionMissing]
     }
 }
+
+/// What the person is shown when a recording is asked for without a grant.
+///
+/// The warning is what gets stored with the meeting and shown in the menu.
+/// This is what goes on screen at the moment of refusal, in front of the
+/// call, with a button into Setup.
+public struct PermissionNotice: Equatable, Sendable, Identifiable {
+    public let warning: CaptureWarning
+    /// The grant that is missing, and the Setup step the button lands on.
+    public let kind: PermissionKind
+    /// Whether the microphone is still being recorded behind the notice.
+    /// Without the Microphone grant nothing is; without the system audio
+    /// grant the microphone runs and the far end is lost.
+    public let recordingContinues: Bool
+
+    public var id: String { warning.dedupKey }
+
+    /// Nil for a warning that is not about a permission.
+    public init?(warning: CaptureWarning) {
+        switch warning {
+        case .microphonePermissionMissing:
+            self.init(warning: warning, kind: .microphone, recordingContinues: false)
+        case .systemAudioPermissionMissing:
+            self.init(warning: warning, kind: .screenRecording, recordingContinues: true)
+        default:
+            return nil
+        }
+    }
+
+    private init(warning: CaptureWarning, kind: PermissionKind, recordingContinues: Bool) {
+        self.warning = warning
+        self.kind = kind
+        self.recordingContinues = recordingContinues
+    }
+
+    public var title: String {
+        recordingContinues
+            ? "Pipit can't record the other people in this meeting"
+            : "Pipit can't record this meeting"
+    }
+
+    public var body: String {
+        switch kind {
+        case .microphone:
+            "Pipit does not have the Microphone permission. Nothing was recorded. Grant it in Setup, then start the recording again."
+        default:
+            "Pipit does not have the Screen & System Audio Recording permission. Your microphone is being recorded. The other side of the call is not."
+        }
+    }
+
+    /// The menu item that stays until the grant exists.
+    public var menuTitle: String { "\(kind.title) permission missing…" }
+
+    /// Whether the grant this notice is about is now usable.
+    public func isResolved(by statuses: [PermissionStatus]) -> Bool {
+        statuses.contains { $0.kind == kind && $0.isUsable }
+    }
+}
+
+/// When the notice goes on screen, as opposed to being recorded.
+///
+/// A manual start gets it every time: the person pressed the button and is
+/// waiting for a reaction. A detected call re-arms on every poll while the
+/// grant is missing, and gets it once a minute so the window is seen and not
+/// thrown at them twice a second.
+public enum PermissionPromptPolicy {
+    public static let detectedRepeatInterval: TimeInterval = 60
+
+    public static func shouldPrompt(isManual: Bool, lastPromptedAt: Date?, now: Date) -> Bool {
+        if isManual { return true }
+        guard let lastPromptedAt else { return true }
+        return now.timeIntervalSince(lastPromptedAt) >= detectedRepeatInterval
+    }
+}

@@ -126,7 +126,17 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     /// adaptive foreground colour. In particular, the recording icon stays
     /// light while the status item has its dark active background.
     public static func iconTintColor(for status: RuntimeStatus) -> NSColor? {
-        status.isInReconnectWindow ? .systemOrange : nil
+        // A missing grant outranks everything: the icon is red until it is seen.
+        if status.permissionNotice != nil { return .systemRed }
+        return status.isInReconnectWindow ? .systemOrange : nil
+    }
+
+    /// Whether the exclamation mark is stamped into the icon's corner.
+    public static func iconIsBadged(for status: RuntimeStatus) -> Bool {
+        if status.permissionNotice != nil { return true }
+        // A recording icon already carries the state that matters most. The
+        // add-on warning waits until the icon is otherwise idle.
+        return status.sensorNeedsAttention && !status.isCapturing
     }
 
     private static func iconImage(for status: RuntimeStatus) -> NSImage? {
@@ -138,10 +148,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         guard let copy = image?.copy() as? NSImage else { return nil }
         copy.size = NSSize(width: 18, height: 18)
         copy.isTemplate = true
-        // A recording icon already carries the state that matters most. The
-        // add-on warning waits until the icon is otherwise idle.
-        guard status.sensorNeedsAttention, !status.isCapturing else { return copy }
-        return badged(copy)
+        return iconIsBadged(for: status) ? badged(copy) : copy
     }
 
     /// Stamps a warning mark into the corner of the menu bar icon.
@@ -204,6 +211,18 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let status = runtime.status
+
+        if let notice = status.permissionNotice {
+            let item = NSMenuItem(
+                title: notice.menuTitle, action: #selector(openSetup), keyEquivalent: ""
+            )
+            item.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil
+            )?.withSymbolConfiguration(.init(paletteColors: [.systemRed]))
+            item.target = self
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
 
         if status.sensorNeedsAttention {
             let warning = NSMenuItem(

@@ -86,12 +86,17 @@ The following paths have been exercised outside unit tests:
 ## Remaining manual checks
 
 - Screen & System Audio Recording missing: remove Pipit from that list in
-  System Settings, start a call, and confirm the Setup window comes to the
-  front as capture is armed, a "Recording problem" notification arrives, the
-  meeting's header shows the warning after it ends, and `metadata.json`
-  carries `system_audio_permission_missing`.
-- Microphone missing: remove Pipit from the Microphone list, press record, and
-  confirm no meeting folder is created and the Setup window opens instead.
+  System Settings, start a call, and confirm the menu bar icon turns red with
+  a mark, a floating "Pipit can't record the other people in this meeting"
+  panel appears in front of the call, its Open Setup button lands on that
+  grant, a "Recording problem" notification arrives, the meeting's header
+  shows the warning after it ends, and `metadata.json` carries
+  `system_audio_permission_missing`. With the panel dismissed and the call
+  still running, it returns after a minute.
+- Microphone missing: remove Pipit from the Microphone list, press Start
+  Recording twice within a minute, and confirm no meeting folder is created,
+  the "Pipit can't record this meeting" panel appears in front both times,
+  and the icon stays red until the grant is given in Setup.
 - Local signing identity: run `scripts/make-signing-identity.sh`, rebuild and
   reinstall twice, and confirm Microphone, Accessibility and Screen & System
   Audio Recording stay granted across the second install.

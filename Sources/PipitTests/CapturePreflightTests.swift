@@ -51,6 +51,49 @@ enum CapturePreflightTests {
             )
         },
 
+        test("a missing grant becomes a notice with a button into the right Setup step") { expect in
+            let refused = PermissionNotice(warning: .microphonePermissionMissing)
+            expect.equal(refused?.kind, .microphone)
+            expect.equal(refused?.recordingContinues, false)
+            expect.equal(refused?.title, "Pipit can't record this meeting")
+            expect.equal(refused?.menuTitle, "Microphone permission missing…")
+
+            let farEnd = PermissionNotice(warning: .systemAudioPermissionMissing)
+            expect.equal(farEnd?.kind, .screenRecording)
+            expect.equal(farEnd?.recordingContinues, true)
+            expect.equal(farEnd?.title, "Pipit can't record the other people in this meeting")
+
+            // A microphone that went away mid-call is a capture fault, not a
+            // grant to go and give.
+            expect.isNil(PermissionNotice(warning: .permissionRevoked(track: .mic)))
+        },
+
+        test("the notice clears when its own grant is seen, not another") { expect in
+            let notice = PermissionNotice(warning: .systemAudioPermissionMissing)!
+            expect.isFalse(notice.isResolved(by: [PermissionStatus(kind: .microphone, state: .granted)]))
+            expect.isFalse(
+                notice.isResolved(by: [PermissionStatus(kind: .screenRecording, state: .grantedButNotEffective)]),
+                "System Settings showing it on is not the tap being able to use it"
+            )
+            expect.isTrue(notice.isResolved(by: [PermissionStatus(kind: .screenRecording, state: .granted)]))
+        },
+
+        test("a manual start always gets the notice, a detected call once a minute") { expect in
+            let now = Date(timeIntervalSince1970: 1_000)
+            let justNow = now.addingTimeInterval(-1)
+            // The person pressed the button one second after the last notice
+            // and is waiting for a reaction. This was the second press that
+            // saw nothing.
+            expect.isTrue(PermissionPromptPolicy.shouldPrompt(isManual: true, lastPromptedAt: justNow, now: now))
+            expect.isTrue(PermissionPromptPolicy.shouldPrompt(isManual: false, lastPromptedAt: nil, now: now))
+            expect.isFalse(PermissionPromptPolicy.shouldPrompt(isManual: false, lastPromptedAt: justNow, now: now))
+            expect.isTrue(
+                PermissionPromptPolicy.shouldPrompt(
+                    isManual: false, lastPromptedAt: now.addingTimeInterval(-60), now: now
+                )
+            )
+        },
+
         test("a warning stored by key reads back as its message") { expect in
             let key = CaptureWarning.systemAudioPermissionMissing.dedupKey
             expect.equal(

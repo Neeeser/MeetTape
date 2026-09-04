@@ -605,6 +605,28 @@ enum UITests {
                 }
             },
 
+            test("a missing grant turns the icon red with a mark until the grant is seen") { expect in
+                await MainActor.run {
+                    var status = RuntimeStatus()
+                    expect.isFalse(MenuBarController.iconIsBadged(for: status))
+
+                    status.permissionNotice = PermissionNotice(warning: .microphonePermissionMissing)
+                    expect.equal(MenuBarController.iconTintColor(for: status), .systemRed)
+                    expect.isTrue(MenuBarController.iconIsBadged(for: status))
+
+                    // Red outranks the reconnect orange, and the mark stays on
+                    // through a recording whose far end is missing.
+                    status.sessionState = .recording
+                    status.permissionNotice = PermissionNotice(warning: .systemAudioPermissionMissing)
+                    expect.equal(MenuBarController.iconTintColor(for: status), .systemRed)
+                    expect.isTrue(MenuBarController.iconIsBadged(for: status))
+
+                    status.permissionNotice = nil
+                    expect.isNil(MenuBarController.iconTintColor(for: status))
+                    expect.isFalse(MenuBarController.iconIsBadged(for: status))
+                }
+            },
+
             test("settings survive a round trip through disk") { expect in
                 let root = try ManifestTests.makeTemporaryDirectory()
                 defer { try? FileManager.default.removeItem(at: root) }

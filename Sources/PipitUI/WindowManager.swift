@@ -19,6 +19,8 @@ public final class WindowManager {
     private var meetingsWindow: NSWindow?
     private var meetingsModel: MeetingsWindowModel?
     private var provisionalWindow: NSWindow?
+    private var permissionWindow: NSWindow?
+    private var permissionNoticeID: String?
     private var provisionalPromptID: String?
     /// The windows currently on screen that Pipit has to stay reachable behind.
     private var openWindows: Set<ObjectIdentifier> = []
@@ -37,10 +39,8 @@ public final class WindowManager {
         // An open meetings window tracks processing on its own. When a
         // transcript lands, the row and the pane show it without a manual
         // refresh.
-        runtime.onPermissionRequired = { [weak self] _ in
-            // Setup lands on the first grant that is missing, so the kind is
-            // not needed to pick a step.
-            self?.showSetup()
+        runtime.onPermissionRequired = { [weak self] notice in
+            self?.showPermissionNotice(notice)
         }
         runtime.onProcessingUpdate = { [weak self] meetingID in
             guard let self, let model = self.meetingsModel else { return }
@@ -258,6 +258,9 @@ public final class WindowManager {
         setupWindow?.close()
         setupWindow = nil
         setupModel = nil
+        // The grant may have been given in System Settings with Setup
+        // closed. One read clears the red icon if it was.
+        Task { @MainActor [runtime] in await runtime.recheckPermissions() }
     }
 
     /// The meetings window: everything ever recorded, and one of them open.
@@ -336,6 +339,53 @@ public final class WindowManager {
         present(window, activating: false, holdsDockPresence: false)
     }
 
+    /// Says, in front of everything, that a recording was refused or is
+    /// missing its far end for want of a grant.
+    ///
+    /// Floating and on every space, ordered front without waiting for
+    /// activation: the person pressed Start Recording, or a call was
+    /// detected, and the reaction has to be where they are looking. Setup
+    /// itself stays at the normal level (see `showSetup`), so the macOS
+    /// permission prompts it triggers are never covered.
+    public func showPermissionNotice(_ notice: PermissionNotice) {
+        // Already up for this problem: the reaction to a second press is the
+        // panel coming forward, not a new one appearing over the old.
+        if permissionNoticeID == notice.id, let window = permissionWindow {
+            present(window, activating: true, holdsDockPresence: false)
+            window.orderFrontRegardless()
+            return
+        }
+        closePermissionNotice()
+        let window = makeWindow(
+            title: notice.title,
+            size: NSSize(width: 460, height: 196),
+            content: PermissionNoticeView(
+                notice: notice,
+                onOpenSetup: { [weak self] in
+                    self?.closePermissionNotice()
+                    self?.showSetup()
+                },
+                onDismiss: { [weak self] in self?.closePermissionNotice() }
+            )
+        )
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
+        permissionWindow = window
+        permissionNoticeID = notice.id
+        present(window, activating: true, holdsDockPresence: false)
+        window.orderFrontRegardless()
+    }
+
+    public func closePermissionNotice() {
+        permissionWindow?.close()
+        permissionWindow = nil
+        permissionNoticeID = nil
+    }
+
     public func closeProvisionalPrompt() {
         provisionalWindow?.close()
         provisionalWindow = nil
@@ -410,6 +460,41 @@ public final class WindowManager {
 }
 
 /// The keep-or-discard question for an unrecognised call.
+struct PermissionNoticeView: View {
+    let notice: PermissionNotice
+    let onOpenSetup: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(notice.title).font(.headline)
+                    Text(notice.body).font(.callout).foregroundStyle(.secondary)
+                    if notice.recordingContinues {
+                        Text("Recording continues while this is open.")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            Spacer()
+            HStack {
+                Spacer()
+                Button(notice.recordingContinues ? "Keep Recording" : "Not Now") { onDismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Open Setup") { onOpenSetup() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
 struct ProvisionalPromptView: View {
     let prompt: ProvisionalPrompt
     let onKeep: () -> Void

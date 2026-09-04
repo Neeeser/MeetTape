@@ -28,6 +28,10 @@ public struct RuntimeStatus: Sendable, Equatable {
     public var firefoxAddOnInProfile = false
     public var slackState: SlackHuddleDetector.State = .idle
     public var lastWarning: CaptureWarning?
+    /// A recording was refused or crippled for a missing grant, and the
+    /// grant has not been seen since. Drives the red menu bar icon and the
+    /// menu item that opens Setup.
+    public var permissionNotice: PermissionNotice?
 
     public init() {}
 
@@ -116,11 +120,11 @@ public final class PipitRuntime {
     /// window can reload its files without the user refreshing by hand.
     @ObservationIgnored public var onProcessingUpdate: ((String) -> Void)?
     /// A recording was asked for without a permission it needs. The window
-    /// layer opens Setup, which lands on the first grant that is missing.
-    @ObservationIgnored public var onPermissionRequired: ((PermissionKind) -> Void)?
-    /// When Setup was last opened for a missing grant. A detected call keeps
-    /// re-arming while the grant is missing, and that must not open the
-    /// window on every poll.
+    /// layer puts the notice in front of everything, with a button into
+    /// Setup.
+    @ObservationIgnored public var onPermissionRequired: ((PermissionNotice) -> Void)?
+    /// When the notice was last put on screen for a detected call. See
+    /// `PermissionPromptPolicy`.
     @ObservationIgnored private var permissionPromptedAt: Date?
 
     @ObservationIgnored public let repository: MeetingRepository
@@ -1028,7 +1032,7 @@ public final class PipitRuntime {
                 ) {
                 case .refuse(let warning):
                     Log.session.notice("preflight refused: \(warning.dedupKey, privacy: .public)")
-                    promptForPermission(.microphone, warning: warning)
+                    promptForPermission(warning)
                     // The rest of the batch would commit a meeting for this
                     // session. Nothing is armed, so nothing is committed.
                     _ = sessionController.stop(
@@ -1037,9 +1041,14 @@ public final class PipitRuntime {
                     syncStatusFromSession()
                     return
                 case .proceed(let warnings):
+                    var granted = [PermissionStatus(kind: .microphone, state: microphone)]
+                    if capturesRemote {
+                        granted.append(PermissionStatus(kind: .screenRecording, state: systemAudio))
+                    }
+                    permissionsDidChange(granted)
                     for warning in warnings {
                         Log.session.notice("preflight: \(warning.dedupKey, privacy: .public)")
-                        promptForPermission(.screenRecording, warning: warning)
+                        promptForPermission(warning)
                     }
                 }
                 await captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
@@ -1069,18 +1078,38 @@ public final class PipitRuntime {
         }
     }
 
-    /// Raises the warning and opens Setup, once a minute at most.
+    /// Raises the warning, turns the menu bar icon red, and puts the notice
+    /// on screen.
     ///
-    /// A detected call re-arms on every poll while a grant is missing, and
-    /// the person has to see the window once, not have it thrown at them
-    /// twice a second. The warning itself is deduplicated per session by
-    /// `captureDidWarn`, so the throttle here is only for the window.
-    private func promptForPermission(_ kind: PermissionKind, warning: CaptureWarning) {
+    /// The warning itself is deduplicated per session by `captureDidWarn`.
+    /// Whether the window goes up is `PermissionPromptPolicy`: every time
+    /// for a manual start, once a minute for a detected call.
+    private func promptForPermission(_ warning: CaptureWarning) {
         captureDidWarn(warning)
+        guard let notice = PermissionNotice(warning: warning) else { return }
+        status.permissionNotice = notice
+        onStatusChange?()
         let now = clock.now
-        if let last = permissionPromptedAt, now.timeIntervalSince(last) < 60 { return }
+        let isManual = sessionController.snapshot.isManual
+        guard PermissionPromptPolicy.shouldPrompt(
+            isManual: isManual, lastPromptedAt: permissionPromptedAt, now: now
+        ) else { return }
         permissionPromptedAt = now
-        onPermissionRequired?(kind)
+        onPermissionRequired?(notice)
+    }
+
+    /// Clears the red icon once the grant it is about is seen. Setup calls
+    /// this with every poll while it is open, and closing Setup asks once.
+    public func permissionsDidChange(_ statuses: [PermissionStatus]) {
+        guard let notice = status.permissionNotice, notice.isResolved(by: statuses) else { return }
+        status.permissionNotice = nil
+        permissionPromptedAt = nil
+        onStatusChange?()
+    }
+
+    public func recheckPermissions() async {
+        guard status.permissionNotice != nil else { return }
+        permissionsDidChange(await permissions.allStatuses())
     }
 
     @discardableResult

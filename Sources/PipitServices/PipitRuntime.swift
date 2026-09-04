@@ -115,6 +115,13 @@ public final class PipitRuntime {
     /// Called when a meeting's processing state changes, so an open review
     /// window can reload its files without the user refreshing by hand.
     @ObservationIgnored public var onProcessingUpdate: ((String) -> Void)?
+    /// A recording was asked for without a permission it needs. The window
+    /// layer opens Setup, which lands on the first grant that is missing.
+    @ObservationIgnored public var onPermissionRequired: ((PermissionKind) -> Void)?
+    /// When Setup was last opened for a missing grant. A detected call keeps
+    /// re-arming while the grant is missing, and that must not open the
+    /// window on every poll.
+    @ObservationIgnored private var permissionPromptedAt: Date?
 
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
@@ -1007,19 +1014,32 @@ public final class PipitRuntime {
                 // A new session. What the last one raised belongs to it and
                 // was written into its meeting when it ended.
                 sessionWarnings = []
-                // Before the tap exists, because the tap cannot tell. Without
-                // the grant it delivers digital zero and reports healthy, and
-                // the meeting loses its far end with nothing said until the
-                // silence detector gives up on it forty seconds in.
-                if capturesRemote {
-                    let systemAudio = await permissions.status(for: .screenRecording).state
-                    for warning in RecordingPreflight.warnings(
-                        capturesRemote: capturesRemote, systemAudio: systemAudio
-                    ) {
-                        Log.session.notice(
-                            "preflight: \(warning.dedupKey, privacy: .public)"
-                        )
-                        captureDidWarn(warning)
+                // Before anything is opened, because neither device can tell.
+                // Without the microphone grant the input engine throws on
+                // every build and the meeting is a folder of nothing. Without
+                // the system audio grant the tap delivers digital zero and
+                // reports healthy, and the far end is lost with nothing said
+                // until the silence detector gives up forty seconds in.
+                let microphone = await permissions.status(for: .microphone).state
+                let systemAudio = capturesRemote
+                    ? await permissions.status(for: .screenRecording).state : .granted
+                switch RecordingPreflight.decide(
+                    capturesRemote: capturesRemote, microphone: microphone, systemAudio: systemAudio
+                ) {
+                case .refuse(let warning):
+                    Log.session.notice("preflight refused: \(warning.dedupKey, privacy: .public)")
+                    promptForPermission(.microphone, warning: warning)
+                    // The rest of the batch would commit a meeting for this
+                    // session. Nothing is armed, so nothing is committed.
+                    _ = sessionController.stop(
+                        reason: "microphone_permission_missing", now: clock.monotonicSeconds
+                    )
+                    syncStatusFromSession()
+                    return
+                case .proceed(let warnings):
+                    for warning in warnings {
+                        Log.session.notice("preflight: \(warning.dedupKey, privacy: .public)")
+                        promptForPermission(.screenRecording, warning: warning)
                     }
                 }
                 await captureEngine.arm(bundlePrefixes: prefixes, capturesRemote: capturesRemote)
@@ -1047,6 +1067,20 @@ public final class PipitRuntime {
                 deliver(notice)
             }
         }
+    }
+
+    /// Raises the warning and opens Setup, once a minute at most.
+    ///
+    /// A detected call re-arms on every poll while a grant is missing, and
+    /// the person has to see the window once, not have it thrown at them
+    /// twice a second. The warning itself is deduplicated per session by
+    /// `captureDidWarn`, so the throttle here is only for the window.
+    private func promptForPermission(_ kind: PermissionKind, warning: CaptureWarning) {
+        captureDidWarn(warning)
+        let now = clock.now
+        if let last = permissionPromptedAt, now.timeIntervalSince(last) < 60 { return }
+        permissionPromptedAt = now
+        onPermissionRequired?(kind)
     }
 
     @discardableResult

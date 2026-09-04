@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import PipitCore
 import PipitIntegrations
@@ -22,6 +23,13 @@ final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
     /// The audio handed to this backend, so a test can say which one read it.
     private let state = Mutex<[String]>([])
     var received: [String] { state.withLock { $0 } }
+    /// Where to keep a copy of every file handed over, for a test that has to
+    /// measure the samples rather than read the name. The pipeline deletes its
+    /// working copies when the meeting finishes, so they have to be taken as
+    /// they are read.
+    var copyAudioTo: URL?
+    private let copies = Mutex<[URL]>([])
+    var copiedAudio: [URL] { copies.withLock { $0 } }
 
     init(segments: [RawTranscriptSegment]) { self.segments = segments }
 
@@ -29,6 +37,18 @@ final class StubLocalTranscriber: TranscriptionBackend, @unchecked Sendable {
         audio: URL, progress: @escaping @Sendable (Double) -> Void
     ) async throws -> TranscriptionOutput {
         state.withLock { $0.append(audio.lastPathComponent) }
+        if let copyAudioTo {
+            copies.withLock { made in
+                let destination = copyAudioTo.appendingPathComponent(
+                    "\(made.count).\(audio.lastPathComponent)"
+                )
+                try? FileManager.default.createDirectory(
+                    at: copyAudioTo, withIntermediateDirectories: true
+                )
+                try? FileManager.default.copyItem(at: audio, to: destination)
+                made.append(destination)
+            }
+        }
         progress(1)
         let spoken = audio.lastPathComponent.hasPrefix(CaptureTrack.mic.rawValue)
             ? (micSegments ?? segments) : segments
@@ -122,6 +142,48 @@ enum LocalPipelineTests {
                 vector: SpeakerIdentityTests.vector(seed: seed)
             )
         }
+    }
+
+    /// Every sample of one file, so a test can measure what a backend was
+    /// handed rather than trust the name it came under.
+    static func samples(ofFile url: URL) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        guard file.length > 0, let buffer = AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)
+        ) else { return [] }
+        try file.read(into: buffer)
+        guard let data = buffer.floatChannelData else { return [] }
+        return Array(UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength)))
+    }
+
+    /// What the far end and the user's own voice did between the recording and
+    /// the file the transcription backend opened.
+    ///
+    /// Measured on `makeCallOnSpeakers`, where the far end plays for all 30
+    /// seconds and the user talks over it for the middle third. Both figures
+    /// are decibels lost against the recording. A cleaned microphone loses tens
+    /// of decibels of far end and none of the user. A far-end figure near zero
+    /// says the backend was handed the recording.
+    static func farEndAndUser(
+        handed: URL, recording: TrackAudioLocation
+    ) throws -> (farEndLostDB: Double, userLostDB: Double) {
+        let heard = try samples(ofFile: handed)
+        let recorded = try MicrophoneCleanerTests.samples(recording)
+        func energy(_ samples: [Float], _ from: Double, _ to: Double, _ frequency: Double) -> Double {
+            MicrophoneCleanerTests.toneEnergy(
+                MicrophoneCleanerTests.seconds(from, to, of: samples), frequency: frequency
+            )
+        }
+        let far = MicrophoneCleanerTests.farToneA
+        let near = MicrophoneCleanerTests.nearTone
+        return (
+            MicrophoneCleanerTests.dropDB(
+                from: energy(recorded, 20, 30, far), to: energy(heard, 20, 30, far)
+            ),
+            MicrophoneCleanerTests.dropDB(
+                from: energy(recorded, 12, 18, near), to: energy(heard, 12, 18, near)
+            )
+        )
     }
 
     static func makePipeline(
@@ -2820,6 +2882,197 @@ enum LocalPipelineTests {
                     map.displayName(for: "remote-001_speaker_00"), "Andrew",
                     "and is still on disk rather than deleted"
                 )
+            },
+
+            test("the transcriber reads the microphone with the far end taken out of it") { expect in
+                // The canceller reaches the user here. Every stage above takes
+                // its audio through `trackAudioLocation`, so cleaning the
+                // microphone at the top of transcription is what stops the far
+                // end's words being written down under the local user's name.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try MicrophoneCleanerTests.makeCallOnSpeakers(root: root)
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 0.3, text: " we")]
+                    ),
+                ])
+                transcriber.copyAudioTo = root.appendingPathComponent("handed")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 51, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.equal(metadata.processing.state, .complete)
+                expect.equal(metadata.cleaningOutcome, CleaningOutcome.cleaned)
+                let cleaned = try expect.unwrap(metadata.cleanedMic)
+                expect.equal(cleaned.track.file, "mic.cleaned.m4a")
+
+                let handed = try expect.unwrap(
+                    transcriber.copiedAudio.first { $0.lastPathComponent.hasSuffix("mic.wav") },
+                    "the microphone was transcribed"
+                )
+                let measured = try farEndAndUser(
+                    handed: handed,
+                    recording: meeting.store.rawTrackAudioLocation(
+                        track: .mic, metadata: metadata, timeline: try meeting.store.readTimeline()
+                    )
+                )
+                expect.isTrue(
+                    measured.farEndLostDB > 20,
+                    "the transcriber read a microphone whose far end is only "
+                        + "\(measured.farEndLostDB) dB down on the recording"
+                )
+                expect.isTrue(
+                    abs(measured.userLostDB) < 3,
+                    "and the user's own voice moved \(measured.userLostDB) dB with it"
+                )
+            },
+
+            test("a working copy an earlier run left is thrown away when the microphone is cleaned") { expect in
+                // The working copies in Caches are keyed by meeting and track
+                // alone and carry no record of what they were exported from, and
+                // an existing one is handed back without being read. A run that
+                // exported the recording and then stopped part-way leaves one.
+                // The next run cleans the microphone and then transcribes that
+                // export instead of the track it just wrote.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try MicrophoneCleanerTests.makeCallOnSpeakers(root: root)
+                let scratchRoot = root.appendingPathComponent("scratch")
+
+                let recording = meeting.store.rawTrackAudioLocation(
+                    track: .mic, metadata: meeting.metadata,
+                    timeline: try meeting.store.readTimeline()
+                )
+                let stale = try expect.unwrap(try ProcessingScratch(root: scratchRoot).trackAudio(
+                    meetingID: meeting.metadata.id, track: .mic,
+                    segments: recording.segments, segmentsDirectory: recording.directory
+                ))
+                expect.isTrue(
+                    FileManager.default.fileExists(atPath: stale.path),
+                    "the earlier run's export is there to be picked up"
+                )
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 0.3, text: " we")]
+                    ),
+                ])
+                transcriber.copyAudioTo = root.appendingPathComponent("handed")
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 52, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: scratchRoot
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.equal(metadata.cleaningOutcome, CleaningOutcome.cleaned)
+                let handed = try expect.unwrap(
+                    transcriber.copiedAudio.first { $0.lastPathComponent.hasSuffix("mic.wav") },
+                    "the microphone was transcribed"
+                )
+                // Read again after the run rather than reusing the location the
+                // stale copy was made from. Compaction replaces the segment
+                // chain with `mic.m4a` and deletes the segments, so the
+                // pre-run location names files that are no longer there.
+                let measured = try farEndAndUser(
+                    handed: handed,
+                    recording: meeting.store.rawTrackAudioLocation(
+                        track: .mic, metadata: metadata, timeline: try meeting.store.readTimeline()
+                    )
+                )
+                expect.isTrue(
+                    measured.farEndLostDB > 20,
+                    "the transcriber was handed the earlier run's export of the recording, whose "
+                        + "far end is \(measured.farEndLostDB) dB down"
+                )
+            },
+
+            test("a meeting whose cleaner throws is still transcribed") { expect in
+                // Cleaning is an improvement on the recording, never a
+                // condition of reading it. A disk that will not take the
+                // cleaned file has to leave the user with the same transcript
+                // they would have had before any of this existed.
+                let root = try ManifestTests.makeTemporaryDirectory()
+                defer { try? FileManager.default.removeItem(at: root) }
+                let meeting = try PipelineTests.makeRecordedMeeting(root: root, seconds: 6)
+
+                // The cleaned track's own directory, taken away from the writer
+                // after the recording is safely in the segments. Nothing else
+                // this run needs is written here. The mixdown goes to the
+                // meeting root, and compaction reports its own failure and
+                // leaves the segments where they are.
+                let audioDirectory = meeting.store.layout.trackArchiveDirectory
+                try FileManager.default.createDirectory(
+                    at: audioDirectory, withIntermediateDirectories: true
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o555], ofItemAtPath: audioDirectory.path
+                )
+                defer {
+                    try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o755], ofItemAtPath: audioDirectory.path
+                    )
+                }
+
+                let transcriber = StubLocalTranscriber(segments: [
+                    RawTranscriptSegment(
+                        start: 0, end: 5, text: "we ship friday", speaker: nil,
+                        words: [RawTranscriptWord(start: 0, end: 0.3, text: " we")]
+                    ),
+                ])
+                let diarizer = StubLocalDiarizer(
+                    intervals: [DiarizationInterval(start: 0, end: 2, clusterID: "S1")],
+                    chunkEmbeddings: embeddings(cluster: "S1", seed: 53, spans: [(0, 2)])
+                )
+                var settings = AppSettings()
+                settings.enrichment = EnrichmentSettings(
+                    generateTitle: false, generateDescription: false, generateNotes: false,
+                    generateSummary: false, suggestSpeakers: false
+                )
+                let pipeline = makePipeline(
+                    repository: meeting.repository, backend: FakeAIBackend(),
+                    transcriber: transcriber, diarizer: diarizer, speakers: nil,
+                    settings: settings, scratchRoot: root.appendingPathComponent("scratch")
+                )
+                await pipeline.process(meetingID: meeting.metadata.id)
+
+                let metadata = try meeting.store.readMetadata()
+                expect.equal(metadata.cleaningOutcome, CleaningOutcome.failed)
+                expect.isNil(metadata.cleanedMic, "and nothing points a reader at a file")
+                expect.equal(
+                    metadata.processing.state, .complete,
+                    "the meeting was transcribed on the microphone it recorded"
+                )
+                let raw = try meeting.store.readRawTranscript()
+                expect.isTrue(raw.chunks.contains { $0.id == "mic_full" })
+                expect.isTrue(raw.chunks.contains { $0.id == "remote_full" })
             },
         ])
     }

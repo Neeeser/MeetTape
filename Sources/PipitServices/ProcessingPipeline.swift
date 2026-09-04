@@ -283,6 +283,7 @@ public actor ProcessingPipeline {
                 case .audioSafe:
                     metadata.processing.advance(to: .transcribing, at: clock.now)
                 case .transcribing:
+                    cleanMicrophone(store: store, metadata: &metadata)
                     try await runTranscription(store: store, metadata: &metadata, settings: settings)
                     metadata.processing.advance(to: .diarizing, at: clock.now)
                 case .diarizing:
@@ -687,6 +688,58 @@ public actor ProcessingPipeline {
         _ metadata: MeetingMetadata, evidence: SpeechEvidence?
     ) -> CaptureTrack {
         micHoldsLocalUserAlone(metadata, evidence: evidence) ? .remote : .mic
+    }
+
+    /// Takes the far end out of the microphone before anything reads it.
+    ///
+    /// A call on speakers puts the far end back into the microphone through the
+    /// air, and on the Slack huddle this was measured on that was 81% of the
+    /// words the microphone carried. Every stage from here on takes its audio
+    /// through `trackAudioLocation`, which the cleaner switches over, so
+    /// transcription, the speech evidence measured just below, diarization,
+    /// voice enrolment and the mixdown all read the cleaned track without
+    /// knowing it exists.
+    ///
+    /// This never fails the meeting. A throw is recorded and the microphone is
+    /// read as it was captured, which is what every meeting recorded before the
+    /// cleaner existed already does.
+    private func cleanMicrophone(store: MeetingStore, metadata: inout MeetingMetadata) {
+        // The outcome is the record that the question was answered, and it is
+        // written whatever the answer, so it alone decides whether this runs.
+        // `cleanedMic` is deliberately not asked as well. It is set only by a
+        // run that reached `.cleaned`, and a crash between the file landing and
+        // the outcome being written would leave a meeting reading a cleaned
+        // track that nothing on disk accounts for. Re-entry is safe. `clean`
+        // subtracts from the recording rather than from its own output, and it
+        // clears the earlier record before anything on disk moves.
+        guard metadata.cleaningOutcome == nil else { return }
+        let outcome: CleaningOutcome
+        do {
+            outcome = try MicrophoneCleaner(clock: clock).clean(
+                store: store, metadata: &metadata, timeline: try store.readTimeline()
+            )
+        } catch {
+            Log.processing.error(
+                "microphone cleaning failed: \(logSafeDescription(error), privacy: .public)"
+            )
+            outcome = .failed
+        }
+        // The decoded working copies in Caches are keyed by meeting and track
+        // alone, carry no record of what they were exported from, and are handed
+        // back without being read. One an earlier run exported from the
+        // recording would be transcribed in place of the track just written.
+        if outcome == .cleaned { scratch.discard(meetingID: metadata.id) }
+        // Written through the store rather than into the copy above. `clean`
+        // replaces that copy with what it read back from disk, so a field set
+        // beforehand is dropped, and `persist` carries only the fields this
+        // pipeline owns, which do not include this one.
+        do {
+            metadata = try store.updateMetadata { $0.cleaningOutcome = outcome }
+        } catch {
+            Log.processing.notice(
+                "cleaning outcome not recorded: \(logSafeDescription(error), privacy: .public)"
+            )
+        }
     }
 
     /// Transcribes every track that needs words.

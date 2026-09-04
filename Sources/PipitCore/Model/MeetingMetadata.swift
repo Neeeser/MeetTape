@@ -226,6 +226,10 @@ public enum CleaningOutcome: String, Codable, Sendable, Equatable {
     /// One track holding everyone, which is every import and every in-person
     /// session. There is no separate far end and nothing to subtract.
     case skippedOneTrack
+    /// The pass did not finish. What went wrong is on this Mac rather than in
+    /// the recording, so the meeting is read on the microphone as it was
+    /// captured and nothing about it is lost.
+    case failed
 }
 
 /// `metadata.json`. Mutable by design: titles, notes, participants, calendar

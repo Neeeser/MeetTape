@@ -93,6 +93,10 @@ These paths still need direct observation:
 - A full Google Meet join, refresh, leave, and reconnect through the sensor
 - Sleep, wake, screen lock, and Bluetooth device changes during capture
 - Other applications' playback level is unchanged from the moment recording starts
+- A call taken on speakers: `raw/audio/mic.cleaned.m4a` holds the local user and
+  not the far end, `raw/audio/mic.m4a` still holds both, and the transcript
+  carries the far end's words on the remote track only. The same call taken on
+  headphones writes no cleaned file at all
 - On an input device with more than two channels, the mono downmix keeps the
   channel carrying the most energy over the first 30 seconds. The scan runs only
   above two channels, so a mono or stereo device is mixed down the way it always

@@ -132,6 +132,18 @@ finalizing -> audio_safe -> transcribing -> diarizing
 only after this state. Each later stage records its state and can resume after a
 failure.
 
+`transcribing` begins by subtracting the far end out of the microphone. A call
+taken on speakers puts the far end back into the microphone through the air.
+Pipit records that far end separately through the process tap, and that
+recording is the reference WebRTC's echo canceller needs. The result is written
+to `raw/audio/mic.cleaned.m4a`, and every stage from transcription onward reads
+it in place of `mic.m4a`. The recording itself is never written to. The cleaned
+file is kept only when the canceller reports it removed a median of 6 dB or more
+over the windows where the far end was playing, which is what a call on speakers
+gives and a call on headphones does not. A meeting on headphones, a meeting with
+no far-end track, an imported single-track recording, and a meeting whose
+cleaning pass failed are all read on the microphone as it was captured.
+
 Local processing uses Apple SpeechAnalyzer on supported macOS versions or
 Parakeet through FluidAudio. Speaker separation runs locally unless the selected
 cloud model returns words and speakers together. Voice matching stays local for

@@ -335,7 +335,32 @@ public struct MeetingStore: Sendable {
     /// Decided by the metadata, never by listing the disk: after compaction the
     /// archive file stands in for the segment chain, and a meeting that has not
     /// been compacted reads its segments even if stray files exist elsewhere.
+    /// Where a reader should take this track's audio from.
+    ///
+    /// For the microphone of a meeting that was cleaned, that is the cleaned
+    /// file. Everything above reads audio through here, so transcription,
+    /// speech evidence, diarization, voice enrolment and the mixdown all get
+    /// the microphone with the far end taken out of it without knowing the
+    /// cleaner exists.
+    ///
+    /// Compaction is the exception and calls `rawTrackAudioLocation`, because
+    /// what it archives and verifies is the recording itself.
     public func trackAudioLocation(
+        track: CaptureTrack, metadata: MeetingMetadata, timeline: RecordingTimeline
+    ) -> TrackAudioLocation {
+        if track == .mic, let cleaned = metadata.cleanedMic {
+            return .archived(
+                track: .mic, record: cleaned.track,
+                directory: layout.trackArchiveDirectory,
+                compactedAt: cleaned.producedAt
+            )
+        }
+        return rawTrackAudioLocation(track: track, metadata: metadata, timeline: timeline)
+    }
+
+    /// The recording as it was captured, whatever has been derived from it
+    /// since: the segment chain, or the archive that replaced it.
+    public func rawTrackAudioLocation(
         track: CaptureTrack, metadata: MeetingMetadata, timeline: RecordingTimeline
     ) -> TrackAudioLocation {
         if let archive = metadata.audioArchive {

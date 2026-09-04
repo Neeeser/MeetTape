@@ -137,10 +137,10 @@ public enum SpeechEvidenceBuilder {
         func pair() -> (mic: TimelineTrackReader, remote: TimelineTrackReader)? {
             guard let mic = TimelineTrackReader(
                 location: micLocation, format: readFormat,
-                leadIn: timeline.leadIn(track: .mic), windowSeconds: levelWindowSeconds
+                offsetSeconds: gridLeadIn(track: .mic, timeline: timeline)
             ), let remote = TimelineTrackReader(
                 location: remoteLocation, format: readFormat,
-                leadIn: timeline.leadIn(track: .remote), windowSeconds: levelWindowSeconds
+                offsetSeconds: gridLeadIn(track: .remote, timeline: timeline)
             ) else { return nil }
             return (mic, remote)
         }
@@ -272,6 +272,18 @@ public enum SpeechEvidenceBuilder {
         return profile
     }
 
+    /// A track's lead-in, rounded to a whole number of level windows.
+    ///
+    /// `padded` rounds the level series the same way and the gate reads the two
+    /// side by side. Rounding them differently would slide the echo series up to
+    /// half a window against the levels it is weighted by, and weight each
+    /// reading with a neighbouring window's energy.
+    private static func gridLeadIn(track: CaptureTrack, timeline: RecordingTimeline) -> Double {
+        let leadIn = timeline.leadIn(track: track)
+        guard leadIn > 0 else { return 0 }
+        return Double(max(0, Int((leadIn / levelWindowSeconds).rounded()))) * levelWindowSeconds
+    }
+
     /// Moves a track's own measurements onto the meeting timeline by filling
     /// the seconds before it started recording.
     private static func padded(
@@ -305,72 +317,6 @@ private actor SampleReader {
     func next() throws -> [Float]? {
         while true {
             guard let buffer = try reader.read(frames: frames), buffer.frameLength > 0 else {
-                return nil
-            }
-            guard let channel = buffer.floatChannelData?[0] else { continue }
-            return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
-        }
-    }
-}
-
-/// One track, read a stretch at a time, positioned on the meeting timeline.
-///
-/// The two tracks do not begin at the same instant, and every comparison the
-/// echo pass makes is between the same moment on both. The seconds before a
-/// track started recording are handed back as the silence they were, which is
-/// the same thing `padded` does to the level series.
-private final class TimelineTrackReader {
-    private let reader: TrackAudioReader
-    private var silenceRemaining: Int
-    private var pending: [Float] = []
-    private var exhausted = false
-
-    /// - Parameter windowSeconds: the grid the measurements land on. The lead-in
-    ///   is rounded to a whole number of these, because `padded` rounds the level
-    ///   series the same way and the gate reads the two side by side. Rounding
-    ///   them differently would slide the echo series up to half a window against
-    ///   the levels it is weighted by, and weight each reading with a
-    ///   neighbouring window's energy.
-    init?(
-        location: TrackAudioLocation, format: AudioFormatDescriptor, leadIn: Double,
-        windowSeconds: Double
-    ) {
-        let stream = TrackAudioStream(
-            segments: location.segments, segmentsDirectory: location.directory, format: format
-        )
-        guard let reader = stream.makeReader() else { return nil }
-        self.reader = reader
-        let windows = leadIn > 0 && windowSeconds > 0 ? Int((leadIn / windowSeconds).rounded()) : 0
-        self.silenceRemaining = max(0, windows) * Int(windowSeconds * format.sampleRate)
-    }
-
-    /// The next `count` samples, or fewer where the track has run out.
-    func next(count: Int) throws -> [Float] {
-        var out: [Float] = []
-        out.reserveCapacity(count)
-        if silenceRemaining > 0 {
-            let take = min(silenceRemaining, count)
-            out.append(contentsOf: repeatElement(0, count: take))
-            silenceRemaining -= take
-        }
-        while out.count < count {
-            if pending.isEmpty {
-                guard !exhausted, let block = try read() else {
-                    exhausted = true
-                    break
-                }
-                pending = block
-            }
-            let take = min(count - out.count, pending.count)
-            out.append(contentsOf: pending[..<take])
-            pending.removeFirst(take)
-        }
-        return out
-    }
-
-    private func read() throws -> [Float]? {
-        while true {
-            guard let buffer = try reader.read(frames: 16_384), buffer.frameLength > 0 else {
                 return nil
             }
             guard let channel = buffer.floatChannelData?[0] else { continue }

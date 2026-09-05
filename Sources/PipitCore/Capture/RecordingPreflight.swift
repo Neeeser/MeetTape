@@ -90,6 +90,8 @@ public struct PermissionNotice: Equatable, Sendable, Identifiable {
             return "Pipit does not have the Microphone permission. Nothing was recorded. Allow it and the recording starts."
         case .screenRecording:
             return "Pipit does not have the Screen & System Audio Recording permission. Your microphone is being recorded. The other side of the call is not."
+        case .accessibility:
+            return "Pipit does not have the Accessibility permission, so Slack huddles are not detected. Recording still works."
         case .some(let kind):
             return "Pipit does not have the \(kind.title) permission."
         case .none:
@@ -115,6 +117,17 @@ public struct PermissionNotice: Equatable, Sendable, Identifiable {
             case .accessibility, .calendar, .notifications: nil
             }
         }
+    }
+
+    /// The grants Pipit cannot fully work without that are not in effect,
+    /// from whatever has been probed so far. A kind never probed is not
+    /// counted as missing: the icon goes red on evidence, not on silence.
+    public static func missingRequired(in states: [PermissionKind: PermissionState]) -> PermissionNotice? {
+        let missing = PermissionKind.allCases.filter { kind in
+            guard kind.isRequired, let state = states[kind] else { return false }
+            return state != .granted
+        }
+        return PermissionNotice(missing: missing)
     }
 
     /// Whether every grant this notice is about is now usable.

@@ -129,6 +129,15 @@ public final class PipitRuntime {
     /// A manual recording refused for a missing grant, to start once the
     /// grant is given from the panel. Cleared when the panel is dismissed.
     @ObservationIgnored private var pendingStart: MeetingSource?
+    /// The grants that refusal was waiting on.
+    @ObservationIgnored private var pendingStartNeeds: [PermissionKind] = []
+    /// Every grant probed so far, by kind. The red icon is decided from this
+    /// whole picture, not from the last recording that asked.
+    @ObservationIgnored private var permissionStates: [PermissionKind: PermissionState] = [:]
+    /// Re-reads the grants every half minute while the application runs, so
+    /// a grant removed in System Settings, or dropped by a reinstall, turns
+    /// the icon red before a meeting finds out.
+    @ObservationIgnored private var permissionWatch: Task<Void, Never>?
 
     @ObservationIgnored public let repository: MeetingRepository
     @ObservationIgnored public let notifications = NotificationService()
@@ -341,6 +350,12 @@ public final class PipitRuntime {
         // A job killed mid-export leaves a partial track behind. Nothing ever
         // swept it, so it accumulated once per interrupted meeting.
         ProcessingScratch(root: ProcessingScratch.defaultRoot()).pruneIncomplete()
+        permissionWatch = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                await self?.recheckPermissions()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
         powerObserver = PowerEventObserver(
             onWake: { [weak self] in
                 Task { @MainActor in self?.captureEngine.noteSystemWake() }
@@ -383,6 +398,8 @@ public final class PipitRuntime {
     }
 
     public func stop() {
+        permissionWatch?.cancel()
+        permissionWatch = nil
         detectionEngine.stop()
         if status.hasActiveSession { stopRecording(reason: "app_quit") }
     }
@@ -1053,7 +1070,13 @@ public final class PipitRuntime {
                         // Given the grant from the panel, the recording the
                         // person asked for starts without a second press.
                         pendingStart = sessionController.snapshot.source
+                        pendingStartNeeds = missing
                     }
+                    var probed = [PermissionStatus(kind: .microphone, state: microphone)]
+                    if capturesRemote {
+                        probed.append(PermissionStatus(kind: .screenRecording, state: systemAudio))
+                    }
+                    permissionsDidChange(probed)
                     raisePermissionNotice(missing: missing)
                     // The rest of the batch would commit a meeting for this
                     // session. Nothing is armed, so nothing is committed.
@@ -1109,8 +1132,6 @@ public final class PipitRuntime {
     private func raisePermissionNotice(missing: [PermissionKind]) {
         guard let notice = PermissionNotice(missing: missing) else { return }
         for warning in notice.warnings { captureDidWarn(warning) }
-        status.permissionNotice = notice
-        onStatusChange?()
         let now = clock.now
         let isManual = sessionController.snapshot.isManual
         guard PermissionPromptPolicy.shouldPrompt(
@@ -1120,17 +1141,23 @@ public final class PipitRuntime {
         onPermissionRequired?(notice)
     }
 
-    /// Clears the red icon once the grants it is about are seen, and starts
-    /// the recording the person asked for if the panel is still up. Setup
-    /// and the panel call this with every poll while they are open, and
-    /// closing Setup asks once.
+    /// Folds a probe into the picture and redraws the icon from it. Red
+    /// while any required grant is known to be missing, plain once every
+    /// one is seen. Setup and the panel call this with every poll while they
+    /// are open, and the runtime asks on its own every half minute.
     public func permissionsDidChange(_ statuses: [PermissionStatus]) {
-        guard let notice = status.permissionNotice, notice.isResolved(by: statuses) else { return }
-        status.permissionNotice = nil
-        permissionPromptedAt = nil
-        onStatusChange?()
-        guard let source = pendingStart else { return }
+        for probe in statuses { permissionStates[probe.kind] = probe.state }
+        let ambient = PermissionNotice.missingRequired(in: permissionStates)
+        if status.permissionNotice != ambient {
+            status.permissionNotice = ambient
+            if ambient == nil { permissionPromptedAt = nil }
+            onStatusChange?()
+        }
+        guard let source = pendingStart,
+            pendingStartNeeds.allSatisfy({ permissionStates[$0] == .granted })
+        else { return }
         pendingStart = nil
+        pendingStartNeeds = []
         Log.session.notice("starting the refused \(source.rawValue, privacy: .public) recording after the grant")
         switch source {
         case .inPerson: startInPersonRecording()
@@ -1143,10 +1170,10 @@ public final class PipitRuntime {
     /// later.
     public func dismissPermissionNotice() {
         pendingStart = nil
+        pendingStartNeeds = []
     }
 
     public func recheckPermissions() async {
-        guard status.permissionNotice != nil else { return }
         permissionsDidChange(await permissions.allStatuses())
     }
 

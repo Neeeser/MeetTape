@@ -89,6 +89,28 @@ enum CapturePreflightTests {
             )
         },
 
+        test("the icon is red while any required grant is known to be missing, on evidence only") { expect in
+            expect.isNil(
+                PermissionNotice.missingRequired(in: [:]),
+                "nothing probed yet is not a problem"
+            )
+            expect.isNil(
+                PermissionNotice.missingRequired(in: [
+                    .microphone: .granted, .screenRecording: .granted, .accessibility: .granted,
+                    .calendar: .denied, .notifications: .denied,
+                ]),
+                "the optional grants never colour the icon"
+            )
+            let one = PermissionNotice.missingRequired(in: [.microphone: .granted, .accessibility: .denied])
+            expect.equal(one?.missing, [.accessibility])
+            expect.equal(one?.recordingContinues, true, "the microphone still records without it")
+            let two = PermissionNotice.missingRequired(in: [
+                .microphone: .notDetermined, .screenRecording: .grantedButNotEffective, .accessibility: .granted,
+            ])
+            expect.equal(two?.missing, [.microphone, .screenRecording])
+            expect.equal(two?.menuTitle, "Permissions missing…")
+        },
+
         test("a manual start always gets the notice, a detected call once a minute") { expect in
             let now = Date(timeIntervalSince1970: 1_000)
             let justNow = now.addingTimeInterval(-1)

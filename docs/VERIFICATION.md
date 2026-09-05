@@ -105,6 +105,12 @@ The following paths have been exercised outside unit tests:
 - Both missing: press Start Recording and confirm the panel offers Open
   Setup instead, and that Setup opens on the Microphone step with red marks
   on Microphone and Screen recording.
+- Red icon from launch: with any of Microphone, Screen & System Audio
+  Recording or Accessibility missing, launch Pipit and confirm the bird is
+  red with its mark within a few seconds, before any recording is asked
+  for, and that the menu's first item names what is missing. Grant it and
+  confirm the bird is plain again within half a minute, or at once while
+  Setup is open.
 - Setup placement: with a second display attached, put the pointer on one
   screen and open Setup from the menu; it appears centred on that screen, in
   front. Close it, put another application in full screen, reopen Setup from

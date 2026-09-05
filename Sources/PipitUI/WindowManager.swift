@@ -350,7 +350,8 @@ public final class WindowManager {
             // Escape closes the strip wherever focus is. The strip's own
             // cancel button never saw the key while the sidebar field held it.
             let escape: UInt16 = 53
-            if modifiers.isEmpty, event.keyCode == escape,
+            if event.keyCode == escape,
+                modifiers.isDisjoint(with: [.command, .option, .control, .shift]),
                 detail.navigation != nil || detail.isSearching {
                 detail.endNavigation()
                 return nil

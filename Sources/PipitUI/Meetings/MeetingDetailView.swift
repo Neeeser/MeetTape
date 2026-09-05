@@ -475,16 +475,7 @@ public struct MeetingDetailView: View {
 
     @ViewBuilder private var content: some View {
         switch model.tab {
-        case .transcript:
-            MeetingTranscriptView(model: model, detail: detail)
-                .background {
-                    // The key equivalent, carried by a button nothing draws.
-                    // The window has no Find menu to hang it on.
-                    Button("Find") { detail.beginSearch() }
-                        .keyboardShortcut("f", modifiers: .command)
-                        .frame(width: 0, height: 0)
-                        .opacity(0)
-                }
+        case .transcript: MeetingTranscriptView(model: model, detail: detail)
         case .summary: summary
         case .notes: notes
         }

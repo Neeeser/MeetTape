@@ -340,12 +340,22 @@ public final class WindowManager {
     private func installFindShortcut(for window: NSWindow) {
         findMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
             guard let self, let window, window.isKeyWindow,
-                event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                event.charactersIgnoringModifiers == "f",
                 let model = meetingsModel, model.tab == .transcript, let detail = model.detail
             else { return event }
-            detail.beginSearch()
-            return nil
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifiers == .command, event.charactersIgnoringModifiers == "f" {
+                detail.beginSearch()
+                return nil
+            }
+            // Escape closes the strip wherever focus is. The strip's own
+            // cancel button never saw the key while the sidebar field held it.
+            let escape: UInt16 = 53
+            if modifiers.isEmpty, event.keyCode == escape,
+                detail.navigation != nil || detail.isSearching {
+                detail.endNavigation()
+                return nil
+            }
+            return event
         }
     }
 

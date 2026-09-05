@@ -56,6 +56,10 @@ that ships rather than a second copy of it.
   and typed error categories.
 - Store API keys in Keychain. Never commit keys, recordings, or benchmark audio.
 - Keep voice profiles under Application Support and out of meeting folders.
+- Never put a real person's name, voice, or anything said on a recorded call
+  into the repository. This covers commit messages, pull requests, code and test
+  comments, docs, fixtures, and test data. Describe the bug with the mechanism
+  and synthetic examples instead.
 - Speech dependencies are pinned to measured versions. A version change requires
   benchmark evaluation.
 - An imported recording is dated from what the recorder wrote: the container's

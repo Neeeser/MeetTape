@@ -724,6 +724,8 @@ struct SuggestionPills: View {
 struct SpeakerChips: View {
     let model: MeetingsWindowModel
     let detail: MeetingReviewModel
+    /// The chip under the pointer, whose arrow is showing.
+    @State private var hovered: String?
 
     var body: some View {
         // A wrapping row, because four or five speakers do not fit on one line
@@ -741,6 +743,8 @@ struct SpeakerChips: View {
     /// around all three is what makes it one control.
     private func chip(_ row: MeetingSpeakerRow) -> some View {
         let unnamed = row.isUnnamed
+        let walking = detail.isWalking(row)
+        let showsArrow = walking || hovered == row.id
         return HStack(spacing: 6) {
             SpeakerFace(
                 name: unnamed ? "" : row.displayName,
@@ -773,15 +777,36 @@ struct SpeakerChips: View {
             Text(Format.shortDuration(row.speechSeconds))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            // The way to where they speak. Shown on hover, and kept while the
+            // walk is on, so a second click steps to their next turn. The
+            // name's own click still assigns, as before.
+            if showsArrow {
+                Button { detail.jump(to: row) } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(walking ? Color.white : Color.primary)
+                        .frame(width: 16, height: 16)
+                        .background(
+                            Circle().fill(walking ? Color.accentColor : Color.primary.opacity(0.12))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(walking ? "Next turn" : "Go to where they speak")
+            }
         }
         .padding(.leading, 3)
-        .padding(.trailing, 8)
+        .padding(.trailing, showsArrow ? 4 : 8)
         .padding(.vertical, 3)
         .background {
             Capsule().fill(unnamed ? Color.orange.opacity(0.12) : Color.primary.opacity(0.06))
         }
         .overlay {
             if unnamed { Capsule().stroke(Color.orange.opacity(0.55), lineWidth: 1) }
+        }
+        .onHover { inside in hovered = inside ? row.id : (hovered == row.id ? nil : hovered) }
+        .contextMenu {
+            Button("Go to First Turn") { detail.jump(to: row) }
+            Button("Assign to Person…") { detail.beginNaming(target(row)) }
         }
         .help(chipDetail(row))
     }

@@ -20,6 +20,7 @@ public final class WindowManager {
     private var meetingsWindow: NSWindow?
     private var meetingsModel: MeetingsWindowModel?
     private var provisionalWindow: NSWindow?
+    private var findMonitor: Any?
     private var permissionWindow: NSWindow?
     private var permissionNoticeModel: PermissionNoticeModel?
     private var permissionNoticeID: String?
@@ -317,6 +318,7 @@ public final class WindowManager {
             created.setFrameAutosaveName("PipitMeetings")
             created.isReleasedWhenClosed = false
             meetingsWindow = created
+            installFindShortcut(for: created)
             return created
         }()
         // Reloaded on every open, because meetings recorded since the last one
@@ -326,6 +328,36 @@ public final class WindowManager {
             if let meetingID { model.show(meetingID: meetingID) }
         }
         present(window, activating: activating)
+    }
+
+    /// Command-F on the Transcript tab searches the transcript.
+    ///
+    /// A key monitor rather than a hidden button with a key equivalent: the
+    /// sidebar's search field is the window's first responder, and it took
+    /// the keystroke as typing before any equivalent was consulted. With no
+    /// meeting open, or on another tab, the key falls through to the sidebar
+    /// as before.
+    private func installFindShortcut(for window: NSWindow) {
+        findMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
+            guard let self, let window, window.isKeyWindow,
+                let model = meetingsModel, model.tab == .transcript, let detail = model.detail
+            else { return event }
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifiers == .command, event.charactersIgnoringModifiers == "f" {
+                detail.beginSearch()
+                return nil
+            }
+            // Escape closes the strip wherever focus is. The strip's own
+            // cancel button never saw the key while the sidebar field held it.
+            let escape: UInt16 = 53
+            if event.keyCode == escape,
+                modifiers.isDisjoint(with: [.command, .option, .control, .shift]),
+                detail.navigation != nil || detail.isSearching {
+                detail.endNavigation()
+                return nil
+            }
+            return event
+        }
     }
 
     /// Where a finished recording lands.

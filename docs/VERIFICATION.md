@@ -120,6 +120,16 @@ The following paths have been exercised outside unit tests:
   prompt is still unanswered, and that the Meetings window fills in once
   Allow is pressed. A build signed with the local identity is not asked
   again.
+- Speaker jump: open a meeting with a short-spoken speaker, hover its chip,
+  and confirm an arrow appears at the chip's right. Pressing it scrolls the
+  transcript to that speaker's first turn, marks the turn with a blue band,
+  and a strip at the top right reads the name and "1 of N". Pressing again
+  steps to the next turn and wraps. The chip's name click still opens the
+  assign picker, and the right-click menu offers both.
+- Find in transcript: press Command-F on the Transcript tab, type a word,
+  and confirm every match is tinted, the current one bright and scrolled
+  into view, the count reads "1 of N", Return and Shift-Return step, and
+  Escape closes the strip and clears the tint.
 - Local signing identity: run `scripts/make-signing-identity.sh`, rebuild and
   reinstall twice, and confirm Microphone, Accessibility and Screen & System
   Audio Recording stay granted across the second install.

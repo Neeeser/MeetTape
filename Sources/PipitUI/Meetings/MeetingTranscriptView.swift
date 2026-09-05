@@ -13,21 +13,38 @@ struct MeetingTranscriptView: View {
         if detail.combinedLines.isEmpty {
             waiting
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if detail.isSplitRecording { continuationNotice }
-                    // Lazy because a long meeting is thousands of lines and each
-                    // one carries a menu.
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(CombinedLineBlock.blocks(from: detail.combinedLines)) { block in
-                            blockView(block)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if detail.isSplitRecording { continuationNotice }
+                        // Lazy because a long meeting is thousands of lines and each
+                        // one carries a menu.
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            ForEach(CombinedLineBlock.blocks(from: detail.combinedLines)) { block in
+                                blockView(block).id(block.id)
+                            }
                         }
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 20)
-                .frame(maxWidth: 680, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .topTrailing) {
+                    if detail.isSearching || detail.navigation != nil {
+                        TranscriptNavigatorBar(detail: detail)
+                            .padding(.top, 4)
+                            .padding(.trailing, 20)
+                    }
+                }
+                .onChange(of: detail.navigation?.current) { _, target in
+                    guard let target else { return }
+                    // Animated, so the eye follows the page to the turn rather
+                    // than finding it replaced.
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(target.blockID, anchor: .top)
+                    }
+                }
             }
         }
     }
@@ -105,6 +122,8 @@ struct MeetingTranscriptView: View {
     /// there underneath, and the menu on the header names the whole turn.
     private func blockView(_ block: CombinedLineBlock) -> some View {
         let paragraph = block.paragraph()
+        let matches = detail.navigation?.matches(in: block.id)
+        let isCurrentTurn = detail.navigation?.isSearch == false && matches?.current != nil
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 blockMenu(for: block)
@@ -132,7 +151,9 @@ struct MeetingTranscriptView: View {
                 },
                 onSomeoneElse: { action in
                     detail.beginNaming(.range(target(action, in: block), in: block.id))
-                }
+                },
+                highlights: (matches?.all ?? []).map { NSRange(location: $0.location, length: $0.length) },
+                currentHighlight: matches?.current.map { NSRange(location: $0.location, length: $0.length) }
             )
             // Anchored on the block, because the menu that raised it is an
             // AppKit one and has already closed by the time this opens.
@@ -140,6 +161,21 @@ struct MeetingTranscriptView: View {
                 if let open = detail.namingRange(inBlock: block.id) { picker(open) }
             }
         }
+        // The turn the reader was taken to, marked with a band so the eye
+        // lands on it after the scroll.
+        .padding(.leading, isCurrentTurn ? 9 : 0)
+        .padding(.vertical, isCurrentTurn ? 6 : 0)
+        .background {
+            if isCurrentTurn {
+                RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.12))
+            }
+        }
+        .overlay(alignment: .leading) {
+            if isCurrentTurn {
+                RoundedRectangle(cornerRadius: 1.5).fill(Color.accentColor).frame(width: 3)
+            }
+        }
+        .padding(.leading, isCurrentTurn ? -12 : 0)
     }
 
     private func pickingRange(in block: CombinedLineBlock) -> Binding<Bool> {
@@ -281,4 +317,72 @@ struct MeetingTranscriptView: View {
             set: { open in if !open, detail.isNaming(id) { detail.cancelNaming() } }
         )
     }
+}
+
+/// The strip at the top of the transcript while it is being walked.
+///
+/// One strip for both walks: a speaker's turns show the name and "1 of 2";
+/// a search shows the field and its count. Return and Shift-Return step, the
+/// arrows do the same, Escape closes it.
+struct TranscriptNavigatorBar: View {
+    let detail: MeetingReviewModel
+    @State private var query = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if detail.isSearching {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+                    TextField("Find in transcript", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.callout)
+                        .frame(width: 170)
+                        .focused($fieldFocused)
+                        .onSubmit { detail.stepNavigation(forward: !shiftHeld) }
+                        .onChange(of: query) { _, text in detail.search(text) }
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
+            } else if let walk = detail.navigation {
+                HStack(spacing: 6) {
+                    Circle().fill(Color.orange.opacity(0.8)).frame(width: 7, height: 7)
+                    Text(walk.label).font(.callout)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
+            }
+            Text(detail.navigation?.counter ?? "0 of 0")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 40)
+            Button { detail.stepNavigation(forward: false) } label: { Image(systemName: "chevron.up") }
+                .help("Previous")
+            Button { detail.stepNavigation(forward: true) } label: { Image(systemName: "chevron.down") }
+                .help("Next")
+            Button { detail.endNavigation() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close")
+                .keyboardShortcut(.cancelAction)
+        }
+        .controlSize(.small)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.separator))
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+        .onAppear {
+            if detail.isSearching { fieldFocused = true }
+        }
+        .onChange(of: detail.isSearching) { _, searching in
+            if searching { fieldFocused = true }
+        }
+    }
+
+    private var shiftHeld: Bool { NSEvent.modifierFlags.contains(.shift) }
 }
